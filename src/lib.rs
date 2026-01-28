@@ -290,9 +290,9 @@ impl WavetableFilterParams {
 
 impl Plugin for WavetableFilter {
     const NAME: &'static str = "Wavetable Filter";
-    const VENDOR: &'static str = "Your Name";
-    const URL: &'static str = "https://github.com/yourusername/wavetable-filter";
-    const EMAIL: &'static str = "your.email@example.com";
+    const VENDOR: &'static str = "Michael Dungan";
+    const URL: &'static str = "https://github.com/xxx/wavetable-filter";
+    const EMAIL: &'static str = "no-reply@example.com";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
@@ -445,7 +445,7 @@ impl Plugin for WavetableFilter {
 }
 
 impl ClapPlugin for WavetableFilter {
-    const CLAP_ID: &'static str = "com.yourname.wavetable-filter";
+    const CLAP_ID: &'static str = "com.mpd.wavetable-filter";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("A wavetable-based filter plugin");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
