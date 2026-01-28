@@ -1,17 +1,29 @@
 use nih_plug::prelude::*;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-mod wavetable;
+pub mod wavetable;
 mod editor;
 
 use wavetable::Wavetable;
 
-struct WavetableFilter {
+pub struct WavetableFilter {
     params: Arc<WavetableFilterParams>,
     wavetable: Option<Wavetable>,
     sample_rate: f32,
     // Circular buffer for convolution (per channel)
     filter_state: [FilterState; 2],
+    // Shared state for wavetable path
+    wavetable_path: Arc<Mutex<String>>,
+    should_reload: Arc<AtomicBool>,
+    // Shared wavetable for UI display
+    shared_wavetable: Arc<Mutex<Wavetable>>,
+    // Version counter to trigger UI updates
+    wavetable_version: Arc<std::sync::atomic::AtomicU32>,
+    // Current frame count for parameter display
+    current_frame_count: Arc<std::sync::atomic::AtomicUsize>,
+    // Silence detection counter
+    silence_samples: usize,
 }
 
 struct FilterState {
@@ -37,42 +49,92 @@ struct WavetableFilterParams {
 
 impl Default for WavetableFilter {
     fn default() -> Self {
+        let default_wt = Self::create_default_wavetable();
+        let frame_count = default_wt.frame_count;
+
+        let current_frame_count = Arc::new(std::sync::atomic::AtomicUsize::new(frame_count));
+
         Self {
-            params: Arc::new(WavetableFilterParams::default()),
-            wavetable: Some(Self::create_default_wavetable()),
+            params: Arc::new(WavetableFilterParams::new(current_frame_count.clone())),
+            wavetable: Some(default_wt.clone()),
             sample_rate: 44100.0,
             filter_state: [
                 FilterState::new(2048),
                 FilterState::new(2048),
             ],
+            wavetable_path: Arc::new(Mutex::new(String::from("Default"))),
+            should_reload: Arc::new(AtomicBool::new(false)),
+            shared_wavetable: Arc::new(Mutex::new(default_wt)),
+            wavetable_version: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            current_frame_count,
+            silence_samples: 0,
         }
     }
 }
 
 impl WavetableFilter {
     /// Create a default lowpass filter wavetable
-    fn create_default_wavetable() -> Wavetable {
-        const FRAME_SIZE: usize = 512;
+    pub fn create_default_wavetable() -> Wavetable {
+        const FRAME_SIZE: usize = 256;  // Smaller for more aggressive filtering
         const FRAME_COUNT: usize = 16;
         let mut samples = Vec::with_capacity(FRAME_SIZE * FRAME_COUNT);
 
         for frame_idx in 0..FRAME_COUNT {
-            // Create progressively darker lowpass filters
-            let cutoff = 1.0 - (frame_idx as f32 / FRAME_COUNT as f32) * 0.9;
+            let mut frame_samples = Vec::with_capacity(FRAME_SIZE);
+            let mut sum = 0.0;
 
-            for i in 0..FRAME_SIZE {
-                let freq = i as f32 / FRAME_SIZE as f32;
+            // Create different filter types across frames
+            let filter_type = frame_idx as f32 / (FRAME_COUNT - 1) as f32;
 
-                // Simple lowpass filter kernel
-                let response = if freq < cutoff {
-                    1.0
-                } else {
-                    // Smooth rolloff
-                    ((1.0 - (freq - cutoff) / (1.0 - cutoff)) * std::f32::consts::PI).cos() * 0.5 + 0.5
-                };
-
-                samples.push(response);
+            if filter_type < 0.33 {
+                // Frames 0-5: Aggressive lowpass (simple moving average)
+                let window_size = (FRAME_SIZE as f32 * (0.05 + filter_type * 0.15)) as usize;
+                for i in 0..FRAME_SIZE {
+                    let value = if i < window_size {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    frame_samples.push(value);
+                    sum += value;
+                }
+            } else if filter_type < 0.66 {
+                // Frames 6-10: Bandpass (two peaks)
+                let center = FRAME_SIZE / 2;
+                let width = (20.0 + (filter_type - 0.33) * 60.0) as usize;
+                for i in 0..FRAME_SIZE {
+                    let dist = (i as i32 - center as i32).abs() as usize;
+                    let value = if dist < width {
+                        (1.0 - (dist as f32 / width as f32)).max(0.0)
+                    } else {
+                        0.0
+                    };
+                    frame_samples.push(value);
+                    sum += value;
+                }
+            } else {
+                // Frames 11-15: Highpass (invert lowpass)
+                let window_size = (FRAME_SIZE as f32 * 0.05) as usize;
+                for i in 0..FRAME_SIZE {
+                    let value = if i == 0 {
+                        1.0  // DC component
+                    } else if i < window_size {
+                        -0.8 / window_size as f32  // Negative for highpass
+                    } else {
+                        0.0
+                    };
+                    frame_samples.push(value);
+                    sum += value.abs();  // Use abs for normalization
+                }
             }
+
+            // Normalize the filter kernel
+            let normalization = if sum.abs() > 0.0001 { 1.0 / sum } else { 1.0 };
+            for sample in &mut frame_samples {
+                *sample *= normalization;
+            }
+
+            samples.extend(frame_samples);
         }
 
         Wavetable::new(samples, FRAME_SIZE).expect("Failed to create default wavetable")
@@ -81,16 +143,67 @@ impl WavetableFilter {
     pub fn load_wavetable_from_file(&mut self, path: &str) -> Result<(), String> {
         let wavetable = Wavetable::from_file(path)?;
 
+        nih_log!("Loaded wavetable: {} frames, {} samples per frame", wavetable.frame_count, wavetable.frame_size);
+
         // Resize filter state if needed
         let new_size = wavetable.frame_size;
         for state in &mut self.filter_state {
-            if state.history.len() != new_size {
-                *state = FilterState::new(new_size);
+            if state.history.len() != new_size.max(2048) {
+                *state = FilterState::new(new_size.max(2048));
             }
         }
 
-        self.wavetable = Some(wavetable);
+        // Update frame count for parameter display
+        self.current_frame_count.store(wavetable.frame_count, Ordering::Relaxed);
+
+        self.wavetable = Some(wavetable.clone());
+
+        // Update shared wavetable for UI
+        if let Ok(mut shared_wt) = self.shared_wavetable.lock() {
+            *shared_wt = wavetable;
+        }
+
+        // Increment version to trigger UI redraw
+        let new_version = self.wavetable_version.fetch_add(1, Ordering::Relaxed) + 1;
+        nih_log!("Updated wavetable version to {}", new_version);
+
+        if let Ok(mut path_lock) = self.wavetable_path.lock() {
+            *path_lock = path.to_string();
+        }
         Ok(())
+    }
+
+    pub fn set_wavetable_path(&self, path: String) {
+        if let Ok(mut path_lock) = self.wavetable_path.lock() {
+            *path_lock = path;
+        }
+        self.should_reload.store(true, Ordering::Relaxed);
+    }
+
+    /// Try to load a wavetable from environment variable or default location
+    pub fn try_load_user_wavetable(&mut self) {
+        // First, try environment variable WAVETABLE_FILTER_PATH
+        if let Ok(path) = std::env::var("WAVETABLE_FILTER_PATH") {
+            if std::path::Path::new(&path).exists() {
+                if let Ok(_) = self.load_wavetable_from_file(&path) {
+                    return;
+                }
+            }
+        }
+
+        // Fall back to ~/wavetable-filter/wavetable.wav or wavetable.wt
+        if let Some(home) = std::env::var_os("HOME") {
+            let base_path = std::path::Path::new(&home).join("wavetable-filter");
+
+            for ext in &["wav", "wt"] {
+                let path = base_path.join(format!("wavetable.{}", ext));
+                if path.exists() {
+                    if let Ok(_) = self.load_wavetable_from_file(path.to_str().unwrap()) {
+                        return;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -118,8 +231,8 @@ impl FilterState {
     }
 }
 
-impl Default for WavetableFilterParams {
-    fn default() -> Self {
+impl WavetableFilterParams {
+    fn new(frame_count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
         Self {
             frequency: FloatParam::new(
                 "Frequency",
@@ -133,12 +246,24 @@ impl Default for WavetableFilterParams {
             .with_smoother(SmoothingStyle::Logarithmic(50.0))
             .with_unit(" Hz"),
 
-            frame_position: FloatParam::new(
-                "Frame Position",
-                0.0,
-                FloatRange::Linear { min: 0.0, max: 1.0 },
-            )
-            .with_smoother(SmoothingStyle::Linear(50.0)),
+            frame_position: {
+                let frame_count_clone = frame_count.clone();
+                FloatParam::new(
+                    "Frame Position",
+                    0.0,
+                    FloatRange::Linear { min: 0.0, max: 1.0 },
+                )
+                .with_smoother(SmoothingStyle::Linear(50.0))
+                .with_value_to_string(Arc::new(move |value| {
+                    let count = frame_count.load(std::sync::atomic::Ordering::Relaxed);
+                    let frame_num = (value * (count - 1) as f32).round() as usize + 1;
+                    format!("{}", frame_num)
+                }))
+                .with_string_to_value(Arc::new(move |string| {
+                    let count = frame_count_clone.load(std::sync::atomic::Ordering::Relaxed);
+                    string.parse::<f32>().ok().map(|frame| (frame - 1.0) / (count - 1).max(1) as f32)
+                }))
+            },
 
             mix: FloatParam::new(
                 "Mix",
@@ -170,6 +295,10 @@ impl Plugin for WavetableFilter {
     const EMAIL: &'static str = "your.email@example.com";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
+    // Tail time in seconds - max wavetable frame size at low frequencies
+    // 2048 samples at 44.1kHz = ~46ms, but give it more headroom
+    const HARD_REALTIME_ONLY: bool = false;
+
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
         AudioIOLayout {
             main_input_channels: NonZeroU32::new(2),
@@ -197,6 +326,10 @@ impl Plugin for WavetableFilter {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
+
+        // Try to load a user wavetable on initialization
+        self.try_load_user_wavetable();
+
         true
     }
 
@@ -204,6 +337,7 @@ impl Plugin for WavetableFilter {
         for state in &mut self.filter_state {
             state.reset();
         }
+        self.silence_samples = 0;
     }
 
     fn process(
@@ -212,10 +346,34 @@ impl Plugin for WavetableFilter {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        // Check if we should reload the wavetable
+        if self.should_reload.load(Ordering::Relaxed) {
+            // Copy from shared_wavetable (loaded by GUI thread) to audio thread's wavetable
+            if let Ok(shared_wt) = self.shared_wavetable.lock() {
+                // Update frame count for parameter display
+                self.current_frame_count.store(shared_wt.frame_count, Ordering::Relaxed);
+
+                self.wavetable = Some(shared_wt.clone());
+
+                // Resize filter state if needed
+                let new_size = shared_wt.frame_size;
+                for state in &mut self.filter_state {
+                    if state.history.len() != new_size.max(2048) {
+                        *state = FilterState::new(new_size.max(2048));
+                    }
+                }
+            }
+            self.should_reload.store(false, Ordering::Relaxed);
+        }
+
         // If no wavetable loaded, pass through the audio
         let Some(ref wavetable) = self.wavetable else {
             return ProcessStatus::Normal;
         };
+
+        // Check if input is silent (to clear filter state when playback stops)
+        let silence_threshold = 1e-6f32;
+        let mut is_silent = true;
 
         for (channel_idx, mut channel_samples) in buffer.iter_samples().enumerate() {
             let frame_pos = self.params.frame_position.smoothed.next();
@@ -227,6 +385,11 @@ impl Plugin for WavetableFilter {
 
             for sample in channel_samples.iter_mut() {
                 let input = *sample;
+
+                // Check if this sample is above silence threshold
+                if input.abs() > silence_threshold {
+                    is_silent = false;
+                }
 
                 // Apply drive
                 let driven_input = (input * drive).tanh();
@@ -244,8 +407,8 @@ impl Plugin for WavetableFilter {
                     filtered += self.filter_state[state_idx].get(k) * filter_kernel[k];
                 }
 
-                // Normalize by kernel size to prevent volume buildup
-                filtered /= kernel_size as f32;
+                // Don't normalize - the filter kernel should already be normalized
+                // (dividing by kernel_size was making the output too quiet)
 
                 // Mix dry and wet signals
                 let output = input * (1.0 - mix) + filtered * mix;
@@ -254,11 +417,30 @@ impl Plugin for WavetableFilter {
             }
         }
 
+        // Track silence duration and clear filter state if silent for too long
+        if is_silent {
+            self.silence_samples += buffer.samples();
+            // Clear after ~100ms of silence (assuming 44.1kHz)
+            if self.silence_samples > (self.sample_rate * 0.1) as usize {
+                for state in &mut self.filter_state {
+                    state.reset();
+                }
+            }
+        } else {
+            self.silence_samples = 0;
+        }
+
         ProcessStatus::Normal
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        editor::create(self.params.clone())
+        editor::create(
+            self.params.clone(),
+            self.wavetable_path.clone(),
+            self.should_reload.clone(),
+            self.shared_wavetable.clone(),
+            self.wavetable_version.clone(),
+        )
     }
 }
 

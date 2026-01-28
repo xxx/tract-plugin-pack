@@ -29,3 +29,14 @@ param-slider {
     background-color: #2a2c32;
     border-radius: 3px;
 }
+
+/* Path display styling */
+.path-display {
+    background-color: #2a2c32;
+    color: #ffffff;
+    border-width: 1px;
+    border-color: #404040;
+    border-radius: 3px;
+    child-left: 8px;
+    child-top: 5px;
+}

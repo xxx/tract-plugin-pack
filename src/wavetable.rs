@@ -84,54 +84,99 @@ impl Wavetable {
         Self::new(samples, frame_size)
     }
 
-    /// Load a wavetable from a .wt file (Serum format)
+    /// Load a wavetable from a .wt file (Serum/vawt format)
     pub fn from_wt<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let file = File::open(path).map_err(|e| format!("Failed to open WT file: {}", e))?;
         let mut reader = BufReader::new(file);
 
-        // Read header (first 4 bytes should be "WATR" for Serum wavetables)
+        // Read header (first 4 bytes)
         let mut header = [0u8; 4];
         reader
             .read_exact(&mut header)
             .map_err(|e| format!("Failed to read header: {}", e))?;
 
-        if &header != b"WATR" {
-            return Err("Invalid WT file format".to_string());
+        // Support both "WATR" (Serum) and "vawt" formats
+        let is_vawt = &header == b"vawt";
+        let is_watr = &header == b"WATR";
+
+        if !is_vawt && !is_watr {
+            return Err(format!("Invalid WT file format (header: {:?})",
+                std::str::from_utf8(&header).unwrap_or("invalid UTF-8")));
         }
 
-        // Read frame size (4 bytes, little-endian)
-        let mut frame_size_bytes = [0u8; 4];
-        reader
-            .read_exact(&mut frame_size_bytes)
-            .map_err(|e| format!("Failed to read frame size: {}", e))?;
-        let frame_size = u32::from_le_bytes(frame_size_bytes) as usize;
+        // Read frame size and count based on format
+        let (frame_size, frame_count, use_float) = if is_vawt {
+            // vawt format: 4 bytes frame size, 2 bytes frame count, 2 bytes flags
+            let mut frame_size_bytes = [0u8; 4];
+            reader.read_exact(&mut frame_size_bytes)
+                .map_err(|e| format!("Failed to read frame size: {}", e))?;
+            let frame_size = u32::from_le_bytes(frame_size_bytes) as usize;
+
+            let mut frame_count_bytes = [0u8; 2];
+            reader.read_exact(&mut frame_count_bytes)
+                .map_err(|e| format!("Failed to read frame count: {}", e))?;
+            let frame_count = u16::from_le_bytes(frame_count_bytes) as usize;
+
+            let mut flags_bytes = [0u8; 2];
+            reader.read_exact(&mut flags_bytes)
+                .map_err(|e| format!("Failed to read flags: {}", e))?;
+            let flags = u16::from_le_bytes(flags_bytes);
+
+            // Bit 0x0004: 0 = float32, 1 = int16
+            let use_float = (flags & 0x0004) == 0;
+
+            (frame_size, frame_count, use_float)
+        } else {
+            // WATR format: 4 bytes frame size, 4 bytes frame count
+            let mut frame_size_bytes = [0u8; 4];
+            reader.read_exact(&mut frame_size_bytes)
+                .map_err(|e| format!("Failed to read frame size: {}", e))?;
+            let frame_size = u32::from_le_bytes(frame_size_bytes) as usize;
+
+            let mut frame_count_bytes = [0u8; 4];
+            reader.read_exact(&mut frame_count_bytes)
+                .map_err(|e| format!("Failed to read frame count: {}", e))?;
+            let frame_count = u32::from_le_bytes(frame_count_bytes) as usize;
+
+            (frame_size, frame_count, true) // WATR uses floats
+        };
 
         if !Self::is_valid_frame_size(frame_size) {
             return Err(format!("Invalid frame size in WT file: {}", frame_size));
         }
 
-        // Read frame count (4 bytes, little-endian)
-        let mut frame_count_bytes = [0u8; 4];
-        reader
-            .read_exact(&mut frame_count_bytes)
-            .map_err(|e| format!("Failed to read frame count: {}", e))?;
-        let frame_count = u32::from_le_bytes(frame_count_bytes) as usize;
-
         if frame_count > 256 {
             return Err(format!("Frame count {} exceeds maximum of 256", frame_count));
         }
 
-        // Read all samples as 32-bit floats
+        // Read all samples based on format
         let total_samples = frame_size * frame_count;
-        let mut samples = vec![0f32; total_samples];
-        let mut buffer = vec![0u8; total_samples * 4];
-        reader
-            .read_exact(&mut buffer)
-            .map_err(|e| format!("Failed to read sample data: {}", e))?;
+        let samples = if use_float {
+            // float32 format
+            let mut buffer = vec![0u8; total_samples * 4];
+            reader
+                .read_exact(&mut buffer)
+                .map_err(|e| format!("Failed to read sample data: {}", e))?;
 
-        for (i, chunk) in buffer.chunks_exact(4).enumerate() {
-            samples[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        }
+            buffer
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect()
+        } else {
+            // int16 format
+            let mut buffer = vec![0u8; total_samples * 2];
+            reader
+                .read_exact(&mut buffer)
+                .map_err(|e| format!("Failed to read sample data: {}", e))?;
+
+            buffer
+                .chunks_exact(2)
+                .map(|chunk| {
+                    let sample_i16 = i16::from_le_bytes([chunk[0], chunk[1]]);
+                    sample_i16 as f32 / 32768.0 // Convert to -1.0 to 1.0 range
+                })
+                .collect()
+        };
 
         Self::new(samples, frame_size)
     }
