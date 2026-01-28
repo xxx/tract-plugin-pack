@@ -1,6 +1,9 @@
+#![feature(portable_simd)]
+
 use nih_plug::prelude::*;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::simd::f32x8;
 
 pub mod wavetable;
 mod editor;
@@ -442,9 +445,39 @@ impl Plugin for WavetableFilter {
                 // Push input into history buffer
                 self.filter_state[state_idx].push(driven_input);
 
-                // Perform convolution: output = sum(input[n-k] * kernel[k])
+                // Perform convolution with SIMD: output = sum(input[n-k] * kernel[k])
                 let mut filtered = 0.0;
-                for k in 0..kernel_size {
+                let simd_lanes = 8;
+                let simd_chunks = kernel_size / simd_lanes;
+
+                // Process 8 samples at a time with SIMD
+                let mut acc = f32x8::splat(0.0);
+                for chunk_idx in 0..simd_chunks {
+                    let k = chunk_idx * simd_lanes;
+
+                    // Load 8 history samples
+                    let mut history = [0.0f32; 8];
+                    for i in 0..8 {
+                        history[i] = self.filter_state[state_idx].get(k + i);
+                    }
+                    let history_vec = f32x8::from_array(history);
+
+                    // Load 8 kernel coefficients
+                    let kernel_slice = &self.current_kernel[k..k + 8];
+                    let kernel_vec = f32x8::from_slice(kernel_slice);
+
+                    // Multiply and accumulate
+                    acc += history_vec * kernel_vec;
+                }
+
+                // Sum the SIMD accumulator
+                let acc_array = acc.to_array();
+                for val in acc_array {
+                    filtered += val;
+                }
+
+                // Handle remaining samples
+                for k in (simd_chunks * simd_lanes)..kernel_size {
                     filtered += self.filter_state[state_idx].get(k) * self.current_kernel[k];
                 }
 
