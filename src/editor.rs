@@ -41,8 +41,8 @@ impl Model for Data {
     }
 }
 
-const WINDOW_WIDTH: u32 = 700;
-const WINDOW_HEIGHT: u32 = 540;
+const WINDOW_WIDTH: u32 = 1050;  // 700 * 1.5
+const WINDOW_HEIGHT: u32 = 810;  // 540 * 1.5
 
 pub(crate) fn default_state() -> Arc<ViziaState> {
     ViziaState::new(|| (WINDOW_WIDTH, WINDOW_HEIGHT))

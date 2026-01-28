@@ -84,11 +84,14 @@ impl View for WavetableView {
         let current_frame_pos = self.params.frame_position.unmodulated_normalized_value();
         let current_frame_idx = (current_frame_pos * (frame_count - 1) as f32).round() as usize;
 
-        // Draw each frame as a waveform with depth (back to front for proper layering)
+        // Draw all non-active frames first (back to front for proper layering)
         // Overhead view: front frames at lower-left, back frames at upper-right
         for frame_idx in (0..frame_count).rev() {
+            if frame_idx == current_frame_idx {
+                continue; // Skip active frame, we'll draw it last
+            }
+
             let frame = &frames_data[frame_idx];
-            let is_active = frame_idx == current_frame_idx;
 
             // Calculate depth for overhead perspective
             // depth = 0 (frame 0) at front/lower-left
@@ -99,7 +102,7 @@ impl View for WavetableView {
             let perspective_x = depth * 80.0; // Move right
             let perspective_y = -depth * 80.0; // Move up (negative Y)
 
-            let alpha = if is_active { 1.0 } else { 0.3 + (1.0 - depth) * 0.4 }; // Highlight active frame
+            let alpha = 0.3 + (1.0 - depth) * 0.4;
 
             let mut path = vg::Path::new();
 
@@ -127,20 +130,47 @@ impl View for WavetableView {
                 }
             }
 
-            // Color: active frame is bright, others fade
-            let color = if is_active {
-                vg::Color::rgba(255, 200, 100, 255) // Bright orange for active
-            } else {
-                vg::Color::rgba(
-                    (50.0 + (1.0 - depth) * 100.0) as u8,
-                    (100.0 + (1.0 - depth) * 100.0) as u8,
-                    255,
-                    (alpha * 255.0) as u8,
-                )
-            };
+            let color = vg::Color::rgba(
+                (50.0 + (1.0 - depth) * 100.0) as u8,
+                (100.0 + (1.0 - depth) * 100.0) as u8,
+                255,
+                (alpha * 255.0) as u8,
+            );
 
-            let line_width = if is_active { 2.5 } else { 1.2 };
-            canvas.stroke_path(&path, &vg::Paint::color(color).with_line_width(line_width));
+            canvas.stroke_path(&path, &vg::Paint::color(color).with_line_width(1.2));
+        }
+
+        // Draw the active frame last so it's always on top
+        if current_frame_idx < frame_count {
+            let frame = &frames_data[current_frame_idx];
+            let depth = current_frame_idx as f32 / frame_count.max(1) as f32;
+            let perspective_x = depth * 80.0;
+            let perspective_y = -depth * 80.0;
+
+            let mut path = vg::Path::new();
+
+            for (i, &sample) in frame.iter().enumerate() {
+                let normalized = (sample - global_min) / range;
+
+                let x = bounds.x
+                    + padding
+                    + (i as f32 / frame_size as f32) * (width * 0.7)
+                    + perspective_x;
+
+                let y = bounds.y
+                    + bounds.h - padding * 2.0
+                    - (normalized * height * 0.4)
+                    + perspective_y;
+
+                if i == 0 {
+                    path.move_to(x, y);
+                } else {
+                    path.line_to(x, y);
+                }
+            }
+
+            let color = vg::Color::rgba(255, 200, 100, 255); // Bright orange for active
+            canvas.stroke_path(&path, &vg::Paint::color(color).with_line_width(2.5));
         }
 
         // Draw grid lines
