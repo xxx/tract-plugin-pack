@@ -3,7 +3,7 @@
 use nih_plug::prelude::*;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::simd::f32x8;
+use std::simd::f32x16;
 
 pub mod wavetable;
 mod editor;
@@ -447,24 +447,24 @@ impl Plugin for WavetableFilter {
 
                 // Perform convolution with SIMD: output = sum(input[n-k] * kernel[k])
                 let mut filtered = 0.0;
-                let simd_lanes = 8;
+                let simd_lanes = 16;
                 let simd_chunks = kernel_size / simd_lanes;
 
-                // Process 8 samples at a time with SIMD
-                let mut acc = f32x8::splat(0.0);
+                // Process 16 samples at a time with SIMD (512-bit AVX-512 or 256-bit AVX2)
+                let mut acc = f32x16::splat(0.0);
                 for chunk_idx in 0..simd_chunks {
                     let k = chunk_idx * simd_lanes;
 
-                    // Load 8 history samples
-                    let mut history = [0.0f32; 8];
-                    for i in 0..8 {
+                    // Load 16 history samples
+                    let mut history = [0.0f32; 16];
+                    for i in 0..16 {
                         history[i] = self.filter_state[state_idx].get(k + i);
                     }
-                    let history_vec = f32x8::from_array(history);
+                    let history_vec = f32x16::from_array(history);
 
-                    // Load 8 kernel coefficients
-                    let kernel_slice = &self.current_kernel[k..k + 8];
-                    let kernel_vec = f32x8::from_slice(kernel_slice);
+                    // Load 16 kernel coefficients
+                    let kernel_slice = &self.current_kernel[k..k + 16];
+                    let kernel_vec = f32x16::from_slice(kernel_slice);
 
                     // Multiply and accumulate
                     acc += history_vec * kernel_vec;
