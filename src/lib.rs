@@ -295,10 +295,6 @@ impl Plugin for WavetableFilter {
     const EMAIL: &'static str = "your.email@example.com";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-    // Tail time in seconds - max wavetable frame size at low frequencies
-    // 2048 samples at 44.1kHz = ~46ms, but give it more headroom
-    const HARD_REALTIME_ONLY: bool = false;
-
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
         AudioIOLayout {
             main_input_channels: NonZeroU32::new(2),
@@ -312,11 +308,25 @@ impl Plugin for WavetableFilter {
         },
     ];
 
+    // Tail time in seconds - max wavetable frame size at low frequencies
+    // 2048 samples at 44.1kHz = ~46ms, but give it more headroom
+    const HARD_REALTIME_ONLY: bool = false;
+
     type SysExMessage = ();
     type BackgroundTask = ();
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor::create(
+            self.params.clone(),
+            self.wavetable_path.clone(),
+            self.should_reload.clone(),
+            self.shared_wavetable.clone(),
+            self.wavetable_version.clone(),
+        )
     }
 
     fn initialize(
@@ -431,16 +441,6 @@ impl Plugin for WavetableFilter {
         }
 
         ProcessStatus::Normal
-    }
-
-    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        editor::create(
-            self.params.clone(),
-            self.wavetable_path.clone(),
-            self.should_reload.clone(),
-            self.shared_wavetable.clone(),
-            self.wavetable_version.clone(),
-        )
     }
 }
 
