@@ -24,10 +24,9 @@ pub struct WavetableFilter {
     current_frame_count: Arc<std::sync::atomic::AtomicUsize>,
     // Silence detection counter
     silence_samples: usize,
-    // Cached filter kernels for crossfading
+    // Cached filter kernel
     current_kernel: Vec<f32>,
-    previous_kernel: Vec<f32>,
-    kernel_crossfade: f32,
+    last_frame_pos: f32,
 }
 
 struct FilterState {
@@ -74,8 +73,7 @@ impl Default for WavetableFilter {
             current_frame_count,
             silence_samples: 0,
             current_kernel: vec![0.0; frame_size],
-            previous_kernel: vec![0.0; frame_size],
-            kernel_crossfade: 1.0,
+            last_frame_pos: -1.0,
         }
     }
 }
@@ -381,10 +379,9 @@ impl Plugin for WavetableFilter {
                     }
                 }
 
-                // Resize kernel buffers to match new frame size
+                // Resize kernel buffer to match new frame size
                 self.current_kernel.resize(new_size, 0.0);
-                self.previous_kernel.resize(new_size, 0.0);
-                self.kernel_crossfade = 1.0;
+                self.last_frame_pos = -1.0;
             }
             self.should_reload.store(false, Ordering::Relaxed);
         }
@@ -408,12 +405,6 @@ impl Plugin for WavetableFilter {
             .map(|slice| (slice.as_ptr(), slice.as_ptr() as *mut f32))
             .collect();
 
-        // Crossfade time: 5ms at 44.1kHz = ~220 samples
-        let crossfade_samples = (self.sample_rate * 0.005).max(1.0);
-        let crossfade_increment = 1.0 / crossfade_samples;
-
-        let mut last_frame_pos = -1.0f32;
-
         // Process each sample across all channels
         for sample_idx in 0..num_samples {
             // Get smoothed parameters once per sample (not once per channel!)
@@ -421,19 +412,13 @@ impl Plugin for WavetableFilter {
             let mix = self.params.mix.smoothed.next();
             let drive = self.params.drive.smoothed.next();
 
-            // Update filter kernel only when frame position changes significantly
-            // This reduces allocations and allows for crossfading
-            if (frame_pos - last_frame_pos).abs() > 0.001 {
-                // Start crossfade to new kernel
-                self.previous_kernel.copy_from_slice(&self.current_kernel);
-                self.current_kernel = wavetable.get_frame_interpolated(frame_pos);
-                self.kernel_crossfade = 0.0;
-                last_frame_pos = frame_pos;
-            }
+            // Update kernel only when frame position changes enough to warrant a new interpolation
+            // Use a smaller threshold to track parameter changes more closely
+            let needs_update = (frame_pos - self.last_frame_pos).abs() > 0.0001 || self.last_frame_pos < 0.0;
 
-            // Advance crossfade
-            if self.kernel_crossfade < 1.0 {
-                self.kernel_crossfade = (self.kernel_crossfade + crossfade_increment).min(1.0);
+            if needs_update {
+                self.current_kernel = wavetable.get_frame_interpolated(frame_pos);
+                self.last_frame_pos = frame_pos;
             }
 
             let kernel_size = self.current_kernel.len();
@@ -457,24 +442,11 @@ impl Plugin for WavetableFilter {
                 // Push input into history buffer
                 self.filter_state[state_idx].push(driven_input);
 
-                // Perform convolution with crossfaded kernels
-                let mut filtered_current = 0.0;
-                let mut filtered_previous = 0.0;
-
+                // Perform convolution: output = sum(input[n-k] * kernel[k])
+                let mut filtered = 0.0;
                 for k in 0..kernel_size {
-                    let history_sample = self.filter_state[state_idx].get(k);
-                    filtered_current += history_sample * self.current_kernel[k];
-                    if self.kernel_crossfade < 1.0 {
-                        filtered_previous += history_sample * self.previous_kernel[k];
-                    }
+                    filtered += self.filter_state[state_idx].get(k) * self.current_kernel[k];
                 }
-
-                // Crossfade between previous and current kernel
-                let filtered = if self.kernel_crossfade < 1.0 {
-                    filtered_previous * (1.0 - self.kernel_crossfade) + filtered_current * self.kernel_crossfade
-                } else {
-                    filtered_current
-                };
 
                 // Mix dry and wet signals
                 let output = input * (1.0 - mix) + filtered * mix;
