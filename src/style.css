@@ -1,0 +1,31 @@
+/* Main window background */
+* {
+    background-color: #1a1c22;
+    color: #e0e0e0;
+}
+
+/* Title styling */
+label {
+    color: #ffffff;
+    font-size: 14px;
+}
+
+/* Section titles */
+.section-title {
+    color: #a0a0a0;
+    font-size: 12px;
+}
+
+/* Visualization areas */
+.wavetable-3d-view,
+.filter-response-view {
+    border-width: 1px;
+    border-color: #404040;
+    border-radius: 4px;
+}
+
+/* Slider styling */
+param-slider {
+    background-color: #2a2c32;
+    border-radius: 3px;
+}

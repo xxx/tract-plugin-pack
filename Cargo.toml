@@ -1,0 +1,29 @@
+[package]
+name = "wavetable-filter"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["xtask"]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+hound = "3.5"
+atomic_float = "1.0"
+
+[profile.release]
+lto = true
+strip = true
+
+[package.metadata.bundler]
+name = "Wavetable Filter"
+company = "Your Name"
+url = "https://github.com/yourusername/wavetable-filter"
+email = "your.email@example.com"
+description = "A wavetable-based filter plugin"
+license = "GPL-3.0-or-later"
+version = "0.1.0"

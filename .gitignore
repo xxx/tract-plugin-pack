@@ -1,0 +1,8 @@
+.idea/
+/target
+Cargo.lock
+*.so
+*.dll
+*.dylib
+*.vst3
+*.clap
