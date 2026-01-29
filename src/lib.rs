@@ -33,7 +33,10 @@ pub struct WavetableFilter {
     current_kernel: Vec<f32>,
     // Cached minimum phase kernel (for minimum phase mode)
     minimum_phase_kernel: Vec<f32>,
+    // Resampled kernel (after applying cutoff frequency scaling)
+    resampled_kernel: Vec<f32>,
     last_frame_pos: f32,
+    last_cutoff: f32,
     // FFT state for minimum phase mode
     fft_forward: Option<Arc<dyn RealToComplex<f32>>>,
     fft_inverse: Option<Arc<dyn ComplexToReal<f32>>>,
@@ -100,10 +103,12 @@ impl Default for WavetableFilter {
             current_frame_count,
             silence_samples: 0,
             current_kernel: vec![0.0; frame_size],
+            minimum_phase_kernel: vec![0.0; frame_size],
+            resampled_kernel: vec![0.0; frame_size],
             last_frame_pos: -1.0,
+            last_cutoff: -1.0,
             fft_forward: Some(fft_forward),
             fft_inverse: Some(fft_inverse),
-            minimum_phase_kernel: vec![0.0; frame_size],
         }
     }
 }
@@ -198,6 +203,48 @@ impl WavetableFilter {
         } else {
             frame.to_vec()
         }
+    }
+
+    /// Resample a filter kernel to achieve a target cutoff frequency
+    /// cutoff_hz: desired cutoff frequency
+    /// sample_rate: audio sample rate
+    /// kernel: the filter kernel to resample
+    /// Returns resampled kernel (may be shorter or longer than input)
+    fn resample_kernel_for_cutoff(
+        cutoff_hz: f32,
+        sample_rate: f32,
+        kernel: &[f32],
+    ) -> Vec<f32> {
+        // Harmonic 24 in the original wavetable should map to cutoff_hz
+        // Original frequency of harmonic 24: (24 / kernel.len()) * sample_rate
+        let harmonic_24_original_hz = (24.0 / kernel.len() as f32) * sample_rate;
+
+        // Stretch factor: how much to scale the kernel
+        // If cutoff < harmonic_24_original, we stretch (slow down) -> longer kernel
+        // If cutoff > harmonic_24_original, we shrink (speed up) -> shorter kernel
+        let stretch_factor = harmonic_24_original_hz / cutoff_hz;
+
+        // New kernel length after resampling
+        let new_len = (kernel.len() as f32 * stretch_factor).round() as usize;
+        let new_len = new_len.clamp(16, 4096); // Reasonable limits
+
+        // Resample using linear interpolation
+        let mut resampled = Vec::with_capacity(new_len);
+        for i in 0..new_len {
+            let src_pos = (i as f32 * kernel.len() as f32) / new_len as f32;
+            let src_idx = src_pos.floor() as usize;
+            let frac = src_pos - src_idx as f32;
+
+            let val = if src_idx + 1 < kernel.len() {
+                // Linear interpolation
+                kernel[src_idx] * (1.0 - frac) + kernel[src_idx + 1] * frac
+            } else {
+                kernel[src_idx]
+            };
+            resampled.push(val);
+        }
+
+        resampled
     }
 
     /// Create a default lowpass filter wavetable
@@ -568,12 +615,15 @@ impl Plugin for WavetableFilter {
             let frame_pos = self.params.frame_position.smoothed.next();
             let mix = self.params.mix.smoothed.next();
             let drive = self.params.drive.smoothed.next();
+            let cutoff = self.params.frequency.smoothed.next();
 
-            // Update kernel only when frame position changes enough
-            let needs_update =
+            // Update kernel when frame position or cutoff changes
+            let needs_kernel_update =
                 (frame_pos - self.last_frame_pos).abs() > 0.0001 || self.last_frame_pos < 0.0;
+            let needs_resample =
+                (cutoff - self.last_cutoff).abs() > 0.1 || self.last_cutoff < 0.0;
 
-            if needs_update {
+            if needs_kernel_update {
                 // Get new kernel from wavetable
                 let new_kernel = wavetable.get_frame_interpolated(frame_pos);
                 self.current_kernel = new_kernel.clone();
@@ -591,7 +641,20 @@ impl Plugin for WavetableFilter {
                 self.last_frame_pos = frame_pos;
             }
 
-            let kernel_size = self.current_kernel.len();
+            // Resample kernel when cutoff changes (or when kernel was just updated)
+            if needs_kernel_update || needs_resample {
+                let source_kernel = if filter_mode == FilterMode::Minimum {
+                    &self.minimum_phase_kernel
+                } else {
+                    &self.current_kernel
+                };
+
+                self.resampled_kernel =
+                    Self::resample_kernel_for_cutoff(cutoff, self.sample_rate, source_kernel);
+                self.last_cutoff = cutoff;
+            }
+
+            let kernel_size = self.resampled_kernel.len();
 
             // Process each channel in this sample
             for (channel_idx, sample) in channel_samples.iter_mut().enumerate() {
@@ -607,45 +670,7 @@ impl Plugin for WavetableFilter {
                 let driven_input = (input * drive).tanh();
 
                 let filtered = if filter_mode == FilterMode::Minimum {
-                    // MINIMUM PHASE MODE: Use minimum-phase kernel with SIMD
-                    self.filter_state[state_idx].push(driven_input);
-
-                    let mut result = 0.0;
-                    let simd_lanes = 16;
-                    let min_phase_size = self.minimum_phase_kernel.len();
-                    let simd_chunks = min_phase_size / simd_lanes;
-
-                    // Process 16 samples at a time with SIMD
-                    let mut acc = f32x16::splat(0.0);
-                    for chunk_idx in 0..simd_chunks {
-                        let k = chunk_idx * simd_lanes;
-
-                        // Load 16 history samples using bulk read
-                        let history = self.filter_state[state_idx].get_bulk::<16>(k);
-                        let history_vec = f32x16::from_array(history);
-
-                        // Load 16 minimum phase kernel coefficients
-                        let kernel_slice = &self.minimum_phase_kernel[k..k + 16];
-                        let kernel_vec = f32x16::from_slice(kernel_slice);
-
-                        // Multiply and accumulate
-                        acc += history_vec * kernel_vec;
-                    }
-
-                    // Sum the SIMD accumulator
-                    let acc_array = acc.to_array();
-                    for val in acc_array {
-                        result += val;
-                    }
-
-                    // Handle remaining samples (non-SIMD remainder)
-                    for k in (simd_chunks * simd_lanes)..min_phase_size {
-                        result += self.filter_state[state_idx].get(k) * self.minimum_phase_kernel[k];
-                    }
-
-                    result
-                } else {
-                    // RAW MODE: Direct time-domain convolution with SIMD
+                    // MINIMUM PHASE MODE: Use resampled minimum-phase kernel with SIMD
                     self.filter_state[state_idx].push(driven_input);
 
                     let mut result = 0.0;
@@ -661,8 +686,45 @@ impl Plugin for WavetableFilter {
                         let history = self.filter_state[state_idx].get_bulk::<16>(k);
                         let history_vec = f32x16::from_array(history);
 
-                        // Load 16 kernel coefficients
-                        let kernel_slice = &self.current_kernel[k..k + 16];
+                        // Load 16 resampled kernel coefficients
+                        let kernel_slice = &self.resampled_kernel[k..k + 16];
+                        let kernel_vec = f32x16::from_slice(kernel_slice);
+
+                        // Multiply and accumulate
+                        acc += history_vec * kernel_vec;
+                    }
+
+                    // Sum the SIMD accumulator
+                    let acc_array = acc.to_array();
+                    for val in acc_array {
+                        result += val;
+                    }
+
+                    // Handle remaining samples (non-SIMD remainder)
+                    for k in (simd_chunks * simd_lanes)..kernel_size {
+                        result += self.filter_state[state_idx].get(k) * self.resampled_kernel[k];
+                    }
+
+                    result
+                } else {
+                    // RAW MODE: Direct time-domain convolution with SIMD using resampled kernel
+                    self.filter_state[state_idx].push(driven_input);
+
+                    let mut result = 0.0;
+                    let simd_lanes = 16;
+                    let simd_chunks = kernel_size / simd_lanes;
+
+                    // Process 16 samples at a time with SIMD
+                    let mut acc = f32x16::splat(0.0);
+                    for chunk_idx in 0..simd_chunks {
+                        let k = chunk_idx * simd_lanes;
+
+                        // Load 16 history samples using bulk read
+                        let history = self.filter_state[state_idx].get_bulk::<16>(k);
+                        let history_vec = f32x16::from_array(history);
+
+                        // Load 16 resampled kernel coefficients
+                        let kernel_slice = &self.resampled_kernel[k..k + 16];
                         let kernel_vec = f32x16::from_slice(kernel_slice);
 
                         // Multiply and accumulate
@@ -677,7 +739,7 @@ impl Plugin for WavetableFilter {
 
                     // Handle remaining samples
                     for k in (simd_chunks * simd_lanes)..kernel_size {
-                        result += self.filter_state[state_idx].get(k) * self.current_kernel[k];
+                        result += self.filter_state[state_idx].get(k) * self.resampled_kernel[k];
                     }
                     result
                 };

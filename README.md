@@ -150,11 +150,11 @@ pw-link "Wavetable Filter:output_FR" "Built-in Audio Analog Stereo:playback_FR"
    - Supports up to 256 frames per wavetable
 
 2. **Adjust Parameters**:
-   - **Frequency**: (Currently informational - future cutoff/scaling control)
+   - **Frequency**: Cutoff frequency control (20 Hz - 20 kHz). This determines where harmonic 24 of the wavetable appears in the spectrum, effectively scaling the filter response up or down in frequency.
    - **Frame Position**: Select which wavetable frame to use (0.0-1.0)
    - **Mix**: Dry/wet blend (0% = bypass, 100% = full effect)
    - **Drive**: Input gain/saturation (0.1-10.0)
-   - **Mode**: Toggle between RAW and Spectral filtering
+   - **Mode**: Toggle between Raw and Minimum phase filtering
 
 3. **Visualize**:
    - Left panel shows 3D view of wavetable frames
@@ -168,6 +168,13 @@ Direct time-domain convolution using the wavetable frame as-is as an FIR filter 
 
 ### Minimum Mode
 Converts the wavetable to a minimum-phase filter kernel before applying convolution. This creates a "snappy and tight" filter response with no pre-ringing, making transients sound more natural. The minimum-phase conversion preserves the magnitude spectrum while ensuring all phase energy occurs after the impulse, similar to Kilohearts FilterTable's minimum phase mode.
+
+### Cutoff Frequency Behavior
+The Frequency parameter controls where harmonic 24 of the wavetable maps to in the frequency spectrum:
+- Lower cutoff values stretch the filter kernel, creating a lowpass effect
+- Higher cutoff values compress the filter kernel, shifting the filter response upward
+- At 1000 Hz cutoff, harmonic 24 appears at 1000 Hz
+- The filter kernel is automatically resampled to achieve the target cutoff frequency
 
 ## File Formats
 
