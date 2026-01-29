@@ -200,6 +200,16 @@ pub(crate) fn create(
                 .height(Pixels(40.0))
                 .col_between(Pixels(10.0));
 
+                // Mode selection row
+                HStack::new(cx, |cx| {
+                    Label::new(cx, "Mode")
+                        .width(Pixels(100.0))
+                        .height(Pixels(30.0));
+                    ParamSlider::new(cx, Data::params, |params| &params.mode);
+                })
+                .height(Pixels(40.0))
+                .col_between(Pixels(10.0));
+
                 // Visualization area - split into two sections
                 HStack::new(cx, |cx| {
                     // 3D Wavetable view (left side)

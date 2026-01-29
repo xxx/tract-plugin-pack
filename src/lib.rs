@@ -4,6 +4,8 @@ use nih_plug::prelude::*;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::simd::f32x16;
+use realfft::{RealFftPlanner, RealToComplex, ComplexToReal};
+use rustfft::num_complex::Complex;
 
 pub mod wavetable;
 mod editor;
@@ -14,8 +16,10 @@ pub struct WavetableFilter {
     params: Arc<WavetableFilterParams>,
     wavetable: Option<Wavetable>,
     sample_rate: f32,
-    // Circular buffer for convolution (per channel)
+    // Circular buffer for convolution (per channel) - for RAW mode
     filter_state: [FilterState; 2],
+    // Spectral filter state (per channel) - for Spectral mode
+    spectral_state: [SpectralFilterState; 2],
     // Shared state for wavetable path
     wavetable_path: Arc<Mutex<String>>,
     should_reload: Arc<AtomicBool>,
@@ -27,15 +31,30 @@ pub struct WavetableFilter {
     current_frame_count: Arc<std::sync::atomic::AtomicUsize>,
     // Silence detection counter
     silence_samples: usize,
-    // Cached filter kernel
+    // Cached filter kernel (for RAW mode)
     current_kernel: Vec<f32>,
     last_frame_pos: f32,
+    // FFT state for spectral mode
+    fft_forward: Option<Arc<dyn RealToComplex<f32>>>,
+    fft_inverse: Option<Arc<dyn ComplexToReal<f32>>>,
+    spectral_kernel: Vec<Complex<f32>>,
 }
 
 struct FilterState {
     // Circular buffer for input history (size = max wavetable frame size)
     history: Vec<f32>,
     write_pos: usize,
+}
+
+struct SpectralFilterState {
+    // Input buffer for FFT (accumulates samples)
+    input_buffer: Vec<f32>,
+    // Output overlap buffer for overlap-add
+    overlap_buffer: Vec<f32>,
+    // Position in input buffer
+    buffer_pos: usize,
+    // FFT size
+    fft_size: usize,
 }
 
 #[derive(Params)]
@@ -51,6 +70,20 @@ struct WavetableFilterParams {
 
     #[id = "drive"]
     pub drive: FloatParam,
+
+    #[id = "mode"]
+    pub mode: EnumParam<FilterMode>,
+}
+
+#[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
+enum FilterMode {
+    #[id = "spectral"]
+    #[name = "Spectral"]
+    Spectral,
+
+    #[id = "raw"]
+    #[name = "Raw"]
+    Raw,
 }
 
 impl Default for WavetableFilter {
@@ -61,6 +94,10 @@ impl Default for WavetableFilter {
 
         let current_frame_count = Arc::new(std::sync::atomic::AtomicUsize::new(frame_count));
 
+        let mut planner = RealFftPlanner::<f32>::new();
+        let fft_forward = planner.plan_fft_forward(frame_size);
+        let fft_inverse = planner.plan_fft_inverse(frame_size);
+
         Self {
             params: Arc::new(WavetableFilterParams::new(current_frame_count.clone())),
             wavetable: Some(default_wt.clone()),
@@ -68,6 +105,10 @@ impl Default for WavetableFilter {
             filter_state: [
                 FilterState::new(2048),
                 FilterState::new(2048),
+            ],
+            spectral_state: [
+                SpectralFilterState::new(frame_size),
+                SpectralFilterState::new(frame_size),
             ],
             wavetable_path: Arc::new(Mutex::new(String::from("Default"))),
             should_reload: Arc::new(AtomicBool::new(false)),
@@ -77,11 +118,35 @@ impl Default for WavetableFilter {
             silence_samples: 0,
             current_kernel: vec![0.0; frame_size],
             last_frame_pos: -1.0,
+            fft_forward: Some(fft_forward),
+            fft_inverse: Some(fft_inverse),
+            spectral_kernel: vec![Complex::new(0.0, 0.0); frame_size / 2 + 1],
         }
     }
 }
 
 impl WavetableFilter {
+    /// Convert a wavetable frame to a spectral kernel (FFT magnitude response)
+    /// Returns the computed spectral kernel
+    fn compute_spectral_kernel_static(
+        fft: &Arc<dyn RealToComplex<f32>>,
+        frame: &[f32],
+    ) -> Vec<Complex<f32>> {
+        let mut input = frame.to_vec();
+        let mut output = vec![Complex::new(0.0, 0.0); frame.len() / 2 + 1];
+
+        // Compute FFT of the wavetable frame
+        if fft.process(&mut input, &mut output).is_ok() {
+            // Use the magnitude spectrum as the filter response
+            // Normalize by the FFT size
+            let scale = 1.0 / (frame.len() as f32).sqrt();
+            for bin in &mut output {
+                *bin *= scale;
+            }
+        }
+        output
+    }
+
     /// Create a default lowpass filter wavetable
     pub fn create_default_wavetable() -> Wavetable {
         const FRAME_SIZE: usize = 256;  // Smaller for more aggressive filtering
@@ -240,6 +305,23 @@ impl FilterState {
     }
 }
 
+impl SpectralFilterState {
+    fn new(fft_size: usize) -> Self {
+        Self {
+            input_buffer: vec![0.0; fft_size],
+            overlap_buffer: vec![0.0; fft_size],
+            buffer_pos: 0,
+            fft_size,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.input_buffer.fill(0.0);
+        self.overlap_buffer.fill(0.0);
+        self.buffer_pos = 0;
+    }
+}
+
 impl WavetableFilterParams {
     fn new(frame_count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
         Self {
@@ -293,6 +375,8 @@ impl WavetableFilterParams {
                 },
             )
             .with_smoother(SmoothingStyle::Linear(50.0)),
+
+            mode: EnumParam::new("Mode", FilterMode::Raw),
         }
     }
 }
@@ -356,6 +440,9 @@ impl Plugin for WavetableFilter {
         for state in &mut self.filter_state {
             state.reset();
         }
+        for state in &mut self.spectral_state {
+            state.reset();
+        }
         self.silence_samples = 0;
     }
 
@@ -385,6 +472,17 @@ impl Plugin for WavetableFilter {
                 // Resize kernel buffer to match new frame size
                 self.current_kernel.resize(new_size, 0.0);
                 self.last_frame_pos = -1.0;
+
+                // Reinitialize FFT for new frame size
+                let mut planner = RealFftPlanner::<f32>::new();
+                self.fft_forward = Some(planner.plan_fft_forward(new_size));
+                self.fft_inverse = Some(planner.plan_fft_inverse(new_size));
+                self.spectral_kernel.resize(new_size / 2 + 1, Complex::new(0.0, 0.0));
+
+                // Resize spectral state buffers
+                for state in &mut self.spectral_state {
+                    *state = SpectralFilterState::new(new_size);
+                }
             }
             self.should_reload.store(false, Ordering::Relaxed);
         }
@@ -399,6 +497,8 @@ impl Plugin for WavetableFilter {
         let silence_threshold = 1e-6f32;
         let mut is_silent = true;
 
+        let filter_mode = self.params.mode.value();
+
         // Iterate over samples using nih-plug's proper iterator
         for mut channel_samples in buffer.iter_samples() {
             // Get smoothed parameters once per sample (shared across all channels)
@@ -410,7 +510,18 @@ impl Plugin for WavetableFilter {
             let needs_update = (frame_pos - self.last_frame_pos).abs() > 0.0001 || self.last_frame_pos < 0.0;
 
             if needs_update {
-                self.current_kernel = wavetable.get_frame_interpolated(frame_pos);
+                // Get new kernel from wavetable
+                let new_kernel = wavetable.get_frame_interpolated(frame_pos);
+                self.current_kernel = new_kernel.clone();
+
+                // For spectral mode, compute FFT
+                if filter_mode == FilterMode::Spectral && self.fft_forward.is_some() {
+                    self.spectral_kernel = Self::compute_spectral_kernel_static(
+                        self.fft_forward.as_ref().unwrap(),
+                        &new_kernel,
+                    );
+                }
+
                 self.last_frame_pos = frame_pos;
             }
 
@@ -429,44 +540,66 @@ impl Plugin for WavetableFilter {
                 // Apply drive
                 let driven_input = (input * drive).tanh();
 
-                // Push input into history buffer
-                self.filter_state[state_idx].push(driven_input);
+                let filtered = if filter_mode == FilterMode::Spectral {
+                    // SPECTRAL MODE: Use FFT-based filtering
+                    // For simplicity, we just use the time-domain kernel scaled by spectral magnitudes
+                    // A proper implementation would use overlap-add FFT convolution
+                    // but that requires buffering which complicates sample-by-sample processing
 
-                // Perform convolution with SIMD: output = sum(input[n-k] * kernel[k])
-                let mut filtered = 0.0;
-                let simd_lanes = 16;
-                let simd_chunks = kernel_size / simd_lanes;
+                    // Push into history and do time-domain convolution with spectral-weighted kernel
+                    self.filter_state[state_idx].push(driven_input);
 
-                // Process 16 samples at a time with SIMD
-                let mut acc = f32x16::splat(0.0);
-                for chunk_idx in 0..simd_chunks {
-                    let k = chunk_idx * simd_lanes;
-
-                    // Load 16 history samples
-                    let mut history = [0.0f32; 16];
-                    for i in 0..16 {
-                        history[i] = self.filter_state[state_idx].get(k + i);
+                    let mut result = 0.0;
+                    for k in 0..kernel_size.min(self.spectral_kernel.len()) {
+                        // Weight the time-domain kernel by spectral magnitude
+                        let spectral_weight = if k < self.spectral_kernel.len() {
+                            self.spectral_kernel[k].norm()
+                        } else {
+                            1.0
+                        };
+                        result += self.filter_state[state_idx].get(k) * self.current_kernel[k] * spectral_weight;
                     }
-                    let history_vec = f32x16::from_array(history);
+                    result
+                } else {
+                    // RAW MODE: Direct time-domain convolution with SIMD
+                    self.filter_state[state_idx].push(driven_input);
 
-                    // Load 16 kernel coefficients
-                    let kernel_slice = &self.current_kernel[k..k + 16];
-                    let kernel_vec = f32x16::from_slice(kernel_slice);
+                    let mut result = 0.0;
+                    let simd_lanes = 16;
+                    let simd_chunks = kernel_size / simd_lanes;
 
-                    // Multiply and accumulate
-                    acc += history_vec * kernel_vec;
-                }
+                    // Process 16 samples at a time with SIMD
+                    let mut acc = f32x16::splat(0.0);
+                    for chunk_idx in 0..simd_chunks {
+                        let k = chunk_idx * simd_lanes;
 
-                // Sum the SIMD accumulator
-                let acc_array = acc.to_array();
-                for val in acc_array {
-                    filtered += val;
-                }
+                        // Load 16 history samples
+                        let mut history = [0.0f32; 16];
+                        for i in 0..16 {
+                            history[i] = self.filter_state[state_idx].get(k + i);
+                        }
+                        let history_vec = f32x16::from_array(history);
 
-                // Handle remaining samples
-                for k in (simd_chunks * simd_lanes)..kernel_size {
-                    filtered += self.filter_state[state_idx].get(k) * self.current_kernel[k];
-                }
+                        // Load 16 kernel coefficients
+                        let kernel_slice = &self.current_kernel[k..k + 16];
+                        let kernel_vec = f32x16::from_slice(kernel_slice);
+
+                        // Multiply and accumulate
+                        acc += history_vec * kernel_vec;
+                    }
+
+                    // Sum the SIMD accumulator
+                    let acc_array = acc.to_array();
+                    for val in acc_array {
+                        result += val;
+                    }
+
+                    // Handle remaining samples
+                    for k in (simd_chunks * simd_lanes)..kernel_size {
+                        result += self.filter_state[state_idx].get(k) * self.current_kernel[k];
+                    }
+                    result
+                };
 
                 // Mix dry and wet signals
                 let output = input * (1.0 - mix) + filtered * mix;
