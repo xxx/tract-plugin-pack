@@ -10,11 +10,11 @@ members = ["xtask"]
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["simd"] }
 nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 hound = "3.5"
 atomic_float = "1.0"
-rfd = "0.15"
+rfd = "0.17.2"
 
 [profile.release]
 lto = true
