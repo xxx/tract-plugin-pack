@@ -394,10 +394,88 @@ impl Plugin for WavetableFilter {
             return ProcessStatus::Normal;
         };
 
+        // NEW IMPLEMENTATION: Using nih-plug's iterator API
         // Check if input is silent (to clear filter state when playback stops)
         let silence_threshold = 1e-6f32;
         let mut is_silent = true;
 
+        // Iterate over samples using nih-plug's proper iterator
+        for mut channel_samples in buffer.iter_samples() {
+            // Get smoothed parameters once per sample (shared across all channels)
+            let frame_pos = self.params.frame_position.smoothed.next();
+            let mix = self.params.mix.smoothed.next();
+            let drive = self.params.drive.smoothed.next();
+
+            // Update kernel only when frame position changes enough
+            let needs_update = (frame_pos - self.last_frame_pos).abs() > 0.0001 || self.last_frame_pos < 0.0;
+
+            if needs_update {
+                self.current_kernel = wavetable.get_frame_interpolated(frame_pos);
+                self.last_frame_pos = frame_pos;
+            }
+
+            let kernel_size = self.current_kernel.len();
+
+            // Process each channel in this sample
+            for (channel_idx, sample) in channel_samples.iter_mut().enumerate() {
+                let state_idx = channel_idx.min(1);
+                let input = *sample;
+
+                // Check if this sample is above silence threshold
+                if input.abs() > silence_threshold {
+                    is_silent = false;
+                }
+
+                // Apply drive
+                let driven_input = (input * drive).tanh();
+
+                // Push input into history buffer
+                self.filter_state[state_idx].push(driven_input);
+
+                // Perform convolution with SIMD: output = sum(input[n-k] * kernel[k])
+                let mut filtered = 0.0;
+                let simd_lanes = 16;
+                let simd_chunks = kernel_size / simd_lanes;
+
+                // Process 16 samples at a time with SIMD
+                let mut acc = f32x16::splat(0.0);
+                for chunk_idx in 0..simd_chunks {
+                    let k = chunk_idx * simd_lanes;
+
+                    // Load 16 history samples
+                    let mut history = [0.0f32; 16];
+                    for i in 0..16 {
+                        history[i] = self.filter_state[state_idx].get(k + i);
+                    }
+                    let history_vec = f32x16::from_array(history);
+
+                    // Load 16 kernel coefficients
+                    let kernel_slice = &self.current_kernel[k..k + 16];
+                    let kernel_vec = f32x16::from_slice(kernel_slice);
+
+                    // Multiply and accumulate
+                    acc += history_vec * kernel_vec;
+                }
+
+                // Sum the SIMD accumulator
+                let acc_array = acc.to_array();
+                for val in acc_array {
+                    filtered += val;
+                }
+
+                // Handle remaining samples
+                for k in (simd_chunks * simd_lanes)..kernel_size {
+                    filtered += self.filter_state[state_idx].get(k) * self.current_kernel[k];
+                }
+
+                // Mix dry and wet signals
+                let output = input * (1.0 - mix) + filtered * mix;
+
+                *sample = output;
+            }
+        }
+
+        /* OLD IMPLEMENTATION (commented out for comparison):
         let num_samples = buffer.samples();
         let num_channels = buffer.channels();
 
@@ -416,7 +494,6 @@ impl Plugin for WavetableFilter {
             let drive = self.params.drive.smoothed.next();
 
             // Update kernel only when frame position changes enough to warrant a new interpolation
-            // Use a smaller threshold to track parameter changes more closely
             let needs_update = (frame_pos - self.last_frame_pos).abs() > 0.0001 || self.last_frame_pos < 0.0;
 
             if needs_update {
@@ -488,6 +565,7 @@ impl Plugin for WavetableFilter {
                 unsafe { *output_ptr.add(sample_idx) = output };
             }
         }
+        */
 
         // Track silence duration and clear filter state if silent for too long
         if is_silent {
