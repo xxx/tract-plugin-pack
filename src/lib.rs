@@ -401,12 +401,14 @@ impl Plugin for WavetableFilter {
         },
     ];
 
-    // Tail time in seconds - max wavetable frame size at low frequencies
-    // 2048 samples at 44.1kHz = ~46ms, but give it more headroom
     const HARD_REALTIME_ONLY: bool = false;
 
     type SysExMessage = ();
     type BackgroundTask = ();
+
+    fn task_executor(&mut self) -> TaskExecutor<Self> {
+        Box::new(|_| ())
+    }
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
