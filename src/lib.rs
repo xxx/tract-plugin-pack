@@ -310,7 +310,7 @@ impl FilterState {
     }
 
     /// Bulk read for SIMD operations - reads N consecutive samples into an array
-    /// Optimized to minimize bounds checks and use direct memory access
+    /// Optimized to minimize bounds checks and use direct slice copying
     #[inline(always)]
     fn get_bulk<const N: usize>(&self, start_offset: usize) -> [f32; N] {
         let mut result = [0.0f32; N];
@@ -320,15 +320,9 @@ impl FilterState {
 
         // Check if we can do a contiguous read (no wrap around)
         if start_idx >= N - 1 {
-            // Simple case: no circular buffer wrap, direct memory copy
+            // Simple case: no circular buffer wrap, direct slice copy
             let src_start = start_idx - (N - 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    self.history.as_ptr().add(src_start),
-                    result.as_mut_ptr(),
-                    N
-                );
-            }
+            result.copy_from_slice(&self.history[src_start..src_start + N]);
         } else {
             // Wrap-around case: copy in two parts
             for i in 0..N {
