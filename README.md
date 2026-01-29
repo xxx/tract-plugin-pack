@@ -163,11 +163,11 @@ pw-link "Wavetable Filter:output_FR" "Built-in Audio Analog Stereo:playback_FR"
 
 ## Filtering Modes
 
-### RAW Mode
-Direct time-domain convolution using the wavetable frame as an FIR filter kernel. Fast and predictable, similar to using the wavetable as an impulse response.
+### Raw Mode
+Direct time-domain convolution using the wavetable frame as-is as an FIR filter kernel. Uses the wavetable exactly as provided, which can include arbitrary phase relationships. Fast and predictable.
 
-### Spectral Mode
-Computes the FFT of the wavetable frame and uses its spectral magnitude to weight the filter response. This emphasizes the harmonic content present in the wavetable, similar to Kilohearts FilterTable's spectral mode.
+### Minimum Mode
+Converts the wavetable to a minimum-phase filter kernel before applying convolution. This creates a "snappy and tight" filter response with no pre-ringing, making transients sound more natural. The minimum-phase conversion preserves the magnitude spectrum while ensuring all phase energy occurs after the impulse, similar to Kilohearts FilterTable's minimum phase mode.
 
 ## File Formats
 

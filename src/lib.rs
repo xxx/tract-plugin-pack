@@ -16,10 +16,8 @@ pub struct WavetableFilter {
     params: Arc<WavetableFilterParams>,
     wavetable: Option<Wavetable>,
     sample_rate: f32,
-    // Circular buffer for convolution (per channel) - for RAW mode
+    // Circular buffer for convolution (per channel) - for both modes
     filter_state: [FilterState; 2],
-    // Spectral filter state (per channel) - for Spectral mode
-    spectral_state: [SpectralFilterState; 2],
     // Shared state for wavetable path
     wavetable_path: Arc<Mutex<String>>,
     should_reload: Arc<AtomicBool>,
@@ -31,13 +29,14 @@ pub struct WavetableFilter {
     current_frame_count: Arc<std::sync::atomic::AtomicUsize>,
     // Silence detection counter
     silence_samples: usize,
-    // Cached filter kernel (for RAW mode)
+    // Cached filter kernel (for RAW mode or minimum phase mode)
     current_kernel: Vec<f32>,
+    // Cached minimum phase kernel (for minimum phase mode)
+    minimum_phase_kernel: Vec<f32>,
     last_frame_pos: f32,
-    // FFT state for spectral mode
+    // FFT state for minimum phase mode
     fft_forward: Option<Arc<dyn RealToComplex<f32>>>,
     fft_inverse: Option<Arc<dyn ComplexToReal<f32>>>,
-    spectral_kernel: Vec<Complex<f32>>,
 }
 
 struct FilterState {
@@ -46,15 +45,6 @@ struct FilterState {
     write_pos: usize,
     // Bit mask for fast modulo (size - 1, only works when size is power of 2)
     mask: usize,
-}
-
-struct SpectralFilterState {
-    // Input buffer for FFT (accumulates samples)
-    input_buffer: Vec<f32>,
-    // Output overlap buffer for overlap-add
-    overlap_buffer: Vec<f32>,
-    // Position in input buffer
-    buffer_pos: usize,
 }
 
 #[derive(Params)]
@@ -77,9 +67,9 @@ struct WavetableFilterParams {
 
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
 enum FilterMode {
-    #[id = "spectral"]
-    #[name = "Spectral"]
-    Spectral,
+    #[id = "minimum"]
+    #[name = "Minimum"]
+    Minimum,
 
     #[id = "raw"]
     #[name = "Raw"]
@@ -103,10 +93,6 @@ impl Default for WavetableFilter {
             wavetable: Some(default_wt.clone()),
             sample_rate: 48000.0,
             filter_state: [FilterState::new(2048), FilterState::new(2048)],
-            spectral_state: [
-                SpectralFilterState::new(frame_size),
-                SpectralFilterState::new(frame_size),
-            ],
             wavetable_path: Arc::new(Mutex::new(String::from("Default"))),
             should_reload: Arc::new(AtomicBool::new(false)),
             shared_wavetable: Arc::new(Mutex::new(default_wt)),
@@ -117,31 +103,101 @@ impl Default for WavetableFilter {
             last_frame_pos: -1.0,
             fft_forward: Some(fft_forward),
             fft_inverse: Some(fft_inverse),
-            spectral_kernel: vec![Complex::new(0.0, 0.0); frame_size / 2 + 1],
+            minimum_phase_kernel: vec![0.0; frame_size],
         }
     }
 }
 
 impl WavetableFilter {
-    /// Convert a wavetable frame to a spectral kernel (FFT magnitude response)
-    /// Returns the computed spectral kernel
-    fn compute_spectral_kernel_static(
-        fft: &Arc<dyn RealToComplex<f32>>,
+    /// Convert a wavetable frame to a minimum-phase filter kernel
+    /// This computes the minimum phase representation of the wavetable's magnitude spectrum
+    fn compute_minimum_phase_kernel(
+        fft_forward: &Arc<dyn RealToComplex<f32>>,
+        fft_inverse: &Arc<dyn ComplexToReal<f32>>,
         frame: &[f32],
-    ) -> Vec<Complex<f32>> {
-        let mut input = frame.to_vec();
-        let mut output = vec![Complex::new(0.0, 0.0); frame.len() / 2 + 1];
+    ) -> Vec<f32> {
+        let n = frame.len();
 
-        // Compute FFT of the wavetable frame
-        if fft.process(&mut input, &mut output).is_ok() {
-            // Use the magnitude spectrum as the filter response
-            // Normalize by the FFT size
-            let scale = 1.0 / (frame.len() as f32).sqrt();
-            for bin in &mut output {
-                *bin *= scale;
-            }
+        // 1. FFT the input to get magnitude spectrum
+        let mut fft_input = frame.to_vec();
+        let mut spectrum = vec![Complex::new(0.0, 0.0); n / 2 + 1];
+
+        if fft_forward.process(&mut fft_input, &mut spectrum).is_err() {
+            // If FFT fails, return original frame
+            return frame.to_vec();
         }
-        output
+
+        // 2. Compute log magnitude (with small epsilon to avoid log(0))
+        let epsilon = 1e-10;
+        for bin in &mut spectrum {
+            let mag = bin.norm().max(epsilon);
+            *bin = Complex::new(mag.ln(), 0.0);
+        }
+
+        // 3. Build full spectrum (mirror for negative frequencies)
+        let mut full_spectrum = vec![Complex::new(0.0, 0.0); n];
+        full_spectrum[0] = spectrum[0];
+        for i in 1..n / 2 {
+            full_spectrum[i] = spectrum[i];
+            full_spectrum[n - i] = spectrum[i].conj();
+        }
+        if n % 2 == 0 {
+            full_spectrum[n / 2] = spectrum[n / 2];
+        }
+
+        // 4. IFFT to get real cepstrum
+        let mut cepstrum = vec![0.0; n];
+        if fft_inverse.process(&mut full_spectrum, &mut cepstrum).is_err() {
+            return frame.to_vec();
+        }
+
+        // 5. Apply minimum phase window (Hilbert transform in cepstral domain)
+        // Keep DC, double positive frequencies, zero negative frequencies
+        cepstrum[0] *= 1.0;
+        for i in 1..n / 2 {
+            cepstrum[i] *= 2.0;
+        }
+        if n % 2 == 0 {
+            cepstrum[n / 2] *= 1.0;
+        }
+        for i in (n / 2 + 1)..n {
+            cepstrum[i] = 0.0;
+        }
+
+        // 6. FFT back to get minimum phase log spectrum
+        let mut min_phase_input = cepstrum.clone();
+        let mut min_phase_spectrum = vec![Complex::new(0.0, 0.0); n / 2 + 1];
+        if fft_forward.process(&mut min_phase_input, &mut min_phase_spectrum).is_err() {
+            return frame.to_vec();
+        }
+
+        // 7. Convert from log domain and build full spectrum
+        for bin in &mut min_phase_spectrum {
+            *bin = Complex::new(bin.re.exp() * bin.im.cos(), bin.re.exp() * bin.im.sin());
+        }
+
+        let mut full_min_phase = vec![Complex::new(0.0, 0.0); n];
+        full_min_phase[0] = min_phase_spectrum[0];
+        for i in 1..n / 2 {
+            full_min_phase[i] = min_phase_spectrum[i];
+            full_min_phase[n - i] = min_phase_spectrum[i].conj();
+        }
+        if n % 2 == 0 {
+            full_min_phase[n / 2] = min_phase_spectrum[n / 2];
+        }
+
+        // 8. IFFT to get minimum phase impulse response
+        let mut result = vec![0.0; n];
+        if fft_inverse.process(&mut full_min_phase, &mut result).is_ok() {
+            // Normalize
+            let scale = 1.0 / (n as f32);
+            for sample in &mut result {
+                *sample *= scale;
+            }
+            result
+        } else {
+            frame.to_vec()
+        }
     }
 
     /// Create a default lowpass filter wavetable
@@ -335,22 +391,6 @@ impl FilterState {
     }
 }
 
-impl SpectralFilterState {
-    fn new(fft_size: usize) -> Self {
-        Self {
-            input_buffer: vec![0.0; fft_size],
-            overlap_buffer: vec![0.0; fft_size],
-            buffer_pos: 0,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.input_buffer.fill(0.0);
-        self.overlap_buffer.fill(0.0);
-        self.buffer_pos = 0;
-    }
-}
-
 impl WavetableFilterParams {
     fn new(frame_count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
         Self {
@@ -470,9 +510,6 @@ impl Plugin for WavetableFilter {
         for state in &mut self.filter_state {
             state.reset();
         }
-        for state in &mut self.spectral_state {
-            state.reset();
-        }
         self.silence_samples = 0;
     }
 
@@ -508,13 +545,7 @@ impl Plugin for WavetableFilter {
                 let mut planner = RealFftPlanner::<f32>::new();
                 self.fft_forward = Some(planner.plan_fft_forward(new_size));
                 self.fft_inverse = Some(planner.plan_fft_inverse(new_size));
-                self.spectral_kernel
-                    .resize(new_size / 2 + 1, Complex::new(0.0, 0.0));
-
-                // Resize spectral state buffers
-                for state in &mut self.spectral_state {
-                    *state = SpectralFilterState::new(new_size);
-                }
+                self.minimum_phase_kernel.resize(new_size, 0.0);
             }
             self.should_reload.store(false, Ordering::Relaxed);
         }
@@ -547,11 +578,13 @@ impl Plugin for WavetableFilter {
                 let new_kernel = wavetable.get_frame_interpolated(frame_pos);
                 self.current_kernel = new_kernel.clone();
 
-                // For spectral mode, compute FFT
-                if filter_mode == FilterMode::Spectral {
-                    if let Some(ref fft) = self.fft_forward {
-                        self.spectral_kernel =
-                            Self::compute_spectral_kernel_static(fft, &new_kernel);
+                // For minimum phase mode, compute minimum phase kernel
+                if filter_mode == FilterMode::Minimum {
+                    if let (Some(ref fft_fwd), Some(ref fft_inv)) =
+                        (&self.fft_forward, &self.fft_inverse)
+                    {
+                        self.minimum_phase_kernel =
+                            Self::compute_minimum_phase_kernel(fft_fwd, fft_inv, &new_kernel);
                     }
                 }
 
@@ -573,27 +606,43 @@ impl Plugin for WavetableFilter {
                 // Apply drive
                 let driven_input = (input * drive).tanh();
 
-                let filtered = if filter_mode == FilterMode::Spectral {
-                    // SPECTRAL MODE: Use FFT-based filtering
-                    // For simplicity, we just use the time-domain kernel scaled by spectral magnitudes
-                    // A proper implementation would use overlap-add FFT convolution
-                    // but that requires buffering which complicates sample-by-sample processing
-
-                    // Push into history and do time-domain convolution with spectral-weighted kernel
+                let filtered = if filter_mode == FilterMode::Minimum {
+                    // MINIMUM PHASE MODE: Use minimum-phase kernel with SIMD
                     self.filter_state[state_idx].push(driven_input);
 
                     let mut result = 0.0;
-                    for k in 0..kernel_size.min(self.spectral_kernel.len()) {
-                        // Weight the time-domain kernel by spectral magnitude
-                        let spectral_weight = if k < self.spectral_kernel.len() {
-                            self.spectral_kernel[k].norm()
-                        } else {
-                            1.0
-                        };
-                        result += self.filter_state[state_idx].get(k)
-                            * self.current_kernel[k]
-                            * spectral_weight;
+                    let simd_lanes = 16;
+                    let min_phase_size = self.minimum_phase_kernel.len();
+                    let simd_chunks = min_phase_size / simd_lanes;
+
+                    // Process 16 samples at a time with SIMD
+                    let mut acc = f32x16::splat(0.0);
+                    for chunk_idx in 0..simd_chunks {
+                        let k = chunk_idx * simd_lanes;
+
+                        // Load 16 history samples using bulk read
+                        let history = self.filter_state[state_idx].get_bulk::<16>(k);
+                        let history_vec = f32x16::from_array(history);
+
+                        // Load 16 minimum phase kernel coefficients
+                        let kernel_slice = &self.minimum_phase_kernel[k..k + 16];
+                        let kernel_vec = f32x16::from_slice(kernel_slice);
+
+                        // Multiply and accumulate
+                        acc += history_vec * kernel_vec;
                     }
+
+                    // Sum the SIMD accumulator
+                    let acc_array = acc.to_array();
+                    for val in acc_array {
+                        result += val;
+                    }
+
+                    // Handle remaining samples (non-SIMD remainder)
+                    for k in (simd_chunks * simd_lanes)..min_phase_size {
+                        result += self.filter_state[state_idx].get(k) * self.minimum_phase_kernel[k];
+                    }
+
                     result
                 } else {
                     // RAW MODE: Direct time-domain convolution with SIMD
