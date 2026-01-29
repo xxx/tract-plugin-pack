@@ -53,8 +53,6 @@ struct SpectralFilterState {
     overlap_buffer: Vec<f32>,
     // Position in input buffer
     buffer_pos: usize,
-    // FFT size
-    fft_size: usize,
 }
 
 #[derive(Params)]
@@ -170,7 +168,7 @@ impl WavetableFilter {
                 let center = FRAME_SIZE / 2;
                 let width = (20.0 + (filter_type - 0.33) * 60.0) as usize;
                 for i in 0..FRAME_SIZE {
-                    let dist = (i as i32 - center as i32).abs() as usize;
+                    let dist = i.abs_diff(center);
                     let value = if dist < width {
                         (1.0 - (dist as f32 / width as f32)).max(0.0)
                     } else {
@@ -256,10 +254,9 @@ impl WavetableFilter {
     pub fn try_load_user_wavetable(&mut self) {
         // First, try environment variable WAVETABLE_FILTER_PATH
         if let Ok(path) = std::env::var("WAVETABLE_FILTER_PATH") {
-            if std::path::Path::new(&path).exists() {
-                if let Ok(_) = self.load_wavetable_from_file(&path) {
-                    return;
-                }
+            if std::path::Path::new(&path).exists() && self.load_wavetable_from_file(&path).is_ok()
+            {
+                return;
             }
         }
 
@@ -269,10 +266,12 @@ impl WavetableFilter {
 
             for ext in &["wav", "wt"] {
                 let path = base_path.join(format!("wavetable.{}", ext));
-                if path.exists() {
-                    if let Ok(_) = self.load_wavetable_from_file(path.to_str().unwrap()) {
-                        return;
-                    }
+                if path.exists()
+                    && self
+                        .load_wavetable_from_file(path.to_str().unwrap())
+                        .is_ok()
+                {
+                    return;
                 }
             }
         }
@@ -309,7 +308,6 @@ impl SpectralFilterState {
             input_buffer: vec![0.0; fft_size],
             overlap_buffer: vec![0.0; fft_size],
             buffer_pos: 0,
-            fft_size,
         }
     }
 
@@ -517,11 +515,11 @@ impl Plugin for WavetableFilter {
                 self.current_kernel = new_kernel.clone();
 
                 // For spectral mode, compute FFT
-                if filter_mode == FilterMode::Spectral && self.fft_forward.is_some() {
-                    self.spectral_kernel = Self::compute_spectral_kernel_static(
-                        self.fft_forward.as_ref().unwrap(),
-                        &new_kernel,
-                    );
+                if filter_mode == FilterMode::Spectral {
+                    if let Some(ref fft) = self.fft_forward {
+                        self.spectral_kernel =
+                            Self::compute_spectral_kernel_static(fft, &new_kernel);
+                    }
                 }
 
                 self.last_frame_pos = frame_pos;
@@ -578,10 +576,8 @@ impl Plugin for WavetableFilter {
                         let k = chunk_idx * simd_lanes;
 
                         // Load 16 history samples
-                        let mut history = [0.0f32; 16];
-                        for i in 0..16 {
-                            history[i] = self.filter_state[state_idx].get(k + i);
-                        }
+                        let history: [f32; 16] =
+                            std::array::from_fn(|i| self.filter_state[state_idx].get(k + i));
                         let history_vec = f32x16::from_array(history);
 
                         // Load 16 kernel coefficients

@@ -3,7 +3,7 @@ use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 use std::sync::Arc;
 
-use crate::{WavetableFilter, WavetableFilterParams};
+use crate::WavetableFilterParams;
 
 pub struct WavetableView {
     params: Arc<WavetableFilterParams>,
@@ -12,12 +12,12 @@ pub struct WavetableView {
 }
 
 impl WavetableView {
-    pub fn new(
-        cx: &mut Context,
+    pub fn new<'a>(
+        cx: &'a mut Context,
         params: Arc<WavetableFilterParams>,
         shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
         _wavetable_version: Arc<std::sync::atomic::AtomicU32>,
-    ) -> Handle<Self> {
+    ) -> Handle<'a, Self> {
         // Get initial frame count
         let initial_frame_count = shared_wavetable
             .lock()

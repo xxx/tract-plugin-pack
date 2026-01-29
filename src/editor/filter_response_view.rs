@@ -3,7 +3,7 @@ use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 use std::sync::Arc;
 
-use crate::{WavetableFilter, WavetableFilterParams};
+use crate::WavetableFilterParams;
 
 pub struct FilterResponseView {
     params: Arc<WavetableFilterParams>,
@@ -11,11 +11,11 @@ pub struct FilterResponseView {
 }
 
 impl FilterResponseView {
-    pub fn new(
-        cx: &mut Context,
+    pub fn new<'a>(
+        cx: &'a mut Context,
         params: Arc<WavetableFilterParams>,
         shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
-    ) -> Handle<Self> {
+    ) -> Handle<'a, Self> {
         Self {
             params,
             shared_wavetable,

@@ -25,7 +25,7 @@ impl Wavetable {
             ));
         }
 
-        if samples.len() % frame_size != 0 {
+        if !samples.len().is_multiple_of(frame_size) {
             return Err(format!(
                 "Sample count {} is not a multiple of frame size {}",
                 samples.len(),
@@ -285,7 +285,7 @@ impl Wavetable {
 
     fn detect_frame_size(total_samples: usize) -> Result<usize, String> {
         for &size in &[2048, 1024, 512, 256] {
-            if total_samples % size == 0 && total_samples / size <= 256 {
+            if total_samples.is_multiple_of(size) && total_samples / size <= 256 {
                 return Ok(size);
             }
         }
@@ -307,7 +307,7 @@ mod tests {
         let frame_count = 2;
         let mut samples = Vec::new();
 
-        for frame in 0..frame_count {
+        for _frame in 0..frame_count {
             for i in 0..frame_size {
                 let phase = i as f32 / frame_size as f32;
                 let value = (phase * 2.0 * std::f32::consts::PI).sin();
