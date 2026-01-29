@@ -64,7 +64,7 @@ impl Default for WavetableFilter {
         Self {
             params: Arc::new(WavetableFilterParams::new(current_frame_count.clone())),
             wavetable: Some(default_wt.clone()),
-            sample_rate: 44100.0,
+            sample_rate: 48000.0,
             filter_state: [
                 FilterState::new(2048),
                 FilterState::new(2048),
