@@ -1,14 +1,14 @@
 #![feature(portable_simd)]
 
 use nih_plug::prelude::*;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::simd::f32x16;
-use realfft::{RealFftPlanner, RealToComplex, ComplexToReal};
+use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use rustfft::num_complex::Complex;
+use std::simd::f32x16;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-pub mod wavetable;
 mod editor;
+pub mod wavetable;
 
 use wavetable::Wavetable;
 
@@ -102,10 +102,7 @@ impl Default for WavetableFilter {
             params: Arc::new(WavetableFilterParams::new(current_frame_count.clone())),
             wavetable: Some(default_wt.clone()),
             sample_rate: 48000.0,
-            filter_state: [
-                FilterState::new(2048),
-                FilterState::new(2048),
-            ],
+            filter_state: [FilterState::new(2048), FilterState::new(2048)],
             spectral_state: [
                 SpectralFilterState::new(frame_size),
                 SpectralFilterState::new(frame_size),
@@ -149,7 +146,7 @@ impl WavetableFilter {
 
     /// Create a default lowpass filter wavetable
     pub fn create_default_wavetable() -> Wavetable {
-        const FRAME_SIZE: usize = 256;  // Smaller for more aggressive filtering
+        const FRAME_SIZE: usize = 256; // Smaller for more aggressive filtering
         const FRAME_COUNT: usize = 16;
         let mut samples = Vec::with_capacity(FRAME_SIZE * FRAME_COUNT);
 
@@ -164,11 +161,7 @@ impl WavetableFilter {
                 // Frames 0-5: Aggressive lowpass (simple moving average)
                 let window_size = (FRAME_SIZE as f32 * (0.05 + filter_type * 0.15)) as usize;
                 for i in 0..FRAME_SIZE {
-                    let value = if i < window_size {
-                        1.0
-                    } else {
-                        0.0
-                    };
+                    let value = if i < window_size { 1.0 } else { 0.0 };
                     frame_samples.push(value);
                     sum += value;
                 }
@@ -191,14 +184,14 @@ impl WavetableFilter {
                 let window_size = (FRAME_SIZE as f32 * 0.05) as usize;
                 for i in 0..FRAME_SIZE {
                     let value = if i == 0 {
-                        1.0  // DC component
+                        1.0 // DC component
                     } else if i < window_size {
-                        -0.8 / window_size as f32  // Negative for highpass
+                        -0.8 / window_size as f32 // Negative for highpass
                     } else {
                         0.0
                     };
                     frame_samples.push(value);
-                    sum += value.abs();  // Use abs for normalization
+                    sum += value.abs(); // Use abs for normalization
                 }
             }
 
@@ -217,7 +210,11 @@ impl WavetableFilter {
     pub fn load_wavetable_from_file(&mut self, path: &str) -> Result<(), String> {
         let wavetable = Wavetable::from_file(path)?;
 
-        nih_log!("Loaded wavetable: {} frames, {} samples per frame", wavetable.frame_count, wavetable.frame_size);
+        nih_log!(
+            "Loaded wavetable: {} frames, {} samples per frame",
+            wavetable.frame_count,
+            wavetable.frame_size
+        );
 
         // Resize filter state if needed
         let new_size = wavetable.frame_size;
@@ -228,7 +225,8 @@ impl WavetableFilter {
         }
 
         // Update frame count for parameter display
-        self.current_frame_count.store(wavetable.frame_count, Ordering::Relaxed);
+        self.current_frame_count
+            .store(wavetable.frame_count, Ordering::Relaxed);
 
         self.wavetable = Some(wavetable.clone());
 
@@ -352,18 +350,17 @@ impl WavetableFilterParams {
                 }))
                 .with_string_to_value(Arc::new(move |string| {
                     let count = frame_count_clone.load(std::sync::atomic::Ordering::Relaxed);
-                    string.parse::<f32>().ok().map(|frame| (frame - 1.0) / (count - 1).max(1) as f32)
+                    string
+                        .parse::<f32>()
+                        .ok()
+                        .map(|frame| (frame - 1.0) / (count - 1).max(1) as f32)
                 }))
             },
 
-            mix: FloatParam::new(
-                "Mix",
-                1.0,
-                FloatRange::Linear { min: 0.0, max: 1.0 },
-            )
-            .with_smoother(SmoothingStyle::Linear(50.0))
-            .with_unit("%")
-            .with_value_to_string(formatters::v2s_f32_percentage(0)),
+            mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_smoother(SmoothingStyle::Linear(50.0))
+                .with_unit("%")
+                .with_value_to_string(formatters::v2s_f32_percentage(0)),
 
             drive: FloatParam::new(
                 "Drive",
@@ -459,7 +456,8 @@ impl Plugin for WavetableFilter {
             // Copy from shared_wavetable (loaded by GUI thread) to audio thread's wavetable
             if let Ok(shared_wt) = self.shared_wavetable.lock() {
                 // Update frame count for parameter display
-                self.current_frame_count.store(shared_wt.frame_count, Ordering::Relaxed);
+                self.current_frame_count
+                    .store(shared_wt.frame_count, Ordering::Relaxed);
 
                 self.wavetable = Some(shared_wt.clone());
 
@@ -479,7 +477,8 @@ impl Plugin for WavetableFilter {
                 let mut planner = RealFftPlanner::<f32>::new();
                 self.fft_forward = Some(planner.plan_fft_forward(new_size));
                 self.fft_inverse = Some(planner.plan_fft_inverse(new_size));
-                self.spectral_kernel.resize(new_size / 2 + 1, Complex::new(0.0, 0.0));
+                self.spectral_kernel
+                    .resize(new_size / 2 + 1, Complex::new(0.0, 0.0));
 
                 // Resize spectral state buffers
                 for state in &mut self.spectral_state {
@@ -509,7 +508,8 @@ impl Plugin for WavetableFilter {
             let drive = self.params.drive.smoothed.next();
 
             // Update kernel only when frame position changes enough
-            let needs_update = (frame_pos - self.last_frame_pos).abs() > 0.0001 || self.last_frame_pos < 0.0;
+            let needs_update =
+                (frame_pos - self.last_frame_pos).abs() > 0.0001 || self.last_frame_pos < 0.0;
 
             if needs_update {
                 // Get new kernel from wavetable
@@ -559,7 +559,9 @@ impl Plugin for WavetableFilter {
                         } else {
                             1.0
                         };
-                        result += self.filter_state[state_idx].get(k) * self.current_kernel[k] * spectral_weight;
+                        result += self.filter_state[state_idx].get(k)
+                            * self.current_kernel[k]
+                            * spectral_weight;
                     }
                     result
                 } else {
@@ -733,10 +735,8 @@ impl ClapPlugin for WavetableFilter {
 
 impl Vst3Plugin for WavetableFilter {
     const VST3_CLASS_ID: [u8; 16] = *b"WavetableFilter1";
-    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
-        Vst3SubCategory::Fx,
-        Vst3SubCategory::Filter,
-    ];
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
+        &[Vst3SubCategory::Fx, Vst3SubCategory::Filter];
 }
 
 nih_export_clap!(WavetableFilter);

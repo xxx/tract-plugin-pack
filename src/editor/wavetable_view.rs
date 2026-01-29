@@ -12,15 +12,24 @@ pub struct WavetableView {
 }
 
 impl WavetableView {
-    pub fn new(cx: &mut Context, params: Arc<WavetableFilterParams>, shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>, _wavetable_version: Arc<std::sync::atomic::AtomicU32>) -> Handle<Self> {
+    pub fn new(
+        cx: &mut Context,
+        params: Arc<WavetableFilterParams>,
+        shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
+        _wavetable_version: Arc<std::sync::atomic::AtomicU32>,
+    ) -> Handle<Self> {
         // Get initial frame count
-        let initial_frame_count = shared_wavetable.lock().map(|wt| wt.frame_count).unwrap_or(0);
+        let initial_frame_count = shared_wavetable
+            .lock()
+            .map(|wt| wt.frame_count)
+            .unwrap_or(0);
 
         Self {
             params,
             shared_wavetable,
             last_frame_count: std::cell::Cell::new(initial_frame_count),
-        }.build(cx, |_cx| {})
+        }
+        .build(cx, |_cx| {})
     }
 }
 
@@ -62,7 +71,11 @@ impl View for WavetableView {
                 // This is a hack but vizia doesn't give us better options
             }
 
-            (wavetable.frames.clone(), wavetable.frame_count, wavetable.frame_size)
+            (
+                wavetable.frames.clone(),
+                wavetable.frame_count,
+                wavetable.frame_size,
+            )
         };
 
         if frame_count == 0 || frame_size == 0 {
@@ -157,9 +170,7 @@ impl View for WavetableView {
                     + (i as f32 / frame_size as f32) * (width * 0.7)
                     + perspective_x;
 
-                let y = bounds.y
-                    + bounds.h - padding * 2.0
-                    - (normalized * height * 0.4)
+                let y = bounds.y + bounds.h - padding * 2.0 - (normalized * height * 0.4)
                     + perspective_y;
 
                 if i == 0 {
@@ -180,7 +191,10 @@ impl View for WavetableView {
         // Horizontal center line
         let mut path = vg::Path::new();
         path.move_to(bounds.x + padding, bounds.y + padding + height / 2.0);
-        path.line_to(bounds.x + padding + width, bounds.y + padding + height / 2.0);
+        path.line_to(
+            bounds.x + padding + width,
+            bounds.y + padding + height / 2.0,
+        );
         canvas.stroke_path(&path, &grid_paint);
     }
 

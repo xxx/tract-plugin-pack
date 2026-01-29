@@ -1,5 +1,5 @@
-mod wavetable_view;
 mod filter_response_view;
+mod wavetable_view;
 
 use nih_plug::prelude::Editor;
 use nih_plug_vizia::vizia::prelude::*;
@@ -8,8 +8,8 @@ use nih_plug_vizia::{create_vizia_editor, ViziaState, ViziaTheming};
 use std::sync::Arc;
 
 use crate::WavetableFilterParams;
-use wavetable_view::WavetableView;
 use filter_response_view::FilterResponseView;
+use wavetable_view::WavetableView;
 
 #[derive(Lens, Clone)]
 struct Data {
@@ -41,8 +41,8 @@ impl Model for Data {
     }
 }
 
-const WINDOW_WIDTH: u32 = 1050;  // 700 * 1.5
-const WINDOW_HEIGHT: u32 = 810;  // 540 * 1.5
+const WINDOW_WIDTH: u32 = 1050; // 700 * 1.5
+const WINDOW_HEIGHT: u32 = 810; // 540 * 1.5
 
 pub(crate) fn default_state() -> Arc<ViziaState> {
     ViziaState::new(|| (WINDOW_WIDTH, WINDOW_HEIGHT))
@@ -55,193 +55,204 @@ pub(crate) fn create(
     shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
     wavetable_version: Arc<std::sync::atomic::AtomicU32>,
 ) -> Option<Box<dyn Editor>> {
-    create_vizia_editor(
-        default_state(),
-        ViziaTheming::Custom,
-        move |cx, _| {
-            cx.add_stylesheet(include_str!("style.css"))
-                .expect("Failed to load stylesheet");
+    create_vizia_editor(default_state(), ViziaTheming::Custom, move |cx, _| {
+        cx.add_stylesheet(include_str!("style.css"))
+            .expect("Failed to load stylesheet");
 
-            let initial_path = wavetable_path.lock().unwrap().clone();
+        let initial_path = wavetable_path.lock().unwrap().clone();
 
-            Data {
-                params: params.clone(),
-                wavetable_path: initial_path,
-                wavetable_version: 0,
-                status_message: String::from("Ready"),
-            }
-            .build(cx);
+        Data {
+            params: params.clone(),
+            wavetable_path: initial_path,
+            wavetable_version: 0,
+            status_message: String::from("Ready"),
+        }
+        .build(cx);
 
-            let wt_path = wavetable_path.clone();
-            let reload_flag = should_reload.clone();
-            let shared_wt = shared_wavetable.clone();
-            let wt_version = wavetable_version.clone();
+        let wt_path = wavetable_path.clone();
+        let reload_flag = should_reload.clone();
+        let shared_wt = shared_wavetable.clone();
+        let wt_version = wavetable_version.clone();
 
-            VStack::new(cx, |cx| {
-                // Header with title
-                Label::new(cx, "Wavetable Filter")
-                    .font_size(30.0)
-                    .height(Pixels(40.0));
+        VStack::new(cx, |cx| {
+            // Header with title
+            Label::new(cx, "Wavetable Filter")
+                .font_size(30.0)
+                .height(Pixels(40.0));
 
-                // Status message
-                Label::new(cx, Data::status_message)
-                    .height(Pixels(20.0));
+            // Status message
+            Label::new(cx, Data::status_message).height(Pixels(20.0));
 
-                // Wavetable path input
-                HStack::new(cx, |cx| {
-                    Label::new(cx, "Wavetable Path:")
-                        .width(Pixels(120.0))
-                        .height(Pixels(30.0));
+            // Wavetable path input
+            HStack::new(cx, |cx| {
+                Label::new(cx, "Wavetable Path:")
+                    .width(Pixels(120.0))
+                    .height(Pixels(30.0));
 
-                    Label::new(cx, Data::wavetable_path)
-                        .width(Stretch(1.0))
-                        .height(Pixels(30.0))
-                        .class("path-display");
+                Label::new(cx, Data::wavetable_path)
+                    .width(Stretch(1.0))
+                    .height(Pixels(30.0))
+                    .class("path-display");
 
-                    let wt_path_inner = wt_path.clone();
-                    let reload_flag_inner = reload_flag.clone();
-                    let shared_wt_inner = shared_wt.clone();
-                    let wt_version_inner = wt_version.clone();
+                let wt_path_inner = wt_path.clone();
+                let reload_flag_inner = reload_flag.clone();
+                let shared_wt_inner = shared_wt.clone();
+                let wt_version_inner = wt_version.clone();
 
-                    Button::new(
-                        cx,
-                        move |cx| {
-                            nih_plug::nih_log!("Browse button clicked");
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("Wavetable files", &["wav", "wt"])
-                                .pick_file()
-                            {
-                                nih_plug::nih_log!("File selected: {:?}", path);
-                                if let Some(path_str) = path.to_str() {
-                                    let path_string = path_str.to_string();
-                                    nih_plug::nih_log!("Loading wavetable from GUI thread: {}", path_string);
+                Button::new(
+                    cx,
+                    move |cx| {
+                        nih_plug::nih_log!("Browse button clicked");
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Wavetable files", &["wav", "wt"])
+                            .pick_file()
+                        {
+                            nih_plug::nih_log!("File selected: {:?}", path);
+                            if let Some(path_str) = path.to_str() {
+                                let path_string = path_str.to_string();
+                                nih_plug::nih_log!(
+                                    "Loading wavetable from GUI thread: {}",
+                                    path_string
+                                );
 
-                                    // Load the wavetable immediately on the GUI thread
-                                    cx.emit(DataEvent::SetStatus(format!("Loading {}...", path_string)));
+                                // Load the wavetable immediately on the GUI thread
+                                cx.emit(DataEvent::SetStatus(format!(
+                                    "Loading {}...",
+                                    path_string
+                                )));
 
-                                    match crate::wavetable::Wavetable::from_file(&path_string) {
-                                        Ok(new_wavetable) => {
-                                            let msg = format!("Loaded: {} frames x {} samples",
-                                                new_wavetable.frame_count, new_wavetable.frame_size);
-                                            cx.emit(DataEvent::SetStatus(msg));
+                                match crate::wavetable::Wavetable::from_file(&path_string) {
+                                    Ok(new_wavetable) => {
+                                        let msg = format!(
+                                            "Loaded: {} frames x {} samples",
+                                            new_wavetable.frame_count, new_wavetable.frame_size
+                                        );
+                                        cx.emit(DataEvent::SetStatus(msg));
 
-                                            // Update the shared wavetable for UI display
-                                            if let Ok(mut shared) = shared_wt_inner.lock() {
-                                                *shared = new_wavetable;
-                                            }
-
-                                            // Increment version to trigger UI redraw
-                                            let new_version = wt_version_inner.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-
-                                            // Update path and set reload flag for audio thread
-                                            if let Ok(mut wt) = wt_path_inner.lock() {
-                                                *wt = path_string.clone();
-                                            }
-                                            reload_flag_inner.store(true, std::sync::atomic::Ordering::Relaxed);
-
-                                            // Update UI - emit both events
-                                            cx.emit(DataEvent::SetWavetablePath(path_string));
-                                            cx.emit(DataEvent::WavetableChanged(new_version));
+                                        // Update the shared wavetable for UI display
+                                        if let Ok(mut shared) = shared_wt_inner.lock() {
+                                            *shared = new_wavetable;
                                         }
-                                        Err(e) => {
-                                            cx.emit(DataEvent::SetStatus(format!("Error: {}", e)));
+
+                                        // Increment version to trigger UI redraw
+                                        let new_version = wt_version_inner
+                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                            + 1;
+
+                                        // Update path and set reload flag for audio thread
+                                        if let Ok(mut wt) = wt_path_inner.lock() {
+                                            *wt = path_string.clone();
                                         }
+                                        reload_flag_inner
+                                            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+                                        // Update UI - emit both events
+                                        cx.emit(DataEvent::SetWavetablePath(path_string));
+                                        cx.emit(DataEvent::WavetableChanged(new_version));
+                                    }
+                                    Err(e) => {
+                                        cx.emit(DataEvent::SetStatus(format!("Error: {}", e)));
                                     }
                                 }
-                            } else {
-                                nih_plug::nih_log!("File dialog cancelled");
                             }
-                        },
-                        |cx| Label::new(cx, "Browse..."),
-                    )
+                        } else {
+                            nih_plug::nih_log!("File dialog cancelled");
+                        }
+                    },
+                    |cx| Label::new(cx, "Browse..."),
+                )
+                .width(Pixels(100.0))
+                .height(Pixels(30.0));
+            })
+            .height(Pixels(40.0))
+            .col_between(Pixels(10.0));
+
+            // Frequency control
+            HStack::new(cx, |cx| {
+                Label::new(cx, "Frequency")
                     .width(Pixels(100.0))
                     .height(Pixels(30.0));
-                })
-                .height(Pixels(40.0))
-                .col_between(Pixels(10.0));
-
-                // Frequency control
-                HStack::new(cx, |cx| {
-                    Label::new(cx, "Frequency")
-                        .width(Pixels(100.0))
-                        .height(Pixels(30.0));
-                    ParamSlider::new(cx, Data::params, |params| &params.frequency);
-                })
-                .height(Pixels(40.0))
-                .col_between(Pixels(10.0));
-
-                // Frame position control
-                HStack::new(cx, |cx| {
-                    Label::new(cx, "Frame Position")
-                        .width(Pixels(100.0))
-                        .height(Pixels(30.0));
-                    ParamSlider::new(cx, Data::params, |params| &params.frame_position);
-                })
-                .height(Pixels(40.0))
-                .col_between(Pixels(10.0));
-
-                // Mix control
-                HStack::new(cx, |cx| {
-                    Label::new(cx, "Mix")
-                        .width(Pixels(100.0))
-                        .height(Pixels(30.0));
-                    ParamSlider::new(cx, Data::params, |params| &params.mix);
-                })
-                .height(Pixels(40.0))
-                .col_between(Pixels(10.0));
-
-                // Drive control
-                HStack::new(cx, |cx| {
-                    Label::new(cx, "Drive")
-                        .width(Pixels(100.0))
-                        .height(Pixels(30.0));
-                    ParamSlider::new(cx, Data::params, |params| &params.drive);
-                })
-                .height(Pixels(40.0))
-                .col_between(Pixels(10.0));
-
-                // Mode selection row
-                HStack::new(cx, |cx| {
-                    Label::new(cx, "Mode")
-                        .width(Pixels(100.0))
-                        .height(Pixels(30.0));
-                    ParamSlider::new(cx, Data::params, |params| &params.mode);
-                })
-                .height(Pixels(40.0))
-                .col_between(Pixels(10.0));
-
-                // Visualization area - split into two sections
-                HStack::new(cx, |cx| {
-                    // 3D Wavetable view (left side)
-                    VStack::new(cx, |cx| {
-                        Label::new(cx, "3D Wavetable View")
-                            .class("section-title")
-                            .height(Pixels(25.0));
-                        WavetableView::new(cx, params.clone(), shared_wavetable.clone(), wavetable_version.clone())
-                            .height(Pixels(220.0));
-                    })
-                    .width(Stretch(1.0))
-                    .height(Pixels(250.0));
-
-                    // Filter frequency response (right side)
-                    VStack::new(cx, |cx| {
-                        Label::new(cx, "Filter Response")
-                            .class("section-title")
-                            .height(Pixels(25.0));
-                        FilterResponseView::new(cx, params.clone(), shared_wavetable.clone())
-                            .height(Pixels(220.0));
-                    })
-                    .width(Stretch(1.0))
-                    .height(Pixels(250.0));
-                })
-                .col_between(Pixels(10.0))
-                .child_top(Pixels(20.0));
+                ParamSlider::new(cx, Data::params, |params| &params.frequency);
             })
-            .row_between(Pixels(10.0))
-            .child_left(Pixels(20.0))
-            .child_right(Pixels(20.0))
-            .child_top(Pixels(20.0))
-            .child_bottom(Pixels(20.0));
-        },
-    )
+            .height(Pixels(40.0))
+            .col_between(Pixels(10.0));
+
+            // Frame position control
+            HStack::new(cx, |cx| {
+                Label::new(cx, "Frame Position")
+                    .width(Pixels(100.0))
+                    .height(Pixels(30.0));
+                ParamSlider::new(cx, Data::params, |params| &params.frame_position);
+            })
+            .height(Pixels(40.0))
+            .col_between(Pixels(10.0));
+
+            // Mix control
+            HStack::new(cx, |cx| {
+                Label::new(cx, "Mix")
+                    .width(Pixels(100.0))
+                    .height(Pixels(30.0));
+                ParamSlider::new(cx, Data::params, |params| &params.mix);
+            })
+            .height(Pixels(40.0))
+            .col_between(Pixels(10.0));
+
+            // Drive control
+            HStack::new(cx, |cx| {
+                Label::new(cx, "Drive")
+                    .width(Pixels(100.0))
+                    .height(Pixels(30.0));
+                ParamSlider::new(cx, Data::params, |params| &params.drive);
+            })
+            .height(Pixels(40.0))
+            .col_between(Pixels(10.0));
+
+            // Mode selection row
+            HStack::new(cx, |cx| {
+                Label::new(cx, "Mode")
+                    .width(Pixels(100.0))
+                    .height(Pixels(30.0));
+                ParamSlider::new(cx, Data::params, |params| &params.mode);
+            })
+            .height(Pixels(40.0))
+            .col_between(Pixels(10.0));
+
+            // Visualization area - split into two sections
+            HStack::new(cx, |cx| {
+                // 3D Wavetable view (left side)
+                VStack::new(cx, |cx| {
+                    Label::new(cx, "3D Wavetable View")
+                        .class("section-title")
+                        .height(Pixels(25.0));
+                    WavetableView::new(
+                        cx,
+                        params.clone(),
+                        shared_wavetable.clone(),
+                        wavetable_version.clone(),
+                    )
+                    .height(Pixels(220.0));
+                })
+                .width(Stretch(1.0))
+                .height(Pixels(250.0));
+
+                // Filter frequency response (right side)
+                VStack::new(cx, |cx| {
+                    Label::new(cx, "Filter Response")
+                        .class("section-title")
+                        .height(Pixels(25.0));
+                    FilterResponseView::new(cx, params.clone(), shared_wavetable.clone())
+                        .height(Pixels(220.0));
+                })
+                .width(Stretch(1.0))
+                .height(Pixels(250.0));
+            })
+            .col_between(Pixels(10.0))
+            .child_top(Pixels(20.0));
+        })
+        .row_between(Pixels(10.0))
+        .child_left(Pixels(20.0))
+        .child_right(Pixels(20.0))
+        .child_top(Pixels(20.0))
+        .child_bottom(Pixels(20.0));
+    })
 }

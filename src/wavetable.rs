@@ -56,8 +56,8 @@ impl Wavetable {
 
     /// Load a wavetable from a .wav file
     pub fn from_wav<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let mut reader = hound::WavReader::open(path)
-            .map_err(|e| format!("Failed to open WAV file: {}", e))?;
+        let mut reader =
+            hound::WavReader::open(path).map_err(|e| format!("Failed to open WAV file: {}", e))?;
 
         let spec = reader.spec();
 
@@ -100,25 +100,30 @@ impl Wavetable {
         let is_watr = &header == b"WATR";
 
         if !is_vawt && !is_watr {
-            return Err(format!("Invalid WT file format (header: {:?})",
-                std::str::from_utf8(&header).unwrap_or("invalid UTF-8")));
+            return Err(format!(
+                "Invalid WT file format (header: {:?})",
+                std::str::from_utf8(&header).unwrap_or("invalid UTF-8")
+            ));
         }
 
         // Read frame size and count based on format
         let (frame_size, frame_count, use_float) = if is_vawt {
             // vawt format: 4 bytes frame size, 2 bytes frame count, 2 bytes flags
             let mut frame_size_bytes = [0u8; 4];
-            reader.read_exact(&mut frame_size_bytes)
+            reader
+                .read_exact(&mut frame_size_bytes)
                 .map_err(|e| format!("Failed to read frame size: {}", e))?;
             let frame_size = u32::from_le_bytes(frame_size_bytes) as usize;
 
             let mut frame_count_bytes = [0u8; 2];
-            reader.read_exact(&mut frame_count_bytes)
+            reader
+                .read_exact(&mut frame_count_bytes)
                 .map_err(|e| format!("Failed to read frame count: {}", e))?;
             let frame_count = u16::from_le_bytes(frame_count_bytes) as usize;
 
             let mut flags_bytes = [0u8; 2];
-            reader.read_exact(&mut flags_bytes)
+            reader
+                .read_exact(&mut flags_bytes)
                 .map_err(|e| format!("Failed to read flags: {}", e))?;
             let flags = u16::from_le_bytes(flags_bytes);
 
@@ -129,12 +134,14 @@ impl Wavetable {
         } else {
             // WATR format: 4 bytes frame size, 4 bytes frame count
             let mut frame_size_bytes = [0u8; 4];
-            reader.read_exact(&mut frame_size_bytes)
+            reader
+                .read_exact(&mut frame_size_bytes)
                 .map_err(|e| format!("Failed to read frame size: {}", e))?;
             let frame_size = u32::from_le_bytes(frame_size_bytes) as usize;
 
             let mut frame_count_bytes = [0u8; 4];
-            reader.read_exact(&mut frame_count_bytes)
+            reader
+                .read_exact(&mut frame_count_bytes)
                 .map_err(|e| format!("Failed to read frame count: {}", e))?;
             let frame_count = u32::from_le_bytes(frame_count_bytes) as usize;
 
@@ -146,7 +153,10 @@ impl Wavetable {
         }
 
         if frame_count > 256 {
-            return Err(format!("Frame count {} exceeds maximum of 256", frame_count));
+            return Err(format!(
+                "Frame count {} exceeds maximum of 256",
+                frame_count
+            ));
         }
 
         // Read all samples based on format
