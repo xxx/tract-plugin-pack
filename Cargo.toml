@@ -28,8 +28,8 @@ strip = true
 
 [package.metadata.bundler]
 name = "Wavetable Filter"
-company = "Your Name"
-url = "https://github.com/yourusername/wavetable-filter"
+company = "mpd"
+url = "https://github.com/xxx/wavetable-filter"
 email = "your.email@example.com"
 description = "A wavetable-based filter plugin"
 license = "GPL-3.0-or-later"
