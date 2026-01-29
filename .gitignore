@@ -6,3 +6,6 @@ Cargo.lock
 *.dylib
 *.vst3
 *.clap
+*.wav
+*.wt
+*.png
