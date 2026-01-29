@@ -26,6 +26,11 @@ rustfft = "6.2"
 lto = true
 strip = true
 
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
 [package.metadata.bundler]
 name = "Wavetable Filter"
 company = "mpd"

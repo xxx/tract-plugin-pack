@@ -41,9 +41,11 @@ pub struct WavetableFilter {
 }
 
 struct FilterState {
-    // Circular buffer for input history (size = max wavetable frame size)
+    // Circular buffer for input history (size = next power of 2 >= max wavetable frame size)
     history: Vec<f32>,
     write_pos: usize,
+    // Bit mask for fast modulo (size - 1, only works when size is power of 2)
+    mask: usize,
 }
 
 struct SpectralFilterState {
@@ -280,9 +282,12 @@ impl WavetableFilter {
 
 impl FilterState {
     fn new(size: usize) -> Self {
+        // Round up to next power of 2 for fast bit-masking
+        let power_of_2_size = size.next_power_of_two();
         Self {
-            history: vec![0.0; size],
+            history: vec![0.0; power_of_2_size],
             write_pos: 0,
+            mask: power_of_2_size - 1,
         }
     }
 
@@ -291,14 +296,48 @@ impl FilterState {
         self.write_pos = 0;
     }
 
+    #[inline(always)]
     fn push(&mut self, sample: f32) {
         self.history[self.write_pos] = sample;
-        self.write_pos = (self.write_pos + 1) % self.history.len();
+        self.write_pos = (self.write_pos + 1) & self.mask;
     }
 
+    #[inline(always)]
     fn get(&self, offset: usize) -> f32 {
-        let idx = (self.write_pos + self.history.len() - offset - 1) % self.history.len();
+        // Fast bit-mask instead of modulo
+        let idx = (self.write_pos.wrapping_add(self.history.len()).wrapping_sub(offset).wrapping_sub(1)) & self.mask;
         self.history[idx]
+    }
+
+    /// Bulk read for SIMD operations - reads N consecutive samples into an array
+    /// Optimized to minimize bounds checks and use direct memory access
+    #[inline(always)]
+    fn get_bulk<const N: usize>(&self, start_offset: usize) -> [f32; N] {
+        let mut result = [0.0f32; N];
+
+        // Calculate the starting read position
+        let start_idx = (self.write_pos.wrapping_add(self.history.len()).wrapping_sub(start_offset).wrapping_sub(1)) & self.mask;
+
+        // Check if we can do a contiguous read (no wrap around)
+        if start_idx >= N - 1 {
+            // Simple case: no circular buffer wrap, direct memory copy
+            let src_start = start_idx - (N - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    self.history.as_ptr().add(src_start),
+                    result.as_mut_ptr(),
+                    N
+                );
+            }
+        } else {
+            // Wrap-around case: copy in two parts
+            for i in 0..N {
+                let idx = (start_idx.wrapping_sub(i)) & self.mask;
+                result[i] = self.history[idx];
+            }
+        }
+
+        result
     }
 }
 
@@ -575,9 +614,8 @@ impl Plugin for WavetableFilter {
                     for chunk_idx in 0..simd_chunks {
                         let k = chunk_idx * simd_lanes;
 
-                        // Load 16 history samples
-                        let history: [f32; 16] =
-                            std::array::from_fn(|i| self.filter_state[state_idx].get(k + i));
+                        // Load 16 history samples using bulk read
+                        let history = self.filter_state[state_idx].get_bulk::<16>(k);
                         let history_vec = f32x16::from_array(history);
 
                         // Load 16 kernel coefficients
