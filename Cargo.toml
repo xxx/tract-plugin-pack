@@ -10,7 +10,7 @@ members = ["xtask"]
 crate-type = ["cdylib", "lib"]
 
 [[bin]]
-name = "wavetable-filter-cli"
+name = "wavetable-filter"
 path = "src/main.rs"
 
 [dependencies]

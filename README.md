@@ -83,13 +83,13 @@ Build the standalone GUI application:
 
 ```bash
 # Debug build
-cargo build --bin wavetable-filter-cli
+cargo build --bin wavetable-filter
 
 # Release build (recommended)
-cargo build --bin wavetable-filter-cli --release
+cargo build --bin wavetable-filter --release
 ```
 
-The binary will be at: `./target/release/wavetable-filter-cli`
+The binary will be at: `./target/release/wavetable-filter`
 
 ## Running
 
@@ -106,25 +106,25 @@ Load `Wavetable Filter.vst3` or `Wavetable Filter.clap` in your DAW:
 
 ```bash
 # Run directly
-./target/release/wavetable-filter-cli
+./target/release/wavetable-filter
 ```
 
 #### Standalone Command-Line Options
 
 ```bash
 # Use specific backend
-./target/release/wavetable-filter-cli --backend jack
-./target/release/wavetable-filter-cli --backend alsa
+./target/release/wavetable-filter --backend jack
+./target/release/wavetable-filter --backend alsa
 
 # Auto-connect JACK inputs (requires comma-separated port names)
-./target/release/wavetable-filter-cli --backend jack \
+./target/release/wavetable-filter --backend jack \
   --connect-jack-inputs "system:capture_1,system:capture_2"
 
 # Set sample rate (ignored for JACK)
-./target/release/wavetable-filter-cli --sample-rate 48000
+./target/release/wavetable-filter --sample-rate 48000
 
 # See all options
-./target/release/wavetable-filter-cli --help
+./target/release/wavetable-filter --help
 ```
 
 #### Connecting Audio with PipeWire/JACK
@@ -205,7 +205,6 @@ wavetable-filter/
 │       └── filter_response_view.rs # Filter response graph
 ├── xtask/                          # Build tooling
 ├── examples/                       # Example wavetable files
-├── run-standalone.sh              # Auto-connect script for PipeWire
 └── rust-toolchain.toml            # Specifies nightly Rust
 ```
 
@@ -241,7 +240,7 @@ cargo doc --open
 - Make sure you're using nightly Rust (handled automatically by `rust-toolchain.toml`)
 
 **Standalone app doesn't connect to audio:**
-- Use `./run-standalone.sh` or manually connect with a patchbay tool
+- Manually connect with a patchbay tool
 - For JACK: Use `qjackctl`, `Carla`, or `jack_connect`
 - For PipeWire: Use `qpwgraph`, `helvum`, or `pw-link`
 
