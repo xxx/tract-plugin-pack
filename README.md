@@ -20,7 +20,7 @@ A wavetable-based audio filter plugin that uses wavetable frames as filter kerne
 
 - Rust (nightly toolchain - automatically configured via `rust-toolchain.toml`)
 - System dependencies:
-  - Linux: `libxcb`, `libxcb-util`, `libasound2-dev`, `libjack-dev` (or PipeWire JACK support)
+  - Linux: `libxcb`, `libxcb-util`, `libasound2-dev`
   - macOS: Xcode Command Line Tools
   - Windows: Visual Studio 2019+ or MinGW
 
@@ -37,45 +37,39 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 **Arch Linux / Manjaro:**
 ```bash
-sudo pacman -S base-devel libxcb xcb-util alsa-lib jack2
+sudo pacman -S base-devel libxcb xcb-util alsa-lib
 ```
 
 **Ubuntu / Debian:**
 ```bash
-sudo apt install build-essential libxcb1-dev libxcb-util-dev libasound2-dev libjack-jackd2-dev
+sudo apt install build-essential libxcb1-dev libxcb-util-dev libasound2-dev
 ```
 
 **Fedora:**
 ```bash
-sudo dnf install gcc-c++ libxcb-devel xcb-util-devel alsa-lib-devel jack-audio-connection-kit-devel
+sudo dnf install gcc-c++ libxcb-devel xcb-util-devel alsa-lib-devel
 ```
 
 ## Building
 
+**Note:** Plugins must be built separately on each target platform (Linux, macOS, Windows). Cross-compilation is possible but not recommended for audio plugins due to platform-specific dependencies.
+
 ### Plugin Formats (VST3 + CLAP)
 
-The easiest way to build the plugins is using the bundler:
+Build and install the plugins using the bundler:
 
 ```bash
-# Build debug version
-cargo nih-plug bundle wavetable-filter
-
-# Build optimized release version
+# Build optimized release version (recommended)
 cargo nih-plug bundle wavetable-filter --release
+
+# Build debug version (for development)
+cargo nih-plug bundle wavetable-filter
 ```
 
-The plugins should be installed in:
+The plugins will be automatically installed to:
 - **Linux**: `~/.vst3/` and `~/.clap/`
 - **macOS**: `~/Library/Audio/Plug-Ins/VST3/` and `~/Library/Audio/Plug-Ins/CLAP/`
 - **Windows**: `C:\Program Files\Common Files\VST3\` and `C:\Program Files\Common Files\CLAP\`
-
-Or manually build with:
-
-```bash
-# This creates both VST3 and CLAP in target/bundled/
-cargo build --release
-cargo nih-plug bundle wavetable-filter --release
-```
 
 ### Standalone Application
 
