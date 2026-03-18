@@ -8,9 +8,9 @@ use crate::WavetableFilterParams;
 
 const FREQ_MIN: f32 = 20.0;
 const FREQ_MAX: f32 = 20000.0;
-const DB_CEIL: f32 = 12.0;
+const DB_CEIL: f32 = 0.0;
 const DB_FLOOR: f32 = -48.0;
-const DB_RANGE: f32 = DB_CEIL - DB_FLOOR; // 60 dB total
+const DB_RANGE: f32 = DB_CEIL - DB_FLOOR; // 48 dB total
 
 pub struct FilterResponseView {
     params: Arc<WavetableFilterParams>,
@@ -91,20 +91,9 @@ impl View for FilterResponseView {
             *m /= peak;
         }
 
-        // Apply resonance — Gaussian multiplicative boost at harmonic 24, same as synthesize_kernel
         let resonance = self.params.resonance.unmodulated_plain_value();
-        if resonance > 0.001 {
-            let sigma = 3.0_f32;
-            let gain = resonance * 3.0;
-            for (k, m) in mags.iter_mut().enumerate() {
-                let dist = k as f32 - 24.0;
-                let gaussian = (-dist * dist / (2.0 * sigma * sigma)).exp();
-                *m *= 1.0 + gain * gaussian;
-            }
-            // No renormalization — peak can exceed 1.0 (shown as positive dB)
-        }
-
         let cutoff_hz = self.params.frequency.unmodulated_plain_value();
+        let comb_exp = resonance * 8.0;
 
         // --- Grid ---
 
@@ -167,7 +156,14 @@ impl View for FilterResponseView {
             } else {
                 let lo = src.floor() as usize;
                 let frac = src - lo as f32;
-                mags[lo] * (1.0 - frac) + mags[lo + 1] * frac
+                let interp = mags[lo] * (1.0 - frac) + mags[lo + 1] * frac;
+                if comb_exp > 0.01 {
+                    let dist = frac.min(1.0 - frac);
+                    let comb = (std::f32::consts::PI * dist).cos().powf(comb_exp);
+                    interp * comb
+                } else {
+                    interp
+                }
             };
 
             let db = 20.0 * mag.max(1e-6).log10();
@@ -226,7 +222,7 @@ impl View for FilterResponseView {
 
         // dB labels on left axis
         text_paint.set_text_align(vg::Align::Right);
-        for (db, label) in [(12.0_f32, "+12"), (0.0, "0"), (-24.0, "-24"), (-48.0, "-48")] {
+        for (db, label) in [(0.0_f32, "0"), (-24.0, "-24"), (-48.0, "-48")] {
             let y_norm = (db - DB_FLOOR) / DB_RANGE;
             let y = y0 + height - y_norm * height;
             let _ = canvas.fill_text(x0 - 3.0, y, label, &text_paint);

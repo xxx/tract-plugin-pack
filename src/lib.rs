@@ -152,25 +152,11 @@ impl WavetableFilter {
             return result;
         }
 
-        // Get magnitude spectrum; normalize by the peak so maximum gain = 1.0
+        // Normalize magnitude spectrum so peak = 1.0
         let mut frame_mags: Vec<f32> = frame_spectrum.iter().map(|c| c.norm()).collect();
         let peak = frame_mags.iter().cloned().fold(0.0f32, f32::max).max(1e-10);
         for m in &mut frame_mags {
             *m /= peak;
-        }
-
-        // Resonance: multiplicative gain boost centered at harmonic 24 (the cutoff reference).
-        // This lets the resonant peak rise above 1.0 (above unity gain), so the display
-        // can show it going UP while troughs are unaffected. No renormalization afterward —
-        // the peak magnitude can exceed 1.0.
-        if resonance > 0.001 {
-            let sigma = 3.0_f32; // width of the resonant peak in harmonics
-            let gain = resonance * 3.0; // up to 3x boost (+9.5 dB) at harmonic 24
-            for (k, m) in frame_mags.iter_mut().enumerate() {
-                let dist = k as f32 - 24.0;
-                let gaussian = (-dist * dist / (2.0 * sigma * sigma)).exp();
-                *m *= 1.0 + gain * gaussian;
-            }
         }
 
         // 2. Build target magnitude spectrum for the output kernel (KERNEL_LEN samples).
@@ -178,9 +164,15 @@ impl WavetableFilter {
         //    harmonic in the frame spectrum is:
         //      src_harmonic = freq_hz * 24 / cutoff_hz
         //    This maps harmonic 24 of the frame to cutoff_hz in the output.
+        //
+        //    Resonance is applied here as a comb window: each output bin is multiplied by
+        //    cos(π * dist_to_nearest_harmonic)^(2*exp), which is 1.0 exactly at integer
+        //    harmonics and tapers to 0 halfway between them. This keeps harmonic peaks at
+        //    their original level while making inter-harmonic troughs progressively deeper.
         let num_bins = KERNEL_LEN / 2 + 1;
         let bin_to_src = 24.0 * sample_rate / (KERNEL_LEN as f32 * cutoff_hz);
         let max_src = (frame_mags.len() - 1) as f32;
+        let comb_exp = resonance * 8.0; // controls how sharply the comb narrows
 
         let mut target_spectrum = vec![Complex::new(0.0_f32, 0.0); num_bins];
         for j in 0..num_bins {
@@ -190,7 +182,15 @@ impl WavetableFilter {
             } else {
                 let lo = src.floor() as usize;
                 let frac = src - lo as f32;
-                frame_mags[lo] * (1.0 - frac) + frame_mags[lo + 1] * frac
+                let interp = frame_mags[lo] * (1.0 - frac) + frame_mags[lo + 1] * frac;
+                if comb_exp > 0.01 {
+                    // Distance from the nearest integer harmonic (0 at harmonic, 0.5 at midpoint)
+                    let dist = frac.min(1.0 - frac);
+                    let comb = (std::f32::consts::PI * dist).cos().powf(comb_exp);
+                    interp * comb
+                } else {
+                    interp
+                }
             };
             target_spectrum[j] = Complex::new(mag, 0.0);
         }
@@ -272,59 +272,48 @@ impl WavetableFilter {
     /// Create a default lowpass filter wavetable
     pub fn create_default_wavetable() -> Wavetable {
         const FRAME_SIZE: usize = 256;
-        const FRAME_COUNT: usize = 16;
-        let mut samples = Vec::with_capacity(FRAME_SIZE * FRAME_COUNT);
+        use std::f32::consts::PI;
 
-        for frame_idx in 0..FRAME_COUNT {
-            let mut frame_samples = Vec::with_capacity(FRAME_SIZE);
-            let mut sum = 0.0;
+        let mut samples = Vec::with_capacity(FRAME_SIZE * 4);
 
-            let filter_type = frame_idx as f32 / (FRAME_COUNT - 1) as f32;
+        // Frame 0: Sine
+        for i in 0..FRAME_SIZE {
+            let phase = i as f32 / FRAME_SIZE as f32;
+            samples.push((phase * 2.0 * PI).sin());
+        }
 
-            if filter_type < 0.33 {
-                // Frames 0-5: Aggressive lowpass (simple moving average)
-                let window_size = (FRAME_SIZE as f32 * (0.05 + filter_type * 0.15)) as usize;
-                for i in 0..FRAME_SIZE {
-                    let value = if i < window_size { 1.0 } else { 0.0 };
-                    frame_samples.push(value);
-                    sum += value;
-                }
-            } else if filter_type < 0.66 {
-                // Frames 6-10: Bandpass (two peaks)
-                let center = FRAME_SIZE / 2;
-                let width = (20.0 + (filter_type - 0.33) * 60.0) as usize;
-                for i in 0..FRAME_SIZE {
-                    let dist = i.abs_diff(center);
-                    let value = if dist < width {
-                        (1.0 - (dist as f32 / width as f32)).max(0.0)
-                    } else {
-                        0.0
-                    };
-                    frame_samples.push(value);
-                    sum += value;
-                }
+        // Frame 1: Triangle
+        for i in 0..FRAME_SIZE {
+            let phase = i as f32 / FRAME_SIZE as f32;
+            samples.push(if phase < 0.25 {
+                phase * 4.0
+            } else if phase < 0.75 {
+                2.0 - phase * 4.0
             } else {
-                // Frames 11-15: Highpass (invert lowpass)
-                let window_size = (FRAME_SIZE as f32 * 0.05) as usize;
-                for i in 0..FRAME_SIZE {
-                    let value = if i == 0 {
-                        1.0
-                    } else if i < window_size {
-                        -0.8 / window_size as f32
-                    } else {
-                        0.0
-                    };
-                    frame_samples.push(value);
-                    sum += value.abs();
-                }
-            }
+                phase * 4.0 - 4.0
+            });
+        }
 
-            let normalization = if sum.abs() > 0.0001 { 1.0 / sum } else { 1.0 };
-            for sample in &mut frame_samples {
-                *sample *= normalization;
+        // Frame 2: Square (band-limited via additive synthesis to avoid aliasing)
+        for i in 0..FRAME_SIZE {
+            let phase = i as f32 / FRAME_SIZE as f32;
+            let mut s = 0.0f32;
+            let mut k = 1;
+            while k < FRAME_SIZE / 2 {
+                s += (phase * 2.0 * PI * k as f32).sin() / k as f32;
+                k += 2; // odd harmonics only
             }
+            samples.push(s * (4.0 / PI)); // normalize to ±1
+        }
 
-            samples.extend(frame_samples);
+        // Frame 3: Sawtooth (band-limited via additive synthesis)
+        for i in 0..FRAME_SIZE {
+            let phase = i as f32 / FRAME_SIZE as f32;
+            let mut s = 0.0f32;
+            for k in 1..FRAME_SIZE / 2 {
+                s += (phase * 2.0 * PI * k as f32).sin() / k as f32;
+            }
+            samples.push(s * (2.0 / PI)); // normalize to ±1
         }
 
         Wavetable::new(samples, FRAME_SIZE).expect("Failed to create default wavetable")
