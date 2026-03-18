@@ -40,6 +40,7 @@ pub struct WavetableFilter {
     synthesized_kernel: Vec<f32>,
     last_frame_pos: f32,
     last_cutoff: f32,
+    last_resonance: f32,
     // Forward real FFT for analyzing the wavetable frame (size = frame_size, changes with wavetable)
     frame_fft: Arc<dyn RealToComplex<f32>>,
     // Inverse real FFT for kernel synthesis output (size = KERNEL_LEN, constant)
@@ -63,6 +64,9 @@ struct WavetableFilterParams {
 
     #[id = "frame_position"]
     pub frame_position: FloatParam,
+
+    #[id = "resonance"]
+    pub resonance: FloatParam,
 
     #[id = "mix"]
     pub mix: FloatParam,
@@ -116,6 +120,7 @@ impl Default for WavetableFilter {
             synthesized_kernel: vec![0.0; KERNEL_LEN],
             last_frame_pos: -1.0,
             last_cutoff: -1.0,
+            last_resonance: -1.0,
             frame_fft,
             kernel_ifft,
             cplx_fft,
@@ -132,6 +137,7 @@ impl WavetableFilter {
     fn synthesize_kernel(
         frame: &[f32],
         cutoff_hz: f32,
+        resonance: f32,
         sample_rate: f32,
         frame_fft: &Arc<dyn RealToComplex<f32>>,
         kernel_ifft: &Arc<dyn ComplexToReal<f32>>,
@@ -150,6 +156,20 @@ impl WavetableFilter {
         let peak = frame_mags.iter().cloned().fold(0.0f32, f32::max).max(1e-10);
         for m in &mut frame_mags {
             *m /= peak;
+        }
+
+        // Resonance: multiplicative gain boost centered at harmonic 24 (the cutoff reference).
+        // This lets the resonant peak rise above 1.0 (above unity gain), so the display
+        // can show it going UP while troughs are unaffected. No renormalization afterward —
+        // the peak magnitude can exceed 1.0.
+        if resonance > 0.001 {
+            let sigma = 3.0_f32; // width of the resonant peak in harmonics
+            let gain = resonance * 3.0; // up to 3x boost (+9.5 dB) at harmonic 24
+            for (k, m) in frame_mags.iter_mut().enumerate() {
+                let dist = k as f32 - 24.0;
+                let gaussian = (-dist * dist / (2.0 * sigma * sigma)).exp();
+                *m *= 1.0 + gain * gaussian;
+            }
         }
 
         // 2. Build target magnitude spectrum for the output kernel (KERNEL_LEN samples).
@@ -469,6 +489,14 @@ impl WavetableFilterParams {
                 }))
             },
 
+            resonance: FloatParam::new(
+                "Resonance",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_percentage(0)),
+
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(50.0))
                 .with_unit("%")
@@ -598,13 +626,16 @@ impl Plugin for WavetableFilter {
         {
             let frame_pos = self.params.frame_position.smoothed.next();
             let cutoff = self.params.frequency.smoothed.next();
+            let resonance = self.params.resonance.smoothed.next();
 
             let needs_kernel_update =
                 (frame_pos - self.last_frame_pos).abs() > 0.0001 || self.last_frame_pos < 0.0;
             let needs_cutoff_update =
                 (cutoff - self.last_cutoff).abs() > 0.1 || self.last_cutoff < 0.0;
+            let needs_resonance_update =
+                (resonance - self.last_resonance).abs() > 0.001 || self.last_resonance < 0.0;
 
-            if needs_kernel_update || needs_cutoff_update {
+            if needs_kernel_update || needs_cutoff_update || needs_resonance_update {
                 if needs_kernel_update {
                     self.current_kernel = wavetable.get_frame_interpolated(frame_pos);
                     self.last_frame_pos = frame_pos;
@@ -615,6 +646,7 @@ impl Plugin for WavetableFilter {
                 let mut kernel = Self::synthesize_kernel(
                     &self.current_kernel,
                     cutoff,
+                    resonance,
                     self.sample_rate,
                     &self.frame_fft,
                     &self.kernel_ifft,
@@ -631,14 +663,16 @@ impl Plugin for WavetableFilter {
 
                 self.synthesized_kernel = kernel;
                 self.last_cutoff = cutoff;
+                self.last_resonance = resonance;
             }
         }
 
         for mut channel_samples in buffer.iter_samples() {
-            // Advance frame_pos/cutoff smoothers each sample (keeps convergence timing correct).
+            // Advance frame_pos/cutoff/resonance smoothers each sample (keeps convergence timing correct).
             // Their values are not needed here; synthesis already ran above for this buffer.
             let _ = self.params.frame_position.smoothed.next();
             let _ = self.params.frequency.smoothed.next();
+            let _ = self.params.resonance.smoothed.next();
             let mix = self.params.mix.smoothed.next();
             let drive = self.params.drive.smoothed.next();
 

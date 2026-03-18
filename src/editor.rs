@@ -187,6 +187,16 @@ pub(crate) fn create(
             .height(Pixels(40.0))
             .col_between(Pixels(10.0));
 
+            // Resonance control
+            HStack::new(cx, |cx| {
+                Label::new(cx, "Resonance")
+                    .width(Pixels(100.0))
+                    .height(Pixels(30.0));
+                ParamSlider::new(cx, Data::params, |params| &params.resonance);
+            })
+            .height(Pixels(40.0))
+            .col_between(Pixels(10.0));
+
             // Mix control
             HStack::new(cx, |cx| {
                 Label::new(cx, "Mix")

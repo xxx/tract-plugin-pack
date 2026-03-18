@@ -8,7 +8,9 @@ use crate::WavetableFilterParams;
 
 const FREQ_MIN: f32 = 20.0;
 const FREQ_MAX: f32 = 20000.0;
+const DB_CEIL: f32 = 12.0;
 const DB_FLOOR: f32 = -48.0;
+const DB_RANGE: f32 = DB_CEIL - DB_FLOOR; // 60 dB total
 
 pub struct FilterResponseView {
     params: Arc<WavetableFilterParams>,
@@ -89,6 +91,19 @@ impl View for FilterResponseView {
             *m /= peak;
         }
 
+        // Apply resonance — Gaussian multiplicative boost at harmonic 24, same as synthesize_kernel
+        let resonance = self.params.resonance.unmodulated_plain_value();
+        if resonance > 0.001 {
+            let sigma = 3.0_f32;
+            let gain = resonance * 3.0;
+            for (k, m) in mags.iter_mut().enumerate() {
+                let dist = k as f32 - 24.0;
+                let gaussian = (-dist * dist / (2.0 * sigma * sigma)).exp();
+                *m *= 1.0 + gain * gaussian;
+            }
+            // No renormalization — peak can exceed 1.0 (shown as positive dB)
+        }
+
         let cutoff_hz = self.params.frequency.unmodulated_plain_value();
 
         // --- Grid ---
@@ -98,12 +113,24 @@ impl View for FilterResponseView {
 
         // Horizontal dB lines
         for db in [-12.0_f32, -24.0, -36.0, -48.0] {
-            let y_norm = (db - DB_FLOOR) / (-DB_FLOOR); // 0 at bottom, 1 at 0dB
+            let y_norm = (db - DB_FLOOR) / DB_RANGE;
             let y = y0 + height - y_norm * height;
             let mut path = vg::Path::new();
             path.move_to(x0, y);
             path.line_to(x0 + width, y);
             canvas.stroke_path(&path, &grid_paint);
+        }
+
+        // 0 dB reference line — slightly brighter
+        {
+            let y_norm = (0.0_f32 - DB_FLOOR) / DB_RANGE;
+            let y = y0 + height - y_norm * height;
+            let mut path = vg::Path::new();
+            path.move_to(x0, y);
+            path.line_to(x0 + width, y);
+            let mut ref_paint = vg::Paint::color(vg::Color::rgba(120, 120, 140, 180));
+            ref_paint.set_line_width(0.5);
+            canvas.stroke_path(&path, &ref_paint);
         }
 
         // Vertical frequency lines at decade boundaries
@@ -144,7 +171,7 @@ impl View for FilterResponseView {
             };
 
             let db = 20.0 * mag.max(1e-6).log10();
-            let y_norm = ((db - DB_FLOOR) / (-DB_FLOOR)).clamp(0.0, 1.0);
+            let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
             let x = x0 + x_norm * width;
             let y = y0 + height - y_norm * height;
 
@@ -197,9 +224,13 @@ impl View for FilterResponseView {
             let _ = canvas.fill_text(x, bounds.y + bounds.h - 5.0, label, &text_paint);
         }
 
-        // dB label at 0dB line
+        // dB labels on left axis
         text_paint.set_text_align(vg::Align::Right);
-        let _ = canvas.fill_text(x0 - 3.0, y0, "0", &text_paint);
+        for (db, label) in [(12.0_f32, "+12"), (0.0, "0"), (-24.0, "-24"), (-48.0, "-48")] {
+            let y_norm = (db - DB_FLOOR) / DB_RANGE;
+            let y = y0 + height - y_norm * height;
+            let _ = canvas.fill_text(x0 - 3.0, y, label, &text_paint);
+        }
     }
 
     fn event(&mut self, _cx: &mut EventContext, _event: &mut Event) {}
