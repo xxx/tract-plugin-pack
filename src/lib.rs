@@ -3,6 +3,7 @@
 use nih_plug::prelude::*;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use rustfft::num_complex::Complex;
+use rustfft::{Fft, FftPlanner as ComplexFftPlanner};
 use std::simd::f32x16;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,11 +13,15 @@ pub mod wavetable;
 
 use wavetable::Wavetable;
 
+/// Fixed output kernel length for convolution. Must be a multiple of 16 (for SIMD).
+/// 2048 gives 1024 frequency bins — enough resolution for any typical wavetable frame.
+const KERNEL_LEN: usize = 2048;
+
 pub struct WavetableFilter {
     params: Arc<WavetableFilterParams>,
     wavetable: Option<Wavetable>,
     sample_rate: f32,
-    // Circular buffer for convolution (per channel) - for both modes
+    // Circular buffer for convolution (per channel)
     filter_state: [FilterState; 2],
     // Shared state for wavetable path
     wavetable_path: Arc<Mutex<String>>,
@@ -29,24 +34,25 @@ pub struct WavetableFilter {
     current_frame_count: Arc<std::sync::atomic::AtomicUsize>,
     // Silence detection counter
     silence_samples: usize,
-    // Cached filter kernel (for RAW mode or minimum phase mode)
+    // Raw interpolated frame (cached to avoid re-interpolating when only cutoff changes)
     current_kernel: Vec<f32>,
-    // Cached minimum phase kernel (for minimum phase mode)
-    minimum_phase_kernel: Vec<f32>,
-    // Resampled kernel (after applying cutoff frequency scaling)
-    resampled_kernel: Vec<f32>,
+    // Final kernel used for convolution (always KERNEL_LEN samples)
+    synthesized_kernel: Vec<f32>,
     last_frame_pos: f32,
     last_cutoff: f32,
-    // FFT state for minimum phase mode
-    fft_forward: Option<Arc<dyn RealToComplex<f32>>>,
-    fft_inverse: Option<Arc<dyn ComplexToReal<f32>>>,
+    // Forward real FFT for analyzing the wavetable frame (size = frame_size, changes with wavetable)
+    frame_fft: Arc<dyn RealToComplex<f32>>,
+    // Inverse real FFT for kernel synthesis output (size = KERNEL_LEN, constant)
+    kernel_ifft: Arc<dyn ComplexToReal<f32>>,
+    // Complex FFTs for the minimum-phase cepstral algorithm (size = KERNEL_LEN, constant)
+    cplx_fft: Arc<dyn Fft<f32>>,
+    cplx_ifft: Arc<dyn Fft<f32>>,
 }
 
 struct FilterState {
-    // Circular buffer for input history (size = next power of 2 >= max wavetable frame size)
+    // Circular buffer for input history (power-of-2 size for fast bit-masking)
     history: Vec<f32>,
     write_pos: usize,
-    // Bit mask for fast modulo (size - 1, only works when size is power of 2)
     mask: usize,
 }
 
@@ -87,15 +93,19 @@ impl Default for WavetableFilter {
 
         let current_frame_count = Arc::new(std::sync::atomic::AtomicUsize::new(frame_count));
 
-        let mut planner = RealFftPlanner::<f32>::new();
-        let fft_forward = planner.plan_fft_forward(frame_size);
-        let fft_inverse = planner.plan_fft_inverse(frame_size);
+        let mut real_planner = RealFftPlanner::<f32>::new();
+        let frame_fft = real_planner.plan_fft_forward(frame_size);
+        let kernel_ifft = real_planner.plan_fft_inverse(KERNEL_LEN);
+
+        let mut cplx_planner = ComplexFftPlanner::<f32>::new();
+        let cplx_fft = cplx_planner.plan_fft_forward(KERNEL_LEN);
+        let cplx_ifft = cplx_planner.plan_fft_inverse(KERNEL_LEN);
 
         Self {
             params: Arc::new(WavetableFilterParams::new(current_frame_count.clone())),
             wavetable: Some(default_wt.clone()),
             sample_rate: 48000.0,
-            filter_state: [FilterState::new(2048), FilterState::new(2048)],
+            filter_state: [FilterState::new(KERNEL_LEN), FilterState::new(KERNEL_LEN)],
             wavetable_path: Arc::new(Mutex::new(String::from("Default"))),
             should_reload: Arc::new(AtomicBool::new(false)),
             shared_wavetable: Arc::new(Mutex::new(default_wt)),
@@ -103,153 +113,144 @@ impl Default for WavetableFilter {
             current_frame_count,
             silence_samples: 0,
             current_kernel: vec![0.0; frame_size],
-            minimum_phase_kernel: vec![0.0; frame_size],
-            resampled_kernel: vec![0.0; frame_size],
+            synthesized_kernel: vec![0.0; KERNEL_LEN],
             last_frame_pos: -1.0,
             last_cutoff: -1.0,
-            fft_forward: Some(fft_forward),
-            fft_inverse: Some(fft_inverse),
+            frame_fft,
+            kernel_ifft,
+            cplx_fft,
+            cplx_ifft,
         }
     }
 }
 
 impl WavetableFilter {
-    /// Convert a wavetable frame to a minimum-phase filter kernel
-    /// This computes the minimum phase representation of the wavetable's magnitude spectrum
-    fn compute_minimum_phase_kernel(
-        fft_forward: &Arc<dyn RealToComplex<f32>>,
-        fft_inverse: &Arc<dyn ComplexToReal<f32>>,
+    /// Synthesize a FIR filter kernel from a wavetable frame's magnitude spectrum.
+    ///
+    /// Maps harmonic 24 of the wavetable to `cutoff_hz`, matching Filtertable's convention.
+    /// The output is always KERNEL_LEN samples (zero-phase FIR; peak at sample 0).
+    fn synthesize_kernel(
         frame: &[f32],
-    ) -> Vec<f32> {
-        let n = frame.len();
-
-        // 1. FFT the input to get magnitude spectrum
-        let mut fft_input = frame.to_vec();
-        let mut spectrum = vec![Complex::new(0.0, 0.0); n / 2 + 1];
-
-        if fft_forward.process(&mut fft_input, &mut spectrum).is_err() {
-            // If FFT fails, return original frame
-            return frame.to_vec();
-        }
-
-        // 2. Compute log magnitude (with small epsilon to avoid log(0))
-        let epsilon = 1e-10;
-        for bin in &mut spectrum {
-            let mag = bin.norm().max(epsilon);
-            *bin = Complex::new(mag.ln(), 0.0);
-        }
-
-        // 3. Build full spectrum (mirror for negative frequencies)
-        let mut full_spectrum = vec![Complex::new(0.0, 0.0); n];
-        full_spectrum[0] = spectrum[0];
-        for i in 1..n / 2 {
-            full_spectrum[i] = spectrum[i];
-            full_spectrum[n - i] = spectrum[i].conj();
-        }
-        if n % 2 == 0 {
-            full_spectrum[n / 2] = spectrum[n / 2];
-        }
-
-        // 4. IFFT to get real cepstrum
-        let mut cepstrum = vec![0.0; n];
-        if fft_inverse.process(&mut full_spectrum, &mut cepstrum).is_err() {
-            return frame.to_vec();
-        }
-
-        // 5. Apply minimum phase window (Hilbert transform in cepstral domain)
-        // Keep DC, double positive frequencies, zero negative frequencies
-        cepstrum[0] *= 1.0;
-        for i in 1..n / 2 {
-            cepstrum[i] *= 2.0;
-        }
-        if n % 2 == 0 {
-            cepstrum[n / 2] *= 1.0;
-        }
-        for i in (n / 2 + 1)..n {
-            cepstrum[i] = 0.0;
-        }
-
-        // 6. FFT back to get minimum phase log spectrum
-        let mut min_phase_input = cepstrum.clone();
-        let mut min_phase_spectrum = vec![Complex::new(0.0, 0.0); n / 2 + 1];
-        if fft_forward.process(&mut min_phase_input, &mut min_phase_spectrum).is_err() {
-            return frame.to_vec();
-        }
-
-        // 7. Convert from log domain and build full spectrum
-        for bin in &mut min_phase_spectrum {
-            *bin = Complex::new(bin.re.exp() * bin.im.cos(), bin.re.exp() * bin.im.sin());
-        }
-
-        let mut full_min_phase = vec![Complex::new(0.0, 0.0); n];
-        full_min_phase[0] = min_phase_spectrum[0];
-        for i in 1..n / 2 {
-            full_min_phase[i] = min_phase_spectrum[i];
-            full_min_phase[n - i] = min_phase_spectrum[i].conj();
-        }
-        if n % 2 == 0 {
-            full_min_phase[n / 2] = min_phase_spectrum[n / 2];
-        }
-
-        // 8. IFFT to get minimum phase impulse response
-        let mut result = vec![0.0; n];
-        if fft_inverse.process(&mut full_min_phase, &mut result).is_ok() {
-            // Normalize
-            let scale = 1.0 / (n as f32);
-            for sample in &mut result {
-                *sample *= scale;
-            }
-            result
-        } else {
-            frame.to_vec()
-        }
-    }
-
-    /// Resample a filter kernel to achieve a target cutoff frequency
-    /// cutoff_hz: desired cutoff frequency
-    /// sample_rate: audio sample rate
-    /// kernel: the filter kernel to resample
-    /// Returns resampled kernel (may be shorter or longer than input)
-    fn resample_kernel_for_cutoff(
         cutoff_hz: f32,
         sample_rate: f32,
-        kernel: &[f32],
+        frame_fft: &Arc<dyn RealToComplex<f32>>,
+        kernel_ifft: &Arc<dyn ComplexToReal<f32>>,
     ) -> Vec<f32> {
-        // Harmonic 24 in the original wavetable should map to cutoff_hz
-        // Original frequency of harmonic 24: (24 / kernel.len()) * sample_rate
-        let harmonic_24_original_hz = (24.0 / kernel.len() as f32) * sample_rate;
-
-        // Stretch factor: how much to scale the kernel
-        // If cutoff < harmonic_24_original, we stretch (slow down) -> longer kernel
-        // If cutoff > harmonic_24_original, we shrink (speed up) -> shorter kernel
-        let stretch_factor = harmonic_24_original_hz / cutoff_hz;
-
-        // New kernel length after resampling
-        let new_len = (kernel.len() as f32 * stretch_factor).round() as usize;
-        let new_len = new_len.clamp(16, 4096); // Reasonable limits
-
-        // Resample using linear interpolation
-        let mut resampled = Vec::with_capacity(new_len);
-        for i in 0..new_len {
-            let src_pos = (i as f32 * kernel.len() as f32) / new_len as f32;
-            let src_idx = src_pos.floor() as usize;
-            let frac = src_pos - src_idx as f32;
-
-            let val = if src_idx + 1 < kernel.len() {
-                // Linear interpolation
-                kernel[src_idx] * (1.0 - frac) + kernel[src_idx + 1] * frac
-            } else {
-                kernel[src_idx]
-            };
-            resampled.push(val);
+        // 1. FFT the wavetable frame to get its magnitude spectrum
+        let mut frame_buf = frame.to_vec();
+        let mut frame_spectrum = vec![Complex::new(0.0_f32, 0.0); frame.len() / 2 + 1];
+        if frame_fft.process(&mut frame_buf, &mut frame_spectrum).is_err() {
+            let mut result = vec![0.0f32; KERNEL_LEN];
+            result[0] = 1.0;
+            return result;
         }
 
-        resampled
+        // Get magnitude spectrum; normalize by the peak so maximum gain = 1.0
+        let mut frame_mags: Vec<f32> = frame_spectrum.iter().map(|c| c.norm()).collect();
+        let peak = frame_mags.iter().cloned().fold(0.0f32, f32::max).max(1e-10);
+        for m in &mut frame_mags {
+            *m /= peak;
+        }
+
+        // 2. Build target magnitude spectrum for the output kernel (KERNEL_LEN samples).
+        //    For output bin j (frequency = j * sample_rate / KERNEL_LEN), the source
+        //    harmonic in the frame spectrum is:
+        //      src_harmonic = freq_hz * 24 / cutoff_hz
+        //    This maps harmonic 24 of the frame to cutoff_hz in the output.
+        let num_bins = KERNEL_LEN / 2 + 1;
+        let bin_to_src = 24.0 * sample_rate / (KERNEL_LEN as f32 * cutoff_hz);
+        let max_src = (frame_mags.len() - 1) as f32;
+
+        let mut target_spectrum = vec![Complex::new(0.0_f32, 0.0); num_bins];
+        for j in 0..num_bins {
+            let src = j as f32 * bin_to_src;
+            let mag = if src >= max_src {
+                0.0
+            } else {
+                let lo = src.floor() as usize;
+                let frac = src - lo as f32;
+                frame_mags[lo] * (1.0 - frac) + frame_mags[lo + 1] * frac
+            };
+            target_spectrum[j] = Complex::new(mag, 0.0);
+        }
+
+        // 3. IFFT to get the time-domain kernel.
+        //    Zero-phase spectrum → kernel peak at sample 0, decaying symmetrically.
+        //    Used directly as causal FIR coefficients (h[0] = current sample weight).
+        let mut kernel = vec![0.0f32; KERNEL_LEN];
+        if kernel_ifft.process(&mut target_spectrum, &mut kernel).is_err() {
+            let mut result = vec![0.0f32; KERNEL_LEN];
+            result[0] = 1.0;
+            return result;
+        }
+
+        // 4. Normalize by KERNEL_LEN (IFFT scaling convention)
+        let scale = 1.0 / KERNEL_LEN as f32;
+        for s in &mut kernel {
+            *s *= scale;
+        }
+
+        kernel
+    }
+
+    /// Convert a FIR kernel to its minimum-phase equivalent via the cepstral method.
+    ///
+    /// Uses complex FFTs (rustfft) for the full cepstral algorithm. Input and output
+    /// are both KERNEL_LEN samples.
+    fn compute_minimum_phase_kernel(
+        kernel: &[f32],
+        cplx_fft: &Arc<dyn Fft<f32>>,
+        cplx_ifft: &Arc<dyn Fft<f32>>,
+    ) -> Vec<f32> {
+        let n = kernel.len();
+        let scale = 1.0 / n as f32;
+        let epsilon = 1e-10_f32;
+
+        // 1. Complex FFT of the kernel
+        let mut buf: Vec<Complex<f32>> =
+            kernel.iter().map(|&x| Complex::new(x, 0.0)).collect();
+        cplx_fft.process(&mut buf);
+
+        // 2. Replace each bin with log(magnitude) to get the log spectrum
+        for b in &mut buf {
+            let mag = b.norm().max(epsilon);
+            *b = Complex::new(mag.ln(), 0.0);
+        }
+
+        // 3. IFFT to get the real cepstrum
+        cplx_ifft.process(&mut buf);
+        for b in &mut buf {
+            *b *= scale;
+        }
+
+        // 4. Apply minimum-phase window in the cepstral domain:
+        //    Keep DC (n=0), double n=1..N/2-1, keep Nyquist (n=N/2), zero n>N/2
+        //    This is equivalent to discarding the non-causal part of the cepstrum.
+        for i in 1..n / 2 {
+            buf[i] *= 2.0;
+        }
+        for i in (n / 2 + 1)..n {
+            buf[i] = Complex::new(0.0, 0.0);
+        }
+
+        // 5. FFT back to get the minimum-phase log spectrum
+        cplx_fft.process(&mut buf);
+
+        // 6. Exponentiate: e^(Re + j*Im) = e^Re * e^(j*Im)
+        for b in &mut buf {
+            let mag = b.re.exp();
+            let phase = b.im;
+            *b = Complex::new(mag * phase.cos(), mag * phase.sin());
+        }
+
+        // 7. IFFT to get the minimum-phase impulse response
+        cplx_ifft.process(&mut buf);
+        buf.iter().map(|c| c.re * scale).collect()
     }
 
     /// Create a default lowpass filter wavetable
     pub fn create_default_wavetable() -> Wavetable {
-        const FRAME_SIZE: usize = 256; // Smaller for more aggressive filtering
+        const FRAME_SIZE: usize = 256;
         const FRAME_COUNT: usize = 16;
         let mut samples = Vec::with_capacity(FRAME_SIZE * FRAME_COUNT);
 
@@ -257,7 +258,6 @@ impl WavetableFilter {
             let mut frame_samples = Vec::with_capacity(FRAME_SIZE);
             let mut sum = 0.0;
 
-            // Create different filter types across frames
             let filter_type = frame_idx as f32 / (FRAME_COUNT - 1) as f32;
 
             if filter_type < 0.33 {
@@ -287,18 +287,17 @@ impl WavetableFilter {
                 let window_size = (FRAME_SIZE as f32 * 0.05) as usize;
                 for i in 0..FRAME_SIZE {
                     let value = if i == 0 {
-                        1.0 // DC component
+                        1.0
                     } else if i < window_size {
-                        -0.8 / window_size as f32 // Negative for highpass
+                        -0.8 / window_size as f32
                     } else {
                         0.0
                     };
                     frame_samples.push(value);
-                    sum += value.abs(); // Use abs for normalization
+                    sum += value.abs();
                 }
             }
 
-            // Normalize the filter kernel
             let normalization = if sum.abs() > 0.0001 { 1.0 / sum } else { 1.0 };
             for sample in &mut frame_samples {
                 *sample *= normalization;
@@ -319,28 +318,33 @@ impl WavetableFilter {
             wavetable.frame_size
         );
 
-        // Resize filter state if needed
         let new_size = wavetable.frame_size;
+
+        // Resize history buffer only if necessary (kernel is always KERNEL_LEN)
         for state in &mut self.filter_state {
-            if state.history.len() != new_size.max(2048) {
-                *state = FilterState::new(new_size.max(2048));
+            if state.history.len() != KERNEL_LEN {
+                *state = FilterState::new(KERNEL_LEN);
             }
         }
 
-        // Update frame count for parameter display
         self.current_frame_count
             .store(wavetable.frame_count, Ordering::Relaxed);
 
         self.wavetable = Some(wavetable.clone());
 
-        // Update shared wavetable for UI
         if let Ok(mut shared_wt) = self.shared_wavetable.lock() {
             *shared_wt = wavetable;
         }
 
-        // Increment version to trigger UI redraw
         let new_version = self.wavetable_version.fetch_add(1, Ordering::Relaxed) + 1;
         nih_log!("Updated wavetable version to {}", new_version);
+
+        // Update frame FFT plan for the new frame size
+        let mut planner = RealFftPlanner::<f32>::new();
+        self.frame_fft = planner.plan_fft_forward(new_size);
+
+        self.current_kernel.resize(new_size, 0.0);
+        self.last_frame_pos = -1.0;
 
         if let Ok(mut path_lock) = self.wavetable_path.lock() {
             *path_lock = path.to_string();
@@ -355,9 +359,7 @@ impl WavetableFilter {
         self.should_reload.store(true, Ordering::Relaxed);
     }
 
-    /// Try to load a wavetable from environment variable or default location
     pub fn try_load_user_wavetable(&mut self) {
-        // First, try environment variable WAVETABLE_FILTER_PATH
         if let Ok(path) = std::env::var("WAVETABLE_FILTER_PATH") {
             if std::path::Path::new(&path).exists() && self.load_wavetable_from_file(&path).is_ok()
             {
@@ -365,7 +367,6 @@ impl WavetableFilter {
             }
         }
 
-        // Fall back to ~/wavetable-filter/wavetable.wav or wavetable.wt
         if let Some(home) = std::env::var_os("HOME") {
             let base_path = std::path::Path::new(&home).join("wavetable-filter");
 
@@ -385,7 +386,6 @@ impl WavetableFilter {
 
 impl FilterState {
     fn new(size: usize) -> Self {
-        // Round up to next power of 2 for fast bit-masking
         let power_of_2_size = size.next_power_of_two();
         Self {
             history: vec![0.0; power_of_2_size],
@@ -407,27 +407,21 @@ impl FilterState {
 
     #[inline(always)]
     fn get(&self, offset: usize) -> f32 {
-        // Fast bit-mask instead of modulo
         let idx = (self.write_pos.wrapping_add(self.history.len()).wrapping_sub(offset).wrapping_sub(1)) & self.mask;
         self.history[idx]
     }
 
-    /// Bulk read for SIMD operations - reads N consecutive samples into an array
-    /// Optimized to minimize bounds checks and use direct slice copying
+    /// Bulk read for SIMD — reads N consecutive samples into an array
     #[inline(always)]
     fn get_bulk<const N: usize>(&self, start_offset: usize) -> [f32; N] {
         let mut result = [0.0f32; N];
 
-        // Calculate the starting read position
         let start_idx = (self.write_pos.wrapping_add(self.history.len()).wrapping_sub(start_offset).wrapping_sub(1)) & self.mask;
 
-        // Check if we can do a contiguous read (no wrap around)
         if start_idx >= N - 1 {
-            // Simple case: no circular buffer wrap, direct slice copy
             let src_start = start_idx - (N - 1);
             result.copy_from_slice(&self.history[src_start..src_start + N]);
         } else {
-            // Wrap-around case: copy in two parts
             for i in 0..N {
                 let idx = (start_idx.wrapping_sub(i)) & self.mask;
                 result[i] = self.history[idx];
@@ -546,10 +540,7 @@ impl Plugin for WavetableFilter {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
-
-        // Try to load a user wavetable on initialization
         self.try_load_user_wavetable();
-
         true
     }
 
@@ -568,285 +559,129 @@ impl Plugin for WavetableFilter {
     ) -> ProcessStatus {
         // Check if we should reload the wavetable
         if self.should_reload.load(Ordering::Relaxed) {
-            // Copy from shared_wavetable (loaded by GUI thread) to audio thread's wavetable
             if let Ok(shared_wt) = self.shared_wavetable.lock() {
-                // Update frame count for parameter display
+                let new_size = shared_wt.frame_size;
+
                 self.current_frame_count
                     .store(shared_wt.frame_count, Ordering::Relaxed);
 
                 self.wavetable = Some(shared_wt.clone());
 
-                // Resize filter state if needed
-                let new_size = shared_wt.frame_size;
                 for state in &mut self.filter_state {
-                    if state.history.len() != new_size.max(2048) {
-                        *state = FilterState::new(new_size.max(2048));
+                    if state.history.len() != KERNEL_LEN {
+                        *state = FilterState::new(KERNEL_LEN);
                     }
                 }
 
-                // Resize kernel buffer to match new frame size
+                // Update frame FFT for new frame size; kernel_ifft and cplx_* are KERNEL_LEN constant
+                let mut planner = RealFftPlanner::<f32>::new();
+                self.frame_fft = planner.plan_fft_forward(new_size);
+
                 self.current_kernel.resize(new_size, 0.0);
                 self.last_frame_pos = -1.0;
-
-                // Reinitialize FFT for new frame size
-                let mut planner = RealFftPlanner::<f32>::new();
-                self.fft_forward = Some(planner.plan_fft_forward(new_size));
-                self.fft_inverse = Some(planner.plan_fft_inverse(new_size));
-                self.minimum_phase_kernel.resize(new_size, 0.0);
             }
             self.should_reload.store(false, Ordering::Relaxed);
         }
 
-        // If no wavetable loaded, pass through the audio
         let Some(ref wavetable) = self.wavetable else {
             return ProcessStatus::Normal;
         };
 
-        // NEW IMPLEMENTATION: Using nih-plug's iterator API
-        // Check if input is silent (to clear filter state when playback stops)
         let silence_threshold = 1e-6f32;
         let mut is_silent = true;
 
         let filter_mode = self.params.mode.value();
 
-        // Iterate over samples using nih-plug's proper iterator
-        for mut channel_samples in buffer.iter_samples() {
-            // Get smoothed parameters once per sample (shared across all channels)
+        // Kernel synthesis is expensive (multiple FFTs). Run it at most once per buffer
+        // by reading the first smoothed value before the loop. The smoothers for
+        // frame_pos/cutoff are also advanced inside the loop so convergence is unaffected.
+        {
             let frame_pos = self.params.frame_position.smoothed.next();
-            let mix = self.params.mix.smoothed.next();
-            let drive = self.params.drive.smoothed.next();
             let cutoff = self.params.frequency.smoothed.next();
 
-            // Update kernel when frame position or cutoff changes
             let needs_kernel_update =
                 (frame_pos - self.last_frame_pos).abs() > 0.0001 || self.last_frame_pos < 0.0;
-            let needs_resample =
+            let needs_cutoff_update =
                 (cutoff - self.last_cutoff).abs() > 0.1 || self.last_cutoff < 0.0;
 
-            if needs_kernel_update {
-                // Get new kernel from wavetable
-                let new_kernel = wavetable.get_frame_interpolated(frame_pos);
-                self.current_kernel = new_kernel.clone();
-
-                // For minimum phase mode, compute minimum phase kernel
-                if filter_mode == FilterMode::Minimum {
-                    if let (Some(ref fft_fwd), Some(ref fft_inv)) =
-                        (&self.fft_forward, &self.fft_inverse)
-                    {
-                        self.minimum_phase_kernel =
-                            Self::compute_minimum_phase_kernel(fft_fwd, fft_inv, &new_kernel);
-                    }
+            if needs_kernel_update || needs_cutoff_update {
+                if needs_kernel_update {
+                    self.current_kernel = wavetable.get_frame_interpolated(frame_pos);
+                    self.last_frame_pos = frame_pos;
                 }
 
-                self.last_frame_pos = frame_pos;
-            }
+                // Synthesize FIR kernel in frequency domain: maps harmonic 24 of the
+                // wavetable frame to cutoff_hz, matching Filtertable's convention.
+                let mut kernel = Self::synthesize_kernel(
+                    &self.current_kernel,
+                    cutoff,
+                    self.sample_rate,
+                    &self.frame_fft,
+                    &self.kernel_ifft,
+                );
 
-            // Resample kernel when cutoff changes (or when kernel was just updated)
-            if needs_kernel_update || needs_resample {
-                let source_kernel = if filter_mode == FilterMode::Minimum {
-                    &self.minimum_phase_kernel
-                } else {
-                    &self.current_kernel
-                };
+                // For minimum phase: convert via cepstral method (removes pre-ringing)
+                if filter_mode == FilterMode::Minimum {
+                    kernel = Self::compute_minimum_phase_kernel(
+                        &kernel,
+                        &self.cplx_fft,
+                        &self.cplx_ifft,
+                    );
+                }
 
-                self.resampled_kernel =
-                    Self::resample_kernel_for_cutoff(cutoff, self.sample_rate, source_kernel);
+                self.synthesized_kernel = kernel;
                 self.last_cutoff = cutoff;
             }
+        }
 
-            let kernel_size = self.resampled_kernel.len();
+        for mut channel_samples in buffer.iter_samples() {
+            // Advance frame_pos/cutoff smoothers each sample (keeps convergence timing correct).
+            // Their values are not needed here; synthesis already ran above for this buffer.
+            let _ = self.params.frame_position.smoothed.next();
+            let _ = self.params.frequency.smoothed.next();
+            let mix = self.params.mix.smoothed.next();
+            let drive = self.params.drive.smoothed.next();
 
             // Process each channel in this sample
             for (channel_idx, sample) in channel_samples.iter_mut().enumerate() {
                 let state_idx = channel_idx.min(1);
                 let input = *sample;
 
-                // Check if this sample is above silence threshold
                 if input.abs() > silence_threshold {
                     is_silent = false;
                 }
 
-                // Apply drive
                 let driven_input = (input * drive).tanh();
-
-                let filtered = if filter_mode == FilterMode::Minimum {
-                    // MINIMUM PHASE MODE: Use resampled minimum-phase kernel with SIMD
-                    self.filter_state[state_idx].push(driven_input);
-
-                    let mut result = 0.0;
-                    let simd_lanes = 16;
-                    let simd_chunks = kernel_size / simd_lanes;
-
-                    // Process 16 samples at a time with SIMD
-                    let mut acc = f32x16::splat(0.0);
-                    for chunk_idx in 0..simd_chunks {
-                        let k = chunk_idx * simd_lanes;
-
-                        // Load 16 history samples using bulk read
-                        let history = self.filter_state[state_idx].get_bulk::<16>(k);
-                        let history_vec = f32x16::from_array(history);
-
-                        // Load 16 resampled kernel coefficients
-                        let kernel_slice = &self.resampled_kernel[k..k + 16];
-                        let kernel_vec = f32x16::from_slice(kernel_slice);
-
-                        // Multiply and accumulate
-                        acc += history_vec * kernel_vec;
-                    }
-
-                    // Sum the SIMD accumulator
-                    let acc_array = acc.to_array();
-                    for val in acc_array {
-                        result += val;
-                    }
-
-                    // Handle remaining samples (non-SIMD remainder)
-                    for k in (simd_chunks * simd_lanes)..kernel_size {
-                        result += self.filter_state[state_idx].get(k) * self.resampled_kernel[k];
-                    }
-
-                    result
-                } else {
-                    // RAW MODE: Direct time-domain convolution with SIMD using resampled kernel
-                    self.filter_state[state_idx].push(driven_input);
-
-                    let mut result = 0.0;
-                    let simd_lanes = 16;
-                    let simd_chunks = kernel_size / simd_lanes;
-
-                    // Process 16 samples at a time with SIMD
-                    let mut acc = f32x16::splat(0.0);
-                    for chunk_idx in 0..simd_chunks {
-                        let k = chunk_idx * simd_lanes;
-
-                        // Load 16 history samples using bulk read
-                        let history = self.filter_state[state_idx].get_bulk::<16>(k);
-                        let history_vec = f32x16::from_array(history);
-
-                        // Load 16 resampled kernel coefficients
-                        let kernel_slice = &self.resampled_kernel[k..k + 16];
-                        let kernel_vec = f32x16::from_slice(kernel_slice);
-
-                        // Multiply and accumulate
-                        acc += history_vec * kernel_vec;
-                    }
-
-                    // Sum the SIMD accumulator
-                    let acc_array = acc.to_array();
-                    for val in acc_array {
-                        result += val;
-                    }
-
-                    // Handle remaining samples
-                    for k in (simd_chunks * simd_lanes)..kernel_size {
-                        result += self.filter_state[state_idx].get(k) * self.resampled_kernel[k];
-                    }
-                    result
-                };
-
-                // Mix dry and wet signals
-                let output = input * (1.0 - mix) + filtered * mix;
-
-                *sample = output;
-            }
-        }
-
-        /* OLD IMPLEMENTATION (commented out for comparison):
-        let num_samples = buffer.samples();
-        let num_channels = buffer.channels();
-
-        // Get raw pointers for each channel
-        let channel_ptrs: Vec<(*const f32, *mut f32)> = buffer
-            .as_slice()
-            .iter()
-            .map(|slice| (slice.as_ptr(), slice.as_ptr() as *mut f32))
-            .collect();
-
-        // Process each sample across all channels
-        for sample_idx in 0..num_samples {
-            // Get smoothed parameters once per sample (not once per channel!)
-            let frame_pos = self.params.frame_position.smoothed.next();
-            let mix = self.params.mix.smoothed.next();
-            let drive = self.params.drive.smoothed.next();
-
-            // Update kernel only when frame position changes enough to warrant a new interpolation
-            let needs_update = (frame_pos - self.last_frame_pos).abs() > 0.0001 || self.last_frame_pos < 0.0;
-
-            if needs_update {
-                self.current_kernel = wavetable.get_frame_interpolated(frame_pos);
-                self.last_frame_pos = frame_pos;
-            }
-
-            let kernel_size = self.current_kernel.len();
-
-            // Process each channel for this sample
-            for channel_idx in 0..num_channels {
-                let state_idx = channel_idx.min(1);
-
-                // Safety: we know sample_idx and channel_idx are in bounds
-                let (input_ptr, output_ptr) = channel_ptrs[channel_idx];
-                let input = unsafe { *input_ptr.add(sample_idx) };
-
-                // Check if this sample is above silence threshold
-                if input.abs() > silence_threshold {
-                    is_silent = false;
-                }
-
-                // Apply drive
-                let driven_input = (input * drive).tanh();
-
-                // Push input into history buffer
                 self.filter_state[state_idx].push(driven_input);
 
-                // Perform convolution with SIMD: output = sum(input[n-k] * kernel[k])
-                let mut filtered = 0.0;
+                // SIMD convolution: 16 samples at a time
+                let kernel_size = KERNEL_LEN;
                 let simd_lanes = 16;
                 let simd_chunks = kernel_size / simd_lanes;
 
-                // Process 16 samples at a time with SIMD (512-bit AVX-512 or 256-bit AVX2)
                 let mut acc = f32x16::splat(0.0);
                 for chunk_idx in 0..simd_chunks {
                     let k = chunk_idx * simd_lanes;
-
-                    // Load 16 history samples
-                    let mut history = [0.0f32; 16];
-                    for i in 0..16 {
-                        history[i] = self.filter_state[state_idx].get(k + i);
-                    }
+                    let history = self.filter_state[state_idx].get_bulk::<16>(k);
                     let history_vec = f32x16::from_array(history);
-
-                    // Load 16 kernel coefficients
-                    let kernel_slice = &self.current_kernel[k..k + 16];
-                    let kernel_vec = f32x16::from_slice(kernel_slice);
-
-                    // Multiply and accumulate
+                    let kernel_vec = f32x16::from_slice(&self.synthesized_kernel[k..k + 16]);
                     acc += history_vec * kernel_vec;
                 }
 
-                // Sum the SIMD accumulator
-                let acc_array = acc.to_array();
-                for val in acc_array {
-                    filtered += val;
-                }
+                let mut filtered: f32 = acc.to_array().iter().sum();
 
-                // Handle remaining samples
+                // Handle remainder (kernel_size % 16, currently 0 for KERNEL_LEN=2048)
                 for k in (simd_chunks * simd_lanes)..kernel_size {
-                    filtered += self.filter_state[state_idx].get(k) * self.current_kernel[k];
+                    filtered += self.filter_state[state_idx].get(k) * self.synthesized_kernel[k];
                 }
 
-                // Mix dry and wet signals
-                let output = input * (1.0 - mix) + filtered * mix;
-
-                // Write output
-                unsafe { *output_ptr.add(sample_idx) = output };
+                *sample = input * (1.0 - mix) + filtered * mix;
             }
         }
-        */
 
-        // Track silence duration and clear filter state if silent for too long
+        // Clear filter state after ~100ms of silence
         if is_silent {
             self.silence_samples += buffer.samples();
-            // Clear after ~100ms of silence (assuming 44.1kHz)
             if self.silence_samples > (self.sample_rate * 0.1) as usize {
                 for state in &mut self.filter_state {
                     state.reset();
