@@ -103,9 +103,16 @@ pub(crate) fn create(
                     cx,
                     move |cx| {
                         nih_plug::nih_log!("Browse button clicked");
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Wavetable files", &["wav", "wt"])
-                            .pick_file()
+                        let mut dialog = rfd::FileDialog::new()
+                            .add_filter("Wavetable files", &["wav", "wt"]);
+                        if let Ok(current) = wt_path_inner.lock() {
+                            if let Some(dir) = std::path::Path::new(current.as_str()).parent() {
+                                if dir.exists() {
+                                    dialog = dialog.set_directory(dir);
+                                }
+                            }
+                        }
+                        if let Some(path) = dialog.pick_file()
                         {
                             nih_plug::nih_log!("File selected: {:?}", path);
                             if let Some(path_str) = path.to_str() {

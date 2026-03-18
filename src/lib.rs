@@ -23,8 +23,6 @@ pub struct WavetableFilter {
     sample_rate: f32,
     // Circular buffer for convolution (per channel)
     filter_state: [FilterState; 2],
-    // Shared state for wavetable path
-    wavetable_path: Arc<Mutex<String>>,
     should_reload: Arc<AtomicBool>,
     // Shared wavetable for UI display
     shared_wavetable: Arc<Mutex<Wavetable>>,
@@ -59,6 +57,10 @@ struct FilterState {
 
 #[derive(Params)]
 struct WavetableFilterParams {
+    /// Persisted wavetable file path — restored by the DAW on session reload.
+    #[persist = "wavetable_path"]
+    pub wavetable_path: Arc<Mutex<String>>,
+
     #[id = "frequency"]
     pub frequency: FloatParam,
 
@@ -110,7 +112,6 @@ impl Default for WavetableFilter {
             wavetable: Some(default_wt.clone()),
             sample_rate: 48000.0,
             filter_state: [FilterState::new(KERNEL_LEN), FilterState::new(KERNEL_LEN)],
-            wavetable_path: Arc::new(Mutex::new(String::from("Default"))),
             should_reload: Arc::new(AtomicBool::new(false)),
             shared_wavetable: Arc::new(Mutex::new(default_wt)),
             wavetable_version: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -366,20 +367,33 @@ impl WavetableFilter {
         self.current_kernel.resize(new_size, 0.0);
         self.last_frame_pos = -1.0;
 
-        if let Ok(mut path_lock) = self.wavetable_path.lock() {
+        if let Ok(mut path_lock) = self.params.wavetable_path.lock() {
             *path_lock = path.to_string();
         }
         Ok(())
     }
 
     pub fn set_wavetable_path(&self, path: String) {
-        if let Ok(mut path_lock) = self.wavetable_path.lock() {
+        if let Ok(mut path_lock) = self.params.wavetable_path.lock() {
             *path_lock = path;
         }
         self.should_reload.store(true, Ordering::Relaxed);
     }
 
     pub fn try_load_user_wavetable(&mut self) {
+        // 1. Persisted path from the DAW session (highest priority)
+        let persisted = self.params.wavetable_path.lock().ok()
+            .map(|p| p.clone())
+            .filter(|p| !p.is_empty());
+        if let Some(path) = persisted {
+            if std::path::Path::new(&path).exists()
+                && self.load_wavetable_from_file(&path).is_ok()
+            {
+                return;
+            }
+        }
+
+        // 2. Environment variable override
         if let Ok(path) = std::env::var("WAVETABLE_FILTER_PATH") {
             if std::path::Path::new(&path).exists() && self.load_wavetable_from_file(&path).is_ok()
             {
@@ -387,6 +401,7 @@ impl WavetableFilter {
             }
         }
 
+        // 3. Default file location
         if let Some(home) = std::env::var_os("HOME") {
             let base_path = std::path::Path::new(&home).join("wavetable-filter");
 
@@ -455,6 +470,8 @@ impl FilterState {
 impl WavetableFilterParams {
     fn new(frame_count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
         Self {
+            wavetable_path: Arc::new(Mutex::new(String::new())),
+
             frequency: FloatParam::new(
                 "Frequency",
                 1000.0,
@@ -554,7 +571,7 @@ impl Plugin for WavetableFilter {
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         editor::create(
             self.params.clone(),
-            self.wavetable_path.clone(),
+            self.params.wavetable_path.clone(),
             self.should_reload.clone(),
             self.shared_wavetable.clone(),
             self.wavetable_version.clone(),
