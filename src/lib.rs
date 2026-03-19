@@ -32,13 +32,13 @@ pub struct WavetableFilter {
     current_frame_count: Arc<std::sync::atomic::AtomicUsize>,
     // Silence detection counter
     silence_samples: usize,
-    // Raw interpolated frame (cached to avoid re-interpolating when only cutoff changes)
-    current_kernel: Vec<f32>,
     // Final kernel used for convolution (always KERNEL_LEN samples)
     synthesized_kernel: Vec<f32>,
     last_frame_pos: f32,
     last_cutoff: f32,
     last_resonance: f32,
+    // True until the first process() call; used to force an initial synthesis dispatch.
+    first_process: bool,
     // Final kernel produced by the background synthesis thread; audio thread crossfades to it.
     pending_kernel: Arc<Mutex<Option<Vec<f32>>>>,
     // Params waiting to be dispatched once the current in-flight task finishes.
@@ -111,6 +111,11 @@ pub struct SynthesisTask {
     filter_mode: FilterMode,
     pending_kernel: Arc<Mutex<Option<Vec<f32>>>>,
     synthesis_in_flight: Arc<AtomicBool>,
+    // Pre-built FFT plans shared from the plugin struct — no planner construction per task.
+    frame_fft: Arc<dyn RealToComplex<f32>>,
+    kernel_ifft: Arc<dyn ComplexToReal<f32>>,
+    cplx_fft: Arc<dyn Fft<f32>>,
+    cplx_ifft: Arc<dyn Fft<f32>>,
 }
 
 impl Default for WavetableFilter {
@@ -139,11 +144,11 @@ impl Default for WavetableFilter {
             wavetable_version: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             current_frame_count,
             silence_samples: 0,
-            current_kernel: vec![0.0; frame_size],
             synthesized_kernel: vec![0.0; KERNEL_LEN],
-            last_frame_pos: -1.0,
-            last_cutoff: -1.0,
-            last_resonance: -1.0,
+            last_frame_pos: 0.0,
+            last_cutoff: 0.0,
+            last_resonance: 0.0,
+            first_process: true,
             pending_kernel: Arc::new(Mutex::new(None)),
             pending_dispatch: None,
             synthesis_in_flight: Arc::new(AtomicBool::new(false)),
@@ -156,6 +161,21 @@ impl Default for WavetableFilter {
             cplx_ifft,
         }
     }
+}
+
+/// Horizontal sum of an f32x16 SIMD vector using pairwise tree reduction.
+#[inline(always)]
+fn hsum(v: f32x16) -> f32 {
+    let a = v.to_array();
+    let s0 = a[0] + a[1];
+    let s1 = a[2] + a[3];
+    let s2 = a[4] + a[5];
+    let s3 = a[6] + a[7];
+    let s4 = a[8] + a[9];
+    let s5 = a[10] + a[11];
+    let s6 = a[12] + a[13];
+    let s7 = a[14] + a[15];
+    (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
 }
 
 impl WavetableFilter {
@@ -379,9 +399,7 @@ impl WavetableFilter {
         // Update frame FFT plan for the new frame size
         let mut planner = RealFftPlanner::<f32>::new();
         self.frame_fft = planner.plan_fft_forward(new_size);
-
-        self.current_kernel.resize(new_size, 0.0);
-        self.last_frame_pos = -1.0;
+        self.first_process = true;
 
         if let Ok(mut path_lock) = self.params.wavetable_path.lock() {
             *path_lock = path.to_string();
@@ -586,15 +604,11 @@ impl Plugin for WavetableFilter {
                 filter_mode,
                 pending_kernel,
                 synthesis_in_flight,
+                frame_fft,
+                kernel_ifft,
+                cplx_fft,
+                cplx_ifft,
             } = task;
-
-            let mut real_planner = RealFftPlanner::<f32>::new();
-            let frame_fft = real_planner.plan_fft_forward(frame.len());
-            let kernel_ifft = real_planner.plan_fft_inverse(KERNEL_LEN);
-
-            let mut cplx_planner = ComplexFftPlanner::<f32>::new();
-            let cplx_fft = cplx_planner.plan_fft_forward(KERNEL_LEN);
-            let cplx_ifft = cplx_planner.plan_fft_inverse(KERNEL_LEN);
 
             if let Some((base_mags, bin_fracs)) =
                 Self::compute_base_spectrum(&frame, cutoff_hz, sample_rate, &frame_fft)
@@ -656,14 +670,11 @@ impl Plugin for WavetableFilter {
             let cutoff = self.params.frequency.unmodulated_plain_value();
             let resonance = self.params.resonance.unmodulated_plain_value();
             let mode = self.params.mode.value();
-            self.current_kernel = wt.get_frame_interpolated(frame_pos);
+            let frame = wt.get_frame_interpolated(frame_pos);
 
-            if let Some((base_mags, bin_fracs)) = Self::compute_base_spectrum(
-                &self.current_kernel,
-                cutoff,
-                self.sample_rate,
-                &self.frame_fft,
-            ) {
+            if let Some((base_mags, bin_fracs)) =
+                Self::compute_base_spectrum(&frame, cutoff, self.sample_rate, &self.frame_fft)
+            {
                 let mut spectrum_work =
                     vec![Complex::new(0.0_f32, 0.0); KERNEL_LEN / 2 + 1];
                 let mut cplx_work = vec![Complex::new(0.0_f32, 0.0); KERNEL_LEN];
@@ -683,6 +694,7 @@ impl Plugin for WavetableFilter {
             self.last_frame_pos = frame_pos;
             self.last_cutoff = cutoff;
             self.last_resonance = resonance;
+            self.first_process = false;
         }
 
         true
@@ -721,8 +733,7 @@ impl Plugin for WavetableFilter {
                 let mut planner = RealFftPlanner::<f32>::new();
                 self.frame_fft = planner.plan_fft_forward(new_size);
 
-                self.current_kernel.resize(new_size, 0.0);
-                self.last_frame_pos = -1.0;
+                self.first_process = true;
             }
             self.should_reload.store(false, Ordering::Relaxed);
         }
@@ -766,47 +777,50 @@ impl Plugin for WavetableFilter {
         // If a task just completed and there is a queued dispatch, fire it now.
         if do_pending_dispatch {
             if let Some((pd_fp, pd_cut, pd_res)) = self.pending_dispatch.take() {
-                let frame = wavetable.get_frame_interpolated(pd_fp);
-                self.current_kernel = frame.clone();
                 self.synthesis_in_flight.store(true, Ordering::Relaxed);
                 context.execute_background(SynthesisTask {
-                    frame,
+                    frame: wavetable.get_frame_interpolated(pd_fp),
                     cutoff_hz: pd_cut,
                     resonance: pd_res,
                     sample_rate: self.sample_rate,
                     filter_mode,
                     pending_kernel: self.pending_kernel.clone(),
                     synthesis_in_flight: self.synthesis_in_flight.clone(),
+                    frame_fft: self.frame_fft.clone(),
+                    kernel_ifft: self.kernel_ifft.clone(),
+                    cplx_fft: self.cplx_fft.clone(),
+                    cplx_ifft: self.cplx_ifft.clone(),
                 });
             }
         }
 
         // Dispatch a new task whenever frame/cutoff/resonance changes enough.
         // If a task is already in flight, store the params in pending_dispatch (latest-wins).
-        let needs_update = (frame_pos - self.last_frame_pos).abs() > 0.0001
-            || self.last_frame_pos < 0.0
+        let needs_update = self.first_process
+            || (frame_pos - self.last_frame_pos).abs() > 0.0001
             || (cutoff - self.last_cutoff).abs() > 0.1
-            || self.last_cutoff < 0.0
-            || (resonance - self.last_resonance).abs() > 0.005
-            || self.last_resonance < 0.0;
+            || (resonance - self.last_resonance).abs() > 0.005;
 
         if needs_update {
+            self.first_process = false;
             self.last_frame_pos = frame_pos;
             self.last_cutoff = cutoff;
             self.last_resonance = resonance;
 
             if !self.synthesis_in_flight.load(Ordering::Relaxed) {
-                let frame = wavetable.get_frame_interpolated(frame_pos);
-                self.current_kernel = frame.clone();
                 self.synthesis_in_flight.store(true, Ordering::Relaxed);
                 context.execute_background(SynthesisTask {
-                    frame,
+                    frame: wavetable.get_frame_interpolated(frame_pos),
                     cutoff_hz: cutoff,
                     resonance,
                     sample_rate: self.sample_rate,
                     filter_mode,
                     pending_kernel: self.pending_kernel.clone(),
                     synthesis_in_flight: self.synthesis_in_flight.clone(),
+                    frame_fft: self.frame_fft.clone(),
+                    kernel_ifft: self.kernel_ifft.clone(),
+                    cplx_fft: self.cplx_fft.clone(),
+                    cplx_ifft: self.cplx_ifft.clone(),
                 });
             } else {
                 // Another task is running; queue these params for dispatch when it finishes.
@@ -835,44 +849,45 @@ impl Plugin for WavetableFilter {
                 let driven_input = (input * drive).tanh();
                 self.filter_state[state_idx].push(driven_input);
 
-                // SIMD convolution: 16 samples at a time
+                // SIMD convolution: 16 samples at a time.
+                // During crossfade the history is read once and multiplied against both kernels
+                // in the same loop to avoid fetching history twice.
                 const SIMD_LANES: usize = 16;
                 const SIMD_CHUNKS: usize = KERNEL_LEN / SIMD_LANES;
 
-                let mut acc = f32x16::splat(0.0);
-                for chunk_idx in 0..SIMD_CHUNKS {
-                    let k = chunk_idx * SIMD_LANES;
-                    let history = self.filter_state[state_idx].get_bulk::<16>(k);
-                    let history_vec = f32x16::from_array(history);
-                    let kernel_vec = f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
-                    acc += history_vec * kernel_vec;
-                }
-                let mut filtered: f32 = acc.to_array().iter().sum();
-
-                // If crossfading, blend with a second convolution against the target kernel.
-                // This is per-sample so there are no buffer-boundary discontinuities.
-                if self.crossfade_active {
+                let filtered: f32 = if self.crossfade_active {
+                    let mut acc = f32x16::splat(0.0);
                     let mut acc2 = f32x16::splat(0.0);
                     for chunk_idx in 0..SIMD_CHUNKS {
                         let k = chunk_idx * SIMD_LANES;
-                        let history = self.filter_state[state_idx].get_bulk::<16>(k);
-                        let history_vec = f32x16::from_array(history);
-                        let kernel_vec = f32x16::from_slice(
+                        let history_vec =
+                            f32x16::from_array(self.filter_state[state_idx].get_bulk::<16>(k));
+                        acc += history_vec
+                            * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
+                        acc2 += history_vec * f32x16::from_slice(
                             &self.crossfade_target_kernel[k..k + SIMD_LANES],
                         );
-                        acc2 += history_vec * kernel_vec;
                     }
-                    let filtered_target: f32 = acc2.to_array().iter().sum();
                     let a = self.crossfade_alpha;
-                    filtered = filtered * (1.0 - a) + filtered_target * a;
-                }
+                    hsum(acc) * (1.0 - a) + hsum(acc2) * a
+                } else {
+                    let mut acc = f32x16::splat(0.0);
+                    for chunk_idx in 0..SIMD_CHUNKS {
+                        let k = chunk_idx * SIMD_LANES;
+                        let history_vec =
+                            f32x16::from_array(self.filter_state[state_idx].get_bulk::<16>(k));
+                        acc += history_vec
+                            * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
+                    }
+                    hsum(acc)
+                };
 
                 *sample = input * (1.0 - mix) + filtered * mix;
             }
 
-            // Advance crossfade alpha once per sample (~20 ms total fade duration).
+            // Advance crossfade alpha once per sample (~5 ms total fade duration).
             if self.crossfade_active {
-                self.crossfade_alpha += 1.0 / (self.sample_rate * 0.020);
+                self.crossfade_alpha += 1.0 / (self.sample_rate * 0.005);
                 if self.crossfade_alpha >= 1.0 {
                     std::mem::swap(&mut self.synthesized_kernel, &mut self.crossfade_target_kernel);
                     self.crossfade_active = false;
