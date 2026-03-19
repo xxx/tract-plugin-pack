@@ -39,6 +39,16 @@ pub struct WavetableFilter {
     last_frame_pos: f32,
     last_cutoff: f32,
     last_resonance: f32,
+    // Final kernel produced by the background synthesis thread; audio thread crossfades to it.
+    pending_kernel: Arc<Mutex<Option<Vec<f32>>>>,
+    // Params waiting to be dispatched once the current in-flight task finishes.
+    pending_dispatch: Option<(f32, f32, f32)>, // (frame_pos, cutoff_hz, resonance)
+    synthesis_in_flight: Arc<AtomicBool>,
+    // Per-sample output crossfade: blend convolution outputs during ~20 ms transition.
+    // Pre-allocated to avoid any heap allocation on the audio thread.
+    crossfade_target_kernel: Vec<f32>, // the "to" kernel (KERNEL_LEN)
+    crossfade_active: bool,
+    crossfade_alpha: f32,
     // Forward real FFT for analyzing the wavetable frame (size = frame_size, changes with wavetable)
     frame_fft: Arc<dyn RealToComplex<f32>>,
     // Inverse real FFT for kernel synthesis output (size = KERNEL_LEN, constant)
@@ -91,6 +101,18 @@ enum FilterMode {
     Raw,
 }
 
+/// Sent to the background thread to synthesize the complete FIR kernel.
+/// All FFT work (frame analysis, resonance comb, IFFT, min-phase) runs off the audio thread.
+pub struct SynthesisTask {
+    frame: Vec<f32>,
+    cutoff_hz: f32,
+    resonance: f32,
+    sample_rate: f32,
+    filter_mode: FilterMode,
+    pending_kernel: Arc<Mutex<Option<Vec<f32>>>>,
+    synthesis_in_flight: Arc<AtomicBool>,
+}
+
 impl Default for WavetableFilter {
     fn default() -> Self {
         let default_wt = Self::create_default_wavetable();
@@ -122,6 +144,12 @@ impl Default for WavetableFilter {
             last_frame_pos: -1.0,
             last_cutoff: -1.0,
             last_resonance: -1.0,
+            pending_kernel: Arc::new(Mutex::new(None)),
+            pending_dispatch: None,
+            synthesis_in_flight: Arc::new(AtomicBool::new(false)),
+            crossfade_target_kernel: vec![0.0f32; KERNEL_LEN],
+            crossfade_active: false,
+            crossfade_alpha: 0.0,
             frame_fft,
             kernel_ifft,
             cplx_fft,
@@ -131,142 +159,141 @@ impl Default for WavetableFilter {
 }
 
 impl WavetableFilter {
-    /// Synthesize a FIR filter kernel from a wavetable frame's magnitude spectrum.
+    /// Compute the base magnitude spectrum for a wavetable frame at a given cutoff.
     ///
-    /// Maps harmonic 24 of the wavetable to `cutoff_hz`, matching Filtertable's convention.
-    /// The output is always KERNEL_LEN samples (zero-phase FIR; peak at sample 0).
-    fn synthesize_kernel(
+    /// Returns (magnitudes, fractional harmonic positions) for each of the KERNEL_LEN/2+1
+    /// output bins. Resonance is NOT applied here — call `apply_resonance_and_ifft` inline.
+    fn compute_base_spectrum(
         frame: &[f32],
         cutoff_hz: f32,
-        resonance: f32,
         sample_rate: f32,
         frame_fft: &Arc<dyn RealToComplex<f32>>,
-        kernel_ifft: &Arc<dyn ComplexToReal<f32>>,
-    ) -> Vec<f32> {
-        // 1. FFT the wavetable frame to get its magnitude spectrum
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
         let mut frame_buf = frame.to_vec();
         let mut frame_spectrum = vec![Complex::new(0.0_f32, 0.0); frame.len() / 2 + 1];
         if frame_fft.process(&mut frame_buf, &mut frame_spectrum).is_err() {
-            let mut result = vec![0.0f32; KERNEL_LEN];
-            result[0] = 1.0;
-            return result;
+            return None;
         }
 
-        // Normalize magnitude spectrum so peak = 1.0
         let mut frame_mags: Vec<f32> = frame_spectrum.iter().map(|c| c.norm()).collect();
         let peak = frame_mags.iter().cloned().fold(0.0f32, f32::max).max(1e-10);
         for m in &mut frame_mags {
             *m /= peak;
         }
 
-        // 2. Build target magnitude spectrum for the output kernel (KERNEL_LEN samples).
-        //    For output bin j (frequency = j * sample_rate / KERNEL_LEN), the source
-        //    harmonic in the frame spectrum is:
-        //      src_harmonic = freq_hz * 24 / cutoff_hz
-        //    This maps harmonic 24 of the frame to cutoff_hz in the output.
-        //
-        //    Resonance is applied here as a comb window: each output bin is multiplied by
-        //    cos(π * dist_to_nearest_harmonic)^(2*exp), which is 1.0 exactly at integer
-        //    harmonics and tapers to 0 halfway between them. This keeps harmonic peaks at
-        //    their original level while making inter-harmonic troughs progressively deeper.
         let num_bins = KERNEL_LEN / 2 + 1;
         let bin_to_src = 24.0 * sample_rate / (KERNEL_LEN as f32 * cutoff_hz);
         let max_src = (frame_mags.len() - 1) as f32;
-        let comb_exp = resonance * 8.0; // controls how sharply the comb narrows
 
-        let mut target_spectrum = vec![Complex::new(0.0_f32, 0.0); num_bins];
+        let mut mags = vec![0.0f32; num_bins];
+        let mut fracs = vec![0.0f32; num_bins];
+
         for j in 0..num_bins {
             let src = j as f32 * bin_to_src;
-            let mag = if src >= max_src {
-                0.0
-            } else {
+            if src < max_src {
                 let lo = src.floor() as usize;
                 let frac = src - lo as f32;
-                let interp = frame_mags[lo] * (1.0 - frac) + frame_mags[lo + 1] * frac;
-                if comb_exp > 0.01 {
-                    // Distance from the nearest integer harmonic (0 at harmonic, 0.5 at midpoint)
-                    let dist = frac.min(1.0 - frac);
-                    let comb = (std::f32::consts::PI * dist).cos().powf(comb_exp);
-                    interp * comb
-                } else {
-                    interp
-                }
+                mags[j] = frame_mags[lo] * (1.0 - frac) + frame_mags[lo + 1] * frac;
+                fracs[j] = frac;
+            }
+            // src >= max_src: mags[j] stays 0.0
+        }
+
+        Some((mags, fracs))
+    }
+
+    /// Apply the resonance comb window to the base spectrum and IFFT into `kernel_out`.
+    ///
+    /// All buffers are caller-provided (pre-allocated) — zero heap allocation on the audio thread.
+    fn apply_resonance_and_ifft(
+        base_mags: &[f32],
+        bin_fracs: &[f32],
+        resonance: f32,
+        spectrum_work: &mut [Complex<f32>],
+        kernel_out: &mut [f32],
+        kernel_ifft: &Arc<dyn ComplexToReal<f32>>,
+        mode: FilterMode,
+        cplx_work: &mut [Complex<f32>],
+        cplx_fft: &Arc<dyn Fft<f32>>,
+        cplx_ifft: &Arc<dyn Fft<f32>>,
+    ) {
+        let comb_exp = resonance * 8.0;
+        for j in 0..base_mags.len() {
+            let mag = if comb_exp > 0.01 {
+                let dist = bin_fracs[j].min(1.0 - bin_fracs[j]);
+                let comb = (std::f32::consts::PI * dist).cos().powf(comb_exp);
+                base_mags[j] * comb
+            } else {
+                base_mags[j]
             };
-            target_spectrum[j] = Complex::new(mag, 0.0);
+            spectrum_work[j] = Complex::new(mag, 0.0);
         }
 
-        // 3. IFFT to get the time-domain kernel.
-        //    Zero-phase spectrum → kernel peak at sample 0, decaying symmetrically.
-        //    Used directly as causal FIR coefficients (h[0] = current sample weight).
-        let mut kernel = vec![0.0f32; KERNEL_LEN];
-        if kernel_ifft.process(&mut target_spectrum, &mut kernel).is_err() {
-            let mut result = vec![0.0f32; KERNEL_LEN];
-            result[0] = 1.0;
-            return result;
+        kernel_out.fill(0.0);
+        if kernel_ifft.process(spectrum_work, kernel_out).is_err() {
+            kernel_out.fill(0.0);
+            kernel_out[0] = 1.0;
+            return;
         }
 
-        // 4. Normalize by KERNEL_LEN (IFFT scaling convention)
         let scale = 1.0 / KERNEL_LEN as f32;
-        for s in &mut kernel {
+        for s in kernel_out.iter_mut() {
             *s *= scale;
         }
 
-        kernel
+        if mode == FilterMode::Minimum {
+            Self::compute_minimum_phase_kernel_inplace(kernel_out, cplx_work, cplx_fft, cplx_ifft);
+        }
     }
 
-    /// Convert a FIR kernel to its minimum-phase equivalent via the cepstral method.
+    /// Convert a kernel to minimum phase in-place using the cepstral method.
     ///
-    /// Uses complex FFTs (rustfft) for the full cepstral algorithm. Input and output
-    /// are both KERNEL_LEN samples.
-    fn compute_minimum_phase_kernel(
-        kernel: &[f32],
+    /// `cplx_work` is a pre-allocated scratch buffer of length KERNEL_LEN — no allocation.
+    fn compute_minimum_phase_kernel_inplace(
+        kernel: &mut [f32],
+        cplx_work: &mut [Complex<f32>],
         cplx_fft: &Arc<dyn Fft<f32>>,
         cplx_ifft: &Arc<dyn Fft<f32>>,
-    ) -> Vec<f32> {
+    ) {
         let n = kernel.len();
         let scale = 1.0 / n as f32;
         let epsilon = 1e-10_f32;
 
-        // 1. Complex FFT of the kernel
-        let mut buf: Vec<Complex<f32>> =
-            kernel.iter().map(|&x| Complex::new(x, 0.0)).collect();
-        cplx_fft.process(&mut buf);
+        for (c, &k) in cplx_work.iter_mut().zip(kernel.iter()) {
+            *c = Complex::new(k, 0.0);
+        }
+        cplx_fft.process(cplx_work);
 
-        // 2. Replace each bin with log(magnitude) to get the log spectrum
-        for b in &mut buf {
+        for b in cplx_work.iter_mut() {
             let mag = b.norm().max(epsilon);
             *b = Complex::new(mag.ln(), 0.0);
         }
 
-        // 3. IFFT to get the real cepstrum
-        cplx_ifft.process(&mut buf);
-        for b in &mut buf {
+        cplx_ifft.process(cplx_work);
+        for b in cplx_work.iter_mut() {
             *b *= scale;
         }
 
-        // 4. Apply minimum-phase window in the cepstral domain:
-        //    Keep DC (n=0), double n=1..N/2-1, keep Nyquist (n=N/2), zero n>N/2
-        //    This is equivalent to discarding the non-causal part of the cepstrum.
         for i in 1..n / 2 {
-            buf[i] *= 2.0;
+            cplx_work[i] *= 2.0;
         }
         for i in (n / 2 + 1)..n {
-            buf[i] = Complex::new(0.0, 0.0);
+            cplx_work[i] = Complex::new(0.0, 0.0);
         }
 
-        // 5. FFT back to get the minimum-phase log spectrum
-        cplx_fft.process(&mut buf);
+        cplx_fft.process(cplx_work);
 
-        // 6. Exponentiate: e^(Re + j*Im) = e^Re * e^(j*Im)
-        for b in &mut buf {
+        for b in cplx_work.iter_mut() {
             let mag = b.re.exp();
             let phase = b.im;
             *b = Complex::new(mag * phase.cos(), mag * phase.sin());
         }
 
-        // 7. IFFT to get the minimum-phase impulse response
-        cplx_ifft.process(&mut buf);
-        buf.iter().map(|c| c.re * scale).collect()
+        cplx_ifft.process(cplx_work);
+
+        for (k, c) in kernel.iter_mut().zip(cplx_work.iter()) {
+            *k = c.re * scale;
+        }
     }
 
     /// Create a default lowpass filter wavetable
@@ -547,10 +574,56 @@ impl Plugin for WavetableFilter {
     const HARD_REALTIME_ONLY: bool = false;
 
     type SysExMessage = ();
-    type BackgroundTask = ();
+    type BackgroundTask = SynthesisTask;
 
     fn task_executor(&mut self) -> TaskExecutor<Self> {
-        Box::new(|_| ())
+        Box::new(|task| {
+            let SynthesisTask {
+                frame,
+                cutoff_hz,
+                resonance,
+                sample_rate,
+                filter_mode,
+                pending_kernel,
+                synthesis_in_flight,
+            } = task;
+
+            let mut real_planner = RealFftPlanner::<f32>::new();
+            let frame_fft = real_planner.plan_fft_forward(frame.len());
+            let kernel_ifft = real_planner.plan_fft_inverse(KERNEL_LEN);
+
+            let mut cplx_planner = ComplexFftPlanner::<f32>::new();
+            let cplx_fft = cplx_planner.plan_fft_forward(KERNEL_LEN);
+            let cplx_ifft = cplx_planner.plan_fft_inverse(KERNEL_LEN);
+
+            if let Some((base_mags, bin_fracs)) =
+                Self::compute_base_spectrum(&frame, cutoff_hz, sample_rate, &frame_fft)
+            {
+                let mut spectrum_work =
+                    vec![Complex::new(0.0_f32, 0.0); KERNEL_LEN / 2 + 1];
+                let mut cplx_work = vec![Complex::new(0.0_f32, 0.0); KERNEL_LEN];
+                let mut kernel = vec![0.0f32; KERNEL_LEN];
+
+                Self::apply_resonance_and_ifft(
+                    &base_mags,
+                    &bin_fracs,
+                    resonance,
+                    &mut spectrum_work,
+                    &mut kernel,
+                    &kernel_ifft,
+                    filter_mode,
+                    &mut cplx_work,
+                    &cplx_fft,
+                    &cplx_ifft,
+                );
+
+                if let Ok(mut pending) = pending_kernel.lock() {
+                    *pending = Some(kernel);
+                }
+            }
+
+            synthesis_in_flight.store(false, Ordering::Relaxed);
+        })
     }
 
     fn params(&self) -> Arc<dyn Params> {
@@ -575,6 +648,43 @@ impl Plugin for WavetableFilter {
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
         self.try_load_user_wavetable();
+
+        // Synthesize the initial kernel so the first buffer has valid coefficients.
+        // (Not on the audio thread — allocations are fine here.)
+        if let Some(ref wt) = self.wavetable {
+            let frame_pos = self.params.frame_position.unmodulated_normalized_value();
+            let cutoff = self.params.frequency.unmodulated_plain_value();
+            let resonance = self.params.resonance.unmodulated_plain_value();
+            let mode = self.params.mode.value();
+            self.current_kernel = wt.get_frame_interpolated(frame_pos);
+
+            if let Some((base_mags, bin_fracs)) = Self::compute_base_spectrum(
+                &self.current_kernel,
+                cutoff,
+                self.sample_rate,
+                &self.frame_fft,
+            ) {
+                let mut spectrum_work =
+                    vec![Complex::new(0.0_f32, 0.0); KERNEL_LEN / 2 + 1];
+                let mut cplx_work = vec![Complex::new(0.0_f32, 0.0); KERNEL_LEN];
+                Self::apply_resonance_and_ifft(
+                    &base_mags,
+                    &bin_fracs,
+                    resonance,
+                    &mut spectrum_work,
+                    &mut self.synthesized_kernel,
+                    &self.kernel_ifft,
+                    mode,
+                    &mut cplx_work,
+                    &self.cplx_fft,
+                    &self.cplx_ifft,
+                );
+            }
+            self.last_frame_pos = frame_pos;
+            self.last_cutoff = cutoff;
+            self.last_resonance = resonance;
+        }
+
         true
     }
 
@@ -589,7 +699,7 @@ impl Plugin for WavetableFilter {
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         // Check if we should reload the wavetable
         if self.should_reload.load(Ordering::Relaxed) {
@@ -617,6 +727,28 @@ impl Plugin for WavetableFilter {
             self.should_reload.store(false, Ordering::Relaxed);
         }
 
+        // Pick up a completed kernel from the background thread.
+        let mut do_pending_dispatch = false;
+        if let Ok(mut pending) = self.pending_kernel.try_lock() {
+            if let Some(new_kernel) = pending.take() {
+                // Bake any in-progress crossfade before installing the new target.
+                if self.crossfade_active {
+                    let a = self.crossfade_alpha;
+                    for i in 0..KERNEL_LEN {
+                        self.synthesized_kernel[i] = self.synthesized_kernel[i] * (1.0 - a)
+                            + self.crossfade_target_kernel[i] * a;
+                    }
+                    self.crossfade_active = false;
+                    self.crossfade_alpha = 0.0;
+                }
+                self.crossfade_target_kernel.copy_from_slice(&new_kernel);
+                self.crossfade_active = true;
+                self.crossfade_alpha = 0.0;
+                // synthesis_in_flight was already cleared by the task itself.
+                do_pending_dispatch = self.pending_dispatch.is_some();
+            }
+        }
+
         let Some(ref wavetable) = self.wavetable else {
             return ProcessStatus::Normal;
         };
@@ -626,50 +758,59 @@ impl Plugin for WavetableFilter {
 
         let filter_mode = self.params.mode.value();
 
-        // Kernel synthesis is expensive (multiple FFTs). Run it at most once per buffer
-        // by reading the first smoothed value before the loop. The smoothers for
-        // frame_pos/cutoff are also advanced inside the loop so convergence is unaffected.
-        {
-            let frame_pos = self.params.frame_position.smoothed.next();
-            let cutoff = self.params.frequency.smoothed.next();
-            let resonance = self.params.resonance.smoothed.next();
+        // Advance smoothers once to read current values; the per-sample loop advances them again.
+        let frame_pos = self.params.frame_position.smoothed.next();
+        let cutoff = self.params.frequency.smoothed.next();
+        let resonance = self.params.resonance.smoothed.next();
 
-            let needs_kernel_update =
-                (frame_pos - self.last_frame_pos).abs() > 0.0001 || self.last_frame_pos < 0.0;
-            let needs_cutoff_update =
-                (cutoff - self.last_cutoff).abs() > 0.1 || self.last_cutoff < 0.0;
-            let needs_resonance_update =
-                (resonance - self.last_resonance).abs() > 0.001 || self.last_resonance < 0.0;
+        // If a task just completed and there is a queued dispatch, fire it now.
+        if do_pending_dispatch {
+            if let Some((pd_fp, pd_cut, pd_res)) = self.pending_dispatch.take() {
+                let frame = wavetable.get_frame_interpolated(pd_fp);
+                self.current_kernel = frame.clone();
+                self.synthesis_in_flight.store(true, Ordering::Relaxed);
+                context.execute_background(SynthesisTask {
+                    frame,
+                    cutoff_hz: pd_cut,
+                    resonance: pd_res,
+                    sample_rate: self.sample_rate,
+                    filter_mode,
+                    pending_kernel: self.pending_kernel.clone(),
+                    synthesis_in_flight: self.synthesis_in_flight.clone(),
+                });
+            }
+        }
 
-            if needs_kernel_update || needs_cutoff_update || needs_resonance_update {
-                if needs_kernel_update {
-                    self.current_kernel = wavetable.get_frame_interpolated(frame_pos);
-                    self.last_frame_pos = frame_pos;
-                }
+        // Dispatch a new task whenever frame/cutoff/resonance changes enough.
+        // If a task is already in flight, store the params in pending_dispatch (latest-wins).
+        let needs_update = (frame_pos - self.last_frame_pos).abs() > 0.0001
+            || self.last_frame_pos < 0.0
+            || (cutoff - self.last_cutoff).abs() > 0.1
+            || self.last_cutoff < 0.0
+            || (resonance - self.last_resonance).abs() > 0.005
+            || self.last_resonance < 0.0;
 
-                // Synthesize FIR kernel in frequency domain: maps harmonic 24 of the
-                // wavetable frame to cutoff_hz, matching Filtertable's convention.
-                let mut kernel = Self::synthesize_kernel(
-                    &self.current_kernel,
-                    cutoff,
+        if needs_update {
+            self.last_frame_pos = frame_pos;
+            self.last_cutoff = cutoff;
+            self.last_resonance = resonance;
+
+            if !self.synthesis_in_flight.load(Ordering::Relaxed) {
+                let frame = wavetable.get_frame_interpolated(frame_pos);
+                self.current_kernel = frame.clone();
+                self.synthesis_in_flight.store(true, Ordering::Relaxed);
+                context.execute_background(SynthesisTask {
+                    frame,
+                    cutoff_hz: cutoff,
                     resonance,
-                    self.sample_rate,
-                    &self.frame_fft,
-                    &self.kernel_ifft,
-                );
-
-                // For minimum phase: convert via cepstral method (removes pre-ringing)
-                if filter_mode == FilterMode::Minimum {
-                    kernel = Self::compute_minimum_phase_kernel(
-                        &kernel,
-                        &self.cplx_fft,
-                        &self.cplx_ifft,
-                    );
-                }
-
-                self.synthesized_kernel = kernel;
-                self.last_cutoff = cutoff;
-                self.last_resonance = resonance;
+                    sample_rate: self.sample_rate,
+                    filter_mode,
+                    pending_kernel: self.pending_kernel.clone(),
+                    synthesis_in_flight: self.synthesis_in_flight.clone(),
+                });
+            } else {
+                // Another task is running; queue these params for dispatch when it finishes.
+                self.pending_dispatch = Some((frame_pos, cutoff, resonance));
             }
         }
 
@@ -695,27 +836,48 @@ impl Plugin for WavetableFilter {
                 self.filter_state[state_idx].push(driven_input);
 
                 // SIMD convolution: 16 samples at a time
-                let kernel_size = KERNEL_LEN;
-                let simd_lanes = 16;
-                let simd_chunks = kernel_size / simd_lanes;
+                const SIMD_LANES: usize = 16;
+                const SIMD_CHUNKS: usize = KERNEL_LEN / SIMD_LANES;
 
                 let mut acc = f32x16::splat(0.0);
-                for chunk_idx in 0..simd_chunks {
-                    let k = chunk_idx * simd_lanes;
+                for chunk_idx in 0..SIMD_CHUNKS {
+                    let k = chunk_idx * SIMD_LANES;
                     let history = self.filter_state[state_idx].get_bulk::<16>(k);
                     let history_vec = f32x16::from_array(history);
-                    let kernel_vec = f32x16::from_slice(&self.synthesized_kernel[k..k + 16]);
+                    let kernel_vec = f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
                     acc += history_vec * kernel_vec;
                 }
-
                 let mut filtered: f32 = acc.to_array().iter().sum();
 
-                // Handle remainder (kernel_size % 16, currently 0 for KERNEL_LEN=2048)
-                for k in (simd_chunks * simd_lanes)..kernel_size {
-                    filtered += self.filter_state[state_idx].get(k) * self.synthesized_kernel[k];
+                // If crossfading, blend with a second convolution against the target kernel.
+                // This is per-sample so there are no buffer-boundary discontinuities.
+                if self.crossfade_active {
+                    let mut acc2 = f32x16::splat(0.0);
+                    for chunk_idx in 0..SIMD_CHUNKS {
+                        let k = chunk_idx * SIMD_LANES;
+                        let history = self.filter_state[state_idx].get_bulk::<16>(k);
+                        let history_vec = f32x16::from_array(history);
+                        let kernel_vec = f32x16::from_slice(
+                            &self.crossfade_target_kernel[k..k + SIMD_LANES],
+                        );
+                        acc2 += history_vec * kernel_vec;
+                    }
+                    let filtered_target: f32 = acc2.to_array().iter().sum();
+                    let a = self.crossfade_alpha;
+                    filtered = filtered * (1.0 - a) + filtered_target * a;
                 }
 
                 *sample = input * (1.0 - mix) + filtered * mix;
+            }
+
+            // Advance crossfade alpha once per sample (~20 ms total fade duration).
+            if self.crossfade_active {
+                self.crossfade_alpha += 1.0 / (self.sample_rate * 0.020);
+                if self.crossfade_alpha >= 1.0 {
+                    std::mem::swap(&mut self.synthesized_kernel, &mut self.crossfade_target_kernel);
+                    self.crossfade_active = false;
+                    self.crossfade_alpha = 0.0;
+                }
             }
         }
 
