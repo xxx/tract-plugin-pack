@@ -206,6 +206,31 @@ impl Wavetable {
         }
     }
 
+    /// Write the interpolated frame into a pre-allocated buffer (no heap allocation).
+    /// `out` is resized only if its length does not match `frame_size`.
+    pub fn interpolate_frame_into(&self, frame_position: f32, out: &mut Vec<f32>) {
+        if out.len() != self.frame_size {
+            out.resize(self.frame_size, 0.0);
+        }
+        if self.frames.is_empty() {
+            out.fill(0.0);
+            return;
+        }
+        let frame_position = frame_position.clamp(0.0, 1.0);
+        let frame_float = frame_position * (self.frame_count - 1) as f32;
+        let frame_index = frame_float.floor() as usize;
+        let frame_frac = frame_float.fract();
+        let frame1 = &self.frames[frame_index];
+        let frame2 = if frame_index + 1 < self.frame_count {
+            &self.frames[frame_index + 1]
+        } else {
+            frame1
+        };
+        for ((o, &s1), &s2) in out.iter_mut().zip(frame1).zip(frame2) {
+            *o = s1 + (s2 - s1) * frame_frac;
+        }
+    }
+
     /// Get an interpolated frame at a given position (0.0 to 1.0)
     /// Returns the frame data to be used as a filter kernel
     pub fn get_frame_interpolated(&self, frame_position: f32) -> Vec<f32> {
