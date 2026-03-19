@@ -44,6 +44,7 @@ pub struct WavetableFilter {
     crossfade_target_kernel: Vec<f32>, // the "to" kernel (KERNEL_LEN)
     crossfade_active: bool,
     crossfade_alpha: f32,
+    crossfade_step: f32,
     // Forward real FFT for analyzing the wavetable frame (size = frame_size, changes with wavetable)
     frame_fft: Arc<dyn RealToComplex<f32>>,
     // Inverse real FFT for kernel synthesis output (size = KERNEL_LEN, constant)
@@ -75,9 +76,11 @@ pub struct WavetableFilter {
 }
 
 struct FilterState {
-    // Circular buffer for input history (power-of-2 size for fast bit-masking)
+    // Double-buffered circular history: 2×len elements so that a contiguous
+    // len-sized window starting at write_pos is always valid for zero-copy SIMD reads.
     history: Vec<f32>,
     write_pos: usize,
+    len: usize,
     mask: usize,
 }
 
@@ -154,6 +157,7 @@ impl Default for WavetableFilter {
             crossfade_target_kernel: vec![0.0f32; KERNEL_LEN],
             crossfade_active: false,
             crossfade_alpha: 0.0,
+            crossfade_step: 1.0 / (48000.0 * 0.020),
             frame_fft,
             kernel_ifft,
             cplx_fft,
@@ -187,11 +191,22 @@ fn hsum(v: f32x16) -> f32 {
     (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
 }
 
+/// Reverse a buffer in place. Converts forward-order IFFT output into the
+/// time-reversed kernel layout expected by the SIMD convolution loop.
+#[inline]
+fn reverse_in_place(buf: &mut [f32]) {
+    let n = buf.len();
+    for i in 0..n / 2 {
+        buf.swap(i, n - 1 - i);
+    }
+}
+
 impl WavetableFilter {
     /// Compute the base magnitude spectrum for a wavetable frame at a given cutoff.
     ///
     /// Returns (magnitudes, fractional harmonic positions) for each of the KERNEL_LEN/2+1
     /// output bins. Resonance is NOT applied here — call `apply_resonance_and_ifft` inline.
+    #[cfg(test)]
     fn compute_base_spectrum(
         frame: &[f32],
         cutoff_hz: f32,
@@ -508,7 +523,7 @@ impl WavetableFilter {
 
         // Resize history buffer only if necessary (kernel is always KERNEL_LEN)
         for state in &mut self.filter_state {
-            if state.history.len() != KERNEL_LEN {
+            if state.len != KERNEL_LEN {
                 *state = FilterState::new(KERNEL_LEN);
             }
         }
@@ -591,8 +606,9 @@ impl FilterState {
     fn new(size: usize) -> Self {
         let power_of_2_size = size.next_power_of_two();
         Self {
-            history: vec![0.0; power_of_2_size],
+            history: vec![0.0; 2 * power_of_2_size],
             write_pos: 0,
+            len: power_of_2_size,
             mask: power_of_2_size - 1,
         }
     }
@@ -605,21 +621,21 @@ impl FilterState {
     #[inline(always)]
     fn push(&mut self, sample: f32) {
         self.history[self.write_pos] = sample;
+        self.history[self.write_pos + self.len] = sample;
         self.write_pos = (self.write_pos + 1) & self.mask;
     }
 
-    #[inline(always)]
+    #[cfg(test)]
     fn get(&self, offset: usize) -> f32 {
-        let idx = (self.write_pos.wrapping_add(self.history.len()).wrapping_sub(offset).wrapping_sub(1)) & self.mask;
+        let idx = (self.write_pos.wrapping_add(self.len).wrapping_sub(offset).wrapping_sub(1)) & self.mask;
         self.history[idx]
     }
 
-    /// Bulk read for SIMD — reads N consecutive samples into an array
-    #[inline(always)]
+    #[cfg(test)]
     fn get_bulk<const N: usize>(&self, start_offset: usize) -> [f32; N] {
         let mut result = [0.0f32; N];
 
-        let start_idx = (self.write_pos.wrapping_add(self.history.len()).wrapping_sub(start_offset).wrapping_sub(1)) & self.mask;
+        let start_idx = (self.write_pos.wrapping_add(self.len).wrapping_sub(start_offset).wrapping_sub(1)) & self.mask;
 
         if start_idx >= N - 1 {
             // No wrap-around in this window; index directly without mask.
@@ -635,6 +651,13 @@ impl FilterState {
         }
 
         result
+    }
+
+    /// Contiguous slice of the last `len` samples in chronological order (oldest first).
+    /// Use with a time-reversed kernel for SIMD convolution without per-element copies.
+    #[inline(always)]
+    fn history_slice(&self) -> &[f32] {
+        &self.history[self.write_pos..self.write_pos + self.len]
     }
 }
 
@@ -756,6 +779,7 @@ impl Plugin for WavetableFilter {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
+        self.crossfade_step = 1.0 / (self.sample_rate * 0.020);
         self.try_load_user_wavetable();
 
         // Synthesize the initial kernel so the first buffer has valid coefficients.
@@ -794,6 +818,7 @@ impl Plugin for WavetableFilter {
                     &self.cplx_fft,
                     &self.cplx_ifft,
                 );
+                reverse_in_place(&mut self.synthesized_kernel);
             }
             self.last_frame_pos = frame_pos;
             self.last_cutoff = cutoff;
@@ -833,7 +858,7 @@ impl Plugin for WavetableFilter {
                 self.wavetable = Some(shared_wt.clone());
 
                 for state in &mut self.filter_state {
-                    if state.history.len() != KERNEL_LEN {
+                    if state.len != KERNEL_LEN {
                         *state = FilterState::new(KERNEL_LEN);
                     }
                 }
@@ -900,10 +925,15 @@ impl Plugin for WavetableFilter {
             ) {
                 // Bake any in-progress crossfade before installing the new target.
                 if self.crossfade_active {
-                    let a = self.crossfade_alpha;
-                    for i in 0..KERNEL_LEN {
-                        self.synthesized_kernel[i] = self.synthesized_kernel[i] * (1.0 - a)
-                            + self.crossfade_target_kernel[i] * a;
+                    let a_vec = f32x16::splat(self.crossfade_alpha);
+                    let one_minus_a = f32x16::splat(1.0 - self.crossfade_alpha);
+                    for chunk in 0..KERNEL_LEN / 16 {
+                        let k = chunk * 16;
+                        let s = f32x16::from_slice(&self.synthesized_kernel[k..k + 16]);
+                        let t = f32x16::from_slice(&self.crossfade_target_kernel[k..k + 16]);
+                        let blended = s * one_minus_a + t * a_vec;
+                        self.synthesized_kernel[k..k + 16]
+                            .copy_from_slice(&blended.to_array());
                     }
                     self.crossfade_active = false;
                     self.crossfade_alpha = 0.0;
@@ -920,6 +950,7 @@ impl Plugin for WavetableFilter {
                     &self.cplx_fft,
                     &self.cplx_ifft,
                 );
+                reverse_in_place(&mut self.crossfade_target_kernel);
                 self.crossfade_active = true;
                 self.crossfade_alpha = 0.0;
             }
@@ -953,22 +984,21 @@ impl Plugin for WavetableFilter {
                 let driven_input = (input * drive).tanh();
                 self.filter_state[state_idx].push(driven_input);
 
-                // SIMD convolution: 16 samples at a time.
-                // During crossfade the history is read once and multiplied against both kernels
-                // in the same loop to avoid fetching history twice.
+                // SIMD convolution: forward dot product of the double-buffered
+                // history and time-reversed kernel. No per-element copies needed.
                 const SIMD_LANES: usize = 16;
                 const SIMD_CHUNKS: usize = KERNEL_LEN / SIMD_LANES;
+                let history = self.filter_state[state_idx].history_slice();
 
                 let filtered: f32 = if self.crossfade_active {
                     let mut acc = f32x16::splat(0.0);
                     let mut acc2 = f32x16::splat(0.0);
                     for chunk_idx in 0..SIMD_CHUNKS {
                         let k = chunk_idx * SIMD_LANES;
-                        let history_vec =
-                            f32x16::from_array(self.filter_state[state_idx].get_bulk::<16>(k));
-                        acc += history_vec
+                        let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
+                        acc += h
                             * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
-                        acc2 += history_vec * f32x16::from_slice(
+                        acc2 += h * f32x16::from_slice(
                             &self.crossfade_target_kernel[k..k + SIMD_LANES],
                         );
                     }
@@ -978,9 +1008,8 @@ impl Plugin for WavetableFilter {
                     let mut acc = f32x16::splat(0.0);
                     for chunk_idx in 0..SIMD_CHUNKS {
                         let k = chunk_idx * SIMD_LANES;
-                        let history_vec =
-                            f32x16::from_array(self.filter_state[state_idx].get_bulk::<16>(k));
-                        acc += history_vec
+                        let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
+                        acc += h
                             * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
                     }
                     hsum(acc)
@@ -1001,7 +1030,7 @@ impl Plugin for WavetableFilter {
 
             // Advance crossfade alpha once per sample (~20 ms total fade duration).
             if self.crossfade_active {
-                self.crossfade_alpha += 1.0 / (self.sample_rate * 0.020);
+                self.crossfade_alpha += self.crossfade_step;
                 if self.crossfade_alpha >= 1.0 {
                     std::mem::swap(&mut self.synthesized_kernel, &mut self.crossfade_target_kernel);
                     self.crossfade_active = false;
@@ -1124,17 +1153,19 @@ mod tests {
 
     /// Compute one convolution output sample by calling get_bulk as the audio loop does.
     fn convolve_sample(state: &FilterState, kernel: &[f32]) -> f32 {
+        let n = kernel.len();
+        let rev_kernel: Vec<f32> = kernel.iter().rev().copied().collect();
+        let history = state.history_slice();
         const LANES: usize = 16;
-        let chunks = kernel.len() / LANES;
-        let mut acc = 0.0f32;
+        let chunks = n / LANES;
+        let mut acc = f32x16::splat(0.0);
         for c in 0..chunks {
             let k = c * LANES;
-            let hist: [f32; 16] = state.get_bulk::<16>(k);
-            for i in 0..LANES {
-                acc += hist[i] * kernel[k + i];
-            }
+            let h = f32x16::from_slice(&history[k..k + LANES]);
+            let kr = f32x16::from_slice(&rev_kernel[k..k + LANES]);
+            acc += h * kr;
         }
-        acc
+        hsum(acc)
     }
 
     /// Feed a unit impulse into the filter; the output stream should equal the kernel.
@@ -1449,7 +1480,7 @@ mod tests {
         state.push(v_after);
         let ya2 = convolve_sample(&state, &synthesized);
         let yb2 = convolve_sample(&state, &target);
-        let y_after_bake = (1.0 - 0.0) * ya2 + 0.0 * yb2; // alpha=0 → just synthesized
+        let y_after_bake = (1.0 - alpha) * ya2 + alpha * yb2; // alpha=0 → just synthesized
 
         let jump = (y_after_bake - y_before_bake).abs();
         assert!(
