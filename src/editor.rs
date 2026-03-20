@@ -15,6 +15,18 @@ use wavetable_view::WavetableView;
 
 const SCALE_STEPS: &[f64] = &[1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0];
 
+/// Find the closest SCALE_STEPS index for a given scale factor.
+fn nearest_scale_idx(scale: f64) -> usize {
+    SCALE_STEPS
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            (*a - scale).abs().partial_cmp(&(*b - scale).abs()).unwrap()
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
 /// Set the ui_scale IntParam via the nih-plug parameter event system.
 fn set_scale_param(cx: &mut EventContext, param: &nih_plug::prelude::IntParam, scale: f64) {
     use nih_plug::prelude::Param;
@@ -113,17 +125,15 @@ pub(crate) fn create(
                     cx,
                     |cx| {
                         let current = cx.user_scale_factor();
-                        if let Some(idx) = SCALE_STEPS.iter().position(|&s| (s - current).abs() < 0.01) {
-                            if idx > 0 {
-                                let new_scale = SCALE_STEPS[idx - 1];
-                                cx.set_user_scale_factor(new_scale);
-                                // Persist via the ui_scale IntParam
-                                let p = Data::params.get(cx);
-                                set_scale_param(cx, &p.ui_scale, new_scale);
-                                cx.emit(DataEvent::SetUiScalePct(
-                                    format!("{}%", (new_scale * 100.0).round() as u32),
-                                ));
-                            }
+                        let idx = nearest_scale_idx(current);
+                        if idx > 0 {
+                            let new_scale = SCALE_STEPS[idx - 1];
+                            cx.set_user_scale_factor(new_scale);
+                            let p = Data::params.get(cx);
+                            set_scale_param(cx, &p.ui_scale, new_scale);
+                            cx.emit(DataEvent::SetUiScalePct(
+                                format!("{}%", (new_scale * 100.0).round() as u32),
+                            ));
                         }
                     },
                     |cx| Label::new(cx, "-"),
@@ -141,16 +151,15 @@ pub(crate) fn create(
                     cx,
                     |cx| {
                         let current = cx.user_scale_factor();
-                        if let Some(idx) = SCALE_STEPS.iter().position(|&s| (s - current).abs() < 0.01) {
-                            if idx < SCALE_STEPS.len() - 1 {
-                                let new_scale = SCALE_STEPS[idx + 1];
-                                cx.set_user_scale_factor(new_scale);
-                                let p = Data::params.get(cx);
-                                set_scale_param(cx, &p.ui_scale, new_scale);
-                                cx.emit(DataEvent::SetUiScalePct(
-                                    format!("{}%", (new_scale * 100.0).round() as u32),
-                                ));
-                            }
+                        let idx = nearest_scale_idx(current);
+                        if idx < SCALE_STEPS.len() - 1 {
+                            let new_scale = SCALE_STEPS[idx + 1];
+                            cx.set_user_scale_factor(new_scale);
+                            let p = Data::params.get(cx);
+                            set_scale_param(cx, &p.ui_scale, new_scale);
+                            cx.emit(DataEvent::SetUiScalePct(
+                                format!("{}%", (new_scale * 100.0).round() as u32),
+                            ));
                         }
                     },
                     |cx| Label::new(cx, "+"),
