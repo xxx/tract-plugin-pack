@@ -13,18 +13,22 @@ use filter_response_view::FilterResponseView;
 use param_dial::ParamDial;
 use wavetable_view::WavetableView;
 
+const SCALE_STEPS: &[f64] = &[1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0];
+
 #[derive(Lens, Clone)]
 struct Data {
     params: Arc<WavetableFilterParams>,
     wavetable_path: String,
     wavetable_version: u32,
     status_message: String,
+    ui_scale_pct: String,
 }
 
 enum DataEvent {
     SetWavetablePath(String),
     WavetableChanged(u32),
     SetStatus(String),
+    SetUiScalePct(String),
 }
 
 impl Model for Data {
@@ -38,6 +42,9 @@ impl Model for Data {
             }
             DataEvent::SetStatus(msg) => {
                 self.status_message = msg.clone();
+            }
+            DataEvent::SetUiScalePct(pct) => {
+                self.ui_scale_pct = pct.clone();
             }
         });
     }
@@ -63,11 +70,15 @@ pub(crate) fn create(
 
         let initial_path = wavetable_path.lock().unwrap().clone();
 
+        let initial_scale = cx.user_scale_factor();
+        let initial_scale_pct = format!("{}%", (initial_scale * 100.0).round() as u32);
+
         Data {
             params: params.clone(),
             wavetable_path: initial_path,
             wavetable_version: 0,
             status_message: String::from("Ready"),
+            ui_scale_pct: initial_scale_pct,
         }
         .build(cx);
 
@@ -77,10 +88,61 @@ pub(crate) fn create(
         let wt_version = wavetable_version.clone();
 
         VStack::new(cx, |cx| {
-            // Header with title
-            Label::new(cx, "Wavetable Filter")
-                .font_size(30.0)
-                .height(Pixels(40.0));
+            // Header row: title + scale controls
+            HStack::new(cx, |cx| {
+                Label::new(cx, "Wavetable Filter")
+                    .font_size(30.0)
+                    .width(Stretch(1.0));
+
+                Button::new(
+                    cx,
+                    |cx| {
+                        let current = cx.user_scale_factor();
+                        if let Some(idx) = SCALE_STEPS.iter().position(|&s| (s - current).abs() < 0.01) {
+                            if idx > 0 {
+                                let new_scale = SCALE_STEPS[idx - 1];
+                                cx.set_user_scale_factor(new_scale);
+                                cx.emit(DataEvent::SetUiScalePct(
+                                    format!("{}%", (new_scale * 100.0).round() as u32),
+                                ));
+                            }
+                        }
+                    },
+                    |cx| Label::new(cx, "-"),
+                )
+                .width(Pixels(24.0))
+                .height(Pixels(24.0))
+                .class("scale-btn");
+
+                Label::new(cx, Data::ui_scale_pct)
+                    .width(Pixels(48.0))
+                    .height(Pixels(24.0))
+                    .class("scale-label");
+
+                Button::new(
+                    cx,
+                    |cx| {
+                        let current = cx.user_scale_factor();
+                        if let Some(idx) = SCALE_STEPS.iter().position(|&s| (s - current).abs() < 0.01) {
+                            if idx < SCALE_STEPS.len() - 1 {
+                                let new_scale = SCALE_STEPS[idx + 1];
+                                cx.set_user_scale_factor(new_scale);
+                                cx.emit(DataEvent::SetUiScalePct(
+                                    format!("{}%", (new_scale * 100.0).round() as u32),
+                                ));
+                            }
+                        }
+                    },
+                    |cx| Label::new(cx, "+"),
+                )
+                .width(Pixels(24.0))
+                .height(Pixels(24.0))
+                .class("scale-btn");
+            })
+            .height(Pixels(40.0))
+            .col_between(Pixels(4.0))
+            .child_top(Stretch(1.0))
+            .child_bottom(Stretch(1.0));
 
             // Status message
             Label::new(cx, Data::status_message).height(Pixels(20.0));

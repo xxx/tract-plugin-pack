@@ -41,6 +41,25 @@ param-slider {
     child-top: 5px;
 }
 
+/* Scale controls */
+.scale-btn {
+    background-color: #2a2c32;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: #404040;
+    child-left: 1s;
+    child-right: 1s;
+}
+
+.scale-label {
+    color: #a0a0a0;
+    font-size: 11px;
+    child-left: 1s;
+    child-right: 1s;
+    child-top: 1s;
+    child-bottom: 1s;
+}
+
 /* Dial styling */
 param-dial {
     background-color: transparent;
