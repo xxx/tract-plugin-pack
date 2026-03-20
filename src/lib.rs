@@ -3,7 +3,6 @@
 use nih_plug::prelude::*;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use rustfft::num_complex::Complex;
-use rustfft::{Fft, FftPlanner as ComplexFftPlanner};
 use std::simd::f32x16;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,6 +15,7 @@ use wavetable::Wavetable;
 /// Fixed output kernel length for convolution. Must be a multiple of 16 (for SIMD).
 /// 2048 gives 1024 frequency bins — enough resolution for any typical wavetable frame.
 const KERNEL_LEN: usize = 2048;
+const HOP: usize = KERNEL_LEN / 2; // 1024 — STFT overlap-add hop size (50% overlap)
 
 pub struct WavetableFilter {
     params: Arc<WavetableFilterParams>,
@@ -49,9 +49,6 @@ pub struct WavetableFilter {
     frame_fft: Arc<dyn RealToComplex<f32>>,
     // Inverse real FFT for kernel synthesis output (size = KERNEL_LEN, constant)
     kernel_ifft: Arc<dyn ComplexToReal<f32>>,
-    // Complex FFTs for the minimum-phase cepstral algorithm (size = KERNEL_LEN, constant)
-    cplx_fft: Arc<dyn Fft<f32>>,
-    cplx_ifft: Arc<dyn Fft<f32>>,
     // Pre-allocated synthesis scratch buffers — zero allocation on the audio thread.
     /// Clean copy of the current interpolated frame; updated when frame_pos changes.
     frame_cache: Vec<f32>,
@@ -67,12 +64,30 @@ pub struct WavetableFilter {
     out_fracs: Vec<f32>,
     /// Complex spectrum scratch for resonance + IFFT (KERNEL_LEN/2+1).
     spectrum_work: Vec<Complex<f32>>,
-    /// Complex scratch for the min-phase cepstral algorithm (KERNEL_LEN).
-    cplx_work: Vec<Complex<f32>>,
     // Smooth reset: instead of clearing history instantly (which pops), fade out
     // over a few milliseconds then clear once the output has reached zero.
     reset_fade_remaining: usize,
     reset_fade_total: usize,
+
+    // ── STFT state for magnitude-only (Phaseless) mode ──────────────
+    /// Forward real FFT plan for STFT input blocks (size KERNEL_LEN).
+    stft_fft: Arc<dyn RealToComplex<f32>>,
+    /// Per-channel circular input buffer for STFT (KERNEL_LEN samples each).
+    stft_in: [Vec<f32>; 2],
+    /// Per-channel overlap-add output accumulator (KERNEL_LEN samples each).
+    stft_out: [Vec<f32>; 2],
+    /// Current filter magnitude spectrum for STFT mode (KERNEL_LEN/2+1 real gains).
+    stft_magnitudes: Vec<f32>,
+    /// Pre-computed Hann analysis window (KERNEL_LEN samples).
+    stft_window: Vec<f32>,
+    /// Time-domain scratch buffer for STFT FFT/IFFT (KERNEL_LEN).
+    stft_scratch: Vec<f32>,
+    /// Write position in STFT input circular buffer (0..KERNEL_LEN-1).
+    stft_in_pos: usize,
+    /// Read position within current STFT output hop (0..HOP-1).
+    stft_out_pos: usize,
+    /// Tracks the last mode to detect runtime mode switches.
+    last_mode: FilterMode,
 }
 
 struct FilterState {
@@ -111,13 +126,13 @@ struct WavetableFilterParams {
 
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
 enum FilterMode {
-    #[id = "minimum"]
-    #[name = "Minimum"]
-    Minimum,
-
     #[id = "raw"]
     #[name = "Raw"]
     Raw,
+
+    #[id = "minimum"]
+    #[name = "Phaseless"]
+    Minimum,
 }
 
 
@@ -132,10 +147,7 @@ impl Default for WavetableFilter {
         let mut real_planner = RealFftPlanner::<f32>::new();
         let frame_fft = real_planner.plan_fft_forward(frame_size);
         let kernel_ifft = real_planner.plan_fft_inverse(KERNEL_LEN);
-
-        let mut cplx_planner = ComplexFftPlanner::<f32>::new();
-        let cplx_fft = cplx_planner.plan_fft_forward(KERNEL_LEN);
-        let cplx_ifft = cplx_planner.plan_fft_inverse(KERNEL_LEN);
+        let stft_fft = real_planner.plan_fft_forward(KERNEL_LEN);
 
         let spec_len = frame_size / 2 + 1;
 
@@ -160,8 +172,6 @@ impl Default for WavetableFilter {
             crossfade_step: 1.0 / (48000.0 * 0.020),
             frame_fft,
             kernel_ifft,
-            cplx_fft,
-            cplx_ifft,
             frame_cache: vec![0.0; frame_size],
             frame_buf: vec![0.0; frame_size],
             frame_spectrum: vec![Complex::new(0.0, 0.0); spec_len],
@@ -169,9 +179,25 @@ impl Default for WavetableFilter {
             out_mags: vec![0.0; KERNEL_LEN / 2 + 1],
             out_fracs: vec![0.0; KERNEL_LEN / 2 + 1],
             spectrum_work: vec![Complex::new(0.0, 0.0); KERNEL_LEN / 2 + 1],
-            cplx_work: vec![Complex::new(0.0, 0.0); KERNEL_LEN],
             reset_fade_remaining: 0,
             reset_fade_total: 1, // avoid division by zero
+            stft_fft,
+            stft_in: [vec![0.0; KERNEL_LEN], vec![0.0; KERNEL_LEN]],
+            stft_out: [vec![0.0; KERNEL_LEN], vec![0.0; KERNEL_LEN]],
+            stft_magnitudes: vec![0.0; KERNEL_LEN / 2 + 1],
+            stft_window: {
+                let mut w = vec![0.0f32; KERNEL_LEN];
+                for (i, w_i) in w.iter_mut().enumerate() {
+                    *w_i = 0.5
+                        * (1.0
+                            - (2.0 * std::f32::consts::PI * i as f32 / KERNEL_LEN as f32).cos());
+                }
+                w
+            },
+            stft_scratch: vec![0.0; KERNEL_LEN],
+            stft_in_pos: 0,
+            stft_out_pos: 0,
+            last_mode: FilterMode::Raw,
         }
     }
 }
@@ -376,10 +402,6 @@ impl WavetableFilter {
         spectrum_work: &mut [Complex<f32>],
         kernel_out: &mut [f32],
         kernel_ifft: &Arc<dyn ComplexToReal<f32>>,
-        mode: FilterMode,
-        cplx_work: &mut [Complex<f32>],
-        cplx_fft: &Arc<dyn Fft<f32>>,
-        cplx_ifft: &Arc<dyn Fft<f32>>,
     ) {
         let comb_exp = resonance * 8.0;
         for j in 0..base_mags.len() {
@@ -404,59 +426,28 @@ impl WavetableFilter {
         for s in kernel_out.iter_mut() {
             *s *= scale;
         }
-
-        if mode == FilterMode::Minimum {
-            Self::compute_minimum_phase_kernel_inplace(kernel_out, cplx_work, cplx_fft, cplx_ifft);
-        }
     }
 
-    /// Convert a kernel to minimum phase in-place using the cepstral method.
+    /// Compute filter magnitude gains for STFT mode.
     ///
-    /// `cplx_work` is a pre-allocated scratch buffer of length KERNEL_LEN — no allocation.
-    fn compute_minimum_phase_kernel_inplace(
-        kernel: &mut [f32],
-        cplx_work: &mut [Complex<f32>],
-        cplx_fft: &Arc<dyn Fft<f32>>,
-        cplx_ifft: &Arc<dyn Fft<f32>>,
+    /// Applies the resonance comb to base magnitudes and writes real-valued
+    /// gains to `mags_out`. Each gain is the factor by which an FFT bin's
+    /// magnitude should be scaled (the bin's phase is preserved).
+    fn compute_stft_magnitudes(
+        base_mags: &[f32],
+        bin_fracs: &[f32],
+        resonance: f32,
+        mags_out: &mut [f32],
     ) {
-        let n = kernel.len();
-        let scale = 1.0 / n as f32;
-        let epsilon = 1e-10_f32;
-
-        for (c, &k) in cplx_work.iter_mut().zip(kernel.iter()) {
-            *c = Complex::new(k, 0.0);
-        }
-        cplx_fft.process(cplx_work);
-
-        for b in cplx_work.iter_mut() {
-            let mag = b.norm().max(epsilon);
-            *b = Complex::new(mag.ln(), 0.0);
-        }
-
-        cplx_ifft.process(cplx_work);
-        for b in cplx_work.iter_mut() {
-            *b *= scale;
-        }
-
-        for i in 1..n / 2 {
-            cplx_work[i] *= 2.0;
-        }
-        for i in (n / 2 + 1)..n {
-            cplx_work[i] = Complex::new(0.0, 0.0);
-        }
-
-        cplx_fft.process(cplx_work);
-
-        for b in cplx_work.iter_mut() {
-            let mag = b.re.exp();
-            let phase = b.im;
-            *b = Complex::new(mag * phase.cos(), mag * phase.sin());
-        }
-
-        cplx_ifft.process(cplx_work);
-
-        for (k, c) in kernel.iter_mut().zip(cplx_work.iter()) {
-            *k = c.re * scale;
+        let comb_exp = resonance * 8.0;
+        for j in 0..base_mags.len().min(mags_out.len()) {
+            mags_out[j] = if comb_exp > 0.01 {
+                let dist = bin_fracs[j].min(1.0 - bin_fracs[j]);
+                let comb = (std::f32::consts::PI * dist).cos().max(0.0).powf(comb_exp);
+                base_mags[j] * comb
+            } else {
+                base_mags[j]
+            };
         }
     }
 
@@ -554,6 +545,38 @@ impl WavetableFilter {
             *path_lock = path.to_string();
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn process_stft_frame(
+        stft_in: &[f32],
+        in_pos: usize,
+        stft_out: &mut [f32],
+        magnitudes: &[f32],
+        window: &[f32],
+        fft: &Arc<dyn RealToComplex<f32>>,
+        ifft: &Arc<dyn ComplexToReal<f32>>,
+        scratch_time: &mut [f32],
+        scratch_freq: &mut [Complex<f32>],
+    ) {
+        let n = KERNEL_LEN;
+        let mask = n - 1;
+        for i in 0..n {
+            scratch_time[i] = stft_in[(in_pos + i) & mask] * window[i];
+        }
+        if fft.process(scratch_time, scratch_freq).is_err() {
+            return;
+        }
+        for (bin, &mag) in scratch_freq.iter_mut().zip(magnitudes.iter()) {
+            *bin *= mag;
+        }
+        if ifft.process(scratch_freq, scratch_time).is_err() {
+            return;
+        }
+        let scale = 1.0 / n as f32;
+        for i in 0..n {
+            stft_out[i] += scratch_time[i] * scale;
+        }
     }
 
     pub fn set_wavetable_path(&self, path: String) {
@@ -806,25 +829,40 @@ impl Plugin for WavetableFilter {
                 &mut self.out_mags,
                 &mut self.out_fracs,
             ) {
-                Self::apply_resonance_and_ifft(
-                    &self.out_mags,
-                    &self.out_fracs,
-                    resonance,
-                    &mut self.spectrum_work,
-                    &mut self.synthesized_kernel,
-                    &self.kernel_ifft,
-                    mode,
-                    &mut self.cplx_work,
-                    &self.cplx_fft,
-                    &self.cplx_ifft,
-                );
-                reverse_in_place(&mut self.synthesized_kernel);
+                if mode == FilterMode::Raw {
+                    Self::apply_resonance_and_ifft(
+                        &self.out_mags,
+                        &self.out_fracs,
+                        resonance,
+                        &mut self.spectrum_work,
+                        &mut self.synthesized_kernel,
+                        &self.kernel_ifft,
+                    );
+                    reverse_in_place(&mut self.synthesized_kernel);
+                } else {
+                    Self::compute_stft_magnitudes(
+                        &self.out_mags,
+                        &self.out_fracs,
+                        resonance,
+                        &mut self.stft_magnitudes,
+                    );
+                }
             }
             self.last_frame_pos = frame_pos;
             self.last_cutoff = cutoff;
             self.last_resonance = resonance;
             self.first_process = false;
         }
+
+        for buf in &mut self.stft_in {
+            buf.fill(0.0);
+        }
+        for buf in &mut self.stft_out {
+            buf.fill(0.0);
+        }
+        self.stft_in_pos = 0;
+        self.stft_out_pos = 0;
+        self.last_mode = self.params.mode.value();
 
         true
     }
@@ -845,7 +883,7 @@ impl Plugin for WavetableFilter {
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         // Check if we should reload the wavetable
         if self.should_reload.load(Ordering::Relaxed) {
@@ -883,12 +921,24 @@ impl Plugin for WavetableFilter {
         let silence_threshold = 1e-6f32;
         let mut is_silent = true;
 
-        let filter_mode = self.params.mode.value();
-
         // Advance smoothers once to read current buffer values; the per-sample loop advances them again.
         let frame_pos = self.params.frame_position.smoothed.next();
         let cutoff = self.params.frequency.smoothed.next();
         let resonance = self.params.resonance.smoothed.next();
+
+        let filter_mode = self.params.mode.value();
+
+        if filter_mode != self.last_mode {
+            if filter_mode != FilterMode::Raw {
+                for buf in &mut self.stft_in { buf.fill(0.0); }
+                for buf in &mut self.stft_out { buf.fill(0.0); }
+                self.stft_in_pos = 0;
+                self.stft_out_pos = 0;
+            }
+            self.last_mode = filter_mode;
+        }
+
+        context.set_latency_samples(if filter_mode == FilterMode::Raw { 0 } else { HOP as u32 });
 
         let frame_pos_changed = self.first_process
             || (frame_pos - self.last_frame_pos).abs() > 0.0001;
@@ -923,38 +973,47 @@ impl Plugin for WavetableFilter {
                 &mut self.out_mags,
                 &mut self.out_fracs,
             ) {
-                // Bake any in-progress crossfade before installing the new target.
-                if self.crossfade_active {
-                    let a_vec = f32x16::splat(self.crossfade_alpha);
-                    let one_minus_a = f32x16::splat(1.0 - self.crossfade_alpha);
-                    for chunk in 0..KERNEL_LEN / 16 {
-                        let k = chunk * 16;
-                        let s = f32x16::from_slice(&self.synthesized_kernel[k..k + 16]);
-                        let t = f32x16::from_slice(&self.crossfade_target_kernel[k..k + 16]);
-                        let blended = s * one_minus_a + t * a_vec;
-                        self.synthesized_kernel[k..k + 16]
-                            .copy_from_slice(&blended.to_array());
+                if filter_mode == FilterMode::Raw {
+                    // Bake any in-progress crossfade before installing the new target.
+                    if self.crossfade_active {
+                        let a_vec = f32x16::splat(self.crossfade_alpha);
+                        let one_minus_a = f32x16::splat(1.0 - self.crossfade_alpha);
+                        for chunk in 0..KERNEL_LEN / 16 {
+                            let k = chunk * 16;
+                            let s = f32x16::from_slice(&self.synthesized_kernel[k..k + 16]);
+                            let t = f32x16::from_slice(&self.crossfade_target_kernel[k..k + 16]);
+                            let blended = s * one_minus_a + t * a_vec;
+                            self.synthesized_kernel[k..k + 16]
+                                .copy_from_slice(&blended.to_array());
+                        }
+                        self.crossfade_active = false;
+                        self.crossfade_alpha = 0.0;
                     }
-                    self.crossfade_active = false;
+                    WavetableFilter::apply_resonance_and_ifft(
+                        &self.out_mags,
+                        &self.out_fracs,
+                        resonance,
+                        &mut self.spectrum_work,
+                        &mut self.crossfade_target_kernel,
+                        &self.kernel_ifft,
+                    );
+                    reverse_in_place(&mut self.crossfade_target_kernel);
+                    self.crossfade_active = true;
                     self.crossfade_alpha = 0.0;
+                } else {
+                    // Magnitude-only: just store the magnitude spectrum for STFT
+                    Self::compute_stft_magnitudes(
+                        &self.out_mags,
+                        &self.out_fracs,
+                        resonance,
+                        &mut self.stft_magnitudes,
+                    );
                 }
-                WavetableFilter::apply_resonance_and_ifft(
-                    &self.out_mags,
-                    &self.out_fracs,
-                    resonance,
-                    &mut self.spectrum_work,
-                    &mut self.crossfade_target_kernel,
-                    &self.kernel_ifft,
-                    filter_mode,
-                    &mut self.cplx_work,
-                    &self.cplx_fft,
-                    &self.cplx_ifft,
-                );
-                reverse_in_place(&mut self.crossfade_target_kernel);
-                self.crossfade_active = true;
-                self.crossfade_alpha = 0.0;
             }
         }
+
+        let stft_fft = self.stft_fft.clone();
+        let kernel_ifft_arc = self.kernel_ifft.clone();
 
         for mut channel_samples in buffer.iter_samples() {
             // Advance frame_pos/cutoff/resonance smoothers each sample (keeps convergence timing correct).
@@ -972,6 +1031,20 @@ impl Plugin for WavetableFilter {
                 1.0
             };
 
+            // STFT hop processing: when the output position wraps to 0, process the next frame.
+            if filter_mode != FilterMode::Raw && self.stft_out_pos == 0 {
+                for ch in 0..2 {
+                    self.stft_out[ch].copy_within(HOP..KERNEL_LEN, 0);
+                    self.stft_out[ch][HOP..].fill(0.0);
+                    Self::process_stft_frame(
+                        &self.stft_in[ch], self.stft_in_pos,
+                        &mut self.stft_out[ch], &self.stft_magnitudes,
+                        &self.stft_window, &stft_fft, &kernel_ifft_arc,
+                        &mut self.stft_scratch, &mut self.spectrum_work,
+                    );
+                }
+            }
+
             // Process each channel in this sample
             for (channel_idx, sample) in channel_samples.iter_mut().enumerate() {
                 let state_idx = channel_idx.min(1);
@@ -981,41 +1054,48 @@ impl Plugin for WavetableFilter {
                     is_silent = false;
                 }
 
-                let driven_input = (input * drive).tanh();
-                self.filter_state[state_idx].push(driven_input);
+                if filter_mode == FilterMode::Raw {
+                    let driven_input = (input * drive).tanh();
+                    self.filter_state[state_idx].push(driven_input);
 
-                // SIMD convolution: forward dot product of the double-buffered
-                // history and time-reversed kernel. No per-element copies needed.
-                const SIMD_LANES: usize = 16;
-                const SIMD_CHUNKS: usize = KERNEL_LEN / SIMD_LANES;
-                let history = self.filter_state[state_idx].history_slice();
+                    // SIMD convolution: forward dot product of the double-buffered
+                    // history and time-reversed kernel. No per-element copies needed.
+                    const SIMD_LANES: usize = 16;
+                    const SIMD_CHUNKS: usize = KERNEL_LEN / SIMD_LANES;
+                    let history = self.filter_state[state_idx].history_slice();
 
-                let filtered: f32 = if self.crossfade_active {
-                    let mut acc = f32x16::splat(0.0);
-                    let mut acc2 = f32x16::splat(0.0);
-                    for chunk_idx in 0..SIMD_CHUNKS {
-                        let k = chunk_idx * SIMD_LANES;
-                        let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
-                        acc += h
-                            * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
-                        acc2 += h * f32x16::from_slice(
-                            &self.crossfade_target_kernel[k..k + SIMD_LANES],
-                        );
-                    }
-                    let a = self.crossfade_alpha;
-                    hsum(acc) * (1.0 - a) + hsum(acc2) * a
+                    let filtered: f32 = if self.crossfade_active {
+                        let mut acc = f32x16::splat(0.0);
+                        let mut acc2 = f32x16::splat(0.0);
+                        for chunk_idx in 0..SIMD_CHUNKS {
+                            let k = chunk_idx * SIMD_LANES;
+                            let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
+                            acc += h
+                                * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
+                            acc2 += h * f32x16::from_slice(
+                                &self.crossfade_target_kernel[k..k + SIMD_LANES],
+                            );
+                        }
+                        let a = self.crossfade_alpha;
+                        hsum(acc) * (1.0 - a) + hsum(acc2) * a
+                    } else {
+                        let mut acc = f32x16::splat(0.0);
+                        for chunk_idx in 0..SIMD_CHUNKS {
+                            let k = chunk_idx * SIMD_LANES;
+                            let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
+                            acc += h
+                                * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
+                        }
+                        hsum(acc)
+                    };
+
+                    *sample = input * (1.0 - mix) + filtered * mix * reset_gain;
                 } else {
-                    let mut acc = f32x16::splat(0.0);
-                    for chunk_idx in 0..SIMD_CHUNKS {
-                        let k = chunk_idx * SIMD_LANES;
-                        let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
-                        acc += h
-                            * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
-                    }
-                    hsum(acc)
-                };
-
-                *sample = input * (1.0 - mix) + filtered * mix * reset_gain;
+                    let driven_input = (input * drive).tanh();
+                    self.stft_in[state_idx][self.stft_in_pos] = driven_input;
+                    let filtered = self.stft_out[state_idx][self.stft_out_pos];
+                    *sample = input * (1.0 - mix) + filtered * mix * reset_gain;
+                }
             }
 
             // Complete the reset fade: once output has reached zero, clear history.
@@ -1028,14 +1108,20 @@ impl Plugin for WavetableFilter {
                 }
             }
 
-            // Advance crossfade alpha once per sample (~20 ms total fade duration).
-            if self.crossfade_active {
-                self.crossfade_alpha += self.crossfade_step;
-                if self.crossfade_alpha >= 1.0 {
-                    std::mem::swap(&mut self.synthesized_kernel, &mut self.crossfade_target_kernel);
-                    self.crossfade_active = false;
-                    self.crossfade_alpha = 0.0;
+            if filter_mode == FilterMode::Raw {
+                // Advance crossfade alpha once per sample (~20 ms total fade duration).
+                if self.crossfade_active {
+                    self.crossfade_alpha += self.crossfade_step;
+                    if self.crossfade_alpha >= 1.0 {
+                        std::mem::swap(&mut self.synthesized_kernel, &mut self.crossfade_target_kernel);
+                        self.crossfade_active = false;
+                        self.crossfade_alpha = 0.0;
+                    }
                 }
+            } else {
+                self.stft_in_pos = (self.stft_in_pos + 1) & (KERNEL_LEN - 1);
+                self.stft_out_pos += 1;
+                if self.stft_out_pos >= HOP { self.stft_out_pos = 0; }
             }
         }
 
@@ -1046,6 +1132,10 @@ impl Plugin for WavetableFilter {
                 for state in &mut self.filter_state {
                     state.reset();
                 }
+                for buf in &mut self.stft_in { buf.fill(0.0); }
+                for buf in &mut self.stft_out { buf.fill(0.0); }
+                self.stft_in_pos = 0;
+                self.stft_out_pos = 0;
             }
         } else {
             self.silence_samples = 0;
@@ -1244,9 +1334,6 @@ mod tests {
         let mut planner = RealFftPlanner::<f32>::new();
         let frame_fft = planner.plan_fft_forward(wt.frame_size);
         let kernel_ifft = planner.plan_fft_inverse(KERNEL_LEN);
-        let mut cplx_planner = ComplexFftPlanner::<f32>::new();
-        let cplx_fft = cplx_planner.plan_fft_forward(KERNEL_LEN);
-        let cplx_ifft = cplx_planner.plan_fft_inverse(KERNEL_LEN);
 
         let frame = wt.get_frame_interpolated(0.0);
         let (base_mags, bin_fracs) =
@@ -1254,7 +1341,6 @@ mod tests {
                 .expect("compute_base_spectrum returned None");
 
         let mut spectrum_work = vec![Complex::new(0.0_f32, 0.0); KERNEL_LEN / 2 + 1];
-        let mut cplx_work = vec![Complex::new(0.0_f32, 0.0); KERNEL_LEN];
         let mut kernel = vec![0.0f32; KERNEL_LEN];
 
         WavetableFilter::apply_resonance_and_ifft(
@@ -1264,10 +1350,6 @@ mod tests {
             &mut spectrum_work,
             &mut kernel,
             &kernel_ifft,
-            FilterMode::Raw,
-            &mut cplx_work,
-            &cplx_fft,
-            &cplx_ifft,
         );
         kernel
     }
@@ -1289,9 +1371,6 @@ mod tests {
         let mut real_planner = RealFftPlanner::<f32>::new();
         let frame_fft = real_planner.plan_fft_forward(wt.frame_size);
         let kernel_ifft = real_planner.plan_fft_inverse(KERNEL_LEN);
-        let mut cplx_planner = ComplexFftPlanner::<f32>::new();
-        let cplx_fft = cplx_planner.plan_fft_forward(KERNEL_LEN);
-        let cplx_ifft = cplx_planner.plan_fft_inverse(KERNEL_LEN);
 
         // Pre-allocated scratch (would live in the plugin struct).
         let mut frame_buf = vec![0.0f32; wt.frame_size];
@@ -1300,7 +1379,6 @@ mod tests {
         let mut out_mags = vec![0.0f32; KERNEL_LEN / 2 + 1];
         let mut out_fracs = vec![0.0f32; KERNEL_LEN / 2 + 1];
         let mut spectrum_work = vec![Complex::new(0.0_f32, 0.0); KERNEL_LEN / 2 + 1];
-        let mut cplx_work = vec![Complex::new(0.0_f32, 0.0); KERNEL_LEN];
         let mut kernel_free = vec![0.0f32; KERNEL_LEN];
 
         // Frame interpolation into pre-allocated buffer.
@@ -1327,10 +1405,6 @@ mod tests {
             &mut spectrum_work,
             &mut kernel_free,
             &kernel_ifft,
-            FilterMode::Raw,
-            &mut cplx_work,
-            &cplx_fft,
-            &cplx_ifft,
         );
 
         // Both paths must produce identical results.
@@ -1588,6 +1662,37 @@ mod tests {
     }
 
 
+    // ── STFT magnitude computation ──────────────────────────────────────
+
+    #[test]
+    fn test_stft_magnitudes_match_spectrum() {
+        let sample_rate = 48000.0f32;
+        let cutoff = 2000.0f32;
+        let resonance = 0.3f32;
+        let wt = WavetableFilter::create_default_wavetable();
+        let mut planner = RealFftPlanner::<f32>::new();
+        let frame_fft = planner.plan_fft_forward(wt.frame_size);
+
+        let frame = wt.get_frame_interpolated(0.0);
+        let (base_mags, bin_fracs) =
+            WavetableFilter::compute_base_spectrum(&frame, cutoff, sample_rate, &frame_fft)
+                .expect("spectrum failed");
+
+        let mut stft_mags = vec![0.0f32; KERNEL_LEN / 2 + 1];
+        WavetableFilter::compute_stft_magnitudes(&base_mags, &bin_fracs, resonance, &mut stft_mags);
+
+        // All values should be finite and non-negative
+        assert!(stft_mags.iter().all(|v| v.is_finite() && *v >= 0.0));
+        // DC bin should have a value (lowpass passes DC)
+        assert!(stft_mags[0] > 0.0, "DC magnitude should be non-zero for lowpass");
+        // High-frequency bins should be near zero for lowpass
+        let nyquist_mag = stft_mags[KERNEL_LEN / 2];
+        assert!(
+            nyquist_mag < 0.01,
+            "Nyquist magnitude should be near zero for 2kHz lowpass"
+        );
+    }
+
     // ── Spectrum continuity at source boundary ───────────────────────────
 
     /// When cutoff changes so that an output bin's source position crosses
@@ -1642,4 +1747,106 @@ mod tests {
              (critical cutoff ≈ {critical:.2} Hz); expected < 0.05"
         );
     }
+
+    // ── STFT integration tests ──────────────────────────────────────────
+
+    fn run_stft_mono(plugin: &mut WavetableFilter, input: &[f32]) -> Vec<f32> {
+        let mut output = vec![0.0f32; input.len()];
+        for i in 0..input.len() {
+            if plugin.stft_out_pos == 0 {
+                plugin.stft_out[0].copy_within(HOP..KERNEL_LEN, 0);
+                plugin.stft_out[0][HOP..].fill(0.0);
+                WavetableFilter::process_stft_frame(
+                    &plugin.stft_in[0], plugin.stft_in_pos,
+                    &mut plugin.stft_out[0], &plugin.stft_magnitudes,
+                    &plugin.stft_window, &plugin.stft_fft, &plugin.kernel_ifft,
+                    &mut plugin.stft_scratch, &mut plugin.spectrum_work,
+                );
+            }
+
+            plugin.stft_in[0][plugin.stft_in_pos] = input[i];
+            output[i] = plugin.stft_out[0][plugin.stft_out_pos];
+
+            plugin.stft_in_pos = (plugin.stft_in_pos + 1) & (KERNEL_LEN - 1);
+            plugin.stft_out_pos += 1;
+            if plugin.stft_out_pos >= HOP { plugin.stft_out_pos = 0; }
+        }
+        output
+    }
+
+    #[test]
+    fn test_stft_lowpass_attenuates_highs() {
+        let mut plugin = WavetableFilter::default();
+
+        let cutoff_bin = 100;
+        for i in 0..plugin.stft_magnitudes.len() {
+            plugin.stft_magnitudes[i] = if i < cutoff_bin { 1.0 } else { 0.0 };
+        }
+
+        // High-frequency sine (10 kHz at 48 kHz SR — bin ~426, well above cutoff)
+        let num_samples = KERNEL_LEN * 4;
+        let freq = 10000.0f32;
+        let sr = 48000.0f32;
+        let input: Vec<f32> = (0..num_samples)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sr).sin())
+            .collect();
+
+        let output = run_stft_mono(&mut plugin, &input);
+
+        // After transient, output energy should be much less than input energy
+        let start = KERNEL_LEN * 2;
+        let input_energy: f32 = input[start..].iter().map(|x| x * x).sum();
+        let output_energy: f32 = output[start..].iter().map(|x| x * x).sum();
+        let attenuation = output_energy / input_energy.max(1e-20);
+        assert!(
+            attenuation < 0.01,
+            "High-freq should be attenuated >99%, got {:.1}% through",
+            attenuation * 100.0
+        );
+    }
+
+    #[test]
+    fn test_stft_flat_preserves_amplitude() {
+        // With flat magnitude spectrum, the output should preserve the input
+        // signal's amplitude. The STFT introduces a fixed latency of up to
+        // HOP samples (reported to the host for compensation).
+        let mut plugin = WavetableFilter::default();
+        plugin.stft_magnitudes.fill(1.0);
+
+        let num_samples = KERNEL_LEN * 6;
+        let freq = 1000.0f32;
+        let sr = 48000.0f32;
+        let input: Vec<f32> = (0..num_samples)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sr).sin())
+            .collect();
+
+        let output = run_stft_mono(&mut plugin, &input);
+
+        // Cross-correlate to find best alignment, accounting for STFT latency.
+        let start = KERNEL_LEN * 3;
+        let len = KERNEL_LEN;
+        let mut best_corr = f32::NEG_INFINITY;
+        let search = HOP as i32;
+        for lag in -search..=search {
+            let mut corr = 0.0f32;
+            for j in 0..len {
+                let ij = (start as i32 + j as i32) as usize;
+                let oj = (start as i32 + j as i32 + lag) as usize;
+                if oj < num_samples {
+                    corr += input[ij] * output[oj];
+                }
+            }
+            if corr > best_corr {
+                best_corr = corr;
+            }
+        }
+        // Flat magnitude STFT should preserve amplitude: peak correlation should
+        // be close to the autocorrelation value (len/2 for a unit sine).
+        let expected_corr = len as f32 / 2.0;
+        assert!(
+            best_corr >= expected_corr * 0.8,
+            "Flat STFT should preserve signal; best_corr={best_corr:.1} expected ~{expected_corr:.1}"
+        );
+    }
+
 }
