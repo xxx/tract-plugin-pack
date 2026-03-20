@@ -100,6 +100,9 @@ pub struct WavetableFilter {
     input_spectrum_pos: usize,
     /// Pre-allocated complex scratch for input spectrum FFT (KERNEL_LEN/2+1).
     input_spectrum_scratch: Vec<Complex<f32>>,
+    /// Countdown (in samples) until the next input-spectrum FFT for GUI visualization.
+    /// Throttles the FFT to ~30 updates/sec instead of once per process() call.
+    input_spectrum_countdown: usize,
 }
 
 struct FilterState {
@@ -218,6 +221,7 @@ impl Default for WavetableFilter {
             input_spectrum_buf: vec![0.0; KERNEL_LEN],
             input_spectrum_pos: 0,
             input_spectrum_scratch: vec![Complex::new(0.0, 0.0); KERNEL_LEN / 2 + 1],
+            input_spectrum_countdown: 0,
         }
     }
 }
@@ -1046,9 +1050,6 @@ impl Plugin for WavetableFilter {
             }
         }
 
-        let stft_fft = self.stft_fft.clone();
-        let kernel_ifft_arc = self.kernel_ifft.clone();
-
         for mut channel_samples in buffer.iter_samples() {
             // Advance frame_pos/cutoff/resonance smoothers each sample (keeps convergence timing correct).
             // Their values are not needed here; synthesis already ran above for this buffer.
@@ -1073,7 +1074,7 @@ impl Plugin for WavetableFilter {
                     Self::process_stft_frame(
                         &self.stft_in[ch], self.stft_in_pos,
                         &mut self.stft_out[ch], &self.stft_magnitudes,
-                        &self.stft_window, &stft_fft, &kernel_ifft_arc,
+                        &self.stft_window, &self.stft_fft, &self.kernel_ifft,
                         &mut self.stft_scratch, &mut self.spectrum_work,
                     );
                 }
@@ -1185,8 +1186,12 @@ impl Plugin for WavetableFilter {
             self.silence_samples = 0;
         }
 
-        // Compute input spectrum for GUI visualization (non-blocking)
-        {
+        // Compute input spectrum for GUI visualization (non-blocking).
+        // Throttled to ~30 updates/sec to avoid wasting CPU on every process() call.
+        self.input_spectrum_countdown = self.input_spectrum_countdown.saturating_sub(buffer.samples());
+        if self.input_spectrum_countdown == 0 {
+            self.input_spectrum_countdown = (self.sample_rate / 30.0) as usize;
+
             // Reorder the ring buffer into a contiguous windowed buffer for FFT.
             // Reuse stft_scratch as temporary storage (it is KERNEL_LEN-sized).
             let pos = self.input_spectrum_pos;
@@ -1213,8 +1218,6 @@ impl Plugin for WavetableFilter {
                     }
                 }
             }
-            // Restore stft_scratch to zeros so it's clean for the next STFT frame.
-            self.stft_scratch.fill(0.0);
         }
 
         ProcessStatus::Normal

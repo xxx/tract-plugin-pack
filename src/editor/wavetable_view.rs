@@ -1,6 +1,8 @@
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::WavetableFilterParams;
@@ -8,7 +10,26 @@ use crate::WavetableFilterParams;
 pub struct WavetableView {
     params: Arc<WavetableFilterParams>,
     shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
-    last_frame_count: std::cell::Cell<usize>,
+    wavetable_version: Arc<AtomicU32>,
+    frame_cache: RefCell<FrameCache>,
+}
+
+struct FrameCache {
+    cached_frames: Vec<Vec<f32>>,
+    cached_version: u32,
+    cached_frame_count: usize,
+    cached_frame_size: usize,
+}
+
+impl FrameCache {
+    fn new() -> Self {
+        Self {
+            cached_frames: Vec::new(),
+            cached_version: u32::MAX, // Forces initial load
+            cached_frame_count: 0,
+            cached_frame_size: 0,
+        }
+    }
 }
 
 impl WavetableView {
@@ -16,18 +37,13 @@ impl WavetableView {
         cx: &'a mut Context,
         params: Arc<WavetableFilterParams>,
         shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
-        _wavetable_version: Arc<std::sync::atomic::AtomicU32>,
+        wavetable_version: Arc<AtomicU32>,
     ) -> Handle<'a, Self> {
-        // Get initial frame count
-        let initial_frame_count = shared_wavetable
-            .lock()
-            .map(|wt| wt.frame_count)
-            .unwrap_or(0);
-
         Self {
             params,
             shared_wavetable,
-            last_frame_count: std::cell::Cell::new(initial_frame_count),
+            wavetable_version,
+            frame_cache: RefCell::new(FrameCache::new()),
         }
         .build(cx, |_cx| {})
     }
@@ -57,26 +73,27 @@ impl View for WavetableView {
         let width = bounds.w - padding * 2.0;
         let height = bounds.h - padding * 2.0;
 
-        // Get the current wavetable - read it fresh every frame
-        let (frames_data, frame_count, frame_size) = {
-            let Ok(wavetable) = self.shared_wavetable.lock() else {
-                return;
-            };
+        // Update cached frames only when the wavetable version has changed
+        {
+            let current_version = self.wavetable_version.load(Ordering::Relaxed);
+            let mut cache = self.frame_cache.borrow_mut();
 
-            // Track if wavetable changed
-            let current_count = wavetable.frame_count;
-            if current_count != self.last_frame_count.get() {
-                self.last_frame_count.set(current_count);
-                // Force parent to redraw by requesting layout
-                // This is a hack but vizia doesn't give us better options
+            if current_version != cache.cached_version {
+                // Try to acquire the wavetable lock without blocking the GUI thread
+                if let Ok(wavetable) = self.shared_wavetable.try_lock() {
+                    cache.cached_frames = wavetable.frames.clone();
+                    cache.cached_frame_count = wavetable.frame_count;
+                    cache.cached_frame_size = wavetable.frame_size;
+                    cache.cached_version = current_version;
+                }
+                // If lock is contended, we keep the stale cached data
             }
+        }
 
-            (
-                wavetable.frames.clone(),
-                wavetable.frame_count,
-                wavetable.frame_size,
-            )
-        };
+        let cache = self.frame_cache.borrow();
+        let frame_count = cache.cached_frame_count;
+        let frame_size = cache.cached_frame_size;
+        let frames_data = &cache.cached_frames;
 
         if frame_count == 0 || frame_size == 0 {
             return;
@@ -85,7 +102,7 @@ impl View for WavetableView {
         // Find global min/max for consistent scaling
         let mut global_min = f32::INFINITY;
         let mut global_max = f32::NEG_INFINITY;
-        for frame in &frames_data {
+        for frame in frames_data {
             for &sample in frame {
                 global_min = global_min.min(sample);
                 global_max = global_max.max(sample);
@@ -183,6 +200,9 @@ impl View for WavetableView {
             let color = vg::Color::rgba(255, 200, 100, 255); // Bright orange for active
             canvas.stroke_path(&path, &vg::Paint::color(color).with_line_width(2.5));
         }
+
+        // Drop the borrow before drawing grid (doesn't need frame data)
+        drop(cache);
 
         // Draw grid lines
         let mut grid_paint = vg::Paint::color(vg::Color::rgba(80, 80, 90, 100));

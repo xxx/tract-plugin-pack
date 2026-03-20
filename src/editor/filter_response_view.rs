@@ -2,6 +2,7 @@ use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
 use realfft::RealFftPlanner;
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use crate::WavetableFilterParams;
@@ -12,10 +13,39 @@ const DB_CEIL: f32 = 0.0;
 const DB_FLOOR: f32 = -48.0;
 const DB_RANGE: f32 = DB_CEIL - DB_FLOOR; // 48 dB total
 
+/// Epsilon for float comparison to detect parameter changes.
+const PARAM_EPSILON: f32 = 0.001;
+
 pub struct FilterResponseView {
     params: Arc<WavetableFilterParams>,
     shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
     shared_input_spectrum: Arc<std::sync::Mutex<(f32, Vec<f32>)>>,
+    /// Cached FFT magnitude results and the planner/scratch buffers.
+    fft_cache: RefCell<FftCache>,
+}
+
+struct FftCache {
+    planner: RealFftPlanner<f32>,
+    frame_buf: Vec<f32>,
+    spectrum: Vec<rustfft::num_complex::Complex<f32>>,
+    cached_mags: Vec<f32>,
+    cached_frame_pos: f32,
+    cached_cutoff: f32,
+    cached_resonance: f32,
+}
+
+impl FftCache {
+    fn new() -> Self {
+        Self {
+            planner: RealFftPlanner::new(),
+            frame_buf: Vec::new(),
+            spectrum: Vec::new(),
+            cached_mags: Vec::new(),
+            cached_frame_pos: -1.0,
+            cached_cutoff: -1.0,
+            cached_resonance: -1.0,
+        }
+    }
 }
 
 impl FilterResponseView {
@@ -29,8 +59,83 @@ impl FilterResponseView {
             params,
             shared_wavetable,
             shared_input_spectrum,
+            fft_cache: RefCell::new(FftCache::new()),
         }
         .build(cx, |_cx| {})
+    }
+
+    /// Recompute the FFT magnitudes if parameters changed, otherwise reuse cached data.
+    /// Returns false if there is no valid magnitude data available.
+    fn update_cached_mags(&self, frame_position: f32, cutoff_hz: f32, resonance: f32) -> bool {
+        let mut cache = self.fft_cache.borrow_mut();
+
+        let needs_update = (cache.cached_frame_pos - frame_position).abs() > PARAM_EPSILON
+            || (cache.cached_cutoff - cutoff_hz).abs() > PARAM_EPSILON
+            || (cache.cached_resonance - resonance).abs() > PARAM_EPSILON
+            || cache.cached_mags.is_empty();
+
+        if !needs_update {
+            return !cache.cached_mags.is_empty();
+        }
+
+        // Try to acquire the wavetable lock without blocking the GUI thread
+        let frame = match self.shared_wavetable.try_lock() {
+            Ok(wt) => wt.get_frame_interpolated(frame_position),
+            Err(_) => {
+                // Lock contended (audio thread is updating) — use stale cached data
+                return !cache.cached_mags.is_empty();
+            }
+        };
+
+        if frame.is_empty() {
+            return !cache.cached_mags.is_empty();
+        }
+
+        let frame_n = frame.len();
+        let fft = cache.planner.plan_fft_forward(frame_n);
+
+        // Resize scratch buffers if needed
+        cache.frame_buf.resize(frame_n, 0.0);
+        cache
+            .spectrum
+            .resize(frame_n / 2 + 1, rustfft::num_complex::Complex::new(0.0, 0.0));
+
+        cache.frame_buf.copy_from_slice(&frame);
+        for c in cache.spectrum.iter_mut() {
+            *c = rustfft::num_complex::Complex::new(0.0, 0.0);
+        }
+
+        // Destructure to satisfy the borrow checker: frame_buf and spectrum are
+        // disjoint fields, but Rust cannot prove that through &mut cache.
+        let FftCache {
+            ref mut frame_buf,
+            ref mut spectrum,
+            ref mut cached_mags,
+            ..
+        } = *cache;
+
+        if fft.process(frame_buf, spectrum).is_err() {
+            return !cached_mags.is_empty();
+        }
+
+        cached_mags.clear();
+        cached_mags.extend(spectrum.iter().map(|c| c.norm()));
+
+        // Normalize so peak magnitude = 1.0 (0 dB)
+        let peak = cached_mags
+            .iter()
+            .cloned()
+            .fold(0.0f32, f32::max)
+            .max(1e-10);
+        for m in cached_mags.iter_mut() {
+            *m /= peak;
+        }
+
+        cache.cached_frame_pos = frame_position;
+        cache.cached_cutoff = cutoff_hz;
+        cache.cached_resonance = resonance;
+
+        true
     }
 }
 
@@ -63,40 +168,16 @@ impl View for FilterResponseView {
         let x0 = bounds.x + padding;
         let y0 = bounds.y + padding;
 
-        // --- Compute frequency response ---
+        // --- Compute frequency response (with caching) ---
 
-        let frame = {
-            let Ok(wt) = self.shared_wavetable.lock() else {
-                return;
-            };
-            let pos = self.params.frame_position.unmodulated_normalized_value();
-            wt.get_frame_interpolated(pos)
-        };
-
-        if frame.is_empty() {
-            return;
-        }
-
-        // FFT the frame to get magnitude spectrum
-        let frame_n = frame.len();
-        let mut planner = RealFftPlanner::<f32>::new();
-        let fft = planner.plan_fft_forward(frame_n);
-        let mut frame_buf = frame.clone();
-        let mut spectrum = vec![rustfft::num_complex::Complex::new(0.0_f32, 0.0); frame_n / 2 + 1];
-        if fft.process(&mut frame_buf, &mut spectrum).is_err() {
-            return;
-        }
-        let mut mags: Vec<f32> = spectrum.iter().map(|c| c.norm()).collect();
-
-        // Normalize so peak magnitude = 1.0 (0 dB)
-        let peak = mags.iter().cloned().fold(0.0f32, f32::max).max(1e-10);
-        for m in &mut mags {
-            *m /= peak;
-        }
-
-        let resonance = self.params.resonance.unmodulated_plain_value();
+        let frame_position = self.params.frame_position.unmodulated_normalized_value();
         let cutoff_hz = self.params.frequency.unmodulated_plain_value();
+        let resonance = self.params.resonance.unmodulated_plain_value();
         let comb_exp = resonance * 8.0;
+
+        if !self.update_cached_mags(frame_position, cutoff_hz, resonance) {
+            return;
+        }
 
         // --- Grid ---
 
@@ -185,6 +266,8 @@ impl View for FilterResponseView {
         //   magnitude = interpolate mags[] at src_harmonic
         //   dB = 20 * log10(magnitude)
 
+        let cache = self.fft_cache.borrow();
+        let mags = &cache.cached_mags;
         let max_src = (mags.len() - 1) as f32;
 
         let mut fill_path = vg::Path::new();
@@ -226,6 +309,9 @@ impl View for FilterResponseView {
                 stroke_path.line_to(x, y);
             }
         }
+
+        // Drop the borrow before further canvas operations that don't need it
+        drop(cache);
 
         // Close the fill path along the bottom
         fill_path.line_to(x0 + width, y0 + height);
