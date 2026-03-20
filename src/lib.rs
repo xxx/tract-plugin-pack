@@ -1928,4 +1928,248 @@ mod tests {
         );
     }
 
+    // ── reverse_in_place ────────────────────────────────────────────────
+
+    #[test]
+    fn test_reverse_in_place() {
+        // Even-length array
+        let mut even = [1.0f32, 2.0, 3.0, 4.0];
+        reverse_in_place(&mut even);
+        assert_eq!(even, [4.0, 3.0, 2.0, 1.0]);
+
+        // Odd-length array
+        let mut odd = [1.0f32, 2.0, 3.0];
+        reverse_in_place(&mut odd);
+        assert_eq!(odd, [3.0, 2.0, 1.0]);
+
+        // Single element
+        let mut single = [1.0f32];
+        reverse_in_place(&mut single);
+        assert_eq!(single, [1.0]);
+
+        // Empty
+        let mut empty: [f32; 0] = [];
+        reverse_in_place(&mut empty);
+        assert_eq!(empty, [] as [f32; 0]);
+    }
+
+    // ── FilterState::reset ──────────────────────────────────────────────
+
+    #[test]
+    fn test_filter_state_reset() {
+        let mut state = FilterState::new(2048);
+
+        // Push some samples to make the history non-zero.
+        push_sequence(&mut state, &[1.0, 2.0, 3.0, 4.0, 5.0]);
+
+        // Verify non-zero history and non-zero write_pos before reset.
+        assert_eq!(state.write_pos, 5);
+        let has_nonzero = state.history.iter().any(|&v| v != 0.0);
+        assert!(has_nonzero, "history should contain non-zero samples before reset");
+
+        state.reset();
+
+        // After reset, all history should be zero and write_pos should be 0.
+        assert_eq!(state.write_pos, 0);
+        assert!(
+            state.history.iter().all(|&v| v == 0.0),
+            "all history samples should be zero after reset"
+        );
+    }
+
+    // ── Low cutoff downsampling branch in compute_base_spectrum_into ───
+
+    #[test]
+    fn test_low_cutoff_downsampling() {
+        // At very low cutoffs, bin_to_src > 1.0, exercising the peak-scanning
+        // branch in compute_base_spectrum_into.
+        let wt = WavetableFilter::create_default_wavetable();
+        let sample_rate = 48000.0f32;
+        let cutoff = 25.0f32; // very low cutoff
+
+        let mut planner = RealFftPlanner::<f32>::new();
+        let frame_fft = planner.plan_fft_forward(wt.frame_size);
+
+        // Verify bin_to_src > 1.0 for this configuration.
+        let bin_to_src = 24.0 * sample_rate / (KERNEL_LEN as f32 * cutoff);
+        assert!(
+            bin_to_src > 1.0,
+            "bin_to_src={bin_to_src} should be >1.0 for low cutoff test"
+        );
+
+        // Use the allocating path for simplicity.
+        let frame = wt.get_frame_interpolated(0.0);
+        let result = WavetableFilter::compute_base_spectrum(
+            &frame, cutoff, sample_rate, &frame_fft,
+        );
+        assert!(result.is_some(), "compute_base_spectrum should succeed at low cutoff");
+
+        let (mags, fracs) = result.unwrap();
+
+        // All magnitudes must be finite and non-negative.
+        assert!(
+            mags.iter().all(|v| v.is_finite() && *v >= 0.0),
+            "all magnitudes should be finite and non-negative"
+        );
+
+        // In the downsampling branch, fracs should be 0.0 (documented in the code comment).
+        // Check that the first few non-zero bins have frac=0.0.
+        for j in 1..10.min(fracs.len()) {
+            let src = j as f32 * bin_to_src;
+            if src < wt.frame_size as f32 / 2.0 {
+                assert_eq!(
+                    fracs[j], 0.0,
+                    "bin {j}: frac should be 0.0 in downsampling branch"
+                );
+            }
+        }
+
+        // DC bin should have a value (frame 0 is a sine which has some DC content after FFT).
+        // At minimum, magnitudes should not all be zero.
+        let max_mag = mags.iter().cloned().fold(0.0f32, f32::max);
+        assert!(max_mag > 0.0, "at least some bins should have non-zero magnitude");
+
+        // Also test via the allocation-free path.
+        let mut frame_buf = wt.get_frame_interpolated(0.0);
+        let spec_len = wt.frame_size / 2 + 1;
+        let mut frame_spectrum = vec![Complex::new(0.0f32, 0.0); spec_len];
+        let mut frame_mags = vec![0.0f32; spec_len];
+        let mut out_mags = vec![0.0f32; KERNEL_LEN / 2 + 1];
+        let mut out_fracs = vec![0.0f32; KERNEL_LEN / 2 + 1];
+
+        let ok = WavetableFilter::compute_base_spectrum_into(
+            &mut frame_buf,
+            cutoff,
+            sample_rate,
+            &frame_fft,
+            &mut frame_spectrum,
+            &mut frame_mags,
+            &mut out_mags,
+            &mut out_fracs,
+        );
+        assert!(ok, "compute_base_spectrum_into should succeed at low cutoff");
+        assert!(
+            out_mags.iter().all(|v| v.is_finite() && *v >= 0.0),
+            "all output magnitudes should be finite and non-negative (alloc-free path)"
+        );
+    }
+
+    // ── STFT magnitudes with zero resonance ─────────────────────────────
+
+    #[test]
+    fn test_stft_magnitudes_zero_resonance() {
+        // With resonance=0, comb_exp=0.0 (<=0.01), so compute_stft_magnitudes
+        // takes the else branch and passes base_mags through unchanged.
+        let sample_rate = 48000.0f32;
+        let cutoff = 1000.0f32;
+        let wt = WavetableFilter::create_default_wavetable();
+        let mut planner = RealFftPlanner::<f32>::new();
+        let frame_fft = planner.plan_fft_forward(wt.frame_size);
+
+        let frame = wt.get_frame_interpolated(0.0);
+        let (base_mags, bin_fracs) =
+            WavetableFilter::compute_base_spectrum(&frame, cutoff, sample_rate, &frame_fft)
+                .expect("spectrum computation failed");
+
+        let mut stft_mags = vec![0.0f32; KERNEL_LEN / 2 + 1];
+        WavetableFilter::compute_stft_magnitudes(&base_mags, &bin_fracs, 0.0, &mut stft_mags);
+
+        // With zero resonance, the output should equal the base magnitudes exactly.
+        for j in 0..base_mags.len().min(stft_mags.len()) {
+            assert_eq!(
+                stft_mags[j], base_mags[j],
+                "bin {j}: with zero resonance, stft magnitude should equal base magnitude"
+            );
+        }
+
+        // All values should be finite and non-negative.
+        assert!(stft_mags.iter().all(|v| v.is_finite() && *v >= 0.0));
+    }
+
+    // ── Wavetable file loading ──────────────────────────────────────────
+
+    #[test]
+    fn test_wavetable_file_loading() {
+        // Load the sample wavetable file included in the repo.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/phaseless-bass.wt");
+        let wt = Wavetable::from_file(path);
+        assert!(wt.is_ok(), "phaseless-bass.wt should load successfully: {:?}", wt.err());
+
+        let wt = wt.unwrap();
+        assert!(wt.frame_count > 0, "frame_count should be > 0");
+        assert!(wt.frame_size > 0, "frame_size should be > 0");
+        assert!(!wt.frames.is_empty(), "frames should not be empty");
+
+        // All frame data should contain finite values.
+        for (i, frame) in wt.frames.iter().enumerate() {
+            assert_eq!(frame.len(), wt.frame_size, "frame {i} length mismatch");
+            assert!(
+                frame.iter().all(|v| v.is_finite()),
+                "frame {i} contains non-finite values"
+            );
+        }
+
+        // Error case: non-existent file
+        let result = Wavetable::from_file("/tmp/this_file_does_not_exist_12345.wt");
+        assert!(result.is_err(), "non-existent file should return Err");
+
+        // Error case: garbage data
+        let garbage_path = "/tmp/wavetable_filter_test_garbage.wt";
+        std::fs::write(garbage_path, b"this is not a valid wavetable file")
+            .expect("failed to write temp file");
+        let result = Wavetable::from_file(garbage_path);
+        assert!(result.is_err(), "garbage file should return Err");
+        let _ = std::fs::remove_file(garbage_path);
+    }
+
+    // ── Wavetable interpolation edge cases ──────────────────────────────
+
+    #[test]
+    fn test_wavetable_interpolation_edge_cases() {
+        let wt = WavetableFilter::create_default_wavetable();
+
+        // Position 0.0 should return the first frame exactly.
+        let first = wt.get_frame_interpolated(0.0);
+        assert_eq!(first.len(), wt.frame_size);
+        for (i, (&got, &expected)) in first.iter().zip(wt.frames[0].iter()).enumerate() {
+            assert!(
+                (got - expected).abs() < 1e-7,
+                "sample {i}: get_frame_interpolated(0.0) should match first frame"
+            );
+        }
+
+        // Position 1.0 should return the last frame exactly.
+        let last = wt.get_frame_interpolated(1.0);
+        let last_frame = &wt.frames[wt.frame_count - 1];
+        for (i, (&got, &expected)) in last.iter().zip(last_frame.iter()).enumerate() {
+            assert!(
+                (got - expected).abs() < 1e-7,
+                "sample {i}: get_frame_interpolated(1.0) should match last frame"
+            );
+        }
+
+        // Position 0.5 should be a blend between middle frames.
+        let mid = wt.get_frame_interpolated(0.5);
+        assert_eq!(mid.len(), wt.frame_size);
+        // The result should differ from both the first and last frame (unless all
+        // frames are identical, which they are not for the default wavetable).
+        let differs_from_first = mid.iter().zip(wt.frames[0].iter()).any(|(a, b)| (a - b).abs() > 1e-6);
+        let differs_from_last = mid.iter().zip(last_frame.iter()).any(|(a, b)| (a - b).abs() > 1e-6);
+        assert!(differs_from_first, "mid-frame should differ from first frame");
+        assert!(differs_from_last, "mid-frame should differ from last frame");
+
+        // interpolate_frame_into should produce the same results as get_frame_interpolated.
+        for &pos in &[0.0f32, 0.5, 1.0] {
+            let allocating = wt.get_frame_interpolated(pos);
+            let mut buf = vec![0.0f32; wt.frame_size];
+            wt.interpolate_frame_into(pos, &mut buf);
+            for (i, (&a, &b)) in allocating.iter().zip(buf.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < 1e-7,
+                    "pos={pos} sample {i}: interpolate_frame_into should match get_frame_interpolated"
+                );
+            }
+        }
+    }
+
 }
