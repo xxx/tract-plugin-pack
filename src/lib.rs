@@ -904,7 +904,7 @@ impl Plugin for WavetableFilter {
         let ratio = self.params.oversample.value().factor();
         self.effective_sample_rate = self.host_sample_rate * ratio as f32;
         self.sample_rate = self.effective_sample_rate;
-        self.crossfade_step = 1.0 / (self.effective_sample_rate * 0.020);
+        self.crossfade_step = 1.0 / (self.host_sample_rate * 0.020);
         self.oversamplers = [
             oversampler::Oversampler::new(1, self.max_block_size, 2),
             oversampler::Oversampler::new(2, self.max_block_size, 2),
@@ -950,7 +950,7 @@ impl Plugin for WavetableFilter {
             if Self::compute_base_spectrum_into(
                 &mut self.frame_buf,
                 cutoff,
-                self.sample_rate,
+                self.host_sample_rate,
                 &self.frame_fft,
                 &mut self.frame_spectrum,
                 &mut self.frame_mags,
@@ -1049,7 +1049,7 @@ impl Plugin for WavetableFilter {
             self.oversamplers[current_os_ratio.index()].reset();
             self.effective_sample_rate = self.host_sample_rate * ratio as f32;
             self.sample_rate = self.effective_sample_rate;
-            self.crossfade_step = 1.0 / (self.effective_sample_rate * 0.020);
+            self.crossfade_step = 1.0 / (self.host_sample_rate * 0.020);
             for state in &mut self.filter_state { state.reset(); }
             for buf in &mut self.stft_in { buf.fill(0.0); }
             for buf in &mut self.stft_out { buf.fill(0.0); }
@@ -1115,7 +1115,7 @@ impl Plugin for WavetableFilter {
             if WavetableFilter::compute_base_spectrum_into(
                 &mut self.frame_buf,
                 cutoff,
-                self.sample_rate,
+                self.host_sample_rate,
                 &self.frame_fft,
                 &mut self.frame_spectrum,
                 &mut self.frame_mags,
@@ -1287,9 +1287,12 @@ impl Plugin for WavetableFilter {
             }
         } else {
             // === OVERSAMPLED PATH (ratio > 1) ===
+            // Only the tanh nonlinearity runs at the oversampled rate.
+            // The convolution/STFT filter runs at host rate with full resolution.
+            //
+            // Flow: deinterleave → upsample → tanh at OS rate → downsample → filter at host rate
 
-            // 1. Deinterleave host input into per-channel buffers and
-            //    accumulate mono input for spectrum visualization.
+            // 1. Deinterleave host input and accumulate spectrum visualization data
             for (i, mut frame) in buffer.iter_samples().enumerate() {
                 let mut mono = 0.0f32;
                 for (ch, sample) in frame.iter_mut().enumerate() {
@@ -1301,8 +1304,6 @@ impl Plugin for WavetableFilter {
                         is_silent = false;
                     }
                 }
-                // Accumulate mono input into ring buffer for spectrum visualization
-                // (uses host-rate data, not oversampled)
                 let ch_cnt = num_channels.min(2);
                 if ch_cnt > 0 {
                     self.input_spectrum_buf[self.input_spectrum_pos] = mono / ch_cnt as f32;
@@ -1310,25 +1311,38 @@ impl Plugin for WavetableFilter {
                 }
             }
 
-            // 2. Upsample
+            // 2. Upsample clean input to oversampled rate
             let os_samples = self.oversamplers[os_idx].process_up(
                 &self.os_host_out[..num_channels.min(2)],
                 &mut self.os_input_buf[..num_channels.min(2)],
                 host_samples,
             );
 
-            // Advance unused smoothers once per host sample (not per OS sample).
-            // Kernel synthesis uses a single snapshot per buffer, so these just maintain timing.
-            for _ in 0..host_samples {
+            // 3. Apply tanh drive at oversampled rate (the only nonlinear op)
+            let drive_val = self.params.drive.smoothed.next();
+            for ch in 0..num_channels.min(2) {
+                for i in 0..os_samples {
+                    self.os_input_buf[ch][i] = (self.os_input_buf[ch][i] * drive_val).tanh();
+                }
+            }
+
+            // 4. Downsample driven signal back to host rate
+            self.oversamplers[os_idx].process_down(
+                &self.os_input_buf[..num_channels.min(2)],
+                &mut self.os_output_buf[..num_channels.min(2)],
+                os_samples,
+            );
+
+            // 5. Run the filter at host rate on the driven, downsampled signal.
+            //    This is the same per-sample loop as the 1x path but reads from
+            //    os_output_buf (driven host-rate) and writes back to os_host_out.
+            for i in 0..host_samples {
                 let _ = self.params.frame_position.smoothed.next();
                 let _ = self.params.frequency.smoothed.next();
                 let _ = self.params.resonance.smoothed.next();
-            }
-
-            // 3. Process oversampled samples
-            for i in 0..os_samples {
                 let mix = self.params.mix.smoothed.next();
-                let drive = self.params.drive.smoothed.next();
+                // drive already applied above; advance smoother to keep timing
+                let _ = self.params.drive.smoothed.next();
 
                 let reset_gain = if self.reset_fade_remaining > 0 {
                     self.reset_fade_remaining as f32 / self.reset_fade_total as f32
@@ -1336,9 +1350,9 @@ impl Plugin for WavetableFilter {
                     1.0
                 };
 
-                // STFT hop processing
+                // STFT hop processing at host rate
                 if filter_mode != FilterMode::Raw && self.stft_out_pos == 0 {
-                    for ch in 0..2 {
+                    for ch in 0..num_channels.min(2) {
                         self.stft_out[ch].copy_within(HOP..KERNEL_LEN, 0);
                         self.stft_out[ch][HOP..].fill(0.0);
                         Self::process_stft_frame(
@@ -1350,12 +1364,13 @@ impl Plugin for WavetableFilter {
                     }
                 }
 
-                // Per-channel processing
                 for ch in 0..num_channels.min(2) {
-                    let input = self.os_input_buf[ch][i];
+                    // os_output_buf has the driven, downsampled signal
+                    let driven_input = self.os_output_buf[ch][i];
+                    // os_host_out has the original clean input (from deinterleave)
+                    let clean_input = self.os_host_out[ch][i];
 
                     if filter_mode == FilterMode::Raw {
-                        let driven_input = (input * drive).tanh();
                         self.filter_state[ch].push(driven_input);
 
                         const SIMD_LANES: usize = 16;
@@ -1387,16 +1402,14 @@ impl Plugin for WavetableFilter {
                             hsum(acc)
                         };
 
-                        self.os_output_buf[ch][i] = input * (1.0 - mix) + filtered * mix * reset_gain;
+                        self.os_host_out[ch][i] = clean_input * (1.0 - mix) + filtered * mix * reset_gain;
                     } else {
-                        let driven_input = (input * drive).tanh();
                         self.stft_in[ch][self.stft_in_pos] = driven_input;
                         let filtered = self.stft_out[ch][self.stft_out_pos];
-                        self.os_output_buf[ch][i] = input * (1.0 - mix) + filtered * mix * reset_gain;
+                        self.os_host_out[ch][i] = clean_input * (1.0 - mix) + filtered * mix * reset_gain;
                     }
                 }
 
-                // Reset fade bookkeeping
                 if self.reset_fade_remaining > 0 {
                     self.reset_fade_remaining -= 1;
                     if self.reset_fade_remaining == 0 {
@@ -1422,14 +1435,7 @@ impl Plugin for WavetableFilter {
                 }
             }
 
-            // 4. Downsample
-            self.oversamplers[os_idx].process_down(
-                &self.os_output_buf[..num_channels.min(2)],
-                &mut self.os_host_out[..num_channels.min(2)],
-                os_samples,
-            );
-
-            // 5. Write back to host buffer
+            // 6. Write host-rate output back to buffer
             for (i, mut frame) in buffer.iter_samples().enumerate() {
                 for ch in 0..num_channels.min(2) {
                     *frame.get_mut(ch).unwrap() = self.os_host_out[ch][i];
@@ -1440,7 +1446,7 @@ impl Plugin for WavetableFilter {
         // Clear filter state after ~100ms of silence
         if is_silent {
             self.silence_samples += host_samples;
-            if self.silence_samples > (self.sample_rate * 0.1) as usize {
+            if self.silence_samples > (self.host_sample_rate * 0.1) as usize {
                 for state in &mut self.filter_state {
                     state.reset();
                 }
@@ -2477,6 +2483,237 @@ mod tests {
             "bin_to_src should double at 2x");
         assert!((bin_to_src_4x - bin_to_src_1x * 4.0).abs() < 0.001,
             "bin_to_src should quadruple at 4x");
+    }
+
+    #[test]
+    fn test_oversampling_wav_comparison() {
+        use crate::oversampler::Oversampler;
+        use hound::{WavSpec, WavWriter};
+        use realfft::RealFftPlanner;
+
+        let sample_rate = 48000.0_f32;
+        let freq = 440.0_f32;
+        let drive = 3.0_f32;
+        let n = 512_usize;
+        let ratio = 4_usize;
+
+        // ── Generate clean 440 Hz sine at host rate ─────────────────────
+        let clean: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate).sin())
+            .collect();
+
+        // ── 1x: just apply drive directly (no resampling) ──────────────
+        let driven_1x: Vec<f32> = clean.iter().map(|&s| (s * drive).tanh()).collect();
+
+        // ── 4x correct: upsample clean → drive at oversampled rate → downsample
+        let mut os4 = Oversampler::new(ratio, n, 1);
+        // Prime the resampler so transient settling doesn't pollute the output
+        {
+            let silence = vec![vec![0.0f32; n]];
+            let mut up_tmp = vec![vec![0.0f32; n * ratio]];
+            let mut dn_tmp = vec![vec![0.0f32; n]];
+            for _ in 0..8 {
+                let nu = os4.process_up(&silence, &mut up_tmp, n);
+                os4.process_down(&up_tmp, &mut dn_tmp, nu);
+            }
+        }
+        let input_4x = vec![clean.clone()];
+        let mut up_buf = vec![vec![0.0f32; n * ratio]];
+        let n_up = os4.process_up(&input_4x, &mut up_buf, n);
+        assert_eq!(n_up, n * ratio, "upsample should produce n*ratio samples");
+
+        // Apply drive at the oversampled rate
+        for s in up_buf[0][..n_up].iter_mut() {
+            *s = (*s * drive).tanh();
+        }
+
+        let mut driven_4x = vec![vec![0.0f32; n]];
+        let n_down = os4.process_down(&up_buf, &mut driven_4x, n_up);
+        assert_eq!(n_down, n, "downsample should produce n samples");
+
+        // ── 4x wrong: drive first, then upsample → downsample ──────────
+        let mut os4w = Oversampler::new(ratio, n, 1);
+        {
+            let silence = vec![vec![0.0f32; n]];
+            let mut up_tmp = vec![vec![0.0f32; n * ratio]];
+            let mut dn_tmp = vec![vec![0.0f32; n]];
+            for _ in 0..8 {
+                let nu = os4w.process_up(&silence, &mut up_tmp, n);
+                os4w.process_down(&up_tmp, &mut dn_tmp, nu);
+            }
+        }
+        let already_driven: Vec<f32> = clean.iter().map(|&s| (s * drive).tanh()).collect();
+        let input_wrong = vec![already_driven.clone()];
+        let mut up_buf_w = vec![vec![0.0f32; n * ratio]];
+        let n_up_w = os4w.process_up(&input_wrong, &mut up_buf_w, n);
+
+        // No drive here — it was already applied before upsampling
+        let mut driven_4x_wrong = vec![vec![0.0f32; n]];
+        let _n_down_w = os4w.process_down(&up_buf_w, &mut driven_4x_wrong, n_up_w);
+
+        // ── Write WAV files ─────────────────────────────────────────────
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate: sample_rate as u32,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+
+        let write_wav = |path: &str, data: &[f32]| {
+            let mut w = WavWriter::create(path, spec).expect("create wav");
+            for &s in data {
+                w.write_sample(s).expect("write sample");
+            }
+            w.finalize().expect("finalize wav");
+            println!("  Wrote {path} ({} samples)", data.len());
+        };
+
+        write_wav("/tmp/os_test_1x.wav", &driven_1x);
+        write_wav("/tmp/os_test_4x.wav", &driven_4x[0]);
+        write_wav("/tmp/os_test_4x_wrong.wav", &driven_4x_wrong[0]);
+
+        // ── Time-domain comparison ──────────────────────────────────────
+        println!("\n=== TIME-DOMAIN COMPARISON ===");
+
+        let peak_1x = driven_1x.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        let peak_4x = driven_4x[0].iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        let peak_4xw = driven_4x_wrong[0].iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        println!("Peak amplitude 1x:       {peak_1x:.6}");
+        println!("Peak amplitude 4x:       {peak_4x:.6}");
+        println!("Peak amplitude 4x-wrong: {peak_4xw:.6}");
+
+        // 1x vs 4x-correct
+        let diffs_correct: Vec<f32> = driven_1x
+            .iter()
+            .zip(driven_4x[0].iter())
+            .map(|(a, b)| a - b)
+            .collect();
+        let max_diff_correct = diffs_correct.iter().map(|d| d.abs()).fold(0.0f32, f32::max);
+        let rms_correct = (diffs_correct.iter().map(|d| d * d).sum::<f32>() / n as f32).sqrt();
+
+        println!("\n--- 1x vs 4x-correct ---");
+        println!("Max difference:  {max_diff_correct:.6}");
+        println!("RMS difference:  {rms_correct:.6}");
+
+        // 1x vs 4x-wrong
+        let diffs_wrong: Vec<f32> = driven_1x
+            .iter()
+            .zip(driven_4x_wrong[0].iter())
+            .map(|(a, b)| a - b)
+            .collect();
+        let max_diff_wrong = diffs_wrong.iter().map(|d| d.abs()).fold(0.0f32, f32::max);
+        let rms_wrong = (diffs_wrong.iter().map(|d| d * d).sum::<f32>() / n as f32).sqrt();
+
+        println!("\n--- 1x vs 4x-wrong ---");
+        println!("Max difference:  {max_diff_wrong:.6}");
+        println!("RMS difference:  {rms_wrong:.6}");
+
+        // 4x-correct vs 4x-wrong
+        let diffs_cw: Vec<f32> = driven_4x[0]
+            .iter()
+            .zip(driven_4x_wrong[0].iter())
+            .map(|(a, b)| a - b)
+            .collect();
+        let max_diff_cw = diffs_cw.iter().map(|d| d.abs()).fold(0.0f32, f32::max);
+        let rms_cw = (diffs_cw.iter().map(|d| d * d).sum::<f32>() / n as f32).sqrt();
+
+        println!("\n--- 4x-correct vs 4x-wrong ---");
+        println!("Max difference:  {max_diff_cw:.6}");
+        println!("RMS difference:  {rms_cw:.6}");
+
+        // Per-sample differences for first 50 samples
+        println!("\n--- Per-sample (first 50): idx | 1x | 4x | 4x-wrong | diff(1x-4x) | diff(1x-4xw) ---");
+        for i in 0..50 {
+            println!(
+                "  [{:3}] 1x={:+.6} 4x={:+.6} 4xw={:+.6}  d(1x-4x)={:+.6}  d(1x-4xw)={:+.6}",
+                i, driven_1x[i], driven_4x[0][i], driven_4x_wrong[0][i],
+                diffs_correct[i], diffs_wrong[i]
+            );
+        }
+
+        // ── Spectral analysis ───────────────────────────────────────────
+        println!("\n=== SPECTRAL ANALYSIS (FFT) ===");
+
+        let fft_size = n; // 512
+        let mut planner = RealFftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(fft_size);
+        let n_bins = fft_size / 2 + 1;
+
+        let compute_magnitudes = |signal: &[f32]| -> Vec<f32> {
+            let mut input_buf = signal.to_vec();
+            let mut spectrum = vec![Complex { re: 0.0f32, im: 0.0f32 }; n_bins];
+            fft.process(&mut input_buf, &mut spectrum).expect("fft");
+            spectrum
+                .iter()
+                .map(|c| (c.re * c.re + c.im * c.im).sqrt() / (fft_size as f32 / 2.0))
+                .collect()
+        };
+
+        let mags_1x = compute_magnitudes(&driven_1x);
+        let mags_4x = compute_magnitudes(&driven_4x[0]);
+        let mags_4xw = compute_magnitudes(&driven_4x_wrong[0]);
+
+        let bin_hz = sample_rate / fft_size as f32;
+        println!("Bin resolution: {bin_hz:.1} Hz");
+        println!("Number of bins: {n_bins}");
+
+        // Print notable bins (fundamental + harmonics of 440 Hz, and high-frequency region)
+        println!("\n--- Magnitude at key frequencies ---");
+        println!("{:>8} {:>10} {:>10} {:>10}", "Freq(Hz)", "1x", "4x", "4x-wrong");
+        let interesting_freqs = [440.0, 880.0, 1320.0, 1760.0, 2200.0, 3080.0, 4400.0,
+                                  6600.0, 8800.0, 10000.0, 12000.0, 15000.0, 18000.0, 20000.0, 22000.0];
+        for &f in &interesting_freqs {
+            let bin = (f / bin_hz).round() as usize;
+            if bin < n_bins {
+                println!(
+                    "{:8.0} {:10.6} {:10.6} {:10.6}",
+                    bin as f32 * bin_hz, mags_1x[bin], mags_4x[bin], mags_4xw[bin]
+                );
+            }
+        }
+
+        // Energy above 10 kHz
+        let bin_10k = (10000.0 / bin_hz).ceil() as usize;
+        let energy_above = |mags: &[f32]| -> f32 {
+            mags[bin_10k..].iter().map(|m| m * m).sum::<f32>().sqrt()
+        };
+        let e1x = energy_above(&mags_1x);
+        let e4x = energy_above(&mags_4x);
+        let e4xw = energy_above(&mags_4xw);
+
+        println!("\n--- Energy above 10 kHz (RMS of magnitude bins) ---");
+        println!("1x:       {e1x:.6}");
+        println!("4x:       {e4x:.6}");
+        println!("4x-wrong: {e4xw:.6}");
+
+        // Total energy for reference
+        let total_energy = |mags: &[f32]| -> f32 {
+            mags.iter().map(|m| m * m).sum::<f32>().sqrt()
+        };
+        let t1x = total_energy(&mags_1x);
+        let t4x = total_energy(&mags_4x);
+        let t4xw = total_energy(&mags_4xw);
+        println!("\n--- Total spectral energy (RMS of all bins) ---");
+        println!("1x:       {t1x:.6}");
+        println!("4x:       {t4x:.6}");
+        println!("4x-wrong: {t4xw:.6}");
+
+        println!("\n--- High-freq energy as % of total ---");
+        println!("1x:       {:.2}%", 100.0 * e1x / t1x);
+        println!("4x:       {:.2}%", 100.0 * e4x / t4x);
+        println!("4x-wrong: {:.2}%", 100.0 * e4xw / t4xw);
+
+        // Full spectrum dump for the first 30 bins
+        println!("\n--- Full spectrum (first 30 bins) ---");
+        println!("{:>4} {:>8} {:>10} {:>10} {:>10}", "Bin", "Freq(Hz)", "1x", "4x", "4x-wrong");
+        for bin in 0..30.min(n_bins) {
+            println!(
+                "{:4} {:8.1} {:10.6} {:10.6} {:10.6}",
+                bin, bin as f32 * bin_hz, mags_1x[bin], mags_4x[bin], mags_4xw[bin]
+            );
+        }
+
+        println!("\n=== TEST COMPLETE ===");
     }
 
 }
