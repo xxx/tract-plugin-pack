@@ -293,6 +293,19 @@ pub(crate) fn create(
             .height(Pixels(40.0))
             .col_between(Pixels(10.0));
 
+            // Oversample selection row
+            HStack::new(cx, |cx| {
+                Label::new(cx, "Oversample")
+                    .width(Pixels(80.0))
+                    .height(Pixels(30.0));
+                ParamSlider::new(cx, Data::params, |params| &params.oversample)
+                    .set_style(ParamSliderStyle::CurrentStepLabeled { even: true })
+                    .width(Pixels(250.0))
+                    .class("mode-slider");
+            })
+            .height(Pixels(40.0))
+            .col_between(Pixels(10.0));
+
             // Visualization area with dials below each display
             HStack::new(cx, |cx| {
                 // Left column: wavetable view + frame position dial

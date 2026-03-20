@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod editor;
+pub mod oversampler;
 pub mod wavetable;
 
 use wavetable::Wavetable;
@@ -103,6 +104,18 @@ pub struct WavetableFilter {
     /// Countdown (in samples) until the next input-spectrum FFT for GUI visualization.
     /// Throttles the FFT to ~30 updates/sec instead of once per process() call.
     input_spectrum_countdown: usize,
+
+    // ── Oversampling state ───────────────────────────────────────────────
+    /// Pre-created oversamplers for each ratio. Index: 0=1x, 1=2x, 2=4x, 3=8x.
+    oversamplers: [oversampler::Oversampler; 4],
+    last_oversample_ratio: OversampleRatio,
+    effective_sample_rate: f32,
+    host_sample_rate: f32,
+    max_block_size: usize,
+    /// Pre-allocated buffers for oversampled processing (2ch)
+    os_input_buf: Vec<Vec<f32>>,   // channels × max_block × max_ratio
+    os_output_buf: Vec<Vec<f32>>,  // channels × max_block × max_ratio
+    os_host_out: Vec<Vec<f32>>,    // channels × max_block (for downsampled output)
 }
 
 struct FilterState {
@@ -140,6 +153,9 @@ struct WavetableFilterParams {
 
     #[id = "mode"]
     pub mode: EnumParam<FilterMode>,
+
+    #[id = "oversample"]
+    pub oversample: EnumParam<OversampleRatio>,
 }
 
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
@@ -151,6 +167,42 @@ enum FilterMode {
     #[id = "minimum"]
     #[name = "Phaseless"]
     Minimum,
+}
+
+#[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
+enum OversampleRatio {
+    #[id = "1x"]
+    #[name = "1x"]
+    X1,
+    #[id = "2x"]
+    #[name = "2x"]
+    X2,
+    #[id = "4x"]
+    #[name = "4x"]
+    X4,
+    #[id = "8x"]
+    #[name = "8x"]
+    X8,
+}
+
+impl OversampleRatio {
+    fn factor(self) -> usize {
+        match self {
+            Self::X1 => 1,
+            Self::X2 => 2,
+            Self::X4 => 4,
+            Self::X8 => 8,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::X1 => 0,
+            Self::X2 => 1,
+            Self::X4 => 2,
+            Self::X8 => 3,
+        }
+    }
 }
 
 
@@ -222,6 +274,19 @@ impl Default for WavetableFilter {
             input_spectrum_pos: 0,
             input_spectrum_scratch: vec![Complex::new(0.0, 0.0); KERNEL_LEN / 2 + 1],
             input_spectrum_countdown: 0,
+            oversamplers: [
+                oversampler::Oversampler::new(1, 8192, 2),
+                oversampler::Oversampler::new(2, 8192, 2),
+                oversampler::Oversampler::new(4, 8192, 2),
+                oversampler::Oversampler::new(8, 8192, 2),
+            ],
+            last_oversample_ratio: OversampleRatio::X1,
+            effective_sample_rate: 48000.0,
+            host_sample_rate: 48000.0,
+            max_block_size: 8192,
+            os_input_buf: vec![vec![0.0; 8192 * 8]; 2],
+            os_output_buf: vec![vec![0.0; 8192 * 8]; 2],
+            os_host_out: vec![vec![0.0; 8192]; 2],
         }
     }
 }
@@ -775,6 +840,8 @@ impl WavetableFilterParams {
             .with_smoother(SmoothingStyle::Linear(50.0)),
 
             mode: EnumParam::new("Mode", FilterMode::Raw),
+
+            oversample: EnumParam::new("Oversample", OversampleRatio::X1),
         }
     }
 }
@@ -830,8 +897,19 @@ impl Plugin for WavetableFilter {
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
-        self.sample_rate = buffer_config.sample_rate;
-        self.crossfade_step = 1.0 / (self.sample_rate * 0.020);
+        self.host_sample_rate = buffer_config.sample_rate;
+        self.max_block_size = buffer_config.max_buffer_size as usize;
+        let ratio = self.params.oversample.value().factor();
+        self.effective_sample_rate = self.host_sample_rate * ratio as f32;
+        self.sample_rate = self.effective_sample_rate;
+        self.crossfade_step = 1.0 / (self.effective_sample_rate * 0.020);
+        self.oversamplers = [
+            oversampler::Oversampler::new(1, self.max_block_size, 2),
+            oversampler::Oversampler::new(2, self.max_block_size, 2),
+            oversampler::Oversampler::new(4, self.max_block_size, 2),
+            oversampler::Oversampler::new(8, self.max_block_size, 2),
+        ];
+        self.last_oversample_ratio = self.params.oversample.value();
 
         // Sync editor scale from the persisted ui_scale parameter
         let scale_pct = self.params.ui_scale.value() as f64;
@@ -952,6 +1030,23 @@ impl Plugin for WavetableFilter {
             self.should_reload.store(false, Ordering::Relaxed);
         }
 
+        // ── Oversample ratio change detection ─────────────────────────────
+        let current_os_ratio = self.params.oversample.value();
+        if current_os_ratio != self.last_oversample_ratio {
+            let ratio = current_os_ratio.factor();
+            self.oversamplers[current_os_ratio.index()].reset();
+            self.effective_sample_rate = self.host_sample_rate * ratio as f32;
+            self.sample_rate = self.effective_sample_rate;
+            self.crossfade_step = 1.0 / (self.effective_sample_rate * 0.020);
+            for state in &mut self.filter_state { state.reset(); }
+            for buf in &mut self.stft_in { buf.fill(0.0); }
+            for buf in &mut self.stft_out { buf.fill(0.0); }
+            self.stft_in_pos = 0;
+            self.stft_out_pos = 0;
+            self.first_process = true;
+            self.last_oversample_ratio = current_os_ratio;
+        }
+
         if self.wavetable.is_none() {
             return ProcessStatus::Normal;
         }
@@ -976,7 +1071,11 @@ impl Plugin for WavetableFilter {
             self.last_mode = filter_mode;
         }
 
-        context.set_latency_samples(if filter_mode == FilterMode::Raw { 0 } else { HOP as u32 });
+        let os_idx = self.last_oversample_ratio.index();
+        let os_ratio = self.last_oversample_ratio.factor();
+        let os_latency = self.oversamplers[os_idx].latency_samples();
+        let stft_latency = if filter_mode == FilterMode::Raw { 0 } else { HOP as u32 };
+        context.set_latency_samples(stft_latency + os_latency);
 
         let frame_pos_changed = self.first_process
             || (frame_pos - self.last_frame_pos).abs() > 0.0001;
@@ -1050,129 +1149,281 @@ impl Plugin for WavetableFilter {
             }
         }
 
-        for mut channel_samples in buffer.iter_samples() {
-            // Advance frame_pos/cutoff/resonance smoothers each sample (keeps convergence timing correct).
-            // Their values are not needed here; synthesis already ran above for this buffer.
-            let _ = self.params.frame_position.smoothed.next();
-            let _ = self.params.frequency.smoothed.next();
-            let _ = self.params.resonance.smoothed.next();
-            let mix = self.params.mix.smoothed.next();
-            let drive = self.params.drive.smoothed.next();
+        let host_samples = buffer.samples();
+        let num_channels = buffer.channels();
 
-            // Reset fade: smoothly ramp the filter output to zero before clearing history.
-            let reset_gain = if self.reset_fade_remaining > 0 {
-                self.reset_fade_remaining as f32 / self.reset_fade_total as f32
-            } else {
-                1.0
-            };
+        if os_ratio <= 1 {
+            // === EXISTING 1x PATH (zero overhead) ===
+            for mut channel_samples in buffer.iter_samples() {
+                // Advance frame_pos/cutoff/resonance smoothers each sample (keeps convergence timing correct).
+                // Their values are not needed here; synthesis already ran above for this buffer.
+                let _ = self.params.frame_position.smoothed.next();
+                let _ = self.params.frequency.smoothed.next();
+                let _ = self.params.resonance.smoothed.next();
+                let mix = self.params.mix.smoothed.next();
+                let drive = self.params.drive.smoothed.next();
 
-            // STFT hop processing: when the output position wraps to 0, process the next frame.
-            if filter_mode != FilterMode::Raw && self.stft_out_pos == 0 {
-                for ch in 0..2 {
-                    self.stft_out[ch].copy_within(HOP..KERNEL_LEN, 0);
-                    self.stft_out[ch][HOP..].fill(0.0);
-                    Self::process_stft_frame(
-                        &self.stft_in[ch], self.stft_in_pos,
-                        &mut self.stft_out[ch], &self.stft_magnitudes,
-                        &self.stft_window, &self.stft_fft, &self.kernel_ifft,
-                        &mut self.stft_scratch, &mut self.spectrum_work,
-                    );
+                // Reset fade: smoothly ramp the filter output to zero before clearing history.
+                let reset_gain = if self.reset_fade_remaining > 0 {
+                    self.reset_fade_remaining as f32 / self.reset_fade_total as f32
+                } else {
+                    1.0
+                };
+
+                // STFT hop processing: when the output position wraps to 0, process the next frame.
+                if filter_mode != FilterMode::Raw && self.stft_out_pos == 0 {
+                    for ch in 0..2 {
+                        self.stft_out[ch].copy_within(HOP..KERNEL_LEN, 0);
+                        self.stft_out[ch][HOP..].fill(0.0);
+                        Self::process_stft_frame(
+                            &self.stft_in[ch], self.stft_in_pos,
+                            &mut self.stft_out[ch], &self.stft_magnitudes,
+                            &self.stft_window, &self.stft_fft, &self.kernel_ifft,
+                            &mut self.stft_scratch, &mut self.spectrum_work,
+                        );
+                    }
                 }
-            }
 
-            // Process each channel in this sample
-            let mut mono_input = 0.0f32;
-            let mut num_channels = 0u32;
-            for (channel_idx, sample) in channel_samples.iter_mut().enumerate() {
-                let state_idx = channel_idx.min(1);
-                let input = *sample;
-                mono_input += input;
-                num_channels += 1;
+                // Process each channel in this sample
+                let mut mono_input = 0.0f32;
+                let mut ch_count = 0u32;
+                for (channel_idx, sample) in channel_samples.iter_mut().enumerate() {
+                    let state_idx = channel_idx.min(1);
+                    let input = *sample;
+                    mono_input += input;
+                    ch_count += 1;
 
-                if input.abs() > silence_threshold {
-                    is_silent = false;
+                    if input.abs() > silence_threshold {
+                        is_silent = false;
+                    }
+
+                    if filter_mode == FilterMode::Raw {
+                        let driven_input = (input * drive).tanh();
+                        self.filter_state[state_idx].push(driven_input);
+
+                        // SIMD convolution: forward dot product of the double-buffered
+                        // history and time-reversed kernel. No per-element copies needed.
+                        const SIMD_LANES: usize = 16;
+                        const SIMD_CHUNKS: usize = KERNEL_LEN / SIMD_LANES;
+                        let history = self.filter_state[state_idx].history_slice();
+
+                        let filtered: f32 = if self.crossfade_active {
+                            let mut acc = f32x16::splat(0.0);
+                            let mut acc2 = f32x16::splat(0.0);
+                            for chunk_idx in 0..SIMD_CHUNKS {
+                                let k = chunk_idx * SIMD_LANES;
+                                let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
+                                acc += h
+                                    * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
+                                acc2 += h * f32x16::from_slice(
+                                    &self.crossfade_target_kernel[k..k + SIMD_LANES],
+                                );
+                            }
+                            let a = self.crossfade_alpha;
+                            hsum(acc) * (1.0 - a) + hsum(acc2) * a
+                        } else {
+                            let mut acc = f32x16::splat(0.0);
+                            for chunk_idx in 0..SIMD_CHUNKS {
+                                let k = chunk_idx * SIMD_LANES;
+                                let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
+                                acc += h
+                                    * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
+                            }
+                            hsum(acc)
+                        };
+
+                        *sample = input * (1.0 - mix) + filtered * mix * reset_gain;
+                    } else {
+                        let driven_input = (input * drive).tanh();
+                        self.stft_in[state_idx][self.stft_in_pos] = driven_input;
+                        let filtered = self.stft_out[state_idx][self.stft_out_pos];
+                        *sample = input * (1.0 - mix) + filtered * mix * reset_gain;
+                    }
+                }
+
+                // Accumulate mono input into ring buffer for spectrum visualization
+                if ch_count > 0 {
+                    self.input_spectrum_buf[self.input_spectrum_pos] = mono_input / ch_count as f32;
+                    self.input_spectrum_pos = (self.input_spectrum_pos + 1) & (KERNEL_LEN - 1);
+                }
+
+                // Complete the reset fade: once output has reached zero, clear history.
+                if self.reset_fade_remaining > 0 {
+                    self.reset_fade_remaining -= 1;
+                    if self.reset_fade_remaining == 0 {
+                        for state in &mut self.filter_state {
+                            state.reset();
+                        }
+                    }
                 }
 
                 if filter_mode == FilterMode::Raw {
-                    let driven_input = (input * drive).tanh();
-                    self.filter_state[state_idx].push(driven_input);
-
-                    // SIMD convolution: forward dot product of the double-buffered
-                    // history and time-reversed kernel. No per-element copies needed.
-                    const SIMD_LANES: usize = 16;
-                    const SIMD_CHUNKS: usize = KERNEL_LEN / SIMD_LANES;
-                    let history = self.filter_state[state_idx].history_slice();
-
-                    let filtered: f32 = if self.crossfade_active {
-                        let mut acc = f32x16::splat(0.0);
-                        let mut acc2 = f32x16::splat(0.0);
-                        for chunk_idx in 0..SIMD_CHUNKS {
-                            let k = chunk_idx * SIMD_LANES;
-                            let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
-                            acc += h
-                                * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
-                            acc2 += h * f32x16::from_slice(
-                                &self.crossfade_target_kernel[k..k + SIMD_LANES],
-                            );
+                    // Advance crossfade alpha once per sample (~20 ms total fade duration).
+                    if self.crossfade_active {
+                        self.crossfade_alpha += self.crossfade_step;
+                        if self.crossfade_alpha >= 1.0 {
+                            std::mem::swap(&mut self.synthesized_kernel, &mut self.crossfade_target_kernel);
+                            self.crossfade_active = false;
+                            self.crossfade_alpha = 0.0;
                         }
-                        let a = self.crossfade_alpha;
-                        hsum(acc) * (1.0 - a) + hsum(acc2) * a
-                    } else {
-                        let mut acc = f32x16::splat(0.0);
-                        for chunk_idx in 0..SIMD_CHUNKS {
-                            let k = chunk_idx * SIMD_LANES;
-                            let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
-                            acc += h
-                                * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
-                        }
-                        hsum(acc)
-                    };
-
-                    *sample = input * (1.0 - mix) + filtered * mix * reset_gain;
+                    }
                 } else {
-                    let driven_input = (input * drive).tanh();
-                    self.stft_in[state_idx][self.stft_in_pos] = driven_input;
-                    let filtered = self.stft_out[state_idx][self.stft_out_pos];
-                    *sample = input * (1.0 - mix) + filtered * mix * reset_gain;
+                    self.stft_in_pos = (self.stft_in_pos + 1) & (KERNEL_LEN - 1);
+                    self.stft_out_pos += 1;
+                    if self.stft_out_pos >= HOP { self.stft_out_pos = 0; }
                 }
             }
+        } else {
+            // === OVERSAMPLED PATH (ratio > 1) ===
 
-            // Accumulate mono input into ring buffer for spectrum visualization
-            if num_channels > 0 {
-                self.input_spectrum_buf[self.input_spectrum_pos] = mono_input / num_channels as f32;
-                self.input_spectrum_pos = (self.input_spectrum_pos + 1) & (KERNEL_LEN - 1);
-            }
-
-            // Complete the reset fade: once output has reached zero, clear history.
-            if self.reset_fade_remaining > 0 {
-                self.reset_fade_remaining -= 1;
-                if self.reset_fade_remaining == 0 {
-                    for state in &mut self.filter_state {
-                        state.reset();
+            // 1. Deinterleave host input into per-channel buffers and
+            //    accumulate mono input for spectrum visualization.
+            for (i, mut frame) in buffer.iter_samples().enumerate() {
+                let mut mono = 0.0f32;
+                for (ch, sample) in frame.iter_mut().enumerate() {
+                    if ch >= 2 { break; }
+                    let s = *sample;
+                    self.os_host_out[ch][i] = s;
+                    mono += s;
+                    if s.abs() > silence_threshold {
+                        is_silent = false;
                     }
                 }
+                // Accumulate mono input into ring buffer for spectrum visualization
+                // (uses host-rate data, not oversampled)
+                let ch_cnt = num_channels.min(2);
+                if ch_cnt > 0 {
+                    self.input_spectrum_buf[self.input_spectrum_pos] = mono / ch_cnt as f32;
+                    self.input_spectrum_pos = (self.input_spectrum_pos + 1) & (KERNEL_LEN - 1);
+                }
             }
 
-            if filter_mode == FilterMode::Raw {
-                // Advance crossfade alpha once per sample (~20 ms total fade duration).
-                if self.crossfade_active {
-                    self.crossfade_alpha += self.crossfade_step;
-                    if self.crossfade_alpha >= 1.0 {
-                        std::mem::swap(&mut self.synthesized_kernel, &mut self.crossfade_target_kernel);
-                        self.crossfade_active = false;
-                        self.crossfade_alpha = 0.0;
+            // 2. Upsample
+            let os_samples = self.oversamplers[os_idx].process_up(
+                &self.os_host_out[..num_channels.min(2)],
+                &mut self.os_input_buf[..num_channels.min(2)],
+                host_samples,
+            );
+
+            // 3. Process oversampled samples
+            for i in 0..os_samples {
+                // Advance smoothers (keeps convergence timing correct at oversampled rate).
+                let _ = self.params.frame_position.smoothed.next();
+                let _ = self.params.frequency.smoothed.next();
+                let _ = self.params.resonance.smoothed.next();
+                let mix = self.params.mix.smoothed.next();
+                let drive = self.params.drive.smoothed.next();
+
+                let reset_gain = if self.reset_fade_remaining > 0 {
+                    self.reset_fade_remaining as f32 / self.reset_fade_total as f32
+                } else {
+                    1.0
+                };
+
+                // STFT hop processing
+                if filter_mode != FilterMode::Raw && self.stft_out_pos == 0 {
+                    for ch in 0..2 {
+                        self.stft_out[ch].copy_within(HOP..KERNEL_LEN, 0);
+                        self.stft_out[ch][HOP..].fill(0.0);
+                        Self::process_stft_frame(
+                            &self.stft_in[ch], self.stft_in_pos,
+                            &mut self.stft_out[ch], &self.stft_magnitudes,
+                            &self.stft_window, &self.stft_fft, &self.kernel_ifft,
+                            &mut self.stft_scratch, &mut self.spectrum_work,
+                        );
                     }
                 }
-            } else {
-                self.stft_in_pos = (self.stft_in_pos + 1) & (KERNEL_LEN - 1);
-                self.stft_out_pos += 1;
-                if self.stft_out_pos >= HOP { self.stft_out_pos = 0; }
+
+                // Per-channel processing
+                for ch in 0..num_channels.min(2) {
+                    let input = self.os_input_buf[ch][i];
+
+                    if filter_mode == FilterMode::Raw {
+                        let driven_input = (input * drive).tanh();
+                        self.filter_state[ch].push(driven_input);
+
+                        const SIMD_LANES: usize = 16;
+                        const SIMD_CHUNKS: usize = KERNEL_LEN / SIMD_LANES;
+                        let history = self.filter_state[ch].history_slice();
+
+                        let filtered: f32 = if self.crossfade_active {
+                            let mut acc = f32x16::splat(0.0);
+                            let mut acc2 = f32x16::splat(0.0);
+                            for chunk_idx in 0..SIMD_CHUNKS {
+                                let k = chunk_idx * SIMD_LANES;
+                                let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
+                                acc += h
+                                    * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
+                                acc2 += h * f32x16::from_slice(
+                                    &self.crossfade_target_kernel[k..k + SIMD_LANES],
+                                );
+                            }
+                            let a = self.crossfade_alpha;
+                            hsum(acc) * (1.0 - a) + hsum(acc2) * a
+                        } else {
+                            let mut acc = f32x16::splat(0.0);
+                            for chunk_idx in 0..SIMD_CHUNKS {
+                                let k = chunk_idx * SIMD_LANES;
+                                let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
+                                acc += h
+                                    * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
+                            }
+                            hsum(acc)
+                        };
+
+                        self.os_output_buf[ch][i] = input * (1.0 - mix) + filtered * mix * reset_gain;
+                    } else {
+                        let driven_input = (input * drive).tanh();
+                        self.stft_in[ch][self.stft_in_pos] = driven_input;
+                        let filtered = self.stft_out[ch][self.stft_out_pos];
+                        self.os_output_buf[ch][i] = input * (1.0 - mix) + filtered * mix * reset_gain;
+                    }
+                }
+
+                // Reset fade bookkeeping
+                if self.reset_fade_remaining > 0 {
+                    self.reset_fade_remaining -= 1;
+                    if self.reset_fade_remaining == 0 {
+                        for state in &mut self.filter_state {
+                            state.reset();
+                        }
+                    }
+                }
+
+                if filter_mode == FilterMode::Raw {
+                    if self.crossfade_active {
+                        self.crossfade_alpha += self.crossfade_step;
+                        if self.crossfade_alpha >= 1.0 {
+                            std::mem::swap(&mut self.synthesized_kernel, &mut self.crossfade_target_kernel);
+                            self.crossfade_active = false;
+                            self.crossfade_alpha = 0.0;
+                        }
+                    }
+                } else {
+                    self.stft_in_pos = (self.stft_in_pos + 1) & (KERNEL_LEN - 1);
+                    self.stft_out_pos += 1;
+                    if self.stft_out_pos >= HOP { self.stft_out_pos = 0; }
+                }
+            }
+
+            // 4. Downsample
+            self.oversamplers[os_idx].process_down(
+                &self.os_output_buf[..num_channels.min(2)],
+                &mut self.os_host_out[..num_channels.min(2)],
+                os_samples,
+            );
+
+            // 5. Write back to host buffer
+            for (i, mut frame) in buffer.iter_samples().enumerate() {
+                for ch in 0..num_channels.min(2) {
+                    *frame.get_mut(ch).unwrap() = self.os_host_out[ch][i];
+                }
             }
         }
 
         // Clear filter state after ~100ms of silence
         if is_silent {
-            self.silence_samples += buffer.samples();
+            self.silence_samples += host_samples;
             if self.silence_samples > (self.sample_rate * 0.1) as usize {
                 for state in &mut self.filter_state {
                     state.reset();
@@ -1188,9 +1439,9 @@ impl Plugin for WavetableFilter {
 
         // Compute input spectrum for GUI visualization (non-blocking).
         // Throttled to ~30 updates/sec to avoid wasting CPU on every process() call.
-        self.input_spectrum_countdown = self.input_spectrum_countdown.saturating_sub(buffer.samples());
+        self.input_spectrum_countdown = self.input_spectrum_countdown.saturating_sub(host_samples);
         if self.input_spectrum_countdown == 0 {
-            self.input_spectrum_countdown = (self.sample_rate / 30.0) as usize;
+            self.input_spectrum_countdown = (self.host_sample_rate / 30.0) as usize;
 
             // Reorder the ring buffer into a contiguous windowed buffer for FFT.
             // Reuse stft_scratch as temporary storage (it is KERNEL_LEN-sized).
@@ -1206,7 +1457,7 @@ impl Plugin for WavetableFilter {
                 .is_ok()
             {
                 if let Ok(mut shared) = self.shared_input_spectrum.try_lock() {
-                    shared.0 = self.sample_rate;
+                    shared.0 = self.host_sample_rate;
                     let peak = self
                         .input_spectrum_scratch
                         .iter()
@@ -2170,6 +2421,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── Oversampling tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_oversample_ratio_switch_no_nan() {
+        let mut os = crate::oversampler::Oversampler::new(1, 256, 1);
+        let input = vec![vec![0.5f32; 256]];
+        let mut up = vec![vec![0.0; 256 * 8]; 1];
+        let mut down = vec![vec![0.0; 256]; 1];
+
+        // Process at 1x
+        os.process_up(&input, &mut up, 256);
+
+        // Switch to 4x
+        os = crate::oversampler::Oversampler::new(4, 256, 1);
+        let n = os.process_up(&input, &mut up, 256);
+        assert_eq!(n, 256 * 4);
+
+        for s in up[0][..n].iter_mut() { *s = (*s * 3.0).tanh(); }
+
+        os.process_down(&[up[0][..n].to_vec()], &mut down, n);
+
+        assert!(down[0].iter().all(|s| s.is_finite()),
+            "output contains NaN/inf after ratio switch");
+    }
+
+    #[test]
+    fn test_effective_sample_rate_scaling() {
+        let host_sr = 48000.0;
+        let cutoff = 1000.0;
+
+        let bin_to_src_1x = 24.0 * host_sr / (KERNEL_LEN as f32 * cutoff);
+        let bin_to_src_2x = 24.0 * (host_sr * 2.0) / (KERNEL_LEN as f32 * cutoff);
+        let bin_to_src_4x = 24.0 * (host_sr * 4.0) / (KERNEL_LEN as f32 * cutoff);
+
+        assert!((bin_to_src_2x - bin_to_src_1x * 2.0).abs() < 0.001,
+            "bin_to_src should double at 2x");
+        assert!((bin_to_src_4x - bin_to_src_1x * 4.0).abs() < 0.001,
+            "bin_to_src should quadruple at 4x");
     }
 
 }
