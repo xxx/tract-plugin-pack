@@ -311,8 +311,9 @@ impl WavetableFilter {
     /// `frame_buf` holds the interpolated wavetable frame and doubles as the FFT
     /// input scratch (it will be modified in-place by the FFT).  All other buffers
     /// are caller-supplied.  Returns `false` on FFT error.
+    #[allow(clippy::too_many_arguments)]
     fn compute_base_spectrum_into(
-        frame_buf: &mut Vec<f32>,
+        frame_buf: &mut [f32],
         cutoff_hz: f32,
         sample_rate: f32,
         frame_fft: &Arc<dyn RealToComplex<f32>>,
@@ -320,8 +321,8 @@ impl WavetableFilter {
         frame_spectrum: &mut Vec<Complex<f32>>,
         frame_mags: &mut Vec<f32>,
         // output:
-        out_mags: &mut Vec<f32>,
-        out_fracs: &mut Vec<f32>,
+        out_mags: &mut [f32],
+        out_fracs: &mut [f32],
     ) -> bool {
         let n = frame_buf.len();
         let spec_len = n / 2 + 1;
@@ -366,8 +367,8 @@ impl WavetableFilter {
                 let lo = src.floor() as usize;
                 let hi = (src_end.ceil() as usize).min(frame_mags.len() - 1);
                 let mut peak = 0.0f32;
-                for k in lo..=hi {
-                    peak = peak.max(frame_mags[k]);
+                for &m in &frame_mags[lo..=hi] {
+                    peak = peak.max(m);
                 }
                 (peak, 0.0)
             } else {
@@ -806,17 +807,14 @@ impl Plugin for WavetableFilter {
         self.try_load_user_wavetable();
 
         // Synthesize the initial kernel so the first buffer has valid coefficients.
-        if self.wavetable.is_some() {
+        if let Some(wt) = self.wavetable.as_ref() {
             let frame_pos = self.params.frame_position.unmodulated_normalized_value();
             let cutoff = self.params.frequency.unmodulated_plain_value();
             let resonance = self.params.resonance.unmodulated_plain_value();
             let mode = self.params.mode.value();
 
             // Interpolate the frame into frame_cache, then copy into frame_buf for FFT.
-            self.wavetable
-                .as_ref()
-                .unwrap()
-                .interpolate_frame_into(frame_pos, &mut self.frame_cache);
+            wt.interpolate_frame_into(frame_pos, &mut self.frame_cache);
             self.frame_buf.copy_from_slice(&self.frame_cache);
 
             if Self::compute_base_spectrum_into(
