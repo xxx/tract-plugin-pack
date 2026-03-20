@@ -15,6 +15,7 @@ const DB_RANGE: f32 = DB_CEIL - DB_FLOOR; // 48 dB total
 pub struct FilterResponseView {
     params: Arc<WavetableFilterParams>,
     shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
+    shared_input_spectrum: Arc<std::sync::Mutex<(f32, Vec<f32>)>>,
 }
 
 impl FilterResponseView {
@@ -22,10 +23,12 @@ impl FilterResponseView {
         cx: &'a mut Context,
         params: Arc<WavetableFilterParams>,
         shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
+        shared_input_spectrum: Arc<std::sync::Mutex<(f32, Vec<f32>)>>,
     ) -> Handle<'a, Self> {
         Self {
             params,
             shared_wavetable,
+            shared_input_spectrum,
         }
         .build(cx, |_cx| {})
     }
@@ -131,6 +134,50 @@ impl View for FilterResponseView {
             canvas.stroke_path(&path, &grid_paint);
         }
 
+        // --- Shared point count for spectrum and response curves ---
+        let num_points = width.max(1.0) as usize;
+
+        // --- Input spectrum shadow ---
+        if let Ok(input_data) = self.shared_input_spectrum.try_lock() {
+            let (sr, ref input_mags) = *input_data;
+            if sr > 0.0 && !input_mags.is_empty() {
+                let bin_hz = sr / (2.0 * (input_mags.len() - 1) as f32);
+
+                let mut shadow_path = vg::Path::new();
+                shadow_path.move_to(x0, y0 + height);
+
+                for i in 0..=num_points {
+                    let x_norm = i as f32 / num_points as f32;
+                    let freq = FREQ_MIN * (FREQ_MAX / FREQ_MIN).powf(x_norm);
+                    let bin = freq / bin_hz;
+
+                    let mag = if bin >= (input_mags.len() - 1) as f32 {
+                        0.0
+                    } else if bin <= 0.0 {
+                        input_mags[0]
+                    } else {
+                        let lo = bin.floor() as usize;
+                        let frac = bin - lo as f32;
+                        input_mags[lo] * (1.0 - frac) + input_mags[lo + 1] * frac
+                    };
+
+                    let db = 20.0 * mag.max(1e-6).log10();
+                    let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
+                    let x = x0 + x_norm * width;
+                    let y = y0 + height - y_norm * height;
+                    shadow_path.line_to(x, y);
+                }
+
+                shadow_path.line_to(x0 + width, y0 + height);
+                shadow_path.close();
+
+                canvas.fill_path(
+                    &shadow_path,
+                    &vg::Paint::color(vg::Color::rgba(255, 200, 100, 25)),
+                );
+            }
+        }
+
         // --- Frequency response curve ---
         // For each screen pixel column, compute:
         //   freq = frequency at that x position (log scale)
@@ -138,7 +185,6 @@ impl View for FilterResponseView {
         //   magnitude = interpolate mags[] at src_harmonic
         //   dB = 20 * log10(magnitude)
 
-        let num_points = width.max(1.0) as usize;
         let max_src = (mags.len() - 1) as f32;
 
         let mut fill_path = vg::Path::new();

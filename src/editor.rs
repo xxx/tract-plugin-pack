@@ -90,6 +90,7 @@ pub(crate) fn create(
     shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
     wavetable_version: Arc<std::sync::atomic::AtomicU32>,
     editor_state: Arc<ViziaState>,
+    shared_input_spectrum: Arc<std::sync::Mutex<(f32, Vec<f32>)>>,
 ) -> Option<Box<dyn Editor>> {
     create_vizia_editor(editor_state, ViziaTheming::Custom, move |cx, _| {
         cx.add_stylesheet(include_str!("style.css"))
@@ -322,8 +323,13 @@ pub(crate) fn create(
                     Label::new(cx, "Filter Response")
                         .class("section-title")
                         .height(Pixels(25.0));
-                    FilterResponseView::new(cx, params.clone(), shared_wavetable.clone())
-                        .height(Pixels(220.0));
+                    FilterResponseView::new(
+                        cx,
+                        params.clone(),
+                        shared_wavetable.clone(),
+                        shared_input_spectrum.clone(),
+                    )
+                    .height(Pixels(220.0));
 
                     HStack::new(cx, |cx| {
                         ParamDial::new(cx, Data::params, |params| &params.frequency)

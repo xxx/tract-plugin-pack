@@ -89,6 +89,17 @@ pub struct WavetableFilter {
     stft_out_pos: usize,
     /// Tracks the last mode to detect runtime mode switches.
     last_mode: FilterMode,
+
+    // ── Input spectrum for GUI visualization ─────────────────────────────
+    /// Shared input spectrum magnitudes (KERNEL_LEN/2+1 bins) + sample rate.
+    /// The GUI reads this to draw a faint shadow behind the filter response curve.
+    shared_input_spectrum: Arc<Mutex<(f32, Vec<f32>)>>,
+    /// Ring buffer accumulating the most recent KERNEL_LEN input samples.
+    input_spectrum_buf: Vec<f32>,
+    /// Write position in input_spectrum_buf (0..KERNEL_LEN-1).
+    input_spectrum_pos: usize,
+    /// Pre-allocated complex scratch for input spectrum FFT (KERNEL_LEN/2+1).
+    input_spectrum_scratch: Vec<Complex<f32>>,
 }
 
 struct FilterState {
@@ -203,6 +214,10 @@ impl Default for WavetableFilter {
             stft_in_pos: 0,
             stft_out_pos: 0,
             last_mode: FilterMode::Raw,
+            shared_input_spectrum: Arc::new(Mutex::new((48000.0, vec![0.0; KERNEL_LEN / 2 + 1]))),
+            input_spectrum_buf: vec![0.0; KERNEL_LEN],
+            input_spectrum_pos: 0,
+            input_spectrum_scratch: vec![Complex::new(0.0, 0.0); KERNEL_LEN / 2 + 1],
         }
     }
 }
@@ -801,6 +816,7 @@ impl Plugin for WavetableFilter {
             self.shared_wavetable.clone(),
             self.wavetable_version.clone(),
             self.editor_state.clone(),
+            self.shared_input_spectrum.clone(),
         )
     }
 
@@ -1064,9 +1080,13 @@ impl Plugin for WavetableFilter {
             }
 
             // Process each channel in this sample
+            let mut mono_input = 0.0f32;
+            let mut num_channels = 0u32;
             for (channel_idx, sample) in channel_samples.iter_mut().enumerate() {
                 let state_idx = channel_idx.min(1);
                 let input = *sample;
+                mono_input += input;
+                num_channels += 1;
 
                 if input.abs() > silence_threshold {
                     is_silent = false;
@@ -1116,6 +1136,12 @@ impl Plugin for WavetableFilter {
                 }
             }
 
+            // Accumulate mono input into ring buffer for spectrum visualization
+            if num_channels > 0 {
+                self.input_spectrum_buf[self.input_spectrum_pos] = mono_input / num_channels as f32;
+                self.input_spectrum_pos = (self.input_spectrum_pos + 1) & (KERNEL_LEN - 1);
+            }
+
             // Complete the reset fade: once output has reached zero, clear history.
             if self.reset_fade_remaining > 0 {
                 self.reset_fade_remaining -= 1;
@@ -1157,6 +1183,38 @@ impl Plugin for WavetableFilter {
             }
         } else {
             self.silence_samples = 0;
+        }
+
+        // Compute input spectrum for GUI visualization (non-blocking)
+        {
+            // Reorder the ring buffer into a contiguous windowed buffer for FFT.
+            // Reuse stft_scratch as temporary storage (it is KERNEL_LEN-sized).
+            let pos = self.input_spectrum_pos;
+            let n = KERNEL_LEN;
+            for i in 0..n {
+                let ring_idx = (pos + i) & (n - 1);
+                self.stft_scratch[i] = self.input_spectrum_buf[ring_idx] * self.stft_window[i];
+            }
+            if self
+                .stft_fft
+                .process(&mut self.stft_scratch, &mut self.input_spectrum_scratch)
+                .is_ok()
+            {
+                if let Ok(mut shared) = self.shared_input_spectrum.try_lock() {
+                    shared.0 = self.sample_rate;
+                    let peak = self
+                        .input_spectrum_scratch
+                        .iter()
+                        .map(|c| c.norm())
+                        .fold(0.0f32, f32::max)
+                        .max(1e-10);
+                    for (dst, c) in shared.1.iter_mut().zip(self.input_spectrum_scratch.iter()) {
+                        *dst = c.norm() / peak;
+                    }
+                }
+            }
+            // Restore stft_scratch to zeros so it's clean for the next STFT frame.
+            self.stft_scratch.fill(0.0);
         }
 
         ProcessStatus::Normal
