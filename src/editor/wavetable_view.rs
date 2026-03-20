@@ -1,7 +1,7 @@
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -12,6 +12,7 @@ pub struct WavetableView {
     shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
     wavetable_version: Arc<AtomicU32>,
     frame_cache: RefCell<FrameCache>,
+    show_2d: Cell<bool>,
 }
 
 struct FrameCache {
@@ -44,6 +45,7 @@ impl WavetableView {
             shared_wavetable,
             wavetable_version,
             frame_cache: RefCell::new(FrameCache::new()),
+            show_2d: Cell::new(false),
         }
         .build(cx, |_cx| {})
     }
@@ -114,6 +116,67 @@ impl View for WavetableView {
         let current_frame_pos = self.params.frame_position.modulated_normalized_value();
         let current_frame_idx = (current_frame_pos * (frame_count - 1) as f32).round() as usize;
 
+        if self.show_2d.get() {
+            // === 2D face-on view of the current interpolated frame ===
+            let exact_pos = current_frame_pos * (frame_count - 1) as f32;
+            let lo = (exact_pos.floor() as usize).min(frame_count - 1);
+            let hi = (lo + 1).min(frame_count - 1);
+            let frac = exact_pos - lo as f32;
+
+            let frame_lo = &frames_data[lo];
+            let frame_hi = &frames_data[hi];
+
+            let mut fmin = f32::INFINITY;
+            let mut fmax = f32::NEG_INFINITY;
+            let num_points = (width as usize).min(frame_size).max(1);
+            for pi in 0..num_points {
+                let si = ((pi as f32 / num_points as f32) * frame_size as f32) as usize;
+                let si = si.min(frame_size - 1);
+                let s = frame_lo[si] * (1.0 - frac) + frame_hi[si] * frac;
+                fmin = fmin.min(s);
+                fmax = fmax.max(s);
+            }
+            let frange = (fmax - fmin).max(0.001);
+
+            let x0 = bounds.x + padding;
+            let y0 = bounds.y + padding;
+            let zero_y = y0 + height / 2.0;
+
+            let mut fill_path = vg::Path::new();
+            let mut stroke_path = vg::Path::new();
+            fill_path.move_to(x0, zero_y);
+
+            for pi in 0..num_points {
+                let t = pi as f32 / num_points as f32;
+                let si = ((t * frame_size as f32) as usize).min(frame_size - 1);
+                let s = frame_lo[si] * (1.0 - frac) + frame_hi[si] * frac;
+                let normalized = (s - fmin) / frange;
+                let x = x0 + t * width;
+                let y = y0 + height - normalized * height;
+
+                fill_path.line_to(x, y);
+                if pi == 0 { stroke_path.move_to(x, y); } else { stroke_path.line_to(x, y); }
+            }
+
+            fill_path.line_to(x0 + width, zero_y);
+            fill_path.close();
+
+            canvas.fill_path(&fill_path, &vg::Paint::color(vg::Color::rgba(79, 195, 247, 30)));
+            canvas.stroke_path(
+                &stroke_path,
+                &vg::Paint::color(vg::Color::rgba(79, 195, 247, 220)).with_line_width(1.5),
+            );
+
+            let mut zp = vg::Path::new();
+            zp.move_to(x0, zero_y);
+            zp.line_to(x0 + width, zero_y);
+            canvas.stroke_path(&zp, &vg::Paint::color(vg::Color::rgba(80, 80, 90, 100)).with_line_width(0.5));
+
+            drop(cache);
+            return;
+        }
+
+        // === 3D overhead perspective view ===
         // Draw all non-active frames first (back to front for proper layering)
         // Overhead view: front frames at lower-left, back frames at upper-right
         for frame_idx in (0..frame_count).rev() {
@@ -218,7 +281,12 @@ impl View for WavetableView {
         canvas.stroke_path(&path, &grid_paint);
     }
 
-    fn event(&mut self, _cx: &mut EventContext, _event: &mut Event) {
-        // TODO: Handle mouse interaction for frame selection
+    fn event(&mut self, _cx: &mut EventContext, event: &mut Event) {
+        event.map(|window_event, meta| {
+            if let WindowEvent::MouseDown(MouseButton::Left) = window_event {
+                self.show_2d.set(!self.show_2d.get());
+                meta.consume();
+            }
+        });
     }
 }
