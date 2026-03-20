@@ -228,10 +228,12 @@ impl View for ParamDial {
             .with_line_cap(vg::LineCap::Round);
         canvas.stroke_path(&bg_path, &bg_paint);
 
-        // --- Draw value arc (from start to current value) ---
-        let normalized = self.param_base.unmodulated_normalized_value();
-        if normalized > 0.001 {
-            let value_angle = Self::value_to_angle(normalized);
+        // --- Draw value arc (from start to current unmodulated value) ---
+        let unmod = self.param_base.unmodulated_normalized_value();
+        let modulated = self.param_base.modulated_normalized_value();
+
+        if unmod > 0.001 {
+            let value_angle = Self::value_to_angle(unmod);
             let mut val_path = vg::Path::new();
             val_path.arc(
                 arc_cx,
@@ -246,7 +248,7 @@ impl View for ParamDial {
                 .with_line_cap(vg::LineCap::Round);
             canvas.stroke_path(&val_path, &val_paint);
 
-            // --- Draw indicator dot at the value endpoint ---
+            // --- Draw indicator dot at the unmodulated value ---
             let dot_x = arc_cx + radius * value_angle.cos();
             let dot_y = arc_cy + radius * value_angle.sin();
             let mut dot_path = vg::Path::new();
@@ -254,6 +256,33 @@ impl View for ParamDial {
             canvas.fill_path(
                 &dot_path,
                 &vg::Paint::color(vg::Color::rgb(79, 195, 247)),
+            );
+        }
+
+        // --- Draw modulation indicator (arc from unmodulated to modulated value) ---
+        if (modulated - unmod).abs() > 0.001 {
+            let unmod_angle = Self::value_to_angle(unmod);
+            let mod_angle = Self::value_to_angle(modulated);
+            let (from, to) = if modulated > unmod {
+                (unmod_angle, mod_angle)
+            } else {
+                (mod_angle, unmod_angle)
+            };
+            let mut mod_path = vg::Path::new();
+            mod_path.arc(arc_cx, arc_cy, radius, from, to, vg::Solidity::Hole);
+            let mod_paint = vg::Paint::color(vg::Color::rgba(255, 160, 50, 150))
+                .with_line_width(stroke_width + 1.0)
+                .with_line_cap(vg::LineCap::Round);
+            canvas.stroke_path(&mod_path, &mod_paint);
+
+            // Modulated value dot (smaller, orange)
+            let mod_dot_x = arc_cx + radius * mod_angle.cos();
+            let mod_dot_y = arc_cy + radius * mod_angle.sin();
+            let mut mod_dot = vg::Path::new();
+            mod_dot.circle(mod_dot_x, mod_dot_y, 3.0);
+            canvas.fill_path(
+                &mod_dot,
+                &vg::Paint::color(vg::Color::rgba(255, 160, 50, 200)),
             );
         }
     }
