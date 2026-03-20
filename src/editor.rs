@@ -15,6 +15,20 @@ use wavetable_view::WavetableView;
 
 const SCALE_STEPS: &[f64] = &[1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0];
 
+/// Set the ui_scale IntParam via the nih-plug parameter event system.
+fn set_scale_param(cx: &mut EventContext, param: &nih_plug::prelude::IntParam, scale: f64) {
+    use nih_plug::prelude::Param;
+    let pct = (scale * 100.0).round() as i32;
+    let normalized = param.preview_normalized(pct);
+    cx.emit(RawParamEvent::BeginSetParameter(param.as_ptr()));
+    cx.emit(RawParamEvent::SetParameterNormalized(
+        param.as_ptr(),
+        normalized,
+    ));
+    cx.emit(RawParamEvent::EndSetParameter(param.as_ptr()));
+}
+
+
 #[derive(Lens, Clone)]
 struct Data {
     params: Arc<WavetableFilterParams>,
@@ -50,8 +64,8 @@ impl Model for Data {
     }
 }
 
-const WINDOW_WIDTH: u32 = 1050; // 700 * 1.5
-const WINDOW_HEIGHT: u32 = 680;
+pub const WINDOW_WIDTH: u32 = 1050;
+pub const WINDOW_HEIGHT: u32 = 680;
 
 pub(crate) fn default_state() -> Arc<ViziaState> {
     ViziaState::new(|| (WINDOW_WIDTH, WINDOW_HEIGHT))
@@ -63,14 +77,15 @@ pub(crate) fn create(
     should_reload: Arc<std::sync::atomic::AtomicBool>,
     shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
     wavetable_version: Arc<std::sync::atomic::AtomicU32>,
+    editor_state: Arc<ViziaState>,
 ) -> Option<Box<dyn Editor>> {
-    create_vizia_editor(default_state(), ViziaTheming::Custom, move |cx, _| {
+    create_vizia_editor(editor_state, ViziaTheming::Custom, move |cx, _| {
         cx.add_stylesheet(include_str!("style.css"))
             .expect("Failed to load stylesheet");
 
         let initial_path = wavetable_path.lock().unwrap().clone();
-
         let initial_scale = cx.user_scale_factor();
+        nih_plug::nih_log!("[SCALE] Editor opened, cx.user_scale_factor() = {}", initial_scale);
         let initial_scale_pct = format!("{}%", (initial_scale * 100.0).round() as u32);
 
         Data {
@@ -102,6 +117,9 @@ pub(crate) fn create(
                             if idx > 0 {
                                 let new_scale = SCALE_STEPS[idx - 1];
                                 cx.set_user_scale_factor(new_scale);
+                                // Persist via the ui_scale IntParam
+                                let p = Data::params.get(cx);
+                                set_scale_param(cx, &p.ui_scale, new_scale);
                                 cx.emit(DataEvent::SetUiScalePct(
                                     format!("{}%", (new_scale * 100.0).round() as u32),
                                 ));
@@ -127,6 +145,8 @@ pub(crate) fn create(
                             if idx < SCALE_STEPS.len() - 1 {
                                 let new_scale = SCALE_STEPS[idx + 1];
                                 cx.set_user_scale_factor(new_scale);
+                                let p = Data::params.get(cx);
+                                set_scale_param(cx, &p.ui_scale, new_scale);
                                 cx.emit(DataEvent::SetUiScalePct(
                                     format!("{}%", (new_scale * 100.0).round() as u32),
                                 ));
