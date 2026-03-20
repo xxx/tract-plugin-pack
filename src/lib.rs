@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod editor;
-pub mod oversampler;
 pub mod wavetable;
 
 use wavetable::Wavetable;
@@ -105,19 +104,7 @@ pub struct WavetableFilter {
     /// Throttles the FFT to ~30 updates/sec instead of once per process() call.
     input_spectrum_countdown: usize,
 
-    // ── Oversampling state ───────────────────────────────────────────────
-    /// Pre-created oversamplers for each ratio. Index: 0=1x, 1=2x, 2=4x, 3=8x.
-    oversamplers: [oversampler::Oversampler; 4],
-    last_oversample_ratio: OversampleRatio,
-    effective_sample_rate: f32,
-    host_sample_rate: f32,
-    max_block_size: usize,
-    cached_os_latency: u32,
     last_reported_latency: u32,
-    /// Pre-allocated buffers for oversampled processing (2ch)
-    os_input_buf: Vec<Vec<f32>>,   // channels × max_block × max_ratio
-    os_output_buf: Vec<Vec<f32>>,  // channels × max_block × max_ratio
-    os_host_out: Vec<Vec<f32>>,    // channels × max_block (for downsampled output)
 }
 
 struct FilterState {
@@ -155,9 +142,6 @@ struct WavetableFilterParams {
 
     #[id = "mode"]
     pub mode: EnumParam<FilterMode>,
-
-    #[id = "oversample"]
-    pub oversample: EnumParam<OversampleRatio>,
 }
 
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
@@ -169,42 +153,6 @@ enum FilterMode {
     #[id = "minimum"]
     #[name = "Phaseless"]
     Minimum,
-}
-
-#[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
-enum OversampleRatio {
-    #[id = "1x"]
-    #[name = "1x"]
-    X1,
-    #[id = "2x"]
-    #[name = "2x"]
-    X2,
-    #[id = "4x"]
-    #[name = "4x"]
-    X4,
-    #[id = "8x"]
-    #[name = "8x"]
-    X8,
-}
-
-impl OversampleRatio {
-    fn factor(self) -> usize {
-        match self {
-            Self::X1 => 1,
-            Self::X2 => 2,
-            Self::X4 => 4,
-            Self::X8 => 8,
-        }
-    }
-
-    fn index(self) -> usize {
-        match self {
-            Self::X1 => 0,
-            Self::X2 => 1,
-            Self::X4 => 2,
-            Self::X8 => 3,
-        }
-    }
 }
 
 
@@ -276,21 +224,7 @@ impl Default for WavetableFilter {
             input_spectrum_pos: 0,
             input_spectrum_scratch: vec![Complex::new(0.0, 0.0); KERNEL_LEN / 2 + 1],
             input_spectrum_countdown: 0,
-            oversamplers: [
-                oversampler::Oversampler::new(1, 8192, 2),
-                oversampler::Oversampler::new(2, 8192, 2),
-                oversampler::Oversampler::new(4, 8192, 2),
-                oversampler::Oversampler::new(8, 8192, 2),
-            ],
-            last_oversample_ratio: OversampleRatio::X1,
-            effective_sample_rate: 48000.0,
-            host_sample_rate: 48000.0,
-            max_block_size: 8192,
-            cached_os_latency: 0,
             last_reported_latency: u32::MAX, // Forces initial report
-            os_input_buf: vec![vec![0.0; 8192 * 8]; 2],
-            os_output_buf: vec![vec![0.0; 8192 * 8]; 2],
-            os_host_out: vec![vec![0.0; 8192]; 2],
         }
     }
 }
@@ -833,19 +767,20 @@ impl WavetableFilterParams {
                 .with_value_to_string(formatters::v2s_f32_percentage(0)),
 
             drive: FloatParam::new(
-                "Drive",
-                1.0,
+                "Gain",
+                util::db_to_gain(0.0),
                 FloatRange::Skewed {
-                    min: 0.1,
-                    max: 10.0,
+                    min: util::db_to_gain(-20.0),
+                    max: util::db_to_gain(20.0),
                     factor: FloatRange::skew_factor(-1.0),
                 },
             )
-            .with_smoother(SmoothingStyle::Linear(50.0)),
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
             mode: EnumParam::new("Mode", FilterMode::Raw),
-
-            oversample: EnumParam::new("Oversample", OversampleRatio::X1),
         }
     }
 }
@@ -901,29 +836,8 @@ impl Plugin for WavetableFilter {
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
-        self.host_sample_rate = buffer_config.sample_rate;
-        self.max_block_size = buffer_config.max_buffer_size as usize;
-        let ratio = self.params.oversample.value().factor();
-        self.effective_sample_rate = self.host_sample_rate * ratio as f32;
-        self.sample_rate = self.effective_sample_rate;
-        self.crossfade_step = 1.0 / (self.host_sample_rate * 0.020);
-        self.oversamplers = [
-            oversampler::Oversampler::new(1, self.max_block_size, 2),
-            oversampler::Oversampler::new(2, self.max_block_size, 2),
-            oversampler::Oversampler::new(4, self.max_block_size, 2),
-            oversampler::Oversampler::new(8, self.max_block_size, 2),
-        ];
-        self.last_oversample_ratio = self.params.oversample.value();
-
-        // Resize staging buffers to match actual host block size
-        let max_os = self.max_block_size * 8;
-        for ch in &mut self.os_input_buf { ch.resize(max_os, 0.0); }
-        for ch in &mut self.os_output_buf { ch.resize(max_os, 0.0); }
-        for ch in &mut self.os_host_out { ch.resize(self.max_block_size, 0.0); }
-
-        // Cache latency
-        let os_idx = self.last_oversample_ratio.index();
-        self.cached_os_latency = self.oversamplers[os_idx].latency_samples();
+        self.sample_rate = buffer_config.sample_rate;
+        self.crossfade_step = 1.0 / (self.sample_rate * 0.020);
 
         // Sync editor scale from the persisted ui_scale parameter
         let scale_pct = self.params.ui_scale.value() as f64;
@@ -952,7 +866,7 @@ impl Plugin for WavetableFilter {
             if Self::compute_base_spectrum_into(
                 &mut self.frame_buf,
                 cutoff,
-                self.host_sample_rate,
+                self.sample_rate,
                 &self.frame_fft,
                 &mut self.frame_spectrum,
                 &mut self.frame_mags,
@@ -1045,24 +959,6 @@ impl Plugin for WavetableFilter {
             // If try_lock fails, leave should_reload true and retry next buffer
         }
 
-        // ── Oversample ratio change detection ─────────────────────────────
-        let current_os_ratio = self.params.oversample.value();
-        if current_os_ratio != self.last_oversample_ratio {
-            let ratio = current_os_ratio.factor();
-            self.oversamplers[current_os_ratio.index()].reset();
-            self.effective_sample_rate = self.host_sample_rate * ratio as f32;
-            self.sample_rate = self.effective_sample_rate;
-            self.crossfade_step = 1.0 / (self.host_sample_rate * 0.020);
-            for state in &mut self.filter_state { state.reset(); }
-            for buf in &mut self.stft_in { buf.fill(0.0); }
-            for buf in &mut self.stft_out { buf.fill(0.0); }
-            self.stft_in_pos = 0;
-            self.stft_out_pos = 0;
-            self.first_process = true;
-            self.cached_os_latency = self.oversamplers[current_os_ratio.index()].latency_samples();
-            self.last_oversample_ratio = current_os_ratio;
-        }
-
         if self.wavetable.is_none() {
             return ProcessStatus::Normal;
         }
@@ -1087,13 +983,10 @@ impl Plugin for WavetableFilter {
             self.last_mode = filter_mode;
         }
 
-        let os_idx = self.last_oversample_ratio.index();
-        let os_ratio = self.last_oversample_ratio.factor();
         let stft_latency = if filter_mode == FilterMode::Raw { 0 } else { HOP as u32 };
-        let new_latency = stft_latency + self.cached_os_latency;
-        if new_latency != self.last_reported_latency {
-            context.set_latency_samples(new_latency);
-            self.last_reported_latency = new_latency;
+        if stft_latency != self.last_reported_latency {
+            context.set_latency_samples(stft_latency);
+            self.last_reported_latency = stft_latency;
         }
 
         let frame_pos_changed = self.first_process
@@ -1122,7 +1015,7 @@ impl Plugin for WavetableFilter {
             if WavetableFilter::compute_base_spectrum_into(
                 &mut self.frame_buf,
                 cutoff,
-                self.host_sample_rate,
+                self.sample_rate,
                 &self.frame_fft,
                 &mut self.frame_spectrum,
                 &mut self.frame_mags,
@@ -1171,8 +1064,7 @@ impl Plugin for WavetableFilter {
         let host_samples = buffer.samples();
         let num_channels = buffer.channels();
 
-        if os_ratio <= 1 {
-            // === EXISTING 1x PATH (zero overhead) ===
+        {
             for mut channel_samples in buffer.iter_samples() {
                 // Advance frame_pos/cutoff/resonance smoothers each sample (keeps convergence timing correct).
                 // Their values are not needed here; synthesis already ran above for this buffer.
@@ -1217,8 +1109,7 @@ impl Plugin for WavetableFilter {
                     }
 
                     if filter_mode == FilterMode::Raw {
-                        let driven_input = (input * drive).tanh();
-                        self.filter_state[state_idx].push(driven_input);
+                        self.filter_state[state_idx].push(input);
 
                         // SIMD convolution: forward dot product of the double-buffered
                         // history and time-reversed kernel. No per-element copies needed.
@@ -1251,12 +1142,11 @@ impl Plugin for WavetableFilter {
                             hsum(acc)
                         };
 
-                        *sample = input * (1.0 - mix) + filtered * mix * reset_gain;
+                        *sample = (input * (1.0 - mix) + filtered * mix * reset_gain) * drive;
                     } else {
-                        let driven_input = (input * drive).tanh();
-                        self.stft_in[state_idx][self.stft_in_pos] = driven_input;
+                        self.stft_in[state_idx][self.stft_in_pos] = input;
                         let filtered = self.stft_out[state_idx][self.stft_out_pos];
-                        *sample = input * (1.0 - mix) + filtered * mix * reset_gain;
+                        *sample = (input * (1.0 - mix) + filtered * mix * reset_gain) * drive;
                     }
                 }
 
@@ -1292,174 +1182,12 @@ impl Plugin for WavetableFilter {
                     if self.stft_out_pos >= HOP { self.stft_out_pos = 0; }
                 }
             }
-        } else {
-            // === OVERSAMPLED PATH (ratio > 1) ===
-            // Only the tanh nonlinearity runs at the oversampled rate.
-            // The convolution/STFT filter runs at host rate with full resolution.
-            //
-            // Flow: deinterleave → upsample → tanh at OS rate → downsample → filter at host rate
-
-            // 1. Deinterleave host input and accumulate spectrum visualization data
-            for (i, mut frame) in buffer.iter_samples().enumerate() {
-                let mut mono = 0.0f32;
-                for (ch, sample) in frame.iter_mut().enumerate() {
-                    if ch >= 2 { break; }
-                    let s = *sample;
-                    self.os_host_out[ch][i] = s;
-                    mono += s;
-                    if s.abs() > silence_threshold {
-                        is_silent = false;
-                    }
-                }
-                let ch_cnt = num_channels.min(2);
-                if ch_cnt > 0 {
-                    self.input_spectrum_buf[self.input_spectrum_pos] = mono / ch_cnt as f32;
-                    self.input_spectrum_pos = (self.input_spectrum_pos + 1) & (KERNEL_LEN - 1);
-                }
-            }
-
-            // 2. Upsample clean input to oversampled rate
-            let os_samples = self.oversamplers[os_idx].process_up(
-                &self.os_host_out[..num_channels.min(2)],
-                &mut self.os_input_buf[..num_channels.min(2)],
-                host_samples,
-            );
-
-            // 3. Apply tanh drive at oversampled rate (the only nonlinear op)
-            // Read smoothed drive value (one step per host buffer — block-constant for the OS loop)
-            let drive_val = self.params.drive.smoothed.next();
-            for ch in 0..num_channels.min(2) {
-                for i in 0..os_samples {
-                    self.os_input_buf[ch][i] = (self.os_input_buf[ch][i] * drive_val).tanh();
-                }
-            }
-
-            // 4. Downsample driven signal back to host rate
-            self.oversamplers[os_idx].process_down(
-                &self.os_input_buf[..num_channels.min(2)],
-                &mut self.os_output_buf[..num_channels.min(2)],
-                os_samples,
-            );
-
-            // 5. Run the filter at host rate on the driven, downsampled signal.
-            //    This is the same per-sample loop as the 1x path but reads from
-            //    os_output_buf (driven host-rate) and writes back to os_host_out.
-            for i in 0..host_samples {
-                let _ = self.params.frame_position.smoothed.next();
-                let _ = self.params.frequency.smoothed.next();
-                let _ = self.params.resonance.smoothed.next();
-                let mix = self.params.mix.smoothed.next();
-                // drive smoother already advanced once for the tanh block above;
-                // advance N-1 more times to match the host buffer sample count
-                if i > 0 {
-                    let _ = self.params.drive.smoothed.next();
-                }
-
-                let reset_gain = if self.reset_fade_remaining > 0 {
-                    self.reset_fade_remaining as f32 / self.reset_fade_total as f32
-                } else {
-                    1.0
-                };
-
-                // STFT hop processing at host rate
-                if filter_mode != FilterMode::Raw && self.stft_out_pos == 0 {
-                    for ch in 0..num_channels.min(2) {
-                        self.stft_out[ch].copy_within(HOP..KERNEL_LEN, 0);
-                        self.stft_out[ch][HOP..].fill(0.0);
-                        Self::process_stft_frame(
-                            &self.stft_in[ch], self.stft_in_pos,
-                            &mut self.stft_out[ch], &self.stft_magnitudes,
-                            &self.stft_window, &self.stft_fft, &self.kernel_ifft,
-                            &mut self.stft_scratch, &mut self.spectrum_work,
-                        );
-                    }
-                }
-
-                for ch in 0..num_channels.min(2) {
-                    // os_output_buf has the driven, downsampled signal
-                    let driven_input = self.os_output_buf[ch][i];
-                    // os_host_out has the original clean input (from deinterleave)
-                    let clean_input = self.os_host_out[ch][i];
-
-                    if filter_mode == FilterMode::Raw {
-                        self.filter_state[ch].push(driven_input);
-
-                        const SIMD_LANES: usize = 16;
-                        const SIMD_CHUNKS: usize = KERNEL_LEN / SIMD_LANES;
-                        let history = self.filter_state[ch].history_slice();
-
-                        let filtered: f32 = if self.crossfade_active {
-                            let mut acc = f32x16::splat(0.0);
-                            let mut acc2 = f32x16::splat(0.0);
-                            for chunk_idx in 0..SIMD_CHUNKS {
-                                let k = chunk_idx * SIMD_LANES;
-                                let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
-                                acc += h
-                                    * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
-                                acc2 += h * f32x16::from_slice(
-                                    &self.crossfade_target_kernel[k..k + SIMD_LANES],
-                                );
-                            }
-                            let a = self.crossfade_alpha;
-                            hsum(acc) * (1.0 - a) + hsum(acc2) * a
-                        } else {
-                            let mut acc = f32x16::splat(0.0);
-                            for chunk_idx in 0..SIMD_CHUNKS {
-                                let k = chunk_idx * SIMD_LANES;
-                                let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
-                                acc += h
-                                    * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
-                            }
-                            hsum(acc)
-                        };
-
-                        self.os_host_out[ch][i] = clean_input * (1.0 - mix) + filtered * mix * reset_gain;
-                    } else {
-                        self.stft_in[ch][self.stft_in_pos] = driven_input;
-                        let filtered = self.stft_out[ch][self.stft_out_pos];
-                        self.os_host_out[ch][i] = clean_input * (1.0 - mix) + filtered * mix * reset_gain;
-                    }
-                }
-
-                if self.reset_fade_remaining > 0 {
-                    self.reset_fade_remaining -= 1;
-                    if self.reset_fade_remaining == 0 {
-                        for state in &mut self.filter_state {
-                            state.reset();
-                        }
-                    }
-                }
-
-                if filter_mode == FilterMode::Raw {
-                    if self.crossfade_active {
-                        self.crossfade_alpha += self.crossfade_step;
-                        if self.crossfade_alpha >= 1.0 {
-                            std::mem::swap(&mut self.synthesized_kernel, &mut self.crossfade_target_kernel);
-                            self.crossfade_active = false;
-                            self.crossfade_alpha = 0.0;
-                        }
-                    }
-                } else {
-                    self.stft_in_pos = (self.stft_in_pos + 1) & (KERNEL_LEN - 1);
-                    self.stft_out_pos += 1;
-                    if self.stft_out_pos >= HOP { self.stft_out_pos = 0; }
-                }
-            }
-
-            // 6. Write host-rate output back to buffer
-            for (i, mut frame) in buffer.iter_samples().enumerate() {
-                for ch in 0..num_channels.min(2) {
-                    if let Some(s) = frame.get_mut(ch) {
-                        *s = self.os_host_out[ch][i];
-                    }
-                }
-            }
         }
 
         // Clear filter state after ~100ms of silence
         if is_silent {
             self.silence_samples += host_samples;
-            if self.silence_samples > (self.host_sample_rate * 0.1) as usize {
+            if self.silence_samples > (self.sample_rate * 0.1) as usize {
                 for state in &mut self.filter_state {
                     state.reset();
                 }
@@ -1477,7 +1205,7 @@ impl Plugin for WavetableFilter {
         // Throttled to ~30 updates/sec to avoid wasting CPU on every process() call.
         self.input_spectrum_countdown = self.input_spectrum_countdown.saturating_sub(host_samples);
         if self.input_spectrum_countdown == 0 {
-            self.input_spectrum_countdown = (self.host_sample_rate / 30.0) as usize;
+            self.input_spectrum_countdown = (self.sample_rate / 30.0) as usize;
 
             // Reorder the ring buffer into a contiguous windowed buffer for FFT.
             // Reuse stft_scratch as temporary storage (it is KERNEL_LEN-sized).
@@ -1493,7 +1221,7 @@ impl Plugin for WavetableFilter {
                 .is_ok()
             {
                 if let Ok(mut shared) = self.shared_input_spectrum.try_lock() {
-                    shared.0 = self.host_sample_rate;
+                    shared.0 = self.sample_rate;
                     let peak = self
                         .input_spectrum_scratch
                         .iter()
@@ -2459,277 +2187,6 @@ mod tests {
         }
     }
 
-    // ── Oversampling tests ─────────────────────────────────────────────
-
-    #[test]
-    fn test_oversample_ratio_switch_no_nan() {
-        let mut os = crate::oversampler::Oversampler::new(1, 256, 1);
-        let input = vec![vec![0.5f32; 256]];
-        let mut up = vec![vec![0.0; 256 * 8]; 1];
-        let mut down = vec![vec![0.0; 256]; 1];
-
-        // Process at 1x
-        os.process_up(&input, &mut up, 256);
-
-        // Switch to 4x
-        os = crate::oversampler::Oversampler::new(4, 256, 1);
-        let n = os.process_up(&input, &mut up, 256);
-        assert_eq!(n, 256 * 4);
-
-        for s in up[0][..n].iter_mut() { *s = (*s * 3.0).tanh(); }
-
-        os.process_down(&[up[0][..n].to_vec()], &mut down, n);
-
-        assert!(down[0].iter().all(|s| s.is_finite()),
-            "output contains NaN/inf after ratio switch");
-    }
-
-    #[test]
-    fn test_effective_sample_rate_scaling() {
-        let host_sr = 48000.0;
-        let cutoff = 1000.0;
-
-        let bin_to_src_1x = 24.0 * host_sr / (KERNEL_LEN as f32 * cutoff);
-        let bin_to_src_2x = 24.0 * (host_sr * 2.0) / (KERNEL_LEN as f32 * cutoff);
-        let bin_to_src_4x = 24.0 * (host_sr * 4.0) / (KERNEL_LEN as f32 * cutoff);
-
-        assert!((bin_to_src_2x - bin_to_src_1x * 2.0).abs() < 0.001,
-            "bin_to_src should double at 2x");
-        assert!((bin_to_src_4x - bin_to_src_1x * 4.0).abs() < 0.001,
-            "bin_to_src should quadruple at 4x");
-    }
-
-    #[test]
-    fn test_oversampling_wav_comparison() {
-        use crate::oversampler::Oversampler;
-        use hound::{WavSpec, WavWriter};
-        use realfft::RealFftPlanner;
-
-        let sample_rate = 48000.0_f32;
-        let freq = 440.0_f32;
-        let drive = 3.0_f32;
-        let n = 512_usize;
-        let ratio = 4_usize;
-
-        // ── Generate clean 440 Hz sine at host rate ─────────────────────
-        let clean: Vec<f32> = (0..n)
-            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate).sin())
-            .collect();
-
-        // ── 1x: just apply drive directly (no resampling) ──────────────
-        let driven_1x: Vec<f32> = clean.iter().map(|&s| (s * drive).tanh()).collect();
-
-        // ── 4x correct: upsample clean → drive at oversampled rate → downsample
-        let mut os4 = Oversampler::new(ratio, n, 1);
-        // Prime the resampler so transient settling doesn't pollute the output
-        {
-            let silence = vec![vec![0.0f32; n]];
-            let mut up_tmp = vec![vec![0.0f32; n * ratio]];
-            let mut dn_tmp = vec![vec![0.0f32; n]];
-            for _ in 0..8 {
-                let nu = os4.process_up(&silence, &mut up_tmp, n);
-                os4.process_down(&up_tmp, &mut dn_tmp, nu);
-            }
-        }
-        let input_4x = vec![clean.clone()];
-        let mut up_buf = vec![vec![0.0f32; n * ratio]];
-        let n_up = os4.process_up(&input_4x, &mut up_buf, n);
-        assert_eq!(n_up, n * ratio, "upsample should produce n*ratio samples");
-
-        // Apply drive at the oversampled rate
-        for s in up_buf[0][..n_up].iter_mut() {
-            *s = (*s * drive).tanh();
-        }
-
-        let mut driven_4x = vec![vec![0.0f32; n]];
-        let n_down = os4.process_down(&up_buf, &mut driven_4x, n_up);
-        assert_eq!(n_down, n, "downsample should produce n samples");
-
-        // ── 4x wrong: drive first, then upsample → downsample ──────────
-        let mut os4w = Oversampler::new(ratio, n, 1);
-        {
-            let silence = vec![vec![0.0f32; n]];
-            let mut up_tmp = vec![vec![0.0f32; n * ratio]];
-            let mut dn_tmp = vec![vec![0.0f32; n]];
-            for _ in 0..8 {
-                let nu = os4w.process_up(&silence, &mut up_tmp, n);
-                os4w.process_down(&up_tmp, &mut dn_tmp, nu);
-            }
-        }
-        let already_driven: Vec<f32> = clean.iter().map(|&s| (s * drive).tanh()).collect();
-        let input_wrong = vec![already_driven.clone()];
-        let mut up_buf_w = vec![vec![0.0f32; n * ratio]];
-        let n_up_w = os4w.process_up(&input_wrong, &mut up_buf_w, n);
-
-        // No drive here — it was already applied before upsampling
-        let mut driven_4x_wrong = vec![vec![0.0f32; n]];
-        let _n_down_w = os4w.process_down(&up_buf_w, &mut driven_4x_wrong, n_up_w);
-
-        // ── Write WAV files ─────────────────────────────────────────────
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate: sample_rate as u32,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-
-        let write_wav = |path: &str, data: &[f32]| {
-            let mut w = WavWriter::create(path, spec).expect("create wav");
-            for &s in data {
-                w.write_sample(s).expect("write sample");
-            }
-            w.finalize().expect("finalize wav");
-            println!("  Wrote {path} ({} samples)", data.len());
-        };
-
-        write_wav("/tmp/os_test_1x.wav", &driven_1x);
-        write_wav("/tmp/os_test_4x.wav", &driven_4x[0]);
-        write_wav("/tmp/os_test_4x_wrong.wav", &driven_4x_wrong[0]);
-
-        // ── Time-domain comparison ──────────────────────────────────────
-        println!("\n=== TIME-DOMAIN COMPARISON ===");
-
-        let peak_1x = driven_1x.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        let peak_4x = driven_4x[0].iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        let peak_4xw = driven_4x_wrong[0].iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        println!("Peak amplitude 1x:       {peak_1x:.6}");
-        println!("Peak amplitude 4x:       {peak_4x:.6}");
-        println!("Peak amplitude 4x-wrong: {peak_4xw:.6}");
-
-        // 1x vs 4x-correct
-        let diffs_correct: Vec<f32> = driven_1x
-            .iter()
-            .zip(driven_4x[0].iter())
-            .map(|(a, b)| a - b)
-            .collect();
-        let max_diff_correct = diffs_correct.iter().map(|d| d.abs()).fold(0.0f32, f32::max);
-        let rms_correct = (diffs_correct.iter().map(|d| d * d).sum::<f32>() / n as f32).sqrt();
-
-        println!("\n--- 1x vs 4x-correct ---");
-        println!("Max difference:  {max_diff_correct:.6}");
-        println!("RMS difference:  {rms_correct:.6}");
-
-        // 1x vs 4x-wrong
-        let diffs_wrong: Vec<f32> = driven_1x
-            .iter()
-            .zip(driven_4x_wrong[0].iter())
-            .map(|(a, b)| a - b)
-            .collect();
-        let max_diff_wrong = diffs_wrong.iter().map(|d| d.abs()).fold(0.0f32, f32::max);
-        let rms_wrong = (diffs_wrong.iter().map(|d| d * d).sum::<f32>() / n as f32).sqrt();
-
-        println!("\n--- 1x vs 4x-wrong ---");
-        println!("Max difference:  {max_diff_wrong:.6}");
-        println!("RMS difference:  {rms_wrong:.6}");
-
-        // 4x-correct vs 4x-wrong
-        let diffs_cw: Vec<f32> = driven_4x[0]
-            .iter()
-            .zip(driven_4x_wrong[0].iter())
-            .map(|(a, b)| a - b)
-            .collect();
-        let max_diff_cw = diffs_cw.iter().map(|d| d.abs()).fold(0.0f32, f32::max);
-        let rms_cw = (diffs_cw.iter().map(|d| d * d).sum::<f32>() / n as f32).sqrt();
-
-        println!("\n--- 4x-correct vs 4x-wrong ---");
-        println!("Max difference:  {max_diff_cw:.6}");
-        println!("RMS difference:  {rms_cw:.6}");
-
-        // Per-sample differences for first 50 samples
-        println!("\n--- Per-sample (first 50): idx | 1x | 4x | 4x-wrong | diff(1x-4x) | diff(1x-4xw) ---");
-        for i in 0..50 {
-            println!(
-                "  [{:3}] 1x={:+.6} 4x={:+.6} 4xw={:+.6}  d(1x-4x)={:+.6}  d(1x-4xw)={:+.6}",
-                i, driven_1x[i], driven_4x[0][i], driven_4x_wrong[0][i],
-                diffs_correct[i], diffs_wrong[i]
-            );
-        }
-
-        // ── Spectral analysis ───────────────────────────────────────────
-        println!("\n=== SPECTRAL ANALYSIS (FFT) ===");
-
-        let fft_size = n; // 512
-        let mut planner = RealFftPlanner::<f32>::new();
-        let fft = planner.plan_fft_forward(fft_size);
-        let n_bins = fft_size / 2 + 1;
-
-        let compute_magnitudes = |signal: &[f32]| -> Vec<f32> {
-            let mut input_buf = signal.to_vec();
-            let mut spectrum = vec![Complex { re: 0.0f32, im: 0.0f32 }; n_bins];
-            fft.process(&mut input_buf, &mut spectrum).expect("fft");
-            spectrum
-                .iter()
-                .map(|c| (c.re * c.re + c.im * c.im).sqrt() / (fft_size as f32 / 2.0))
-                .collect()
-        };
-
-        let mags_1x = compute_magnitudes(&driven_1x);
-        let mags_4x = compute_magnitudes(&driven_4x[0]);
-        let mags_4xw = compute_magnitudes(&driven_4x_wrong[0]);
-
-        let bin_hz = sample_rate / fft_size as f32;
-        println!("Bin resolution: {bin_hz:.1} Hz");
-        println!("Number of bins: {n_bins}");
-
-        // Print notable bins (fundamental + harmonics of 440 Hz, and high-frequency region)
-        println!("\n--- Magnitude at key frequencies ---");
-        println!("{:>8} {:>10} {:>10} {:>10}", "Freq(Hz)", "1x", "4x", "4x-wrong");
-        let interesting_freqs = [440.0, 880.0, 1320.0, 1760.0, 2200.0, 3080.0, 4400.0,
-                                  6600.0, 8800.0, 10000.0, 12000.0, 15000.0, 18000.0, 20000.0, 22000.0];
-        for &f in &interesting_freqs {
-            let bin = (f / bin_hz).round() as usize;
-            if bin < n_bins {
-                println!(
-                    "{:8.0} {:10.6} {:10.6} {:10.6}",
-                    bin as f32 * bin_hz, mags_1x[bin], mags_4x[bin], mags_4xw[bin]
-                );
-            }
-        }
-
-        // Energy above 10 kHz
-        let bin_10k = (10000.0 / bin_hz).ceil() as usize;
-        let energy_above = |mags: &[f32]| -> f32 {
-            mags[bin_10k..].iter().map(|m| m * m).sum::<f32>().sqrt()
-        };
-        let e1x = energy_above(&mags_1x);
-        let e4x = energy_above(&mags_4x);
-        let e4xw = energy_above(&mags_4xw);
-
-        println!("\n--- Energy above 10 kHz (RMS of magnitude bins) ---");
-        println!("1x:       {e1x:.6}");
-        println!("4x:       {e4x:.6}");
-        println!("4x-wrong: {e4xw:.6}");
-
-        // Total energy for reference
-        let total_energy = |mags: &[f32]| -> f32 {
-            mags.iter().map(|m| m * m).sum::<f32>().sqrt()
-        };
-        let t1x = total_energy(&mags_1x);
-        let t4x = total_energy(&mags_4x);
-        let t4xw = total_energy(&mags_4xw);
-        println!("\n--- Total spectral energy (RMS of all bins) ---");
-        println!("1x:       {t1x:.6}");
-        println!("4x:       {t4x:.6}");
-        println!("4x-wrong: {t4xw:.6}");
-
-        println!("\n--- High-freq energy as % of total ---");
-        println!("1x:       {:.2}%", 100.0 * e1x / t1x);
-        println!("4x:       {:.2}%", 100.0 * e4x / t4x);
-        println!("4x-wrong: {:.2}%", 100.0 * e4xw / t4xw);
-
-        // Full spectrum dump for the first 30 bins
-        println!("\n--- Full spectrum (first 30 bins) ---");
-        println!("{:>4} {:>8} {:>10} {:>10} {:>10}", "Bin", "Freq(Hz)", "1x", "4x", "4x-wrong");
-        for bin in 0..30.min(n_bins) {
-            println!(
-                "{:4} {:8.1} {:10.6} {:10.6} {:10.6}",
-                bin, bin as f32 * bin_hz, mags_1x[bin], mags_4x[bin], mags_4xw[bin]
-            );
-        }
-
-        println!("\n=== TEST COMPLETE ===");
-    }
-
     // ── Frame-sweep timing benchmarks ─────────────────────────────────
 
     /// Helper: set up FFT plans and scratch buffers for a given wavetable,
@@ -3144,7 +2601,7 @@ mod tests {
         plugin.frame_spectrum.resize(spec_len, Complex::new(0.0, 0.0));
         plugin.frame_mags.resize(spec_len, 0.0);
 
-        let sample_rate = plugin.host_sample_rate;
+        let sample_rate = plugin.sample_rate;
         let cutoff_hz = 1000.0f32;
         let resonance = 0.3f32;
         let num_steps = 100usize;
@@ -3313,154 +2770,6 @@ mod tests {
                 "{sweep_exceeded}/{num_steps} sweep iterations exceeded 1 ms (max: {sweep_max:.0} us)"
             );
         }
-    }
-
-    // ── Oversampled vs 1x synthesis cost comparison ──────────────────
-
-    /// Verify that the oversampled path's kernel synthesis does NOT introduce
-    /// extra work compared to 1x.  The oversampling restructure changed
-    /// `self.sample_rate` to `self.host_sample_rate` for kernel synthesis.
-    ///
-    /// If `host_sample_rate` were accidentally replaced with
-    /// `effective_sample_rate` (= host_sr * ratio), the FFT mapping
-    /// (`bin_to_src`) would change, but the synthesis cost should be identical
-    /// because `compute_base_spectrum_into` and `apply_resonance_and_ifft`
-    /// do the same amount of work regardless of the sample_rate value.
-    ///
-    /// This test checks:
-    ///   1. Cost parity: 1x vs 2x vs 4x synthesis during a sweep
-    ///   2. Correctness: kernel at host_sr vs effective_sr are DIFFERENT
-    ///      (proves we are actually using host_sr, not effective_sr)
-    #[test]
-    fn test_oversample_synthesis_cost_parity() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/phaseless-bass.wt");
-        let wt = Wavetable::from_file(path).expect("failed to load phaseless-bass.wt");
-        eprintln!("\n=== OVERSAMPLE SYNTHESIS COST PARITY TEST ===");
-        eprintln!("Wavetable: {} frames x {} samples", wt.frame_count, wt.frame_size);
-
-        let host_sr = 48000.0f32;
-        let cutoff_hz = 1000.0f32;
-        let resonance = 0.3f32;
-        let num_steps = 100usize;
-
-        // Test at host_sr (what the plugin SHOULD use for kernel synthesis)
-        let mut bench_1x = SynthBench::new(wt.clone());
-        // Test at 2x effective_sr (what it would use if the bug existed)
-        let mut bench_2x = SynthBench::new(wt.clone());
-        // Test at 4x effective_sr
-        let mut bench_4x = SynthBench::new(wt.clone());
-
-        // Warm up all benches
-        for _ in 0..5 {
-            bench_1x.synthesize(0.0, cutoff_hz, host_sr, resonance);
-            bench_2x.synthesize(0.0, cutoff_hz, host_sr * 2.0, resonance);
-            bench_4x.synthesize(0.0, cutoff_hz, host_sr * 4.0, resonance);
-        }
-
-        // ── Sweep at each "sample rate" ─────────────────────────────────
-        let mut times_1x = Vec::with_capacity(num_steps);
-        let mut times_2x = Vec::with_capacity(num_steps);
-        let mut times_4x = Vec::with_capacity(num_steps);
-
-        for i in 0..num_steps {
-            let frame_pos = i as f32 / (num_steps - 1) as f32;
-
-            let (ti, ts, tf) = bench_1x.synthesize(frame_pos, cutoff_hz, host_sr, resonance);
-            times_1x.push(ti + ts + tf);
-
-            let (ti, ts, tf) = bench_2x.synthesize(frame_pos, cutoff_hz, host_sr * 2.0, resonance);
-            times_2x.push(ti + ts + tf);
-
-            let (ti, ts, tf) = bench_4x.synthesize(frame_pos, cutoff_hz, host_sr * 4.0, resonance);
-            times_4x.push(ti + ts + tf);
-        }
-
-        eprintln!("\n--- Synthesis cost during sweep ({num_steps} steps) ---");
-        print_timing_stats("1x (host_sr=48000)", &times_1x);
-        print_timing_stats("2x (effective_sr=96000)", &times_2x);
-        print_timing_stats("4x (effective_sr=192000)", &times_4x);
-
-        let avg_1x = times_1x.iter().sum::<f64>() / num_steps as f64;
-        let avg_2x = times_2x.iter().sum::<f64>() / num_steps as f64;
-        let avg_4x = times_4x.iter().sum::<f64>() / num_steps as f64;
-
-        let ratio_2x = avg_2x / avg_1x.max(0.001);
-        let ratio_4x = avg_4x / avg_1x.max(0.001);
-
-        eprintln!("\n--- Cost ratios ---");
-        eprintln!("  1x avg: {avg_1x:.1} us");
-        eprintln!("  2x avg: {avg_2x:.1} us  (ratio vs 1x: {ratio_2x:.2}x)");
-        eprintln!("  4x avg: {avg_4x:.1} us  (ratio vs 1x: {ratio_4x:.2}x)");
-
-        // ── Correctness check: kernels MUST differ between sample rates ──
-        // If they were identical, it would mean the sample_rate parameter
-        // is being ignored (or always using the same value).
-        eprintln!("\n--- Correctness: kernel difference at different sample rates ---");
-        let frame_pos = 0.5f32;
-
-        bench_1x.synthesize(frame_pos, cutoff_hz, host_sr, resonance);
-        let kernel_at_host_sr = bench_1x.kernel.clone();
-
-        bench_2x.synthesize(frame_pos, cutoff_hz, host_sr * 2.0, resonance);
-        let kernel_at_2x_sr = bench_2x.kernel.clone();
-
-        bench_4x.synthesize(frame_pos, cutoff_hz, host_sr * 4.0, resonance);
-        let kernel_at_4x_sr = bench_4x.kernel.clone();
-
-        let diff_1x_2x: f32 = kernel_at_host_sr
-            .iter()
-            .zip(kernel_at_2x_sr.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-        let diff_1x_4x: f32 = kernel_at_host_sr
-            .iter()
-            .zip(kernel_at_4x_sr.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-
-        eprintln!("  max|kernel(48k) - kernel(96k)| = {diff_1x_2x:.6}");
-        eprintln!("  max|kernel(48k) - kernel(192k)| = {diff_1x_4x:.6}");
-
-        // Kernels at different sample rates MUST differ (proves sample_rate matters)
-        assert!(
-            diff_1x_2x > 1e-6,
-            "Kernels at host_sr and 2x should differ, but max diff is {diff_1x_2x:.2e}. \
-             This means sample_rate is not affecting synthesis."
-        );
-        assert!(
-            diff_1x_4x > 1e-6,
-            "Kernels at host_sr and 4x should differ, but max diff is {diff_1x_4x:.2e}. \
-             This means sample_rate is not affecting synthesis."
-        );
-
-        // ── Verify the plugin actually uses host_sample_rate ────────────
-        // Build a WavetableFilter, set different OS ratios, and check that
-        // the sample_rate passed to compute_base_spectrum_into is host_sr.
-        eprintln!("\n--- Plugin field check ---");
-        let plugin = WavetableFilter::default();
-        eprintln!("  host_sample_rate:      {}", plugin.host_sample_rate);
-        eprintln!("  effective_sample_rate:  {}", plugin.effective_sample_rate);
-        eprintln!("  sample_rate:           {}", plugin.sample_rate);
-
-        // The synthesis in process() uses host_sample_rate (line 1125).
-        // If this ever changes, this test will catch it via the kernel diff above.
-
-        // Cost parity: synthesis time should not meaningfully change with
-        // different sample_rate values (the work is O(KERNEL_LEN) regardless).
-        // Allow up to 50% variance (noise in timing).
-        #[cfg(not(debug_assertions))]
-        {
-            assert!(
-                ratio_2x < 1.5,
-                "2x synthesis is {ratio_2x:.2}x more expensive than 1x -- unexpected extra work"
-            );
-            assert!(
-                ratio_4x < 1.5,
-                "4x synthesis is {ratio_4x:.2}x more expensive than 1x -- unexpected extra work"
-            );
-        }
-
-        eprintln!("\n=== END OVERSAMPLE SYNTHESIS COST PARITY TEST ===\n");
     }
 
 }

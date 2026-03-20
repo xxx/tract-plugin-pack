@@ -21,7 +21,6 @@ atomic_float = "1.0"
 rfd = "0.17.2"
 realfft = "3.3"
 rustfft = "6.2"
-rubato = "0.16"
 
 [profile.release]
 lto = true
