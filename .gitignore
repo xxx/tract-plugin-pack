@@ -1,4 +1,5 @@
 .idea/
+.superpowers/
 /target
 Cargo.lock
 *.so

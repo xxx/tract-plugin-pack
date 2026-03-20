@@ -85,16 +85,28 @@ pub(crate) fn create(
             // Status message
             Label::new(cx, Data::status_message).height(Pixels(20.0));
 
-            // Wavetable path input
+            // Wavetable name + browse
             HStack::new(cx, |cx| {
-                Label::new(cx, "Wavetable Path:")
-                    .width(Pixels(120.0))
+                Label::new(cx, "Wavetable:")
+                    .width(Pixels(80.0))
                     .height(Pixels(30.0));
 
-                Label::new(cx, Data::wavetable_path)
-                    .width(Stretch(1.0))
-                    .height(Pixels(30.0))
-                    .class("path-display");
+                Label::new(
+                    cx,
+                    Data::wavetable_path.map(|p| {
+                        std::path::Path::new(p)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("(none)")
+                            .to_string()
+                    }),
+                )
+                .width(Stretch(1.0))
+                .height(Pixels(30.0))
+                .class("path-display")
+                .tooltip(|cx| {
+                    Label::new(cx, Data::wavetable_path);
+                });
 
                 let wt_path_inner = wt_path.clone();
                 let reload_flag_inner = reload_flag.clone();
