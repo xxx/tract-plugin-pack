@@ -31,7 +31,14 @@ cargo clippy
 cargo fmt --check
 ```
 
-Tests live in `src/wavetable.rs` (inline `#[cfg(test)]` module).
+Tests live in `src/lib.rs` and `src/wavetable.rs` (inline `#[cfg(test)]` modules). Test fixtures are in `tests/fixtures/`.
+
+## Development Practices
+
+- **Prefer TDD**: Write tests before or alongside implementation, not as an afterthought. New DSP functions and data structures should have tests covering normal operation, edge cases, and error paths.
+- **Use the LSP tool**: Prefer the LSP tool over grep for code navigation — go-to-definition, find-references, and hover for type info. Fall back to grep only when LSP is unavailable.
+- **Never commit unless asked**: Do not create git commits unless the user explicitly requests it.
+- **No allocations on the audio thread**: `process()` must never allocate. Use pre-allocated buffers, `try_lock()` for shared data, and avoid `Vec::new()`, `clone()` of collections, or `String` operations in the hot path.
 
 ## Architecture
 
