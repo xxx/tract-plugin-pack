@@ -69,7 +69,9 @@ impl FilterResponseView {
     fn update_cached_mags(&self, frame_position: f32, cutoff_hz: f32, resonance: f32) -> bool {
         let mut cache = self.fft_cache.borrow_mut();
 
-        let needs_update = (cache.cached_frame_pos - frame_position).abs() > PARAM_EPSILON
+        // Use coarser threshold for frame_position to avoid FFT on every draw during sweeps.
+        // 0.01 in normalized 0-1 space ≈ 2-3 frames for a 256-frame wavetable.
+        let needs_update = (cache.cached_frame_pos - frame_position).abs() > 0.01
             || (cache.cached_cutoff - cutoff_hz).abs() > PARAM_EPSILON
             || (cache.cached_resonance - resonance).abs() > PARAM_EPSILON
             || cache.cached_mags.is_empty();

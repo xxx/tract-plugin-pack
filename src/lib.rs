@@ -113,6 +113,7 @@ pub struct WavetableFilter {
     host_sample_rate: f32,
     max_block_size: usize,
     cached_os_latency: u32,
+    last_reported_latency: u32,
     /// Pre-allocated buffers for oversampled processing (2ch)
     os_input_buf: Vec<Vec<f32>>,   // channels × max_block × max_ratio
     os_output_buf: Vec<Vec<f32>>,  // channels × max_block × max_ratio
@@ -286,6 +287,7 @@ impl Default for WavetableFilter {
             host_sample_rate: 48000.0,
             max_block_size: 8192,
             cached_os_latency: 0,
+            last_reported_latency: u32::MAX, // Forces initial report
             os_input_buf: vec![vec![0.0; 8192 * 8]; 2],
             os_output_buf: vec![vec![0.0; 8192 * 8]; 2],
             os_host_out: vec![vec![0.0; 8192]; 2],
@@ -1015,7 +1017,7 @@ impl Plugin for WavetableFilter {
     ) -> ProcessStatus {
         // Check if we should reload the wavetable
         if self.should_reload.load(Ordering::Relaxed) {
-            if let Ok(shared_wt) = self.shared_wavetable.lock() {
+            if let Ok(shared_wt) = self.shared_wavetable.try_lock() {
                 let new_size = shared_wt.frame_size;
 
                 self.current_frame_count
@@ -1038,8 +1040,9 @@ impl Plugin for WavetableFilter {
                 self.frame_spectrum.resize(spec_len, Complex::new(0.0, 0.0));
                 self.frame_mags.resize(spec_len, 0.0);
                 self.first_process = true;
+                self.should_reload.store(false, Ordering::Relaxed);
             }
-            self.should_reload.store(false, Ordering::Relaxed);
+            // If try_lock fails, leave should_reload true and retry next buffer
         }
 
         // ── Oversample ratio change detection ─────────────────────────────
@@ -1087,7 +1090,11 @@ impl Plugin for WavetableFilter {
         let os_idx = self.last_oversample_ratio.index();
         let os_ratio = self.last_oversample_ratio.factor();
         let stft_latency = if filter_mode == FilterMode::Raw { 0 } else { HOP as u32 };
-        context.set_latency_samples(stft_latency + self.cached_os_latency);
+        let new_latency = stft_latency + self.cached_os_latency;
+        if new_latency != self.last_reported_latency {
+            context.set_latency_samples(new_latency);
+            self.last_reported_latency = new_latency;
+        }
 
         let frame_pos_changed = self.first_process
             || (frame_pos - self.last_frame_pos).abs() > 0.0001;
@@ -2718,6 +2725,213 @@ mod tests {
         }
 
         println!("\n=== TEST COMPLETE ===");
+    }
+
+    // ── Frame-sweep timing benchmarks ─────────────────────────────────
+
+    /// Helper: set up FFT plans and scratch buffers for a given wavetable,
+    /// returning everything needed to run the synthesis pipeline.
+    struct SynthBench {
+        wt: Wavetable,
+        frame_fft: Arc<dyn RealToComplex<f32>>,
+        kernel_ifft: Arc<dyn ComplexToReal<f32>>,
+        frame_buf: Vec<f32>,
+        frame_spectrum: Vec<Complex<f32>>,
+        frame_mags: Vec<f32>,
+        out_mags: Vec<f32>,
+        out_fracs: Vec<f32>,
+        spectrum_work: Vec<Complex<f32>>,
+        kernel: Vec<f32>,
+    }
+
+    impl SynthBench {
+        fn new(wt: Wavetable) -> Self {
+            let mut planner = RealFftPlanner::<f32>::new();
+            let frame_fft = planner.plan_fft_forward(wt.frame_size);
+            let kernel_ifft = planner.plan_fft_inverse(KERNEL_LEN);
+            let spec_len = wt.frame_size / 2 + 1;
+            Self {
+                frame_buf: vec![0.0f32; wt.frame_size],
+                frame_spectrum: vec![Complex::new(0.0f32, 0.0); spec_len],
+                frame_mags: vec![0.0f32; spec_len],
+                out_mags: vec![0.0f32; KERNEL_LEN / 2 + 1],
+                out_fracs: vec![0.0f32; KERNEL_LEN / 2 + 1],
+                spectrum_work: vec![Complex::new(0.0f32, 0.0); KERNEL_LEN / 2 + 1],
+                kernel: vec![0.0f32; KERNEL_LEN],
+                frame_fft,
+                kernel_ifft,
+                wt,
+            }
+        }
+
+        /// Run one full synthesis cycle: interpolate + spectrum + IFFT.
+        /// Returns (interpolate_us, spectrum_us, ifft_us).
+        fn synthesize(&mut self, frame_pos: f32, cutoff_hz: f32, sample_rate: f32, resonance: f32) -> (f64, f64, f64) {
+            let t0 = std::time::Instant::now();
+            self.wt.interpolate_frame_into(frame_pos, &mut self.frame_buf);
+            let t1 = std::time::Instant::now();
+
+            WavetableFilter::compute_base_spectrum_into(
+                &mut self.frame_buf,
+                cutoff_hz,
+                sample_rate,
+                &self.frame_fft,
+                &mut self.frame_spectrum,
+                &mut self.frame_mags,
+                &mut self.out_mags,
+                &mut self.out_fracs,
+            );
+            let t2 = std::time::Instant::now();
+
+            WavetableFilter::apply_resonance_and_ifft(
+                &self.out_mags,
+                &self.out_fracs,
+                resonance,
+                &mut self.spectrum_work,
+                &mut self.kernel,
+                &self.kernel_ifft,
+            );
+            let t3 = std::time::Instant::now();
+
+            // Prevent dead-code elimination
+            std::hint::black_box(&self.kernel);
+
+            let interp_us = t1.duration_since(t0).as_nanos() as f64 / 1000.0;
+            let spectrum_us = t2.duration_since(t1).as_nanos() as f64 / 1000.0;
+            let ifft_us = t3.duration_since(t2).as_nanos() as f64 / 1000.0;
+            (interp_us, spectrum_us, ifft_us)
+        }
+    }
+
+    fn print_timing_stats(label: &str, times_us: &[f64]) {
+        let n = times_us.len() as f64;
+        let min = times_us.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = times_us.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let avg = times_us.iter().sum::<f64>() / n;
+        let mut sorted = times_us.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p50 = sorted[(n * 0.50) as usize];
+        let p95 = sorted[(n * 0.95) as usize];
+        let p99 = sorted[(n * 0.99).min(n - 1.0) as usize];
+
+        // Buffer period threshold: 256 samples / 48000 Hz * 50% = ~2666 us
+        let threshold_us = 256.0 / 48000.0 * 0.5 * 1_000_000.0;
+        let exceeded = times_us.iter().filter(|&&t| t > threshold_us).count();
+
+        eprintln!("  {label}:");
+        eprintln!("    min={min:.1} us  avg={avg:.1} us  p50={p50:.1} us  p95={p95:.1} us  p99={p99:.1} us  max={max:.1} us");
+        eprintln!("    exceeded 50% buffer period ({threshold_us:.0} us): {exceeded}/{} calls", times_us.len());
+    }
+
+    /// Benchmark: sweep frame_position from 0.0 to 1.0 over ~100 buffer periods.
+    /// Each "buffer" triggers one full kernel re-synthesis (the expensive path).
+    /// Uses the real phaseless-bass.wt fixture to reproduce reported lag.
+    #[test]
+    fn bench_frame_sweep() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/phaseless-bass.wt");
+        let wt = Wavetable::from_file(path).expect("failed to load phaseless-bass.wt");
+        eprintln!("\n=== FRAME SWEEP BENCHMARK ===");
+        eprintln!("Wavetable: {} frames x {} samples", wt.frame_count, wt.frame_size);
+
+        let sample_rate = 48000.0f32;
+        let cutoff_hz = 1000.0f32;
+        let resonance = 0.3f32;
+        let num_buffers = 100usize;
+
+        let mut bench = SynthBench::new(wt);
+
+        // Warm up FFT plans
+        for _ in 0..5 {
+            bench.synthesize(0.0, cutoff_hz, sample_rate, resonance);
+        }
+
+        let mut interp_times = Vec::with_capacity(num_buffers);
+        let mut spectrum_times = Vec::with_capacity(num_buffers);
+        let mut ifft_times = Vec::with_capacity(num_buffers);
+        let mut total_times = Vec::with_capacity(num_buffers);
+
+        for i in 0..num_buffers {
+            let frame_pos = i as f32 / (num_buffers - 1) as f32;
+            let (t_interp, t_spectrum, t_ifft) =
+                bench.synthesize(frame_pos, cutoff_hz, sample_rate, resonance);
+            interp_times.push(t_interp);
+            spectrum_times.push(t_spectrum);
+            ifft_times.push(t_ifft);
+            total_times.push(t_interp + t_spectrum + t_ifft);
+        }
+
+        eprintln!("\n--- Per-step breakdown (sweeping frame 0.0 -> 1.0, {num_buffers} buffers) ---");
+        print_timing_stats("interpolate_frame_into", &interp_times);
+        print_timing_stats("compute_base_spectrum_into", &spectrum_times);
+        print_timing_stats("apply_resonance_and_ifft", &ifft_times);
+        print_timing_stats("TOTAL synthesis", &total_times);
+
+        // Extended run: 200 iterations for more statistical confidence
+        eprintln!("\n--- Extended run: 200 iterations at varying frame positions ---");
+        let mut ext_total = Vec::with_capacity(200);
+        for i in 0..200 {
+            let frame_pos = (i as f32 * 0.007).fract(); // sweep through multiple cycles
+            let (t_i, t_s, t_f) = bench.synthesize(frame_pos, cutoff_hz, sample_rate, resonance);
+            ext_total.push(t_i + t_s + t_f);
+        }
+        print_timing_stats("TOTAL (200 iterations)", &ext_total);
+
+        eprintln!("\n=== END FRAME SWEEP BENCHMARK ===\n");
+    }
+
+    /// Baseline benchmark: frame_position is STATIC (no frame change).
+    /// Same cutoff/resonance as the sweep test, so the only difference is
+    /// whether the frame interpolation input changes between calls.
+    #[test]
+    fn bench_frame_static() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/phaseless-bass.wt");
+        let wt = Wavetable::from_file(path).expect("failed to load phaseless-bass.wt");
+        eprintln!("\n=== STATIC FRAME BENCHMARK (baseline) ===");
+        eprintln!("Wavetable: {} frames x {} samples", wt.frame_count, wt.frame_size);
+
+        let sample_rate = 48000.0f32;
+        let cutoff_hz = 1000.0f32;
+        let resonance = 0.3f32;
+        let num_buffers = 100usize;
+        let static_frame_pos = 0.5f32; // fixed mid-point
+
+        let mut bench = SynthBench::new(wt);
+
+        // Warm up
+        for _ in 0..5 {
+            bench.synthesize(static_frame_pos, cutoff_hz, sample_rate, resonance);
+        }
+
+        let mut interp_times = Vec::with_capacity(num_buffers);
+        let mut spectrum_times = Vec::with_capacity(num_buffers);
+        let mut ifft_times = Vec::with_capacity(num_buffers);
+        let mut total_times = Vec::with_capacity(num_buffers);
+
+        for _ in 0..num_buffers {
+            let (t_interp, t_spectrum, t_ifft) =
+                bench.synthesize(static_frame_pos, cutoff_hz, sample_rate, resonance);
+            interp_times.push(t_interp);
+            spectrum_times.push(t_spectrum);
+            ifft_times.push(t_ifft);
+            total_times.push(t_interp + t_spectrum + t_ifft);
+        }
+
+        eprintln!("\n--- Per-step breakdown (static frame_pos={static_frame_pos}, {num_buffers} buffers) ---");
+        print_timing_stats("interpolate_frame_into", &interp_times);
+        print_timing_stats("compute_base_spectrum_into", &spectrum_times);
+        print_timing_stats("apply_resonance_and_ifft", &ifft_times);
+        print_timing_stats("TOTAL synthesis", &total_times);
+
+        // Extended run
+        eprintln!("\n--- Extended run: 200 iterations at static frame position ---");
+        let mut ext_total = Vec::with_capacity(200);
+        for _ in 0..200 {
+            let (t_i, t_s, t_f) = bench.synthesize(static_frame_pos, cutoff_hz, sample_rate, resonance);
+            ext_total.push(t_i + t_s + t_f);
+        }
+        print_timing_stats("TOTAL (200 iterations)", &ext_total);
+
+        eprintln!("\n=== END STATIC FRAME BENCHMARK ===\n");
     }
 
 }

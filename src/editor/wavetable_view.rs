@@ -120,7 +120,45 @@ impl View for WavetableView {
             }
         }
 
-        let mut cache = self.frame_cache.borrow_mut();
+        let current_frame_pos = self.params.frame_position.unmodulated_normalized_value();
+
+        // Update 2D interpolation cache if needed (narrow mutable borrow)
+        {
+            let mut cache = self.frame_cache.borrow_mut();
+            let frame_count = cache.cached_frame_count;
+            let frame_size = cache.cached_frame_size;
+            if frame_count > 0 && frame_size > 0 && self.show_2d.get() {
+                let frame_step = if frame_count > 1 {
+                    0.5 / (frame_count - 1) as f32
+                } else {
+                    1.0
+                };
+                if (current_frame_pos - cache.interp_frame_pos).abs() > frame_step
+                    || cache.interp_frame.len() != frame_size
+                {
+                    let exact_pos = current_frame_pos * (frame_count - 1) as f32;
+                    let lo = (exact_pos.floor() as usize).min(frame_count - 1);
+                    let hi = (lo + 1).min(frame_count - 1);
+                    let frac = exact_pos - lo as f32;
+
+                    cache.interp_frame.resize(frame_size, 0.0);
+                    let mut fmin = f32::INFINITY;
+                    let mut fmax = f32::NEG_INFINITY;
+                    for i in 0..frame_size {
+                        let s = cache.cached_frames[lo][i] * (1.0 - frac)
+                            + cache.cached_frames[hi][i] * frac;
+                        cache.interp_frame[i] = s;
+                        fmin = fmin.min(s);
+                        fmax = fmax.max(s);
+                    }
+                    cache.interp_min = fmin;
+                    cache.interp_max = fmax;
+                    cache.interp_frame_pos = current_frame_pos;
+                }
+            }
+        }
+
+        let cache = self.frame_cache.borrow();
         let frame_count = cache.cached_frame_count;
         let frame_size = cache.cached_frame_size;
 
@@ -128,35 +166,9 @@ impl View for WavetableView {
             return;
         }
 
-        let current_frame_pos = self.params.frame_position.unmodulated_normalized_value();
         let current_frame_idx = (current_frame_pos * (frame_count - 1) as f32).round() as usize;
 
         if self.show_2d.get() {
-            // === 2D face-on view of the current interpolated frame ===
-            // Update interpolation cache only when frame position changes
-            if (current_frame_pos - cache.interp_frame_pos).abs() > 0.0001
-                || cache.interp_frame.len() != frame_size
-            {
-                let exact_pos = current_frame_pos * (frame_count - 1) as f32;
-                let lo = (exact_pos.floor() as usize).min(frame_count - 1);
-                let hi = (lo + 1).min(frame_count - 1);
-                let frac = exact_pos - lo as f32;
-
-                cache.interp_frame.resize(frame_size, 0.0);
-                let mut fmin = f32::INFINITY;
-                let mut fmax = f32::NEG_INFINITY;
-                for i in 0..frame_size {
-                    let s = cache.cached_frames[lo][i] * (1.0 - frac)
-                        + cache.cached_frames[hi][i] * frac;
-                    cache.interp_frame[i] = s;
-                    fmin = fmin.min(s);
-                    fmax = fmax.max(s);
-                }
-                cache.interp_min = fmin;
-                cache.interp_max = fmax;
-                cache.interp_frame_pos = current_frame_pos;
-            }
-
             let range = (cache.interp_max - cache.interp_min).max(0.001);
 
             // Draw filled waveform
