@@ -44,7 +44,7 @@ impl Model for Data {
 }
 
 const WINDOW_WIDTH: u32 = 1050; // 700 * 1.5
-const WINDOW_HEIGHT: u32 = 810; // 540 * 1.5
+const WINDOW_HEIGHT: u32 = 680;
 
 pub(crate) fn default_state() -> Arc<ViziaState> {
     ViziaState::new(|| (WINDOW_WIDTH, WINDOW_HEIGHT))
@@ -188,29 +188,6 @@ pub(crate) fn create(
             .height(Pixels(40.0))
             .col_between(Pixels(10.0));
 
-            // Parameter dials row
-            HStack::new(cx, |cx| {
-                ParamDial::new(cx, Data::params, |params| &params.frequency)
-                    .width(Pixels(110.0))
-                    .height(Pixels(110.0));
-                ParamDial::new(cx, Data::params, |params| &params.frame_position)
-                    .width(Pixels(110.0))
-                    .height(Pixels(110.0));
-                ParamDial::new(cx, Data::params, |params| &params.resonance)
-                    .width(Pixels(110.0))
-                    .height(Pixels(110.0));
-                ParamDial::new(cx, Data::params, |params| &params.mix)
-                    .width(Pixels(110.0))
-                    .height(Pixels(110.0));
-                ParamDial::new(cx, Data::params, |params| &params.drive)
-                    .width(Pixels(110.0))
-                    .height(Pixels(110.0));
-            })
-            .col_between(Pixels(30.0))
-            .height(Pixels(120.0))
-            .child_left(Stretch(1.0))
-            .child_right(Stretch(1.0));
-
             // Mode selection row
             HStack::new(cx, |cx| {
                 Label::new(cx, "Mode")
@@ -221,9 +198,9 @@ pub(crate) fn create(
             .height(Pixels(40.0))
             .col_between(Pixels(10.0));
 
-            // Visualization area - split into two sections
+            // Visualization area with dials below each display
             HStack::new(cx, |cx| {
-                // 3D Wavetable view (left side)
+                // Left column: wavetable view + frame position dial
                 VStack::new(cx, |cx| {
                     Label::new(cx, "3D Wavetable View")
                         .class("section-title")
@@ -235,23 +212,55 @@ pub(crate) fn create(
                         wavetable_version.clone(),
                     )
                     .height(Pixels(220.0));
-                })
-                .width(Stretch(1.0))
-                .height(Pixels(250.0));
 
-                // Filter frequency response (right side)
+                    HStack::new(cx, |cx| {
+                        ParamDial::new(cx, Data::params, |params| &params.frame_position)
+                            .width(Pixels(110.0))
+                            .height(Pixels(110.0));
+                    })
+                    .height(Pixels(120.0))
+                    .child_top(Pixels(6.0));
+                })
+                .width(Stretch(1.0));
+
+                // Right column: filter response + cutoff/resonance dials + drive/mix
                 VStack::new(cx, |cx| {
                     Label::new(cx, "Filter Response")
                         .class("section-title")
                         .height(Pixels(25.0));
                     FilterResponseView::new(cx, params.clone(), shared_wavetable.clone())
                         .height(Pixels(220.0));
+
+                    HStack::new(cx, |cx| {
+                        ParamDial::new(cx, Data::params, |params| &params.frequency)
+                            .width(Pixels(110.0))
+                            .height(Pixels(110.0));
+                        ParamDial::new(cx, Data::params, |params| &params.resonance)
+                            .width(Pixels(110.0))
+                            .height(Pixels(110.0));
+                    })
+                    .col_between(Pixels(10.0))
+                    .height(Pixels(120.0))
+                    .child_top(Pixels(6.0));
+
+                    // Drive and Mix in the lower right
+                    HStack::new(cx, |cx| {
+                        ParamDial::new(cx, Data::params, |params| &params.drive)
+                            .width(Pixels(110.0))
+                            .height(Pixels(110.0));
+                        ParamDial::new(cx, Data::params, |params| &params.mix)
+                            .width(Pixels(110.0))
+                            .height(Pixels(110.0));
+                    })
+                    .col_between(Pixels(10.0))
+                    .height(Pixels(120.0))
+                    .child_left(Stretch(1.0))
+                    .child_top(Stretch(1.0));
                 })
-                .width(Stretch(1.0))
-                .height(Pixels(250.0));
+                .width(Stretch(1.0));
             })
             .col_between(Pixels(10.0))
-            .child_top(Pixels(20.0));
+            .child_top(Pixels(10.0));
         })
         .row_between(Pixels(10.0))
         .child_left(Pixels(20.0))
