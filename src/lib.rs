@@ -2091,7 +2091,7 @@ mod tests {
     #[test]
     fn test_wavetable_file_loading() {
         // Load the sample wavetable file included in the repo.
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/phaseless-bass.wt");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/phaseless-bass.wt");
         let wt = Wavetable::from_file(path);
         assert!(wt.is_ok(), "phaseless-bass.wt should load successfully: {:?}", wt.err());
 

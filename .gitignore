@@ -9,4 +9,5 @@ Cargo.lock
 *.clap
 *.wav
 *.wt
+!tests/fixtures/*.wt
 *.png

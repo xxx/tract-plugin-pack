@@ -79,4 +79,4 @@ Minimum phase conversion (in `lib.rs`): FFT → log-magnitude cepstrum → Hilbe
 - `.wav` — standard WAV; frames are contiguous chunks of equal size
 - `.wt` — Surge-compatible wavetable format; frame metadata in header
 
-Sample wavetable: `phaseless-bass.wt` in repo root.
+Sample wavetable: `tests/fixtures/phaseless-bass.wt` (used by unit tests).
