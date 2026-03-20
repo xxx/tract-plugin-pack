@@ -253,9 +253,12 @@ pub(crate) fn create(
             // Mode selection row
             HStack::new(cx, |cx| {
                 Label::new(cx, "Mode")
-                    .width(Pixels(100.0))
+                    .width(Pixels(50.0))
                     .height(Pixels(30.0));
-                ParamSlider::new(cx, Data::params, |params| &params.mode);
+                ParamSlider::new(cx, Data::params, |params| &params.mode)
+                    .set_style(ParamSliderStyle::CurrentStepLabeled { even: true })
+                    .width(Pixels(200.0))
+                    .class("mode-slider");
             })
             .height(Pixels(40.0))
             .col_between(Pixels(10.0));

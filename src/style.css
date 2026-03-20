@@ -1,7 +1,14 @@
 /* Main window background */
-* {
+:root {
     background-color: #1a1c22;
     color: #e0e0e0;
+}
+
+button {
+    background-color: #2a2c32;
+    border-width: 1px;
+    border-color: #404040;
+    border-radius: 3px;
 }
 
 /* Title styling */
@@ -28,6 +35,25 @@ label {
 param-slider {
     background-color: #2a2c32;
     border-radius: 3px;
+    border-width: 1px;
+    border-color: #404040;
+}
+
+param-slider .fill {
+    background-color: #4fc3f7;
+}
+
+.mode-slider {
+    height: 28px;
+}
+
+.mode-slider .fill {
+    background-color: #4fc3f7;
+    border-radius: 3px;
+}
+
+.mode-slider .value--multiple {
+    font-size: 13px;
 }
 
 /* Path display styling */
