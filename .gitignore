@@ -11,3 +11,4 @@ Cargo.lock
 *.wt
 !tests/fixtures/*.wt
 *.png
+!docs/manual/*.png
