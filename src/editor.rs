@@ -1,4 +1,5 @@
 mod filter_response_view;
+mod param_dial;
 mod wavetable_view;
 
 use nih_plug::prelude::Editor;
@@ -9,6 +10,7 @@ use std::sync::Arc;
 
 use crate::WavetableFilterParams;
 use filter_response_view::FilterResponseView;
+use param_dial::ParamDial;
 use wavetable_view::WavetableView;
 
 #[derive(Lens, Clone)]
@@ -174,55 +176,28 @@ pub(crate) fn create(
             .height(Pixels(40.0))
             .col_between(Pixels(10.0));
 
-            // Frequency control
+            // Parameter dials row
             HStack::new(cx, |cx| {
-                Label::new(cx, "Frequency")
-                    .width(Pixels(100.0))
-                    .height(Pixels(30.0));
-                ParamSlider::new(cx, Data::params, |params| &params.frequency);
+                ParamDial::new(cx, Data::params, |params| &params.frequency)
+                    .width(Pixels(110.0))
+                    .height(Pixels(110.0));
+                ParamDial::new(cx, Data::params, |params| &params.frame_position)
+                    .width(Pixels(110.0))
+                    .height(Pixels(110.0));
+                ParamDial::new(cx, Data::params, |params| &params.resonance)
+                    .width(Pixels(110.0))
+                    .height(Pixels(110.0));
+                ParamDial::new(cx, Data::params, |params| &params.mix)
+                    .width(Pixels(110.0))
+                    .height(Pixels(110.0));
+                ParamDial::new(cx, Data::params, |params| &params.drive)
+                    .width(Pixels(110.0))
+                    .height(Pixels(110.0));
             })
-            .height(Pixels(40.0))
-            .col_between(Pixels(10.0));
-
-            // Frame position control
-            HStack::new(cx, |cx| {
-                Label::new(cx, "Frame Position")
-                    .width(Pixels(100.0))
-                    .height(Pixels(30.0));
-                ParamSlider::new(cx, Data::params, |params| &params.frame_position);
-            })
-            .height(Pixels(40.0))
-            .col_between(Pixels(10.0));
-
-            // Resonance control
-            HStack::new(cx, |cx| {
-                Label::new(cx, "Resonance")
-                    .width(Pixels(100.0))
-                    .height(Pixels(30.0));
-                ParamSlider::new(cx, Data::params, |params| &params.resonance);
-            })
-            .height(Pixels(40.0))
-            .col_between(Pixels(10.0));
-
-            // Mix control
-            HStack::new(cx, |cx| {
-                Label::new(cx, "Mix")
-                    .width(Pixels(100.0))
-                    .height(Pixels(30.0));
-                ParamSlider::new(cx, Data::params, |params| &params.mix);
-            })
-            .height(Pixels(40.0))
-            .col_between(Pixels(10.0));
-
-            // Drive control
-            HStack::new(cx, |cx| {
-                Label::new(cx, "Drive")
-                    .width(Pixels(100.0))
-                    .height(Pixels(30.0));
-                ParamSlider::new(cx, Data::params, |params| &params.drive);
-            })
-            .height(Pixels(40.0))
-            .col_between(Pixels(10.0));
+            .col_between(Pixels(30.0))
+            .height(Pixels(120.0))
+            .child_left(Stretch(1.0))
+            .child_right(Stretch(1.0));
 
             // Mode selection row
             HStack::new(cx, |cx| {
