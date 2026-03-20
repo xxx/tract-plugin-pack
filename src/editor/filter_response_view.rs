@@ -172,9 +172,10 @@ impl View for FilterResponseView {
 
         // --- Compute frequency response (with caching) ---
 
-        let frame_position = self.params.frame_position.unmodulated_normalized_value();
-        let cutoff_hz = self.params.frequency.unmodulated_plain_value();
-        let resonance = self.params.resonance.unmodulated_plain_value();
+        // Use modulated values so the response reflects DAW automation/modulation
+        let frame_position = self.params.frame_position.modulated_normalized_value();
+        let cutoff_hz = self.params.frequency.modulated_plain_value();
+        let resonance = self.params.resonance.modulated_plain_value();
         let comb_exp = resonance * 8.0;
 
         if !self.update_cached_mags(frame_position, cutoff_hz, resonance) {
@@ -221,44 +222,50 @@ impl View for FilterResponseView {
         let num_points = width.max(1.0) as usize;
 
         // --- Input spectrum shadow ---
-        if let Ok(input_data) = self.shared_input_spectrum.try_lock() {
-            let (sr, ref input_mags) = *input_data;
-            if sr > 0.0 && !input_mags.is_empty() {
-                let bin_hz = sr / (2.0 * (input_mags.len() - 1) as f32);
-
-                let mut shadow_path = vg::Path::new();
-                shadow_path.move_to(x0, y0 + height);
-
-                for i in 0..=num_points {
-                    let x_norm = i as f32 / num_points as f32;
-                    let freq = FREQ_MIN * (FREQ_MAX / FREQ_MIN).powf(x_norm);
-                    let bin = freq / bin_hz;
-
-                    let mag = if bin >= (input_mags.len() - 1) as f32 {
-                        0.0
-                    } else if bin <= 0.0 {
-                        input_mags[0]
-                    } else {
-                        let lo = bin.floor() as usize;
-                        let frac = bin - lo as f32;
-                        input_mags[lo] * (1.0 - frac) + input_mags[lo + 1] * frac
-                    };
-
-                    let db = 20.0 * mag.max(1e-6).log10();
-                    let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
-                    let x = x0 + x_norm * width;
-                    let y = y0 + height - y_norm * height;
-                    shadow_path.line_to(x, y);
-                }
-
-                shadow_path.line_to(x0 + width, y0 + height);
-                shadow_path.close();
-
-                canvas.fill_path(
-                    &shadow_path,
-                    &vg::Paint::color(vg::Color::rgba(255, 200, 100, 25)),
-                );
+        // Copy data out of the lock immediately to avoid holding it during path construction
+        let spectrum_snapshot = self.shared_input_spectrum.try_lock().ok().and_then(|data| {
+            let (sr, ref mags) = *data;
+            if sr > 0.0 && !mags.is_empty() {
+                Some((sr, mags.clone()))
+            } else {
+                None
             }
+        });
+        if let Some((sr, input_mags)) = spectrum_snapshot {
+            let bin_hz = sr / (2.0 * (input_mags.len() - 1) as f32);
+
+            let mut shadow_path = vg::Path::new();
+            shadow_path.move_to(x0, y0 + height);
+
+            for i in 0..=num_points {
+                let x_norm = i as f32 / num_points as f32;
+                let freq = FREQ_MIN * (FREQ_MAX / FREQ_MIN).powf(x_norm);
+                let bin = freq / bin_hz;
+
+                let mag = if bin >= (input_mags.len() - 1) as f32 {
+                    0.0
+                } else if bin <= 0.0 {
+                    input_mags[0]
+                } else {
+                    let lo = bin.floor() as usize;
+                    let frac = bin - lo as f32;
+                    input_mags[lo] * (1.0 - frac) + input_mags[lo + 1] * frac
+                };
+
+                let db = 20.0 * mag.max(1e-6).log10();
+                let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
+                let x = x0 + x_norm * width;
+                let y = y0 + height - y_norm * height;
+                shadow_path.line_to(x, y);
+            }
+
+            shadow_path.line_to(x0 + width, y0 + height);
+            shadow_path.close();
+
+            canvas.fill_path(
+                &shadow_path,
+                &vg::Paint::color(vg::Color::rgba(255, 200, 100, 25)),
+            );
         }
 
         // --- Frequency response curve ---

@@ -1191,7 +1191,7 @@ impl Plugin for WavetableFilter {
 
                 // STFT hop processing: when the output position wraps to 0, process the next frame.
                 if filter_mode != FilterMode::Raw && self.stft_out_pos == 0 {
-                    for ch in 0..2 {
+                    for ch in 0..num_channels.min(2) {
                         self.stft_out[ch].copy_within(HOP..KERNEL_LEN, 0);
                         self.stft_out[ch][HOP..].fill(0.0);
                         Self::process_stft_frame(
@@ -1326,8 +1326,8 @@ impl Plugin for WavetableFilter {
             );
 
             // 3. Apply tanh drive at oversampled rate (the only nonlinear op)
-            // Use the current drive value without advancing the smoother (advanced in step 5)
-            let drive_val = self.params.drive.unmodulated_plain_value();
+            // Read smoothed drive value (one step per host buffer — block-constant for the OS loop)
+            let drive_val = self.params.drive.smoothed.next();
             for ch in 0..num_channels.min(2) {
                 for i in 0..os_samples {
                     self.os_input_buf[ch][i] = (self.os_input_buf[ch][i] * drive_val).tanh();
@@ -1349,8 +1349,11 @@ impl Plugin for WavetableFilter {
                 let _ = self.params.frequency.smoothed.next();
                 let _ = self.params.resonance.smoothed.next();
                 let mix = self.params.mix.smoothed.next();
-                // drive already applied above; advance smoother to keep timing
-                let _ = self.params.drive.smoothed.next();
+                // drive smoother already advanced once for the tanh block above;
+                // advance N-1 more times to match the host buffer sample count
+                if i > 0 {
+                    let _ = self.params.drive.smoothed.next();
+                }
 
                 let reset_gain = if self.reset_fade_remaining > 0 {
                     self.reset_fade_remaining as f32 / self.reset_fade_total as f32
