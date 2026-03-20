@@ -99,9 +99,12 @@ impl Oversampler {
             }
         }
 
-        let (_in_used, out_written) = up
+        let (_in_used, out_written) = match up
             .process_into_buffer(&self.up_input_buf, &mut self.up_output_buf, None)
-            .expect("upsample process_into_buffer failed");
+        {
+            Ok(result) => result,
+            Err(_) => return n_in, // pass through on error
+        };
 
         let n_out = n_in * self.ratio;
         let copy_len = n_out.min(out_written);
@@ -136,9 +139,12 @@ impl Oversampler {
             }
         }
 
-        let (_in_used, out_written) = down
+        let (_in_used, out_written) = match down
             .process_into_buffer(&self.down_input_buf, &mut self.down_output_buf, None)
-            .expect("downsample process_into_buffer failed");
+        {
+            Ok(result) => result,
+            Err(_) => return n_in / self.ratio, // pass through on error
+        };
 
         let n_out = n_in / self.ratio;
         let copy_len = n_out.min(out_written);

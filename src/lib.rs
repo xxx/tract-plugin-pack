@@ -112,6 +112,7 @@ pub struct WavetableFilter {
     effective_sample_rate: f32,
     host_sample_rate: f32,
     max_block_size: usize,
+    cached_os_latency: u32,
     /// Pre-allocated buffers for oversampled processing (2ch)
     os_input_buf: Vec<Vec<f32>>,   // channels × max_block × max_ratio
     os_output_buf: Vec<Vec<f32>>,  // channels × max_block × max_ratio
@@ -284,6 +285,7 @@ impl Default for WavetableFilter {
             effective_sample_rate: 48000.0,
             host_sample_rate: 48000.0,
             max_block_size: 8192,
+            cached_os_latency: 0,
             os_input_buf: vec![vec![0.0; 8192 * 8]; 2],
             os_output_buf: vec![vec![0.0; 8192 * 8]; 2],
             os_host_out: vec![vec![0.0; 8192]; 2],
@@ -911,6 +913,16 @@ impl Plugin for WavetableFilter {
         ];
         self.last_oversample_ratio = self.params.oversample.value();
 
+        // Resize staging buffers to match actual host block size
+        let max_os = self.max_block_size * 8;
+        for ch in &mut self.os_input_buf { ch.resize(max_os, 0.0); }
+        for ch in &mut self.os_output_buf { ch.resize(max_os, 0.0); }
+        for ch in &mut self.os_host_out { ch.resize(self.max_block_size, 0.0); }
+
+        // Cache latency
+        let os_idx = self.last_oversample_ratio.index();
+        self.cached_os_latency = self.oversamplers[os_idx].latency_samples();
+
         // Sync editor scale from the persisted ui_scale parameter
         let scale_pct = self.params.ui_scale.value() as f64;
         let scale = (scale_pct / 100.0).clamp(1.0, 3.0);
@@ -1044,6 +1056,7 @@ impl Plugin for WavetableFilter {
             self.stft_in_pos = 0;
             self.stft_out_pos = 0;
             self.first_process = true;
+            self.cached_os_latency = self.oversamplers[current_os_ratio.index()].latency_samples();
             self.last_oversample_ratio = current_os_ratio;
         }
 
@@ -1073,9 +1086,8 @@ impl Plugin for WavetableFilter {
 
         let os_idx = self.last_oversample_ratio.index();
         let os_ratio = self.last_oversample_ratio.factor();
-        let os_latency = self.oversamplers[os_idx].latency_samples();
         let stft_latency = if filter_mode == FilterMode::Raw { 0 } else { HOP as u32 };
-        context.set_latency_samples(stft_latency + os_latency);
+        context.set_latency_samples(stft_latency + self.cached_os_latency);
 
         let frame_pos_changed = self.first_process
             || (frame_pos - self.last_frame_pos).abs() > 0.0001;
@@ -1305,12 +1317,16 @@ impl Plugin for WavetableFilter {
                 host_samples,
             );
 
-            // 3. Process oversampled samples
-            for i in 0..os_samples {
-                // Advance smoothers (keeps convergence timing correct at oversampled rate).
+            // Advance unused smoothers once per host sample (not per OS sample).
+            // Kernel synthesis uses a single snapshot per buffer, so these just maintain timing.
+            for _ in 0..host_samples {
                 let _ = self.params.frame_position.smoothed.next();
                 let _ = self.params.frequency.smoothed.next();
                 let _ = self.params.resonance.smoothed.next();
+            }
+
+            // 3. Process oversampled samples
+            for i in 0..os_samples {
                 let mix = self.params.mix.smoothed.next();
                 let drive = self.params.drive.smoothed.next();
 
