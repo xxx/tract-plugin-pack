@@ -263,13 +263,14 @@ impl View for ParamDial {
         if (modulated - unmod).abs() > 0.001 {
             let unmod_angle = Self::value_to_angle(unmod);
             let mod_angle = Self::value_to_angle(modulated);
-            let (from, to) = if modulated > unmod {
-                (unmod_angle, mod_angle)
+            // Draw arc from unmodulated to modulated; use Solidity to control direction
+            let solidity = if modulated >= unmod {
+                vg::Solidity::Hole  // clockwise (positive modulation)
             } else {
-                (mod_angle, unmod_angle)
+                vg::Solidity::Solid // counter-clockwise (negative modulation)
             };
             let mut mod_path = vg::Path::new();
-            mod_path.arc(arc_cx, arc_cy, radius, from, to, vg::Solidity::Hole);
+            mod_path.arc(arc_cx, arc_cy, radius, unmod_angle, mod_angle, solidity);
             let mod_paint = vg::Paint::color(vg::Color::rgba(255, 160, 50, 150))
                 .with_line_width(stroke_width + 1.0)
                 .with_line_cap(vg::LineCap::Round);

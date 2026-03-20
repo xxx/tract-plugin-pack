@@ -966,10 +966,11 @@ impl Plugin for WavetableFilter {
         let silence_threshold = 1e-6f32;
         let mut is_silent = true;
 
-        // Advance smoothers once to read current buffer values; the per-sample loop advances them again.
-        let frame_pos = self.params.frame_position.smoothed.next();
-        let cutoff = self.params.frequency.smoothed.next();
-        let resonance = self.params.resonance.smoothed.next();
+        // Read current values for kernel synthesis decision without advancing smoothers.
+        // Smoothers are advanced per-sample inside the loop to keep timing correct.
+        let frame_pos = self.params.frame_position.unmodulated_normalized_value();
+        let cutoff = self.params.frequency.unmodulated_plain_value();
+        let resonance = self.params.resonance.unmodulated_plain_value();
 
         let filter_mode = self.params.mode.value();
 

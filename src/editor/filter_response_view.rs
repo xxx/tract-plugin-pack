@@ -81,28 +81,27 @@ impl FilterResponseView {
         }
 
         // Try to acquire the wavetable lock without blocking the GUI thread
-        let frame = match self.shared_wavetable.try_lock() {
-            Ok(wt) => wt.get_frame_interpolated(frame_position),
+        let frame_n = match self.shared_wavetable.try_lock() {
+            Ok(wt) => {
+                if wt.frame_count == 0 || wt.frame_size == 0 {
+                    return !cache.cached_mags.is_empty();
+                }
+                let n = wt.frame_size;
+                // Resize and interpolate directly into cache buffer (no allocation)
+                cache.frame_buf.resize(n, 0.0);
+                wt.interpolate_frame_into(frame_position, &mut cache.frame_buf);
+                n
+            }
             Err(_) => {
-                // Lock contended (audio thread is updating) — use stale cached data
+                // Lock contended — use stale cached data
                 return !cache.cached_mags.is_empty();
             }
         };
 
-        if frame.is_empty() {
-            return !cache.cached_mags.is_empty();
-        }
-
-        let frame_n = frame.len();
         let fft = cache.planner.plan_fft_forward(frame_n);
-
-        // Resize scratch buffers if needed
-        cache.frame_buf.resize(frame_n, 0.0);
         cache
             .spectrum
             .resize(frame_n / 2 + 1, rustfft::num_complex::Complex::new(0.0, 0.0));
-
-        cache.frame_buf.copy_from_slice(&frame);
         for c in cache.spectrum.iter_mut() {
             *c = rustfft::num_complex::Complex::new(0.0, 0.0);
         }
