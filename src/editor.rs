@@ -310,7 +310,7 @@ pub(crate) fn create(
             HStack::new(cx, |cx| {
                 // Left column: wavetable view + frame position dial
                 VStack::new(cx, |cx| {
-                    Label::new(cx, "3D Wavetable View")
+                    Label::new(cx, "Wavetable (click to toggle 2D/3D)")
                         .class("section-title")
                         .height(Pixels(25.0));
                     WavetableView::new(

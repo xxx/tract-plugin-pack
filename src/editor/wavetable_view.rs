@@ -1,7 +1,7 @@
 use nih_plug::prelude::*;
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::vizia::vg;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -12,6 +12,8 @@ pub struct WavetableView {
     shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
     wavetable_version: Arc<AtomicU32>,
     frame_cache: RefCell<FrameCache>,
+    /// When true, show 2D face-on view of the current frame instead of 3D overview.
+    show_2d: Cell<bool>,
 }
 
 struct FrameCache {
@@ -44,6 +46,7 @@ impl WavetableView {
             shared_wavetable,
             wavetable_version,
             frame_cache: RefCell::new(FrameCache::new()),
+            show_2d: Cell::new(false),
         }
         .build(cx, |_cx| {})
     }
@@ -99,126 +102,164 @@ impl View for WavetableView {
             return;
         }
 
-        // Find global min/max for consistent scaling
-        let mut global_min = f32::INFINITY;
-        let mut global_max = f32::NEG_INFINITY;
-        for frame in frames_data {
-            for &sample in frame {
-                global_min = global_min.min(sample);
-                global_max = global_max.max(sample);
-            }
-        }
-        let range = (global_max - global_min).max(0.001);
-
-        // Get current frame position
         let current_frame_pos = self.params.frame_position.unmodulated_normalized_value();
         let current_frame_idx = (current_frame_pos * (frame_count - 1) as f32).round() as usize;
 
-        // Draw all non-active frames first (back to front for proper layering)
-        // Overhead view: front frames at lower-left, back frames at upper-right
-        for frame_idx in (0..frame_count).rev() {
-            if frame_idx == current_frame_idx {
-                continue; // Skip active frame, we'll draw it last
+        if self.show_2d.get() {
+            // === 2D face-on view of the current interpolated frame ===
+            // Interpolate between adjacent frames for smooth position tracking
+            let exact_pos = current_frame_pos * (frame_count - 1) as f32;
+            let lo = (exact_pos.floor() as usize).min(frame_count - 1);
+            let hi = (lo + 1).min(frame_count - 1);
+            let frac = exact_pos - lo as f32;
+
+            let frame_lo = &frames_data[lo];
+            let frame_hi = &frames_data[hi];
+
+            // Find min/max for this interpolated frame
+            let mut frame_min = f32::INFINITY;
+            let mut frame_max = f32::NEG_INFINITY;
+            for i in 0..frame_size {
+                let s = frame_lo[i] * (1.0 - frac) + frame_hi[i] * frac;
+                frame_min = frame_min.min(s);
+                frame_max = frame_max.max(s);
             }
+            let range = (frame_max - frame_min).max(0.001);
 
-            let frame = &frames_data[frame_idx];
+            // Draw filled waveform
+            let x0 = bounds.x + padding;
+            let y0 = bounds.y + padding;
+            let zero_y = y0 + height / 2.0;
 
-            // Calculate depth for overhead perspective
-            // depth = 0 (frame 0) at front/lower-left
-            // depth = 1 (frame 15) at back/upper-right
-            let depth = frame_idx as f32 / frame_count.max(1) as f32;
+            let mut fill_path = vg::Path::new();
+            let mut stroke_path = vg::Path::new();
+            fill_path.move_to(x0, zero_y);
 
-            // Overhead perspective offsets: move toward upper-right as depth increases
-            let perspective_x = depth * 80.0; // Move right
-            let perspective_y = -depth * 80.0; // Move up (negative Y)
+            for i in 0..frame_size {
+                let s = frame_lo[i] * (1.0 - frac) + frame_hi[i] * frac;
+                let normalized = (s - frame_min) / range; // 0..1
+                let x = x0 + (i as f32 / frame_size as f32) * width;
+                let y = y0 + height - normalized * height;
 
-            let alpha = 0.3 + (1.0 - depth) * 0.4;
-
-            let mut path = vg::Path::new();
-
-            for (i, &sample) in frame.iter().enumerate() {
-                // Normalize sample to 0-1 range
-                let normalized = (sample - global_min) / range;
-
-                // Overhead view: waveform height represents the "height" of the wave
-                // X position: waveform position + perspective offset to the right
-                // Y position: waveform amplitude + perspective offset upward
-                let x = bounds.x
-                    + padding
-                    + (i as f32 / frame_size as f32) * (width * 0.7)
-                    + perspective_x;
-
-                let y = bounds.y
-                    + bounds.h - padding * 2.0  // Start from bottom
-                    - (normalized * height * 0.4)  // Wave amplitude
-                    + perspective_y; // Move up for depth
-
+                fill_path.line_to(x, y);
                 if i == 0 {
-                    path.move_to(x, y);
+                    stroke_path.move_to(x, y);
                 } else {
-                    path.line_to(x, y);
+                    stroke_path.line_to(x, y);
                 }
             }
 
-            let color = vg::Color::rgba(
-                (50.0 + (1.0 - depth) * 100.0) as u8,
-                (100.0 + (1.0 - depth) * 100.0) as u8,
-                255,
-                (alpha * 255.0) as u8,
+            fill_path.line_to(x0 + width, zero_y);
+            fill_path.close();
+
+            canvas.fill_path(
+                &fill_path,
+                &vg::Paint::color(vg::Color::rgba(79, 195, 247, 30)),
+            );
+            canvas.stroke_path(
+                &stroke_path,
+                &vg::Paint::color(vg::Color::rgba(79, 195, 247, 220)).with_line_width(1.5),
             );
 
-            canvas.stroke_path(&path, &vg::Paint::color(color).with_line_width(1.2));
-        }
+            // Zero-crossing line
+            let mut zero_path = vg::Path::new();
+            zero_path.move_to(x0, zero_y);
+            zero_path.line_to(x0 + width, zero_y);
+            canvas.stroke_path(
+                &zero_path,
+                &vg::Paint::color(vg::Color::rgba(80, 80, 90, 100)).with_line_width(0.5),
+            );
+        } else {
+            // === 3D overhead perspective view ===
 
-        // Draw the active frame last so it's always on top
-        if current_frame_idx < frame_count {
-            let frame = &frames_data[current_frame_idx];
-            let depth = current_frame_idx as f32 / frame_count.max(1) as f32;
-            let perspective_x = depth * 80.0;
-            let perspective_y = -depth * 80.0;
-
-            let mut path = vg::Path::new();
-
-            for (i, &sample) in frame.iter().enumerate() {
-                let normalized = (sample - global_min) / range;
-
-                let x = bounds.x
-                    + padding
-                    + (i as f32 / frame_size as f32) * (width * 0.7)
-                    + perspective_x;
-
-                let y = bounds.y + bounds.h - padding * 2.0 - (normalized * height * 0.4)
-                    + perspective_y;
-
-                if i == 0 {
-                    path.move_to(x, y);
-                } else {
-                    path.line_to(x, y);
+            // Find global min/max for consistent scaling
+            let mut global_min = f32::INFINITY;
+            let mut global_max = f32::NEG_INFINITY;
+            for frame in frames_data {
+                for &sample in frame {
+                    global_min = global_min.min(sample);
+                    global_max = global_max.max(sample);
                 }
             }
+            let range = (global_max - global_min).max(0.001);
 
-            let color = vg::Color::rgba(255, 200, 100, 255); // Bright orange for active
-            canvas.stroke_path(&path, &vg::Paint::color(color).with_line_width(2.5));
+            // Draw all non-active frames first (back to front)
+            for frame_idx in (0..frame_count).rev() {
+                if frame_idx == current_frame_idx {
+                    continue;
+                }
+
+                let frame = &frames_data[frame_idx];
+                let depth = frame_idx as f32 / frame_count.max(1) as f32;
+                let perspective_x = depth * 80.0;
+                let perspective_y = -depth * 80.0;
+                let alpha = 0.3 + (1.0 - depth) * 0.4;
+
+                let mut path = vg::Path::new();
+                for (i, &sample) in frame.iter().enumerate() {
+                    let normalized = (sample - global_min) / range;
+                    let x = bounds.x + padding
+                        + (i as f32 / frame_size as f32) * (width * 0.7)
+                        + perspective_x;
+                    let y = bounds.y + bounds.h - padding * 2.0
+                        - (normalized * height * 0.4)
+                        + perspective_y;
+                    if i == 0 { path.move_to(x, y); } else { path.line_to(x, y); }
+                }
+
+                let color = vg::Color::rgba(
+                    (50.0 + (1.0 - depth) * 100.0) as u8,
+                    (100.0 + (1.0 - depth) * 100.0) as u8,
+                    255,
+                    (alpha * 255.0) as u8,
+                );
+                canvas.stroke_path(&path, &vg::Paint::color(color).with_line_width(1.2));
+            }
+
+            // Active frame on top
+            if current_frame_idx < frame_count {
+                let frame = &frames_data[current_frame_idx];
+                let depth = current_frame_idx as f32 / frame_count.max(1) as f32;
+                let perspective_x = depth * 80.0;
+                let perspective_y = -depth * 80.0;
+
+                let mut path = vg::Path::new();
+                for (i, &sample) in frame.iter().enumerate() {
+                    let normalized = (sample - global_min) / range;
+                    let x = bounds.x + padding
+                        + (i as f32 / frame_size as f32) * (width * 0.7)
+                        + perspective_x;
+                    let y = bounds.y + bounds.h - padding * 2.0
+                        - (normalized * height * 0.4)
+                        + perspective_y;
+                    if i == 0 { path.move_to(x, y); } else { path.line_to(x, y); }
+                }
+
+                canvas.stroke_path(
+                    &path,
+                    &vg::Paint::color(vg::Color::rgba(255, 200, 100, 255)).with_line_width(2.5),
+                );
+            }
+
+            // Grid: horizontal center line
+            let mut grid_path = vg::Path::new();
+            grid_path.move_to(bounds.x + padding, bounds.y + padding + height / 2.0);
+            grid_path.line_to(bounds.x + padding + width, bounds.y + padding + height / 2.0);
+            canvas.stroke_path(
+                &grid_path,
+                &vg::Paint::color(vg::Color::rgba(80, 80, 90, 100)).with_line_width(0.5),
+            );
         }
 
-        // Drop the borrow before drawing grid (doesn't need frame data)
         drop(cache);
-
-        // Draw grid lines
-        let mut grid_paint = vg::Paint::color(vg::Color::rgba(80, 80, 90, 100));
-        grid_paint.set_line_width(0.5);
-
-        // Horizontal center line
-        let mut path = vg::Path::new();
-        path.move_to(bounds.x + padding, bounds.y + padding + height / 2.0);
-        path.line_to(
-            bounds.x + padding + width,
-            bounds.y + padding + height / 2.0,
-        );
-        canvas.stroke_path(&path, &grid_paint);
     }
 
-    fn event(&mut self, _cx: &mut EventContext, _event: &mut Event) {
-        // TODO: Handle mouse interaction for frame selection
+    fn event(&mut self, _cx: &mut EventContext, event: &mut Event) {
+        event.map(|window_event, meta| {
+            if let WindowEvent::MouseDown(MouseButton::Left) = window_event {
+                self.show_2d.set(!self.show_2d.get());
+                meta.consume();
+            }
+        });
     }
 }
