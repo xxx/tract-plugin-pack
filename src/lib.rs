@@ -1319,7 +1319,8 @@ impl Plugin for WavetableFilter {
             );
 
             // 3. Apply tanh drive at oversampled rate (the only nonlinear op)
-            let drive_val = self.params.drive.smoothed.next();
+            // Use the current drive value without advancing the smoother (advanced in step 5)
+            let drive_val = self.params.drive.unmodulated_plain_value();
             for ch in 0..num_channels.min(2) {
                 for i in 0..os_samples {
                     self.os_input_buf[ch][i] = (self.os_input_buf[ch][i] * drive_val).tanh();
@@ -1438,7 +1439,9 @@ impl Plugin for WavetableFilter {
             // 6. Write host-rate output back to buffer
             for (i, mut frame) in buffer.iter_samples().enumerate() {
                 for ch in 0..num_channels.min(2) {
-                    *frame.get_mut(ch).unwrap() = self.os_host_out[ch][i];
+                    if let Some(s) = frame.get_mut(ch) {
+                        *s = self.os_host_out[ch][i];
+                    }
                 }
             }
         }
@@ -1454,6 +1457,7 @@ impl Plugin for WavetableFilter {
                 for buf in &mut self.stft_out { buf.fill(0.0); }
                 self.stft_in_pos = 0;
                 self.stft_out_pos = 0;
+                self.silence_samples = 0; // Reset so we don't clear every buffer
             }
         } else {
             self.silence_samples = 0;

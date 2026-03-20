@@ -21,15 +21,29 @@ struct FrameCache {
     cached_version: u32,
     cached_frame_count: usize,
     cached_frame_size: usize,
+    // 3D: global min/max across all frames (recomputed on wavetable change)
+    global_min: f32,
+    global_max: f32,
+    // 2D: interpolated frame cache (recomputed on frame position change)
+    interp_frame: Vec<f32>,
+    interp_frame_pos: f32,
+    interp_min: f32,
+    interp_max: f32,
 }
 
 impl FrameCache {
     fn new() -> Self {
         Self {
             cached_frames: Vec::new(),
-            cached_version: u32::MAX, // Forces initial load
+            cached_version: u32::MAX,
             cached_frame_count: 0,
             cached_frame_size: 0,
+            global_min: 0.0,
+            global_max: 0.0,
+            interp_frame: Vec::new(),
+            interp_frame_pos: -1.0,
+            interp_min: 0.0,
+            interp_max: 0.0,
         }
     }
 }
@@ -88,15 +102,27 @@ impl View for WavetableView {
                     cache.cached_frame_count = wavetable.frame_count;
                     cache.cached_frame_size = wavetable.frame_size;
                     cache.cached_version = current_version;
+                    // Recompute global min/max for 3D view
+                    let mut gmin = f32::INFINITY;
+                    let mut gmax = f32::NEG_INFINITY;
+                    for frame in &cache.cached_frames {
+                        for &s in frame {
+                            gmin = gmin.min(s);
+                            gmax = gmax.max(s);
+                        }
+                    }
+                    cache.global_min = gmin;
+                    cache.global_max = gmax;
+                    // Invalidate interpolated frame cache
+                    cache.interp_frame_pos = -1.0;
                 }
                 // If lock is contended, we keep the stale cached data
             }
         }
 
-        let cache = self.frame_cache.borrow();
+        let mut cache = self.frame_cache.borrow_mut();
         let frame_count = cache.cached_frame_count;
         let frame_size = cache.cached_frame_size;
-        let frames_data = &cache.cached_frames;
 
         if frame_count == 0 || frame_size == 0 {
             return;
@@ -107,24 +133,31 @@ impl View for WavetableView {
 
         if self.show_2d.get() {
             // === 2D face-on view of the current interpolated frame ===
-            // Interpolate between adjacent frames for smooth position tracking
-            let exact_pos = current_frame_pos * (frame_count - 1) as f32;
-            let lo = (exact_pos.floor() as usize).min(frame_count - 1);
-            let hi = (lo + 1).min(frame_count - 1);
-            let frac = exact_pos - lo as f32;
+            // Update interpolation cache only when frame position changes
+            if (current_frame_pos - cache.interp_frame_pos).abs() > 0.0001
+                || cache.interp_frame.len() != frame_size
+            {
+                let exact_pos = current_frame_pos * (frame_count - 1) as f32;
+                let lo = (exact_pos.floor() as usize).min(frame_count - 1);
+                let hi = (lo + 1).min(frame_count - 1);
+                let frac = exact_pos - lo as f32;
 
-            let frame_lo = &frames_data[lo];
-            let frame_hi = &frames_data[hi];
-
-            // Find min/max for this interpolated frame
-            let mut frame_min = f32::INFINITY;
-            let mut frame_max = f32::NEG_INFINITY;
-            for i in 0..frame_size {
-                let s = frame_lo[i] * (1.0 - frac) + frame_hi[i] * frac;
-                frame_min = frame_min.min(s);
-                frame_max = frame_max.max(s);
+                cache.interp_frame.resize(frame_size, 0.0);
+                let mut fmin = f32::INFINITY;
+                let mut fmax = f32::NEG_INFINITY;
+                for i in 0..frame_size {
+                    let s = cache.cached_frames[lo][i] * (1.0 - frac)
+                        + cache.cached_frames[hi][i] * frac;
+                    cache.interp_frame[i] = s;
+                    fmin = fmin.min(s);
+                    fmax = fmax.max(s);
+                }
+                cache.interp_min = fmin;
+                cache.interp_max = fmax;
+                cache.interp_frame_pos = current_frame_pos;
             }
-            let range = (frame_max - frame_min).max(0.001);
+
+            let range = (cache.interp_max - cache.interp_min).max(0.001);
 
             // Draw filled waveform
             let x0 = bounds.x + padding;
@@ -136,8 +169,8 @@ impl View for WavetableView {
             fill_path.move_to(x0, zero_y);
 
             for i in 0..frame_size {
-                let s = frame_lo[i] * (1.0 - frac) + frame_hi[i] * frac;
-                let normalized = (s - frame_min) / range; // 0..1
+                let s = cache.interp_frame[i];
+                let normalized = (s - cache.interp_min) / range;
                 let x = x0 + (i as f32 / frame_size as f32) * width;
                 let y = y0 + height - normalized * height;
 
@@ -171,16 +204,8 @@ impl View for WavetableView {
             );
         } else {
             // === 3D overhead perspective view ===
-
-            // Find global min/max for consistent scaling
-            let mut global_min = f32::INFINITY;
-            let mut global_max = f32::NEG_INFINITY;
-            for frame in frames_data {
-                for &sample in frame {
-                    global_min = global_min.min(sample);
-                    global_max = global_max.max(sample);
-                }
-            }
+            let global_min = cache.global_min;
+            let global_max = cache.global_max;
             let range = (global_max - global_min).max(0.001);
 
             // Draw all non-active frames first (back to front)
@@ -189,7 +214,7 @@ impl View for WavetableView {
                     continue;
                 }
 
-                let frame = &frames_data[frame_idx];
+                let frame = &cache.cached_frames[frame_idx];
                 let depth = frame_idx as f32 / frame_count.max(1) as f32;
                 let perspective_x = depth * 80.0;
                 let perspective_y = -depth * 80.0;
@@ -218,7 +243,7 @@ impl View for WavetableView {
 
             // Active frame on top
             if current_frame_idx < frame_count {
-                let frame = &frames_data[current_frame_idx];
+                let frame = &cache.cached_frames[current_frame_idx];
                 let depth = current_frame_idx as f32 / frame_count.max(1) as f32;
                 let perspective_x = depth * 80.0;
                 let perspective_y = -depth * 80.0;
