@@ -291,7 +291,7 @@ impl ChannelMeter {
         (ms, self.rms_ring_filled)
     }
 
-    /// Crest factor in dB: peak_max_dB - rms_integrated_dB.
+    /// Current crest factor in dB: peak_max_dB - rms_integrated_dB.
     /// Returns `f32::NEG_INFINITY` if insufficient data.
     pub fn crest_factor_db(&self) -> f32 {
         let peak = self.peak_max;
@@ -301,6 +301,7 @@ impl ChannelMeter {
         }
         linear_to_db(peak) - linear_to_db(rms)
     }
+
 }
 
 /// Stereo meter that combines two channels.
@@ -410,6 +411,7 @@ impl StereoMeter {
         }
         linear_to_db(peak) - linear_to_db(rms)
     }
+
 }
 
 /// Convert linear amplitude to dB. Returns -f32::INFINITY for zero.
