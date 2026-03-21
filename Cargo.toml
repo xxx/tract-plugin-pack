@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["simd", "standalone"] }
-nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 hound = "3.5"
 atomic_float = "1.0"
 rfd = "0.17.2"
