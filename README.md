@@ -1,19 +1,19 @@
 # Wavetable Filter
 
-A wavetable-based audio filter plugin that uses wavetable frames as filter kernels. Supports both direct time-domain convolution (RAW mode) and spectral filtering (Spectral mode).
-
-![Wavetable Filter](wtfilter3.png)
+A wavetable-based audio filter plugin that uses wavetable frames as filter kernels. Supports both direct time-domain convolution (Raw mode) and magnitude-only STFT filtering (Phaseless mode).
 
 ## Features
 
 - **Dual Filtering Modes:**
-  - **RAW Mode**: Direct time-domain convolution using wavetable as filter kernel
-  - **Spectral Mode**: FFT-based spectral filtering using wavetable's frequency content
-- **3D Wavetable Visualization**: Real-time display of loaded wavetable frames
-- **Filter Response Graph**: Visual feedback of the filter's frequency response
+  - **Raw Mode**: Direct time-domain convolution using wavetable as FIR filter kernel
+  - **Phaseless Mode**: STFT magnitude-only filtering — preserves magnitude spectrum without phase artifacts or pre-ringing
+- **Wavetable Visualization**: Toggle between 3D overhead perspective and 2D single-frame view (click to switch)
+- **Filter Response Graph**: Real-time frequency response with input spectrum shadow overlay
+- **Rotary Knob Controls**: Custom dials with DAW modulation indicators (orange arc)
+- **UI Scaling**: Adjustable from 100% to 300% in 25% steps, persisted across sessions
 - **File Format Support**: Load `.wav` and `.wt` (Surge) wavetable files
-- **SIMD Optimized**: Uses AVX/AVX2/AVX-512 (f32x16) for fast processing
-- **Real-time Parameter Control**: Frequency, Frame Position, Mix, and Drive
+- **SIMD Optimized**: Uses portable SIMD (`f32x16`) for vectorized convolution
+- **Real-time Parameter Control**: Frequency, Frame Position, Resonance, Mix, and Gain
 - **Multiple Plugin Formats**: VST3, CLAP, and Standalone
 
 ## Build Requirements
@@ -145,29 +145,30 @@ pw-link "Wavetable Filter:output_FR" "Built-in Audio Analog Stereo:playback_FR"
 ## Usage
 
 1. **Load a Wavetable**: Click "Browse..." to load a `.wav` or `.wt` wavetable file
-   - Example wavetables included: `phaseless-bass.wt`, or any Surge wavetable
+   - Compatible with Surge wavetables and standard WAV wavetables
    - Supports 256, 512, 1024, or 2048 samples per frame
-   - Supports up to 256 frames per wavetable
+   - Supports up to 2048 frames per wavetable
 
 2. **Adjust Parameters**:
-   - **Frequency**: Cutoff frequency control (20 Hz - 20 kHz). This determines where harmonic 24 of the wavetable appears in the spectrum, effectively scaling the filter response up or down in frequency.
-   - **Frame Position**: Select which wavetable frame to use (0.0-1.0)
+   - **Frequency**: Cutoff frequency control (20 Hz – 20 kHz). Determines where harmonic 24 of the wavetable maps in the spectrum, scaling the filter response up or down.
+   - **Frame Position**: Select which wavetable frame to use (0.0–1.0). Blends between adjacent frames.
+   - **Resonance**: Boost around the cutoff frequency (0–100%)
    - **Mix**: Dry/wet blend (0% = bypass, 100% = full effect)
-   - **Drive**: Input gain/saturation (0.1-10.0)
-   - **Mode**: Toggle between Raw and Minimum phase filtering
+   - **Gain**: Output gain (-20 dB to +20 dB)
+   - **Mode**: Toggle between Raw and Phaseless filtering
 
 3. **Visualize**:
-   - Left panel shows 3D view of wavetable frames
-   - Right panel shows filter frequency response
-   - Current frame highlighted in orange
+   - Left panel shows wavetable frames (click to toggle 2D/3D view)
+   - Right panel shows filter frequency response with input spectrum shadow
+   - Current frame highlighted in orange; modulation shown as orange arc on dials
 
 ## Filtering Modes
 
 ### Raw Mode
 Direct time-domain convolution using the wavetable frame as-is as an FIR filter kernel. Uses the wavetable exactly as provided, which can include arbitrary phase relationships. Fast and predictable.
 
-### Minimum Mode
-Converts the wavetable to a minimum-phase filter kernel before applying convolution. This creates a "snappy and tight" filter response with no pre-ringing, making transients sound more natural. The minimum-phase conversion preserves the magnitude spectrum while ensuring all phase energy occurs after the impulse, similar to Kilohearts FilterTable's minimum phase mode.
+### Phaseless Mode
+STFT-based magnitude-only filtering. Applies the wavetable's magnitude spectrum to the input signal without altering its phase, eliminating pre-ringing and phase distortion. Uses 50% overlap-add with a Hann window for smooth, artifact-free output.
 
 ### Cutoff Frequency Behavior
 The Frequency parameter controls where harmonic 24 of the wavetable maps to in the frequency spectrum:
@@ -197,24 +198,26 @@ The Frequency parameter controls where harmonic 24 of the wavetable maps to in t
 ```
 wavetable-filter/
 ├── src/
-│   ├── lib.rs                      # Plugin implementation
+│   ├── lib.rs                      # Plugin DSP: convolution, STFT, kernel synthesis
 │   ├── main.rs                     # Standalone binary entry point
-│   ├── wavetable.rs                # Wavetable loading and processing
+│   ├── wavetable.rs                # Wavetable I/O (.wav/.wt), frame interpolation
+│   ├── editor.rs                   # Vizia UI layout, file browser, scaling
 │   └── editor/
-│       ├── mod.rs                  # GUI main
-│       ├── wavetable_view.rs       # 3D wavetable visualization
-│       └── filter_response_view.rs # Filter response graph
-├── xtask/                          # Build tooling
-├── examples/                       # Example wavetable files
-└── rust-toolchain.toml            # Specifies nightly Rust
+│       ├── param_dial.rs           # Custom rotary knob widget with modulation display
+│       ├── wavetable_view.rs       # 2D/3D wavetable visualization
+│       └── filter_response_view.rs # Filter response + input spectrum graph
+├── tests/fixtures/                 # Test wavetable files
+├── xtask/                          # Build tooling (nih-plug bundler)
+└── rust-toolchain.toml             # Specifies nightly Rust
 ```
 
 ## Performance
 
 - Uses Rust's portable SIMD (`f32x16`) for vectorized convolution
-- Processes 16 samples per SIMD operation (AVX-512/AVX2)
-- Typical CPU usage: <5% for 256-sample wavetables at 48kHz
-- Zero-latency processing in RAW mode
+- Processes 16 samples per SIMD operation
+- Typical CPU usage: ~1.5% audio thread at 48 kHz
+- Zero-latency processing in Raw mode
+- Silence detection clears filter state when input is idle
 
 ## Development
 
@@ -253,7 +256,6 @@ cargo doc --open
 **Cracking/popping audio:**
 - Try adjusting your audio interface buffer size
 - Default buffer: 256 samples (should be fine for most systems)
-- RAW mode has lower CPU usage than Spectral mode
 
 ## Credits
 
