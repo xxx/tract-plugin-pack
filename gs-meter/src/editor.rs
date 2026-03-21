@@ -51,6 +51,7 @@ enum DataEvent {
     Reset,
     SetGainFromReading(ReadingKind),
     SetUiScalePct(String),
+    RestoreScale,
 }
 
 #[derive(Clone, Copy)]
@@ -103,6 +104,14 @@ impl Model for Data {
             DataEvent::SetUiScalePct(pct) => {
                 self.ui_scale_pct = pct.clone();
             }
+            DataEvent::RestoreScale => {
+                let saved_pct = self.params.ui_scale.value() as f64;
+                let scale = saved_pct / 100.0;
+                if (scale - 1.0).abs() > 0.01 {
+                    cx.set_user_scale_factor(scale);
+                    self.ui_scale_pct = format!("{}%", saved_pct.round() as u32);
+                }
+            }
         });
     }
 }
@@ -125,8 +134,9 @@ pub(crate) fn create(
     create_vizia_editor(editor_state, ViziaTheming::Custom, move |cx, _| {
         nih_plug_widgets::load_style(cx);
 
-        let initial_scale = cx.user_scale_factor();
-        let initial_scale_pct = format!("{}%", (initial_scale * 100.0).round() as u32);
+        // Read saved scale from the persisted IntParam
+        let saved_scale_pct = params.ui_scale.value() as f64;
+        let initial_scale_pct = format!("{}%", saved_scale_pct.round() as u32);
 
         Data {
             params: params.clone(),
@@ -135,6 +145,10 @@ pub(crate) fn create(
             ui_scale_pct: initial_scale_pct,
         }
         .build(cx);
+
+        // Restore saved scale factor (must happen via event since
+        // set_user_scale_factor requires EventContext, not build Context)
+        cx.emit(DataEvent::RestoreScale);
 
         VStack::new(cx, |cx| {
             // Header row: title + scale controls
