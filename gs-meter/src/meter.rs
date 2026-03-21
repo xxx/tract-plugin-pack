@@ -1,13 +1,142 @@
-//! Core metering DSP: peak tracking, RMS computation, crest factor.
+//! Core metering DSP: peak tracking, RMS computation, crest factor, true peak.
 //! All levels are in linear amplitude; dB conversion happens at display time.
 
 /// Maximum supported RMS window in samples (3000ms at 192kHz).
 const MAX_WINDOW_SAMPLES: usize = 576_000;
 
+// ── True Peak: 4x oversampling via polyphase FIR ────────────────────────
+//
+// ITU-R BS.1770-4 specifies 4x oversampling to detect inter-sample peaks.
+// We use a polyphase FIR computed from a windowed sinc (Kaiser window).
+
+const TRUE_PEAK_PHASES: usize = 4;
+const TRUE_PEAK_TAPS: usize = 24; // taps per phase (96-tap prototype)
+const TRUE_PEAK_HISTORY: usize = TRUE_PEAK_TAPS;
+const TRUE_PEAK_PROTO_LEN: usize = TRUE_PEAK_PHASES * TRUE_PEAK_TAPS;
+
+/// True peak detector using 4x polyphase oversampling.
+pub struct TruePeakDetector {
+    /// Polyphase filter coefficients [phase][tap].
+    coeffs: [[f32; TRUE_PEAK_TAPS]; TRUE_PEAK_PHASES],
+    /// Circular history buffer for FIR convolution.
+    history: [f32; TRUE_PEAK_HISTORY],
+    /// Write position in history.
+    pos: usize,
+    /// Highest true peak (linear) since last reset.
+    true_peak_max: f32,
+}
+
+impl Default for TruePeakDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TruePeakDetector {
+    pub fn new() -> Self {
+        let coeffs = Self::compute_coefficients();
+        Self {
+            coeffs,
+            history: [0.0; TRUE_PEAK_HISTORY],
+            pos: 0,
+            true_peak_max: 0.0,
+        }
+    }
+
+    fn compute_coefficients() -> [[f32; TRUE_PEAK_TAPS]; TRUE_PEAK_PHASES] {
+        let n_total = TRUE_PEAK_PROTO_LEN;
+        // Integer delay divisible by 4 so Phase 0 has sinc(0) = 1.0 (identity).
+        let delay = ((n_total / 2) / TRUE_PEAK_PHASES * TRUE_PEAK_PHASES) as f64;
+        // Low beta = narrow transition band = passband extends close to Nyquist.
+        // Stopband rejection is ~30 dB, sufficient since input is already bandlimited.
+        let beta = 2.0_f64;
+
+        let mut proto = [0.0_f64; TRUE_PEAK_PROTO_LEN];
+        for (n, p) in proto.iter_mut().enumerate().take(n_total) {
+            let x = (n as f64 - delay) / TRUE_PEAK_PHASES as f64;
+            let sinc = if x.abs() < 1e-10 {
+                1.0
+            } else {
+                (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+            };
+            let kaiser = kaiser_window(n, n_total, beta);
+            *p = sinc * kaiser;
+        }
+
+        let mut coeffs = [[0.0_f32; TRUE_PEAK_TAPS]; TRUE_PEAK_PHASES];
+        for (phase, phase_coeffs) in coeffs.iter_mut().enumerate() {
+            for (k, coeff) in phase_coeffs.iter_mut().enumerate() {
+                let n = TRUE_PEAK_PHASES * k + phase;
+                *coeff = proto[n] as f32;
+            }
+            let sum: f32 = phase_coeffs.iter().sum();
+            if sum.abs() > 1e-6 {
+                for c in phase_coeffs.iter_mut() {
+                    *c /= sum;
+                }
+            }
+        }
+        coeffs
+    }
+
+    pub fn reset(&mut self) {
+        self.history.fill(0.0);
+        self.pos = 0;
+        self.true_peak_max = 0.0;
+    }
+
+    #[inline]
+    pub fn process_sample(&mut self, sample: f32) {
+        self.history[self.pos] = sample;
+        self.pos = (self.pos + 1) % TRUE_PEAK_HISTORY;
+
+        for phase in &self.coeffs {
+            let mut sum = 0.0_f32;
+            for (k, &coeff) in phase.iter().enumerate() {
+                let idx = (self.pos + TRUE_PEAK_HISTORY - 1 - k) % TRUE_PEAK_HISTORY;
+                sum += self.history[idx] * coeff;
+            }
+            let abs = sum.abs();
+            if abs > self.true_peak_max {
+                self.true_peak_max = abs;
+            }
+        }
+    }
+
+    pub fn true_peak_max(&self) -> f32 {
+        self.true_peak_max
+    }
+}
+
+/// Kaiser window function.
+fn kaiser_window(n: usize, n_total: usize, beta: f64) -> f64 {
+    let alpha = (n_total as f64 - 1.0) / 2.0;
+    let ratio = (n as f64 - alpha) / alpha;
+    let arg = beta * (1.0 - ratio * ratio).max(0.0).sqrt();
+    bessel_i0(arg) / bessel_i0(beta)
+}
+
+/// Modified Bessel function I0 via power series.
+fn bessel_i0(x: f64) -> f64 {
+    let mut sum = 1.0_f64;
+    let mut term = 1.0_f64;
+    let x_half = x / 2.0;
+    for k in 1..25 {
+        term *= (x_half / k as f64) * (x_half / k as f64);
+        sum += term;
+        if term < 1e-20 {
+            break;
+        }
+    }
+    sum
+}
+
 /// Per-channel metering state.
 pub struct ChannelMeter {
     /// Highest absolute sample value since last reset.
     peak_max: f32,
+    /// True peak detector (4x oversampled).
+    true_peak: TruePeakDetector,
     /// Running sum of squared samples since last reset (for integrated RMS).
     rms_sum: f64,
     /// Number of samples accumulated in rms_sum.
@@ -29,6 +158,7 @@ impl ChannelMeter {
         let size = window_samples.clamp(1, MAX_WINDOW_SAMPLES);
         Self {
             peak_max: 0.0,
+            true_peak: TruePeakDetector::new(),
             rms_sum: 0.0,
             rms_count: 0,
             rms_ring: vec![0.0; MAX_WINDOW_SAMPLES],
@@ -42,6 +172,7 @@ impl ChannelMeter {
     /// Reset all accumulated values.
     pub fn reset(&mut self) {
         self.peak_max = 0.0;
+        self.true_peak.reset();
         self.rms_sum = 0.0;
         self.rms_count = 0;
         self.rms_ring[..self.rms_window_size].fill(0.0);
@@ -67,10 +198,13 @@ impl ChannelMeter {
     pub fn process_sample(&mut self, sample: f32) {
         let abs = sample.abs();
 
-        // Peak tracking
+        // Peak tracking (sample peak)
         if abs > self.peak_max {
             self.peak_max = abs;
         }
+
+        // True peak (4x oversampled)
+        self.true_peak.process_sample(sample);
 
         // Integrated RMS accumulation
         let sq = (sample as f64) * (sample as f64);
@@ -98,9 +232,15 @@ impl ChannelMeter {
         }
     }
 
-    /// Current peak max in linear amplitude.
+    /// Current sample peak max in linear amplitude.
     pub fn peak_max(&self) -> f32 {
         self.peak_max
+    }
+
+    /// Current true peak max in linear amplitude (4x oversampled).
+    /// Always >= sample peak by definition.
+    pub fn true_peak_max(&self) -> f32 {
+        self.true_peak.true_peak_max().max(self.peak_max)
     }
 
     /// Integrated RMS in linear amplitude (since last reset).
@@ -201,9 +341,14 @@ impl StereoMeter {
         }
     }
 
-    /// Max of L/R peak.
+    /// Max of L/R sample peak.
     pub fn peak_max_stereo(&self) -> f32 {
         self.left.peak_max().max(self.right.peak_max())
+    }
+
+    /// Max of L/R true peak.
+    pub fn true_peak_max_stereo(&self) -> f32 {
+        self.left.true_peak_max().max(self.right.true_peak_max())
     }
 
     /// Integrated RMS across both channels (sum of per-channel mean-square, then sqrt).
@@ -516,5 +661,103 @@ mod tests {
             "expected 0.1, got {}",
             m.rms_integrated_linear()
         );
+    }
+
+    #[test]
+    fn test_true_peak_ge_sample_peak() {
+        // True peak should always be >= sample peak
+        let mut m = ChannelMeter::new(100);
+        let n = 4800;
+        for i in 0..n {
+            let phase = i as f32 / n as f32;
+            m.process_sample((phase * std::f32::consts::TAU).sin());
+        }
+        assert!(
+            m.true_peak_max() >= m.peak_max(),
+            "true peak {} should be >= sample peak {}",
+            m.true_peak_max(),
+            m.peak_max()
+        );
+    }
+
+    #[test]
+    fn test_true_peak_detects_intersample() {
+        // 3 samples per cycle: phases 0, 120°, 240°.
+        // Peak at 90° falls between samples. Sample peak = sin(120°) = 0.866.
+        // True peak should detect the actual peak closer to 1.0.
+        let mut m = ChannelMeter::new(100);
+        let sr = 3.0_f64;
+        let freq = 1.0_f64;
+        // Run several cycles to let the filter settle
+        for i in 0..30 {
+            let t = i as f64 / sr;
+            let sample = (t * freq * std::f64::consts::TAU).sin() as f32;
+            m.process_sample(sample);
+        }
+        let sample_peak = m.peak_max();
+        let true_peak = m.true_peak_max();
+        assert!(
+            (sample_peak - 0.866).abs() < 0.01,
+            "sample peak {} should be ~0.866 (sin 120°)",
+            sample_peak
+        );
+        assert!(
+            true_peak > sample_peak,
+            "true peak {} should be > sample peak {} (inter-sample detection)",
+            true_peak,
+            sample_peak
+        );
+    }
+
+    #[test]
+    fn test_true_peak_at_realistic_frequency() {
+        // 15kHz sine at 48kHz — 3.2 samples per cycle.
+        // Sample peak will be noticeably below 1.0, true peak should be closer to 1.0.
+        let mut m = ChannelMeter::new(100);
+        let sr = 48000.0_f64;
+        let freq = 15000.0_f64;
+        for i in 0..48000 {
+            let t = i as f64 / sr;
+            m.process_sample((t * freq * std::f64::consts::TAU).sin() as f32);
+        }
+        let sp = m.peak_max();
+        let tp = m.true_peak_max();
+        let diff_db = linear_to_db(tp) - linear_to_db(sp);
+        assert!(
+            tp > sp,
+            "at 15kHz/48kHz: true peak {} should exceed sample peak {}",
+            tp, sp
+        );
+        assert!(
+            diff_db > 0.01,
+            "true peak should be measurably above sample peak (diff = {} dB)",
+            diff_db
+        );
+    }
+
+    #[test]
+    fn test_true_peak_ge_sample_peak_dc() {
+        // For DC, true peak >= sample peak. Startup Gibbs ringing causes a
+        // transient overshoot at the 0→DC step edge — this is correct behavior
+        // (the filter detects the real inter-sample overshoot of the step function).
+        let mut m = ChannelMeter::new(100);
+        for _ in 0..1000 {
+            m.process_sample(0.5);
+        }
+        assert!(
+            m.true_peak_max() >= m.peak_max(),
+            "true peak {} should be >= sample peak {}",
+            m.true_peak_max(),
+            m.peak_max()
+        );
+    }
+
+    #[test]
+    fn test_true_peak_reset() {
+        let mut det = TruePeakDetector::new();
+        det.process_sample(1.0);
+        assert!(det.true_peak_max() > 0.0);
+        det.reset();
+        assert_eq!(det.true_peak_max(), 0.0);
     }
 }

@@ -10,6 +10,7 @@ use meter::{linear_to_db, StereoMeter};
 /// Shared meter readings for the GUI (written by audio thread, read by GUI).
 pub struct MeterReadings {
     pub peak_max_db: std::sync::atomic::AtomicI32,
+    pub true_peak_max_db: std::sync::atomic::AtomicI32,
     pub rms_integrated_db: std::sync::atomic::AtomicI32,
     pub rms_momentary_db: std::sync::atomic::AtomicI32,
     pub rms_momentary_max_db: std::sync::atomic::AtomicI32,
@@ -20,6 +21,7 @@ impl MeterReadings {
     fn new() -> Self {
         Self {
             peak_max_db: std::sync::atomic::AtomicI32::new(-10000),
+            true_peak_max_db: std::sync::atomic::AtomicI32::new(-10000),
             rms_integrated_db: std::sync::atomic::AtomicI32::new(-10000),
             rms_momentary_db: std::sync::atomic::AtomicI32::new(-10000),
             rms_momentary_max_db: std::sync::atomic::AtomicI32::new(-10000),
@@ -232,9 +234,10 @@ impl Plugin for GsMeter {
 
         // Update shared readings for GUI
         let mode = self.params.channel_mode.value();
-        let (peak, rms_int, rms_mom, rms_mom_max, crest) = match mode {
+        let (peak, true_peak, rms_int, rms_mom, rms_mom_max, crest) = match mode {
             ChannelMode::Stereo => (
                 self.stereo_meter.peak_max_stereo(),
+                self.stereo_meter.true_peak_max_stereo(),
                 self.stereo_meter.rms_integrated_stereo(),
                 self.stereo_meter.rms_momentary_stereo(),
                 self.stereo_meter.rms_momentary_max_stereo(),
@@ -242,6 +245,7 @@ impl Plugin for GsMeter {
             ),
             ChannelMode::Left => (
                 self.stereo_meter.left.peak_max(),
+                self.stereo_meter.left.true_peak_max(),
                 self.stereo_meter.left.rms_integrated_linear(),
                 self.stereo_meter.left.rms_momentary_linear(),
                 self.stereo_meter.left.rms_momentary_max(),
@@ -249,6 +253,7 @@ impl Plugin for GsMeter {
             ),
             ChannelMode::Right => (
                 self.stereo_meter.right.peak_max(),
+                self.stereo_meter.right.true_peak_max(),
                 self.stereo_meter.right.rms_integrated_linear(),
                 self.stereo_meter.right.rms_momentary_linear(),
                 self.stereo_meter.right.rms_momentary_max(),
@@ -257,6 +262,7 @@ impl Plugin for GsMeter {
         };
 
         MeterReadings::store_db(&self.readings.peak_max_db, linear_to_db(peak));
+        MeterReadings::store_db(&self.readings.true_peak_max_db, linear_to_db(true_peak));
         MeterReadings::store_db(&self.readings.rms_integrated_db, linear_to_db(rms_int));
         MeterReadings::store_db(&self.readings.rms_momentary_db, linear_to_db(rms_mom));
         MeterReadings::store_db(&self.readings.rms_momentary_max_db, linear_to_db(rms_mom_max));

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::{GsMeterParams, MeterReadings};
 
 const WINDOW_WIDTH: u32 = 400;
-const WINDOW_HEIGHT: u32 = 500;
+const WINDOW_HEIGHT: u32 = 540;
 
 pub(crate) fn default_state() -> Arc<ViziaState> {
     ViziaState::new(|| (WINDOW_WIDTH, WINDOW_HEIGHT))
@@ -29,6 +29,7 @@ enum DataEvent {
 #[derive(Clone, Copy)]
 enum ReadingKind {
     PeakMax,
+    TruePeakMax,
     RmsIntegrated,
     RmsMomentary,
     RmsMomentaryMax,
@@ -44,6 +45,9 @@ impl Model for Data {
                 let meter_db = match kind {
                     ReadingKind::PeakMax => {
                         MeterReadings::load_db(&self.readings.peak_max_db)
+                    }
+                    ReadingKind::TruePeakMax => {
+                        MeterReadings::load_db(&self.readings.true_peak_max_db)
                     }
                     ReadingKind::RmsIntegrated => {
                         MeterReadings::load_db(&self.readings.rms_integrated_db)
@@ -160,6 +164,14 @@ pub(crate) fn create(
                 "Peak Max",
                 Data::readings.map(|r| format_db(MeterReadings::load_db(&r.peak_max_db))),
                 ReadingKind::PeakMax,
+            );
+
+            // True Peak Max
+            meter_row(
+                cx,
+                "True Peak",
+                Data::readings.map(|r| format_db(MeterReadings::load_db(&r.true_peak_max_db))),
+                ReadingKind::TruePeakMax,
             );
 
             // RMS Integrated
