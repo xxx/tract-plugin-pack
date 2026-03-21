@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::{GsMeterParams, MeterReadings};
 
-const WINDOW_WIDTH: u32 = 400;
+const WINDOW_WIDTH: u32 = 420;
 const WINDOW_HEIGHT: u32 = 540;
 
 const SCALE_STEPS: &[f64] = &[1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0];
@@ -198,7 +198,7 @@ pub(crate) fn create(
             // Channel mode
             HStack::new(cx, |cx| {
                 Label::new(cx, "Channel")
-                    .width(Pixels(80.0))
+                    .width(Pixels(100.0))
                     .height(Pixels(28.0));
                 ParamSlider::new(cx, Data::params, |p| &p.channel_mode)
                     .set_style(ParamSliderStyle::CurrentStepLabeled { even: true })
@@ -210,7 +210,7 @@ pub(crate) fn create(
             // Gain control
             HStack::new(cx, |cx| {
                 Label::new(cx, "Gain")
-                    .width(Pixels(80.0))
+                    .width(Pixels(100.0))
                     .height(Pixels(28.0));
                 ParamSlider::new(cx, Data::params, |p| &p.gain)
                     .width(Pixels(200.0));
@@ -221,7 +221,7 @@ pub(crate) fn create(
             // Reference level
             HStack::new(cx, |cx| {
                 Label::new(cx, "Reference")
-                    .width(Pixels(80.0))
+                    .width(Pixels(100.0))
                     .height(Pixels(28.0));
                 ParamSlider::new(cx, Data::params, |p| &p.reference_level)
                     .width(Pixels(200.0));
@@ -232,7 +232,7 @@ pub(crate) fn create(
             // RMS Window
             HStack::new(cx, |cx| {
                 Label::new(cx, "RMS Window")
-                    .width(Pixels(80.0))
+                    .width(Pixels(100.0))
                     .height(Pixels(28.0));
                 ParamSlider::new(cx, Data::params, |p| &p.rms_window_ms)
                     .width(Pixels(200.0));
@@ -330,7 +330,7 @@ where
 {
     HStack::new(cx, |cx| {
         Label::new(cx, label)
-            .width(Pixels(80.0))
+            .width(Pixels(100.0))
             .height(Pixels(28.0));
         Label::new(cx, value_lens)
             .width(Pixels(120.0))
