@@ -25,7 +25,7 @@ impl MeterReadings {
             rms_integrated_db: std::sync::atomic::AtomicI32::new(-10000),
             rms_momentary_db: std::sync::atomic::AtomicI32::new(-10000),
             rms_momentary_max_db: std::sync::atomic::AtomicI32::new(-10000),
-            crest_factor_db: std::sync::atomic::AtomicI32::new(0),
+            crest_factor_db: std::sync::atomic::AtomicI32::new(-10000),
         }
     }
 

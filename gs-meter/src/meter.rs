@@ -813,4 +813,116 @@ mod tests {
             m.rms_momentary_linear()
         );
     }
+
+    #[test]
+    fn test_true_peak_bypass_mode() {
+        // At ≥192kHz, true peak should equal sample peak (bypass mode)
+        let mut m = ChannelMeter::new(100);
+        m.set_sample_rate(192000.0);
+        for _ in 0..1000 {
+            m.process_sample(0.7);
+        }
+        assert!(
+            approx_eq(m.true_peak_max(), 0.7),
+            "bypass mode: true peak {} should equal sample peak 0.7",
+            m.true_peak_max()
+        );
+    }
+
+    #[test]
+    fn test_true_peak_2x_mode() {
+        // At 96kHz, use 2x oversampling (phases 0 and 2 only)
+        let mut m = ChannelMeter::new(100);
+        m.set_sample_rate(96000.0);
+        // 3 samples/cycle sine — should detect inter-sample peaks
+        for i in 0..30 {
+            let t = i as f64 / 3.0;
+            m.process_sample((t * std::f64::consts::TAU).sin() as f32);
+        }
+        assert!(
+            m.true_peak_max() >= m.peak_max(),
+            "2x mode: true peak {} should be >= sample peak {}",
+            m.true_peak_max(),
+            m.peak_max()
+        );
+    }
+
+    #[test]
+    fn test_reset_clears_true_peak() {
+        let mut m = ChannelMeter::new(100);
+        for _ in 0..100 {
+            m.process_sample(0.8);
+        }
+        assert!(m.true_peak_max() > 0.0);
+        m.reset();
+        assert_eq!(m.true_peak_max(), 0.0);
+    }
+
+    #[test]
+    fn test_stereo_crest_factor() {
+        // For equal-level sine on both channels, stereo crest uses mixed scales:
+        // peak_stereo (single channel) vs rms_stereo (sum-of-power).
+        // For a unit sine: peak=1.0, rms_stereo=sqrt(0.5+0.5)=1.0, crest=0 dB.
+        // Per-channel crest would be ~3 dB.
+        let mut m = StereoMeter::new(48000);
+        let n = 48000;
+        let signal: Vec<f32> = (0..n)
+            .map(|i| (i as f32 / n as f32 * std::f32::consts::TAU).sin())
+            .collect();
+        m.process_buffer(&signal, &signal);
+        let stereo_cf = m.crest_factor_db_stereo();
+        let per_ch_cf = m.left.crest_factor_db();
+        // Stereo crest should be ~3 dB lower than per-channel
+        assert!(
+            stereo_cf.is_finite() && per_ch_cf.is_finite(),
+            "crest factors should be finite"
+        );
+        assert!(
+            (per_ch_cf - stereo_cf - 3.01).abs() < 0.1,
+            "stereo crest ({:.2}) should be ~3 dB below per-channel ({:.2})",
+            stereo_cf, per_ch_cf
+        );
+    }
+
+    #[test]
+    fn test_stereo_momentary_max() {
+        let mut m = StereoMeter::new(10);
+        let loud: Vec<f32> = vec![0.8; 10];
+        let quiet: Vec<f32> = vec![0.1; 10];
+        m.process_buffer(&loud, &loud);
+        let max_after_loud = m.rms_momentary_max_stereo();
+        assert!(max_after_loud > 0.0);
+        m.process_buffer(&quiet, &quiet);
+        // Max should not decrease
+        assert!(
+            m.rms_momentary_max_stereo() >= max_after_loud,
+            "stereo momentary max should not decrease"
+        );
+    }
+
+    #[test]
+    fn test_stereo_reset_clears_all() {
+        let mut m = StereoMeter::new(100);
+        let signal: Vec<f32> = vec![0.5; 100];
+        m.process_buffer(&signal, &signal);
+        assert!(m.peak_max_stereo() > 0.0);
+        assert!(m.rms_momentary_max_stereo() > 0.0);
+        m.reset();
+        assert_eq!(m.peak_max_stereo(), 0.0);
+        assert_eq!(m.rms_integrated_stereo(), 0.0);
+        assert_eq!(m.rms_momentary_stereo(), 0.0);
+        assert_eq!(m.rms_momentary_max_stereo(), 0.0);
+    }
+
+    #[test]
+    fn test_window_size_one() {
+        // Degenerate case: window of 1 sample
+        let mut m = ChannelMeter::new(1);
+        m.process_sample(0.5);
+        assert!(approx_eq(m.rms_momentary_linear(), 0.5));
+        m.process_sample(0.3);
+        assert!(approx_eq(m.rms_momentary_linear(), 0.3));
+        m.process_sample(0.0);
+        assert!(approx_eq(m.rms_momentary_linear(), 0.0));
+    }
 }
