@@ -10,6 +10,31 @@ use crate::{GsMeterParams, MeterReadings};
 const WINDOW_WIDTH: u32 = 400;
 const WINDOW_HEIGHT: u32 = 540;
 
+const SCALE_STEPS: &[f64] = &[1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0];
+
+fn nearest_scale_idx(scale: f64) -> usize {
+    SCALE_STEPS
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            (*a - scale).abs().partial_cmp(&(*b - scale).abs()).unwrap()
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+fn set_scale_param(cx: &mut EventContext, param: &nih_plug::prelude::IntParam, scale: f64) {
+    use nih_plug::prelude::Param;
+    let pct = (scale * 100.0).round() as i32;
+    let normalized = param.preview_normalized(pct);
+    cx.emit(RawParamEvent::BeginSetParameter(param.as_ptr()));
+    cx.emit(RawParamEvent::SetParameterNormalized(
+        param.as_ptr(),
+        normalized,
+    ));
+    cx.emit(RawParamEvent::EndSetParameter(param.as_ptr()));
+}
+
 pub(crate) fn default_state() -> Arc<ViziaState> {
     ViziaState::new(|| (WINDOW_WIDTH, WINDOW_HEIGHT))
 }
@@ -19,11 +44,13 @@ struct Data {
     params: Arc<GsMeterParams>,
     readings: Arc<MeterReadings>,
     should_reset: Arc<std::sync::atomic::AtomicBool>,
+    ui_scale_pct: String,
 }
 
 enum DataEvent {
     Reset,
     SetGainFromReading(ReadingKind),
+    SetUiScalePct(String),
 }
 
 #[derive(Clone, Copy)]
@@ -60,7 +87,7 @@ impl Model for Data {
                     }
                 };
                 if meter_db <= -100.0 {
-                    return; // Don't set gain from -inf
+                    return;
                 }
                 let reference = self.params.reference_level.value();
                 let target_gain_db = reference - meter_db;
@@ -72,6 +99,9 @@ impl Model for Data {
                     normalized,
                 ));
                 cx.emit(RawParamEvent::EndSetParameter(self.params.gain.as_ptr()));
+            }
+            DataEvent::SetUiScalePct(pct) => {
+                self.ui_scale_pct = pct.clone();
             }
         });
     }
@@ -95,18 +125,75 @@ pub(crate) fn create(
     create_vizia_editor(editor_state, ViziaTheming::Custom, move |cx, _| {
         nih_plug_widgets::load_style(cx);
 
+        let initial_scale = cx.user_scale_factor();
+        let initial_scale_pct = format!("{}%", (initial_scale * 100.0).round() as u32);
+
         Data {
             params: params.clone(),
             readings: readings.clone(),
             should_reset: should_reset.clone(),
+            ui_scale_pct: initial_scale_pct,
         }
         .build(cx);
 
         VStack::new(cx, |cx| {
-            // Title
-            Label::new(cx, "GS Meter")
-                .font_size(24.0)
-                .height(Pixels(35.0));
+            // Header row: title + scale controls
+            HStack::new(cx, |cx| {
+                Label::new(cx, "GS Meter")
+                    .font_size(24.0)
+                    .width(Stretch(1.0));
+
+                Button::new(
+                    cx,
+                    |cx| {
+                        let current = cx.user_scale_factor();
+                        let idx = nearest_scale_idx(current);
+                        if idx > 0 {
+                            let new_scale = SCALE_STEPS[idx - 1];
+                            cx.set_user_scale_factor(new_scale);
+                            let p = Data::params.get(cx);
+                            set_scale_param(cx, &p.ui_scale, new_scale);
+                            cx.emit(DataEvent::SetUiScalePct(
+                                format!("{}%", (new_scale * 100.0).round() as u32),
+                            ));
+                        }
+                    },
+                    |cx| Label::new(cx, "-"),
+                )
+                .width(Pixels(24.0))
+                .height(Pixels(24.0))
+                .class("scale-btn");
+
+                Label::new(cx, Data::ui_scale_pct)
+                    .width(Pixels(48.0))
+                    .height(Pixels(24.0))
+                    .class("scale-label");
+
+                Button::new(
+                    cx,
+                    |cx| {
+                        let current = cx.user_scale_factor();
+                        let idx = nearest_scale_idx(current);
+                        if idx < SCALE_STEPS.len() - 1 {
+                            let new_scale = SCALE_STEPS[idx + 1];
+                            cx.set_user_scale_factor(new_scale);
+                            let p = Data::params.get(cx);
+                            set_scale_param(cx, &p.ui_scale, new_scale);
+                            cx.emit(DataEvent::SetUiScalePct(
+                                format!("{}%", (new_scale * 100.0).round() as u32),
+                            ));
+                        }
+                    },
+                    |cx| Label::new(cx, "+"),
+                )
+                .width(Pixels(24.0))
+                .height(Pixels(24.0))
+                .class("scale-btn");
+            })
+            .height(Pixels(35.0))
+            .col_between(Pixels(4.0))
+            .child_top(Stretch(1.0))
+            .child_bottom(Stretch(1.0));
 
             // Channel mode
             HStack::new(cx, |cx| {

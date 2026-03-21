@@ -72,6 +72,9 @@ pub struct GsMeter {
 
 #[derive(Params)]
 pub struct GsMeterParams {
+    #[id = "ui_scale"]
+    pub ui_scale: IntParam,
+
     #[id = "gain"]
     pub gain: FloatParam,
 
@@ -106,6 +109,9 @@ impl Default for GsMeter {
 impl GsMeterParams {
     fn new() -> Self {
         Self {
+            ui_scale: IntParam::new("UI Scale", 100, IntRange::Linear { min: 100, max: 300 })
+                .with_unit("%"),
+
             gain: FloatParam::new(
                 "Gain",
                 util::db_to_gain(0.0),
