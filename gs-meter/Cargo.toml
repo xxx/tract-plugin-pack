@@ -1,0 +1,23 @@
+[package]
+name = "gs-meter"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "gs-meter"
+path = "src/main.rs"
+
+[dependencies]
+nih-plug-widgets = { path = "../nih-plug-widgets" }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["simd", "standalone"] }
+nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+
+[package.metadata.bundler]
+name = "GS Meter"
+company = "mpd"
+description = "A loudness meter with gain utility for clip-to-zero workflow"
+license = "GPL-3.0-or-later"
+version = "0.1.0"
