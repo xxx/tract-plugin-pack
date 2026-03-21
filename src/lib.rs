@@ -18,6 +18,17 @@ use wavetable::Wavetable;
 const KERNEL_LEN: usize = 2048;
 const HOP: usize = KERNEL_LEN / 2; // 1024 — STFT overlap-add hop size (50% overlap)
 
+/// Pre-prepared reload data built on the GUI/loader thread so the audio thread
+/// can install a new wavetable without any heap allocations.
+pub(crate) struct PendingReload {
+    pub(crate) wavetable: Wavetable,
+    pub(crate) frame_fft: Arc<dyn RealToComplex<f32>>,
+    pub(crate) frame_cache: Vec<f32>,
+    pub(crate) frame_buf: Vec<f32>,
+    pub(crate) frame_spectrum: Vec<Complex<f32>>,
+    pub(crate) frame_mags: Vec<f32>,
+}
+
 pub struct WavetableFilter {
     params: Arc<WavetableFilterParams>,
     editor_state: Arc<nih_plug_vizia::ViziaState>,
@@ -26,6 +37,8 @@ pub struct WavetableFilter {
     // Circular buffer for convolution (per channel)
     filter_state: [FilterState; 2],
     should_reload: Arc<AtomicBool>,
+    // Pre-prepared reload data from the GUI thread — audio thread takes with try_lock
+    pending_reload: Arc<Mutex<Option<PendingReload>>>,
     // Shared wavetable for UI display
     shared_wavetable: Arc<Mutex<Wavetable>>,
     // Version counter to trigger UI updates
@@ -179,6 +192,7 @@ impl Default for WavetableFilter {
             sample_rate: 48000.0,
             filter_state: [FilterState::new(KERNEL_LEN), FilterState::new(KERNEL_LEN)],
             should_reload: Arc::new(AtomicBool::new(false)),
+            pending_reload: Arc::new(Mutex::new(None)),
             shared_wavetable: Arc::new(Mutex::new(default_wt)),
             wavetable_version: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             current_frame_count,
@@ -542,7 +556,22 @@ impl WavetableFilter {
         self.current_frame_count
             .store(wavetable.frame_count, Ordering::Relaxed);
 
-        self.wavetable = Some(wavetable.clone());
+        // Prepare reload data on this (non-realtime) thread — no allocations on audio thread
+        let mut planner = RealFftPlanner::<f32>::new();
+        let frame_fft = planner.plan_fft_forward(new_size);
+        let spec_len = new_size / 2 + 1;
+        let reload = PendingReload {
+            wavetable: wavetable.clone(),
+            frame_fft,
+            frame_cache: vec![0.0; new_size],
+            frame_buf: vec![0.0; new_size],
+            frame_spectrum: vec![Complex::new(0.0, 0.0); spec_len],
+            frame_mags: vec![0.0; spec_len],
+        };
+
+        if let Ok(mut pending) = self.pending_reload.lock() {
+            *pending = Some(reload);
+        }
 
         if let Ok(mut shared_wt) = self.shared_wavetable.lock() {
             *shared_wt = wavetable;
@@ -550,16 +579,6 @@ impl WavetableFilter {
 
         let new_version = self.wavetable_version.fetch_add(1, Ordering::Relaxed) + 1;
         nih_log!("Updated wavetable version to {}", new_version);
-
-        // Update frame FFT plan and scratch buffers for the new frame size
-        let mut planner = RealFftPlanner::<f32>::new();
-        self.frame_fft = planner.plan_fft_forward(new_size);
-        let spec_len = new_size / 2 + 1;
-        self.frame_cache.resize(new_size, 0.0);
-        self.frame_buf.resize(new_size, 0.0);
-        self.frame_spectrum.resize(spec_len, Complex::new(0.0, 0.0));
-        self.frame_mags.resize(spec_len, 0.0);
-        self.first_process = true;
 
         if let Ok(mut path_lock) = self.params.wavetable_path.lock() {
             *path_lock = path.to_string();
@@ -733,7 +752,7 @@ impl WavetableFilterParams {
                 .with_smoother(SmoothingStyle::Linear(50.0))
                 .with_value_to_string(Arc::new(move |value| {
                     let count = frame_count.load(std::sync::atomic::Ordering::Relaxed);
-                    let frame_num = (value * (count - 1) as f32).round() as usize + 1;
+                    let frame_num = (value * count.saturating_sub(1) as f32).round() as usize + 1;
                     format!("{}", frame_num)
                 }))
                 .with_string_to_value(Arc::new(move |string| {
@@ -816,6 +835,7 @@ impl Plugin for WavetableFilter {
             self.params.clone(),
             self.params.wavetable_path.clone(),
             self.should_reload.clone(),
+            self.pending_reload.clone(),
             self.shared_wavetable.clone(),
             self.wavetable_version.clone(),
             self.editor_state.clone(),
@@ -922,32 +942,29 @@ impl Plugin for WavetableFilter {
         _aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        // Check if we should reload the wavetable
+        // Check if a pre-prepared reload is ready (no allocations on audio thread)
         if self.should_reload.load(Ordering::Relaxed) {
-            if let Ok(shared_wt) = self.shared_wavetable.try_lock() {
-                let new_size = shared_wt.frame_size;
+            if let Ok(mut pending) = self.pending_reload.try_lock() {
+                if let Some(reload) = pending.take() {
+                    self.current_frame_count
+                        .store(reload.wavetable.frame_count, Ordering::Relaxed);
 
-                self.current_frame_count
-                    .store(shared_wt.frame_count, Ordering::Relaxed);
+                    self.wavetable = Some(reload.wavetable);
+                    self.frame_fft = reload.frame_fft;
+                    self.frame_cache = reload.frame_cache;
+                    self.frame_buf = reload.frame_buf;
+                    self.frame_spectrum = reload.frame_spectrum;
+                    self.frame_mags = reload.frame_mags;
 
-                self.wavetable = Some(shared_wt.clone());
-
-                for state in &mut self.filter_state {
-                    if state.len != KERNEL_LEN {
-                        *state = FilterState::new(KERNEL_LEN);
+                    for state in &mut self.filter_state {
+                        if state.len != KERNEL_LEN {
+                            *state = FilterState::new(KERNEL_LEN);
+                        }
                     }
-                }
 
-                // Update frame FFT and scratch buffers for new frame size
-                let mut planner = RealFftPlanner::<f32>::new();
-                self.frame_fft = planner.plan_fft_forward(new_size);
-                let spec_len = new_size / 2 + 1;
-                self.frame_cache.resize(new_size, 0.0);
-                self.frame_buf.resize(new_size, 0.0);
-                self.frame_spectrum.resize(spec_len, Complex::new(0.0, 0.0));
-                self.frame_mags.resize(spec_len, 0.0);
-                self.first_process = true;
-                self.should_reload.store(false, Ordering::Relaxed);
+                    self.first_process = true;
+                    self.should_reload.store(false, Ordering::Relaxed);
+                }
             }
             // If try_lock fails, leave should_reload true and retry next buffer
         }

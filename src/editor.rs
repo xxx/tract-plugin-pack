@@ -83,10 +83,12 @@ pub(crate) fn default_state() -> Arc<ViziaState> {
     ViziaState::new(|| (WINDOW_WIDTH, WINDOW_HEIGHT))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create(
     params: Arc<WavetableFilterParams>,
     wavetable_path: Arc<std::sync::Mutex<String>>,
     should_reload: Arc<std::sync::atomic::AtomicBool>,
+    pending_reload: Arc<std::sync::Mutex<Option<crate::PendingReload>>>,
     shared_wavetable: Arc<std::sync::Mutex<crate::wavetable::Wavetable>>,
     wavetable_version: Arc<std::sync::atomic::AtomicU32>,
     editor_state: Arc<ViziaState>,
@@ -112,6 +114,7 @@ pub(crate) fn create(
 
         let wt_path = wavetable_path.clone();
         let reload_flag = should_reload.clone();
+        let pending_reload_clone = pending_reload.clone();
         let shared_wt = shared_wavetable.clone();
         let wt_version = wavetable_version.clone();
 
@@ -199,6 +202,7 @@ pub(crate) fn create(
 
                 let wt_path_inner = wt_path.clone();
                 let reload_flag_inner = reload_flag.clone();
+                let pending_reload_inner = pending_reload_clone.clone();
                 let shared_wt_inner = shared_wt.clone();
                 let wt_version_inner = wt_version.clone();
 
@@ -238,6 +242,23 @@ pub(crate) fn create(
                                             new_wavetable.frame_count, new_wavetable.frame_size
                                         );
                                         cx.emit(DataEvent::SetStatus(msg));
+
+                                        // Prepare reload data on GUI thread (no audio-thread allocations)
+                                        let new_size = new_wavetable.frame_size;
+                                        let spec_len = new_size / 2 + 1;
+                                        let mut planner = realfft::RealFftPlanner::<f32>::new();
+                                        let frame_fft = planner.plan_fft_forward(new_size);
+                                        let reload = crate::PendingReload {
+                                            wavetable: new_wavetable.clone(),
+                                            frame_fft,
+                                            frame_cache: vec![0.0; new_size],
+                                            frame_buf: vec![0.0; new_size],
+                                            frame_spectrum: vec![rustfft::num_complex::Complex::new(0.0, 0.0); spec_len],
+                                            frame_mags: vec![0.0; spec_len],
+                                        };
+                                        if let Ok(mut pending) = pending_reload_inner.lock() {
+                                            *pending = Some(reload);
+                                        }
 
                                         // Update the shared wavetable for UI display
                                         if let Ok(mut shared) = shared_wt_inner.lock() {

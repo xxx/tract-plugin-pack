@@ -37,6 +37,9 @@ struct FftCache {
     freq_table_size: usize,
     /// Cached response curve Y-coordinates (recomputed only when params change).
     cached_response_ys: Vec<f32>,
+    /// Cached input spectrum snapshot (avoids per-frame clone).
+    cached_input_mags: Vec<f32>,
+    cached_input_sr: f32,
 }
 
 impl FftCache {
@@ -52,6 +55,8 @@ impl FftCache {
             freq_table: Vec::new(),
             freq_table_size: 0,
             cached_response_ys: Vec::new(),
+            cached_input_mags: Vec::new(),
+            cached_input_sr: 0.0,
         }
     }
 }
@@ -295,15 +300,16 @@ impl View for FilterResponseView {
         let num_points = (width.max(1.0) as usize).min(256);
 
         // --- Input spectrum shadow ---
-        // Copy data out of the lock immediately to avoid holding it during path construction
-        let spectrum_snapshot = self.shared_input_spectrum.try_lock().ok().and_then(|data| {
+        // Update cached input spectrum only when audio thread has new data
+        if let Ok(data) = self.shared_input_spectrum.try_lock() {
             let (sr, ref mags) = *data;
             if sr > 0.0 && !mags.is_empty() {
-                Some((sr, mags.clone()))
-            } else {
-                None
+                let mut cache = self.fft_cache.borrow_mut();
+                cache.cached_input_mags.resize(mags.len(), 0.0);
+                cache.cached_input_mags.copy_from_slice(mags);
+                cache.cached_input_sr = sr;
             }
-        });
+        }
         // Ensure frequency table is built before using it
         {
             let mut cache = self.fft_cache.borrow_mut();
@@ -320,38 +326,41 @@ impl View for FilterResponseView {
             }
         }
 
-        if let Some((sr, input_mags)) = spectrum_snapshot {
-            // Copy freq_table out so we don't hold the borrow across canvas calls
-            let freq_table: Vec<f32> = {
+        // Draw input spectrum shadow from cached data (no per-frame allocation)
+        let has_input_spectrum = {
+            let cache = self.fft_cache.borrow();
+            cache.cached_input_sr > 0.0 && !cache.cached_input_mags.is_empty()
+        };
+        if has_input_spectrum {
+            // Compute shadow Y-coordinates while holding the cache borrow, then draw after releasing
+            let shadow_ys: Vec<f32> = {
                 let cache = self.fft_cache.borrow();
-                cache.freq_table[..=num_points].to_vec()
+                let bin_hz = cache.cached_input_sr / (2.0 * (cache.cached_input_mags.len() - 1) as f32);
+                let input_mags = &cache.cached_input_mags;
+                (0..=num_points).map(|i| {
+                    let freq = cache.freq_table[i];
+                    let bin = freq / bin_hz;
+                    let mag = if bin >= (input_mags.len() - 1) as f32 {
+                        0.0
+                    } else if bin <= 0.0 {
+                        input_mags[0]
+                    } else {
+                        let lo = bin.floor() as usize;
+                        let frac = bin - lo as f32;
+                        input_mags[lo] * (1.0 - frac) + input_mags[lo + 1] * frac
+                    };
+                    let db = 20.0 * mag.max(1e-6).log10();
+                    let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
+                    y0 + height - y_norm * height
+                }).collect()
             };
-            let bin_hz = sr / (2.0 * (input_mags.len() - 1) as f32);
 
             let mut shadow_path = vg::Path::new();
             shadow_path.move_to(x0, y0 + height);
-
-            for i in 0..=num_points {
-                let freq = freq_table[i];
-                let bin = freq / bin_hz;
-
-                let mag = if bin >= (input_mags.len() - 1) as f32 {
-                    0.0
-                } else if bin <= 0.0 {
-                    input_mags[0]
-                } else {
-                    let lo = bin.floor() as usize;
-                    let frac = bin - lo as f32;
-                    input_mags[lo] * (1.0 - frac) + input_mags[lo + 1] * frac
-                };
-
-                let db = 20.0 * mag.max(1e-6).log10();
-                let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
+            for (i, &y) in shadow_ys.iter().enumerate() {
                 let x = x0 + (i as f32 / num_points as f32) * width;
-                let y = y0 + height - y_norm * height;
                 shadow_path.line_to(x, y);
             }
-
             shadow_path.line_to(x0 + width, y0 + height);
             shadow_path.close();
 
@@ -371,9 +380,8 @@ impl View for FilterResponseView {
         let mut stroke_path = vg::Path::new();
 
         if response_ys.len() == num_points + 1 {
-            for i in 0..=num_points {
+            for (i, &y) in response_ys.iter().enumerate().take(num_points + 1) {
                 let x = x0 + (i as f32 / num_points as f32) * width;
-                let y = response_ys[i];
 
                 if i == 0 {
                     fill_path.move_to(x, y0 + height);

@@ -35,6 +35,10 @@ impl Wavetable {
 
         let frame_count = samples.len() / frame_size;
 
+        if frame_count == 0 {
+            return Err("Wavetable must have at least one frame".to_string());
+        }
+
         if frame_count > 256 {
             return Err(format!(
                 "Frame count {} exceeds maximum of 256",
@@ -309,6 +313,9 @@ impl Wavetable {
     }
 
     fn detect_frame_size(total_samples: usize) -> Result<usize, String> {
+        if total_samples == 0 {
+            return Err("WAV file contains no audio data".to_string());
+        }
         for &size in &[2048, 1024, 512, 256] {
             if total_samples.is_multiple_of(size) && total_samples / size <= 256 {
                 return Ok(size);
