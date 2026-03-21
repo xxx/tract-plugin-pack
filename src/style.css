@@ -1,0 +1,108 @@
+/* Main window background */
+:root {
+    background-color: #1a1c22;
+    color: #e0e0e0;
+}
+
+button {
+    background-color: #2a2c32;
+    border-width: 1px;
+    border-color: #404040;
+    border-radius: 3px;
+}
+
+/* Title styling */
+label {
+    color: #ffffff;
+    font-size: 14px;
+}
+
+/* Section titles */
+.section-title {
+    color: #a0a0a0;
+    font-size: 12px;
+}
+
+/* Visualization areas */
+.wavetable-3d-view,
+.filter-response-view {
+    border-width: 1px;
+    border-color: #404040;
+    border-radius: 4px;
+}
+
+/* Slider styling */
+param-slider {
+    background-color: #2a2c32;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: #404040;
+}
+
+param-slider .fill {
+    background-color: #4fc3f7;
+}
+
+.mode-slider {
+    height: 28px;
+}
+
+.mode-slider .fill {
+    background-color: #4fc3f7;
+    border-radius: 3px;
+}
+
+.mode-slider .value--multiple {
+    font-size: 13px;
+}
+
+/* Path display styling */
+.path-display {
+    background-color: #2a2c32;
+    color: #ffffff;
+    border-width: 1px;
+    border-color: #404040;
+    border-radius: 3px;
+    child-left: 8px;
+    child-top: 5px;
+}
+
+/* Scale controls */
+.scale-btn {
+    background-color: #2a2c32;
+    border-radius: 3px;
+    border-width: 1px;
+    border-color: #404040;
+    child-left: 1s;
+    child-right: 1s;
+}
+
+.scale-label {
+    color: #a0a0a0;
+    font-size: 11px;
+    child-left: 1s;
+    child-right: 1s;
+    child-top: 1s;
+    child-bottom: 1s;
+}
+
+/* Dial styling */
+param-dial {
+    background-color: transparent;
+}
+
+param-dial .dial-label {
+    color: #a0a0a0;
+    font-size: 11px;
+    child-left: 1s;
+    child-right: 1s;
+    height: 16px;
+}
+
+param-dial .dial-value {
+    color: #ffffff;
+    font-size: 11px;
+    child-left: 1s;
+    child-right: 1s;
+    height: 16px;
+}
