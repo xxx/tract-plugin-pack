@@ -9,6 +9,6 @@ Cargo.lock
 *.clap
 *.wav
 *.wt
-!tests/fixtures/*.wt
+!wavetable-filter/tests/fixtures/*.wt
 *.png
-!docs/manual/*.png
+!docs/wavetable-filter/*.png

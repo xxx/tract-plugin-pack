@@ -1,5 +1,4 @@
 mod filter_response_view;
-mod param_dial;
 mod wavetable_view;
 
 use nih_plug::prelude::Editor;
@@ -10,7 +9,7 @@ use std::sync::Arc;
 
 use crate::WavetableFilterParams;
 use filter_response_view::FilterResponseView;
-use param_dial::ParamDial;
+use nih_plug_widgets::ParamDial;
 use wavetable_view::WavetableView;
 
 const SCALE_STEPS: &[f64] = &[1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0];
@@ -95,8 +94,7 @@ pub(crate) fn create(
     shared_input_spectrum: Arc<std::sync::Mutex<(f32, Vec<f32>)>>,
 ) -> Option<Box<dyn Editor>> {
     create_vizia_editor(editor_state, ViziaTheming::Custom, move |cx, _| {
-        cx.add_stylesheet(include_str!("style.css"))
-            .expect("Failed to load stylesheet");
+        nih_plug_widgets::load_style(cx);
 
         let initial_path = wavetable_path.lock().unwrap().clone();
         let initial_scale = cx.user_scale_factor();

@@ -1,26 +1,6 @@
-[package]
-name = "wavetable-filter"
-version = "0.1.0"
-edition = "2021"
-
 [workspace]
-members = ["xtask"]
-
-[lib]
-crate-type = ["cdylib", "lib"]
-
-[[bin]]
-name = "wavetable-filter"
-path = "src/main.rs"
-
-[dependencies]
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["simd", "standalone"] }
-nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
-hound = "3.5"
-atomic_float = "1.0"
-rfd = "0.17.2"
-realfft = "3.3"
-rustfft = "6.2"
+members = ["nih-plug-widgets", "wavetable-filter", "xtask"]
+resolver = "2"
 
 [profile.release]
 lto = true
@@ -30,12 +10,3 @@ strip = true
 inherits = "release"
 debug = true
 strip = false
-
-[package.metadata.bundler]
-name = "Wavetable Filter"
-company = "mpd"
-url = "https://github.com/xxx/wavetable-filter"
-email = "your.email@example.com"
-description = "A wavetable-based filter plugin"
-license = "GPL-3.0-or-later"
-version = "0.1.0"

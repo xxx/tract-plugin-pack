@@ -1,0 +1,9 @@
+[package]
+name = "nih-plug-widgets"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["simd"] }
+nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
