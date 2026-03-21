@@ -213,11 +213,12 @@ impl View for ParamDial {
 
         // The child Labels (name + value) take up space at the top and bottom.
         // The arc occupies the middle area. Estimate label heights for positioning.
-        let label_height = 18.0;
-        let arc_size = bounds.w.min(bounds.h - label_height * 2.0);
+        // Use proportional margins so label clearance scales with UI zoom
+        let label_margin = bounds.h * 0.18;
+        let arc_size = bounds.w.min(bounds.h - label_margin * 2.0);
         let arc_cx = bounds.x + bounds.w / 2.0;
-        let arc_cy = bounds.y + label_height + arc_size / 2.0;
-        let radius = arc_size / 2.0 - 6.0; // Margin for indicator dot
+        let arc_cy = bounds.y + label_margin + arc_size / 2.0;
+        let radius = arc_size / 2.0 - 6.0;
         let stroke_width = 3.0;
 
         // --- Draw background arc (full 270deg track) ---

@@ -77,7 +77,7 @@ impl Model for Data {
 }
 
 pub const WINDOW_WIDTH: u32 = 1050;
-pub const WINDOW_HEIGHT: u32 = 750;
+pub const WINDOW_HEIGHT: u32 = 720;
 
 pub(crate) fn default_state() -> Arc<ViziaState> {
     ViziaState::new(|| (WINDOW_WIDTH, WINDOW_HEIGHT))
@@ -173,9 +173,6 @@ pub(crate) fn create(
             .col_between(Pixels(4.0))
             .child_top(Stretch(1.0))
             .child_bottom(Stretch(1.0));
-
-            // Status message
-            Label::new(cx, Data::status_message).height(Pixels(20.0));
 
             // Wavetable name + browse
             HStack::new(cx, |cx| {
@@ -311,9 +308,9 @@ pub(crate) fn create(
                     HStack::new(cx, |cx| {
                         ParamDial::new(cx, Data::params, |params| &params.frame_position)
                             .width(Pixels(110.0))
-                            .height(Pixels(110.0));
+                            .height(Pixels(130.0));
                     })
-                    .height(Pixels(120.0))
+                    .height(Pixels(136.0))
                     .child_top(Pixels(6.0));
                 })
                 .width(Stretch(1.0));
@@ -334,26 +331,26 @@ pub(crate) fn create(
                     HStack::new(cx, |cx| {
                         ParamDial::new(cx, Data::params, |params| &params.frequency)
                             .width(Pixels(110.0))
-                            .height(Pixels(110.0));
+                            .height(Pixels(130.0));
                         ParamDial::new(cx, Data::params, |params| &params.resonance)
                             .width(Pixels(110.0))
-                            .height(Pixels(110.0));
+                            .height(Pixels(130.0));
                     })
                     .col_between(Pixels(10.0))
-                    .height(Pixels(120.0))
+                    .height(Pixels(136.0))
                     .child_top(Pixels(6.0));
 
                     // Drive and Mix in the lower right
                     HStack::new(cx, |cx| {
                         ParamDial::new(cx, Data::params, |params| &params.drive)
                             .width(Pixels(110.0))
-                            .height(Pixels(110.0));
+                            .height(Pixels(130.0));
                         ParamDial::new(cx, Data::params, |params| &params.mix)
                             .width(Pixels(110.0))
-                            .height(Pixels(110.0));
+                            .height(Pixels(130.0));
                     })
                     .col_between(Pixels(10.0))
-                    .height(Pixels(120.0))
+                    .height(Pixels(136.0))
                     .child_left(Stretch(1.0))
                     .child_top(Stretch(1.0));
                 })

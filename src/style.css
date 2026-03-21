@@ -96,13 +96,15 @@ param-dial .dial-label {
     font-size: 11px;
     child-left: 1s;
     child-right: 1s;
-    height: 16px;
+    height: 20px;
 }
 
 param-dial .dial-value {
     color: #ffffff;
     font-size: 11px;
+    width: 1s;
     child-left: 1s;
-    child-right: 1s;
-    height: 16px;
+    child-right: 0px;
+    height: 20px;
+    top: 1s;
 }

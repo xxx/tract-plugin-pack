@@ -726,7 +726,7 @@ impl WavetableFilterParams {
             frame_position: {
                 let frame_count_clone = frame_count.clone();
                 FloatParam::new(
-                    "Frame Position",
+                    "Frame",
                     0.0,
                     FloatRange::Linear { min: 0.0, max: 1.0 },
                 )
