@@ -20,6 +20,8 @@ struct FrameCache {
     cached_version: u32,
     cached_frame_count: usize,
     cached_frame_size: usize,
+    global_min: f32,
+    global_max: f32,
 }
 
 impl FrameCache {
@@ -29,6 +31,8 @@ impl FrameCache {
             cached_version: u32::MAX, // Forces initial load
             cached_frame_count: 0,
             cached_frame_size: 0,
+            global_min: 0.0,
+            global_max: 0.0,
         }
     }
 }
@@ -87,6 +91,17 @@ impl View for WavetableView {
                     cache.cached_frame_count = wavetable.frame_count;
                     cache.cached_frame_size = wavetable.frame_size;
                     cache.cached_version = current_version;
+                    // Precompute global min/max for 3D normalization
+                    let mut gmin = f32::INFINITY;
+                    let mut gmax = f32::NEG_INFINITY;
+                    for frame in &cache.cached_frames {
+                        for &s in frame {
+                            gmin = gmin.min(s);
+                            gmax = gmax.max(s);
+                        }
+                    }
+                    cache.global_min = gmin;
+                    cache.global_max = gmax;
                 }
                 // If lock is contended, we keep the stale cached data
             }
@@ -101,15 +116,8 @@ impl View for WavetableView {
             return;
         }
 
-        // Find global min/max for consistent scaling
-        let mut global_min = f32::INFINITY;
-        let mut global_max = f32::NEG_INFINITY;
-        for frame in frames_data {
-            for &sample in frame {
-                global_min = global_min.min(sample);
-                global_max = global_max.max(sample);
-            }
-        }
+        let global_min = cache.global_min;
+        let global_max = cache.global_max;
         let range = (global_max - global_min).max(0.001);
 
         // Use modulated value so the view reflects DAW automation/modulation

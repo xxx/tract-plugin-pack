@@ -32,6 +32,11 @@ struct FftCache {
     cached_frame_pos: f32,
     cached_cutoff: f32,
     cached_resonance: f32,
+    /// Precomputed log-spaced frequency table (one per pixel column).
+    freq_table: Vec<f32>,
+    freq_table_size: usize,
+    /// Cached response curve Y-coordinates (recomputed only when params change).
+    cached_response_ys: Vec<f32>,
 }
 
 impl FftCache {
@@ -44,6 +49,9 @@ impl FftCache {
             cached_frame_pos: -1.0,
             cached_cutoff: -1.0,
             cached_resonance: -1.0,
+            freq_table: Vec::new(),
+            freq_table_size: 0,
+            cached_response_ys: Vec::new(),
         }
     }
 }
@@ -138,6 +146,70 @@ impl FilterResponseView {
 
         true
     }
+
+    /// Precompute the log-frequency table and response curve Y-coordinates.
+    /// Called from draw() — only recomputes when display width or parameters change.
+    fn update_response_curve(&self, num_points: usize, cutoff_hz: f32, resonance: f32, height: f32, y0: f32) {
+        let mut cache = self.fft_cache.borrow_mut();
+
+        // Rebuild frequency table if display width changed
+        if cache.freq_table_size != num_points {
+            cache.freq_table.resize(num_points + 1, 0.0);
+            let log_min = FREQ_MIN.ln();
+            let log_range = FREQ_MAX.ln() - log_min;
+            for i in 0..=num_points {
+                let x_norm = i as f32 / num_points as f32;
+                cache.freq_table[i] = (log_min + x_norm * log_range).exp();
+            }
+            cache.freq_table_size = num_points;
+            // Force response recomputation
+            cache.cached_response_ys.clear();
+        }
+
+        // Recompute response curve Y-coordinates if needed
+        if cache.cached_response_ys.len() != num_points + 1 || cache.cached_mags.is_empty() {
+            if cache.cached_mags.is_empty() {
+                return;
+            }
+            let comb_exp = resonance * 8.0;
+
+            // Destructure to satisfy borrow checker (disjoint field borrows)
+            let FftCache {
+                ref cached_mags,
+                ref freq_table,
+                ref mut cached_response_ys,
+                ..
+            } = *cache;
+
+            let max_src = (cached_mags.len() - 1) as f32;
+            cached_response_ys.resize(num_points + 1, 0.0);
+            for i in 0..=num_points {
+                let freq = freq_table[i];
+                let src = freq * 24.0 / cutoff_hz;
+
+                let mag = if src >= max_src {
+                    0.0
+                } else if src <= 0.0 {
+                    cached_mags[0]
+                } else {
+                    let lo = src.floor() as usize;
+                    let frac = src - lo as f32;
+                    let interp = cached_mags[lo] * (1.0 - frac) + cached_mags[lo + 1] * frac;
+                    if comb_exp > 0.01 {
+                        let dist = frac.min(1.0 - frac);
+                        let comb = (std::f32::consts::PI * dist).cos().powf(comb_exp);
+                        interp * comb
+                    } else {
+                        interp
+                    }
+                };
+
+                let db = 20.0 * mag.max(1e-6).log10();
+                let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
+                cached_response_ys[i] = y0 + height - y_norm * height;
+            }
+        }
+    }
 }
 
 /// Convert a frequency in Hz to an x position in [0, 1] on a log scale.
@@ -175,7 +247,6 @@ impl View for FilterResponseView {
         let frame_position = self.params.frame_position.modulated_normalized_value();
         let cutoff_hz = self.params.frequency.modulated_plain_value();
         let resonance = self.params.resonance.modulated_plain_value();
-        let comb_exp = resonance * 8.0;
 
         if !self.update_cached_mags(frame_position, cutoff_hz, resonance) {
             return;
@@ -230,15 +301,35 @@ impl View for FilterResponseView {
                 None
             }
         });
+        // Ensure frequency table is built before using it
+        {
+            let mut cache = self.fft_cache.borrow_mut();
+            if cache.freq_table_size != num_points {
+                cache.freq_table.resize(num_points + 1, 0.0);
+                let log_min = FREQ_MIN.ln();
+                let log_range = FREQ_MAX.ln() - log_min;
+                for i in 0..=num_points {
+                    let x_norm = i as f32 / num_points as f32;
+                    cache.freq_table[i] = (log_min + x_norm * log_range).exp();
+                }
+                cache.freq_table_size = num_points;
+                cache.cached_response_ys.clear(); // force response recomputation
+            }
+        }
+
         if let Some((sr, input_mags)) = spectrum_snapshot {
+            // Copy freq_table out so we don't hold the borrow across canvas calls
+            let freq_table: Vec<f32> = {
+                let cache = self.fft_cache.borrow();
+                cache.freq_table[..=num_points].to_vec()
+            };
             let bin_hz = sr / (2.0 * (input_mags.len() - 1) as f32);
 
             let mut shadow_path = vg::Path::new();
             shadow_path.move_to(x0, y0 + height);
 
             for i in 0..=num_points {
-                let x_norm = i as f32 / num_points as f32;
-                let freq = FREQ_MIN * (FREQ_MAX / FREQ_MIN).powf(x_norm);
+                let freq = freq_table[i];
                 let bin = freq / bin_hz;
 
                 let mag = if bin >= (input_mags.len() - 1) as f32 {
@@ -253,7 +344,7 @@ impl View for FilterResponseView {
 
                 let db = 20.0 * mag.max(1e-6).log10();
                 let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
-                let x = x0 + x_norm * width;
+                let x = x0 + (i as f32 / num_points as f32) * width;
                 let y = y0 + height - y_norm * height;
                 shadow_path.line_to(x, y);
             }
@@ -267,58 +358,31 @@ impl View for FilterResponseView {
             );
         }
 
-        // --- Frequency response curve ---
-        // For each screen pixel column, compute:
-        //   freq = frequency at that x position (log scale)
-        //   src_harmonic = freq * 24 / cutoff_hz  (harmonic 24 maps to cutoff)
-        //   magnitude = interpolate mags[] at src_harmonic
-        //   dB = 20 * log10(magnitude)
+        // --- Frequency response curve (from cached Y-coordinates) ---
+        self.update_response_curve(num_points, cutoff_hz, resonance, height, y0);
 
         let cache = self.fft_cache.borrow();
-        let mags = &cache.cached_mags;
-        let max_src = (mags.len() - 1) as f32;
+        let response_ys = &cache.cached_response_ys;
 
         let mut fill_path = vg::Path::new();
         let mut stroke_path = vg::Path::new();
 
-        for i in 0..=num_points {
-            let x_norm = i as f32 / num_points as f32;
-            let freq = FREQ_MIN * (FREQ_MAX / FREQ_MIN).powf(x_norm);
-            let src = freq * 24.0 / cutoff_hz;
+        if response_ys.len() == num_points + 1 {
+            for i in 0..=num_points {
+                let x = x0 + (i as f32 / num_points as f32) * width;
+                let y = response_ys[i];
 
-            let mag = if src >= max_src {
-                0.0
-            } else if src <= 0.0 {
-                mags[0]
-            } else {
-                let lo = src.floor() as usize;
-                let frac = src - lo as f32;
-                let interp = mags[lo] * (1.0 - frac) + mags[lo + 1] * frac;
-                if comb_exp > 0.01 {
-                    let dist = frac.min(1.0 - frac);
-                    let comb = (std::f32::consts::PI * dist).cos().powf(comb_exp);
-                    interp * comb
+                if i == 0 {
+                    fill_path.move_to(x, y0 + height);
+                    fill_path.line_to(x, y);
+                    stroke_path.move_to(x, y);
                 } else {
-                    interp
+                    fill_path.line_to(x, y);
+                    stroke_path.line_to(x, y);
                 }
-            };
-
-            let db = 20.0 * mag.max(1e-6).log10();
-            let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
-            let x = x0 + x_norm * width;
-            let y = y0 + height - y_norm * height;
-
-            if i == 0 {
-                fill_path.move_to(x, y0 + height); // start at bottom-left
-                fill_path.line_to(x, y);
-                stroke_path.move_to(x, y);
-            } else {
-                fill_path.line_to(x, y);
-                stroke_path.line_to(x, y);
             }
         }
 
-        // Drop the borrow before further canvas operations that don't need it
         drop(cache);
 
         // Close the fill path along the bottom

@@ -4,6 +4,7 @@ use nih_plug::prelude::*;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use rustfft::num_complex::Complex;
 use std::simd::f32x16;
+use std::simd::num::SimdFloat;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -232,16 +233,7 @@ impl Default for WavetableFilter {
 /// Horizontal sum of an f32x16 SIMD vector using pairwise tree reduction.
 #[inline(always)]
 fn hsum(v: f32x16) -> f32 {
-    let a = v.to_array();
-    let s0 = a[0] + a[1];
-    let s1 = a[2] + a[3];
-    let s2 = a[4] + a[5];
-    let s3 = a[6] + a[7];
-    let s4 = a[8] + a[9];
-    let s5 = a[10] + a[11];
-    let s6 = a[12] + a[13];
-    let s7 = a[14] + a[15];
-    (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+    v.reduce_sum()
 }
 
 /// Reverse a buffer in place. Converts forward-order IFFT output into the
@@ -1203,9 +1195,9 @@ impl Plugin for WavetableFilter {
         }
 
         // Compute input spectrum for GUI visualization (non-blocking).
-        // Throttled to ~30 updates/sec to avoid wasting CPU on every process() call.
+        // Only runs when the editor is open. Throttled to ~30 updates/sec.
         self.input_spectrum_countdown = self.input_spectrum_countdown.saturating_sub(host_samples);
-        if self.input_spectrum_countdown == 0 {
+        if self.input_spectrum_countdown == 0 && self.editor_state.is_open() {
             self.input_spectrum_countdown = (self.sample_rate / 30.0) as usize;
 
             // Reorder the ring buffer into a contiguous windowed buffer for FFT.
