@@ -4,22 +4,41 @@
 /// Maximum supported RMS window in samples (3000ms at 192kHz).
 const MAX_WINDOW_SAMPLES: usize = 576_000;
 
-// ── True Peak: 4x oversampling via polyphase FIR ────────────────────────
+// ── True Peak: 4x oversampling per ITU-R BS.1770-4, Annex 2 ─────────────
 //
-// ITU-R BS.1770-4 specifies 4x oversampling to detect inter-sample peaks.
-// We use a polyphase FIR computed from a windowed sinc (Kaiser window).
+// Uses the exact reference coefficients from the ITU-R BS.1770-4 standard
+// (page 17, "order 48, 4-phase, FIR interpolating" filter for 48 kHz).
 
+const TRUE_PEAK_TAPS: usize = 12; // taps per phase
 const TRUE_PEAK_PHASES: usize = 4;
-const TRUE_PEAK_TAPS: usize = 24; // taps per phase (96-tap prototype)
-const TRUE_PEAK_HISTORY: usize = TRUE_PEAK_TAPS;
-const TRUE_PEAK_PROTO_LEN: usize = TRUE_PEAK_PHASES * TRUE_PEAK_TAPS;
 
-/// True peak detector using 4x polyphase oversampling.
+/// ITU-R BS.1770-4 Annex 2 reference filter coefficients.
+/// 4 phases × 12 taps, exactly as published in the standard.
+#[rustfmt::skip]
+#[allow(clippy::excessive_precision)] // Coefficients copied verbatim from ITU-R BS.1770-4 Annex 2
+const ITU_COEFFS: [[f32; TRUE_PEAK_TAPS]; TRUE_PEAK_PHASES] = [
+    // Phase 0
+    [ 0.0017089843750, 0.0109863281250,-0.0196533203125, 0.0332031250000,
+     -0.0594482421875, 0.1373291015625, 0.9721679687500,-0.1022949218750,
+      0.0476074218750,-0.0266113281250, 0.0148925781250,-0.0083007812500],
+    // Phase 1
+    [-0.0291748046875, 0.0292968750000,-0.0517578125000, 0.0891113281250,
+     -0.1665039062500, 0.4650878906250, 0.7797851562500,-0.2003173828125,
+      0.1015625000000,-0.0582275390625, 0.0330810546875,-0.0189208984375],
+    // Phase 2
+    [-0.0189208984375, 0.0330810546875,-0.0582275390625, 0.1015625000000,
+     -0.2003173828125, 0.7797851562500, 0.4650878906250,-0.1665039062500,
+      0.0891113281250,-0.0517578125000, 0.0292968750000,-0.0291748046875],
+    // Phase 3
+    [-0.0083007812500, 0.0148925781250,-0.0266113281250, 0.0476074218750,
+     -0.1022949218750, 0.9721679687500, 0.1373291015625,-0.0594482421875,
+      0.0332031250000,-0.0196533203125, 0.0109863281250, 0.0017089843750],
+];
+
+/// True peak detector using 4x polyphase oversampling (ITU-R BS.1770-4).
 pub struct TruePeakDetector {
-    /// Polyphase filter coefficients [phase][tap].
-    coeffs: [[f32; TRUE_PEAK_TAPS]; TRUE_PEAK_PHASES],
-    /// Circular history buffer for FIR convolution.
-    history: [f32; TRUE_PEAK_HISTORY],
+    /// Circular history buffer.
+    history: [f32; TRUE_PEAK_TAPS],
     /// Write position in history.
     pos: usize,
     /// Highest true peak (linear) since last reset.
@@ -34,49 +53,11 @@ impl Default for TruePeakDetector {
 
 impl TruePeakDetector {
     pub fn new() -> Self {
-        let coeffs = Self::compute_coefficients();
         Self {
-            coeffs,
-            history: [0.0; TRUE_PEAK_HISTORY],
+            history: [0.0; TRUE_PEAK_TAPS],
             pos: 0,
             true_peak_max: 0.0,
         }
-    }
-
-    fn compute_coefficients() -> [[f32; TRUE_PEAK_TAPS]; TRUE_PEAK_PHASES] {
-        let n_total = TRUE_PEAK_PROTO_LEN;
-        // Integer delay divisible by 4 so Phase 0 has sinc(0) = 1.0 (identity).
-        let delay = ((n_total / 2) / TRUE_PEAK_PHASES * TRUE_PEAK_PHASES) as f64;
-        // Low beta = narrow transition band = passband extends close to Nyquist.
-        // Stopband rejection is ~30 dB, sufficient since input is already bandlimited.
-        let beta = 2.0_f64;
-
-        let mut proto = [0.0_f64; TRUE_PEAK_PROTO_LEN];
-        for (n, p) in proto.iter_mut().enumerate().take(n_total) {
-            let x = (n as f64 - delay) / TRUE_PEAK_PHASES as f64;
-            let sinc = if x.abs() < 1e-10 {
-                1.0
-            } else {
-                (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
-            };
-            let kaiser = kaiser_window(n, n_total, beta);
-            *p = sinc * kaiser;
-        }
-
-        let mut coeffs = [[0.0_f32; TRUE_PEAK_TAPS]; TRUE_PEAK_PHASES];
-        for (phase, phase_coeffs) in coeffs.iter_mut().enumerate() {
-            for (k, coeff) in phase_coeffs.iter_mut().enumerate() {
-                let n = TRUE_PEAK_PHASES * k + phase;
-                *coeff = proto[n] as f32;
-            }
-            let sum: f32 = phase_coeffs.iter().sum();
-            if sum.abs() > 1e-6 {
-                for c in phase_coeffs.iter_mut() {
-                    *c /= sum;
-                }
-            }
-        }
-        coeffs
     }
 
     pub fn reset(&mut self) {
@@ -88,12 +69,12 @@ impl TruePeakDetector {
     #[inline]
     pub fn process_sample(&mut self, sample: f32) {
         self.history[self.pos] = sample;
-        self.pos = (self.pos + 1) % TRUE_PEAK_HISTORY;
+        self.pos = (self.pos + 1) % TRUE_PEAK_TAPS;
 
-        for phase in &self.coeffs {
+        for phase in &ITU_COEFFS {
             let mut sum = 0.0_f32;
-            for (k, &coeff) in phase.iter().enumerate() {
-                let idx = (self.pos + TRUE_PEAK_HISTORY - 1 - k) % TRUE_PEAK_HISTORY;
+            for (tap, &coeff) in phase.iter().enumerate() {
+                let idx = (self.pos + TRUE_PEAK_TAPS - 1 - tap) % TRUE_PEAK_TAPS;
                 sum += self.history[idx] * coeff;
             }
             let abs = sum.abs();
@@ -106,29 +87,6 @@ impl TruePeakDetector {
     pub fn true_peak_max(&self) -> f32 {
         self.true_peak_max
     }
-}
-
-/// Kaiser window function.
-fn kaiser_window(n: usize, n_total: usize, beta: f64) -> f64 {
-    let alpha = (n_total as f64 - 1.0) / 2.0;
-    let ratio = (n as f64 - alpha) / alpha;
-    let arg = beta * (1.0 - ratio * ratio).max(0.0).sqrt();
-    bessel_i0(arg) / bessel_i0(beta)
-}
-
-/// Modified Bessel function I0 via power series.
-fn bessel_i0(x: f64) -> f64 {
-    let mut sum = 1.0_f64;
-    let mut term = 1.0_f64;
-    let x_half = x / 2.0;
-    for k in 1..25 {
-        term *= (x_half / k as f64) * (x_half / k as f64);
-        sum += term;
-        if term < 1e-20 {
-            break;
-        }
-    }
-    sum
 }
 
 /// Per-channel metering state.
