@@ -35,7 +35,18 @@ const ITU_COEFFS: [[f32; TRUE_PEAK_TAPS]; TRUE_PEAK_PHASES] = [
       0.0332031250000,-0.0196533203125, 0.0109863281250, 0.0017089843750],
 ];
 
-/// True peak detector using 4x polyphase oversampling (ITU-R BS.1770-4).
+/// Oversampling mode based on input sample rate, per ITU-R BS.1770-4 Annex 2.
+#[derive(Clone, Copy, PartialEq)]
+enum TruePeakMode {
+    /// Input < 96 kHz: use all 4 phases (4x oversampling to ≥192 kHz).
+    Oversample4x,
+    /// Input 96–191 kHz: use phases 0 and 2 only (2x oversampling).
+    Oversample2x,
+    /// Input ≥ 192 kHz: no oversampling needed, sample peak suffices.
+    Bypass,
+}
+
+/// True peak detector using polyphase oversampling (ITU-R BS.1770-4).
 pub struct TruePeakDetector {
     /// Circular history buffer.
     history: [f32; TRUE_PEAK_TAPS],
@@ -43,6 +54,8 @@ pub struct TruePeakDetector {
     pos: usize,
     /// Highest true peak (linear) since last reset.
     true_peak_max: f32,
+    /// Oversampling mode (depends on input sample rate).
+    mode: TruePeakMode,
 }
 
 impl Default for TruePeakDetector {
@@ -57,7 +70,19 @@ impl TruePeakDetector {
             history: [0.0; TRUE_PEAK_TAPS],
             pos: 0,
             true_peak_max: 0.0,
+            mode: TruePeakMode::Oversample4x,
         }
+    }
+
+    /// Set the oversampling mode based on the host sample rate.
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.mode = if sample_rate >= 192000.0 {
+            TruePeakMode::Bypass
+        } else if sample_rate >= 96000.0 {
+            TruePeakMode::Oversample2x
+        } else {
+            TruePeakMode::Oversample4x
+        };
     }
 
     pub fn reset(&mut self) {
@@ -68,10 +93,22 @@ impl TruePeakDetector {
 
     #[inline]
     pub fn process_sample(&mut self, sample: f32) {
+        if self.mode == TruePeakMode::Bypass {
+            return; // Sample peak tracked by ChannelMeter directly
+        }
+
         self.history[self.pos] = sample;
         self.pos = (self.pos + 1) % TRUE_PEAK_TAPS;
 
-        for phase in &ITU_COEFFS {
+        // Select which phases to evaluate based on oversampling mode
+        let phases: &[usize] = match self.mode {
+            TruePeakMode::Oversample4x => &[0, 1, 2, 3],
+            TruePeakMode::Oversample2x => &[0, 2], // 2x: only evaluate at 0 and 0.5 positions
+            TruePeakMode::Bypass => unreachable!(),
+        };
+
+        for &p in phases {
+            let phase = &ITU_COEFFS[p];
             let mut sum = 0.0_f32;
             for (tap, &coeff) in phase.iter().enumerate() {
                 let idx = (self.pos + TRUE_PEAK_TAPS - 1 - tap) % TRUE_PEAK_TAPS;
@@ -101,6 +138,8 @@ pub struct ChannelMeter {
     rms_count: u64,
     /// Ring buffer of squared samples, pre-allocated to MAX_WINDOW_SAMPLES.
     rms_ring: Vec<f32>,
+    /// Running sum of squared samples in the ring (f64 for precision).
+    rms_ring_sum: f64,
     /// Logical window size (may be smaller than rms_ring.len()).
     rms_window_size: usize,
     /// Write position in the ring buffer (0..rms_window_size-1).
@@ -120,6 +159,7 @@ impl ChannelMeter {
             rms_sum: 0.0,
             rms_count: 0,
             rms_ring: vec![0.0; MAX_WINDOW_SAMPLES],
+            rms_ring_sum: 0.0,
             rms_window_size: size,
             rms_ring_pos: 0,
             rms_ring_filled: 0,
@@ -134,20 +174,28 @@ impl ChannelMeter {
         self.rms_sum = 0.0;
         self.rms_count = 0;
         self.rms_ring[..self.rms_window_size].fill(0.0);
+        self.rms_ring_sum = 0.0;
         self.rms_ring_pos = 0;
         self.rms_ring_filled = 0;
         self.rms_momentary_max = 0.0;
     }
 
+    /// Set the sample rate for true peak oversampling mode.
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.true_peak.set_sample_rate(sample_rate);
+    }
+
     /// Change the momentary RMS window size. No allocation — uses pre-allocated buffer.
-    /// Resets the ring buffer state.
+    /// Resets the ring buffer state and momentary max.
     pub fn set_window_size(&mut self, window_samples: usize) {
         let size = window_samples.clamp(1, MAX_WINDOW_SAMPLES);
         if self.rms_window_size != size {
             self.rms_window_size = size;
             self.rms_ring[..size].fill(0.0);
+            self.rms_ring_sum = 0.0;
             self.rms_ring_pos = 0;
             self.rms_ring_filled = 0;
+            self.rms_momentary_max = 0.0;
         }
     }
 
@@ -169,9 +217,14 @@ impl ChannelMeter {
         self.rms_sum += sq;
         self.rms_count += 1;
 
-        // Momentary RMS ring buffer
+        // Momentary RMS ring buffer with O(1) running sum
         let sq_f32 = sample * sample;
+        // Subtract the sample being evicted (if ring is full)
+        if self.rms_ring_filled == self.rms_window_size {
+            self.rms_ring_sum -= self.rms_ring[self.rms_ring_pos] as f64;
+        }
         self.rms_ring[self.rms_ring_pos] = sq_f32;
+        self.rms_ring_sum += sq_f32 as f64;
         self.rms_ring_pos += 1;
         if self.rms_ring_pos >= self.rms_window_size {
             self.rms_ring_pos = 0;
@@ -181,8 +234,9 @@ impl ChannelMeter {
         }
     }
 
-    /// Update momentary max after processing a buffer.
-    /// Call this once per buffer, not per sample, for efficiency.
+    /// Update momentary max. Called once per buffer to match dpMeter5's
+    /// update granularity (per-sample tracking finds higher peaks due to
+    /// finer temporal resolution, giving values ~0.5 dB above dpMeter5).
     pub fn update_momentary_max(&mut self) {
         let mom = self.rms_momentary_linear();
         if mom > self.rms_momentary_max {
@@ -214,12 +268,7 @@ impl ChannelMeter {
         if self.rms_ring_filled == 0 {
             return 0.0;
         }
-        let sum: f32 = if self.rms_ring_filled == self.rms_window_size {
-            self.rms_ring[..self.rms_window_size].iter().sum()
-        } else {
-            self.rms_ring[..self.rms_ring_filled].iter().sum()
-        };
-        (sum / self.rms_ring_filled as f32).sqrt()
+        (self.rms_ring_sum.max(0.0) / self.rms_ring_filled as f64).sqrt() as f32
     }
 
     /// Highest momentary RMS (linear) since last reset.
@@ -232,14 +281,14 @@ impl ChannelMeter {
         (self.rms_sum, self.rms_count)
     }
 
-    /// Sum of squared samples in the current momentary window and the filled count.
-    pub fn rms_momentary_raw(&self) -> (f32, usize) {
-        let sum: f32 = if self.rms_ring_filled == self.rms_window_size {
-            self.rms_ring[..self.rms_window_size].iter().sum()
+    /// Mean-square of the current momentary window and the filled count.
+    pub fn rms_momentary_raw(&self) -> (f64, usize) {
+        let ms = if self.rms_ring_filled > 0 {
+            self.rms_ring_sum.max(0.0) / self.rms_ring_filled as f64
         } else {
-            self.rms_ring[..self.rms_ring_filled].iter().sum()
+            0.0
         };
-        (sum, self.rms_ring_filled)
+        (ms, self.rms_ring_filled)
     }
 
     /// Crest factor in dB: peak_max_dB - rms_integrated_dB.
@@ -277,9 +326,15 @@ impl StereoMeter {
         self.momentary_max_stereo = 0.0;
     }
 
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.left.set_sample_rate(sample_rate);
+        self.right.set_sample_rate(sample_rate);
+    }
+
     pub fn set_window_size(&mut self, window_samples: usize) {
         self.left.set_window_size(window_samples);
         self.right.set_window_size(window_samples);
+        self.momentary_max_stereo = 0.0;
     }
 
     /// Process L/R samples from a nih-plug buffer.
@@ -290,9 +345,9 @@ impl StereoMeter {
         for &s in right_samples {
             self.right.process_sample(s);
         }
+        // Update momentary max once per buffer (matches dpMeter5's granularity)
         self.left.update_momentary_max();
         self.right.update_momentary_max();
-        // Track stereo momentary max (summed power)
         let mom = self.rms_momentary_stereo();
         if mom > self.momentary_max_stereo {
             self.momentary_max_stereo = mom;
@@ -324,14 +379,12 @@ impl StereoMeter {
 
     /// Momentary RMS across both channels (sum of per-channel mean-square, then sqrt).
     pub fn rms_momentary_stereo(&self) -> f32 {
-        let (sum_l, filled_l) = self.left.rms_momentary_raw();
-        let (sum_r, filled_r) = self.right.rms_momentary_raw();
+        let (ms_l, filled_l) = self.left.rms_momentary_raw();
+        let (ms_r, filled_r) = self.right.rms_momentary_raw();
         if filled_l == 0 && filled_r == 0 {
             return 0.0;
         }
-        let ms_l = if filled_l > 0 { sum_l / filled_l as f32 } else { 0.0 };
-        let ms_r = if filled_r > 0 { sum_r / filled_r as f32 } else { 0.0 };
-        (ms_l + ms_r).sqrt()
+        (ms_l + ms_r).sqrt() as f32
     }
 
     /// Highest momentary RMS (stereo sum) since last reset.
@@ -340,7 +393,15 @@ impl StereoMeter {
         self.momentary_max_stereo
     }
 
-    /// Stereo crest factor: peak_max_dB - rms_integrated_dB (both summed).
+    /// Stereo crest factor: peak_max_dB - rms_integrated_dB.
+    /// Uses the stereo peak (max of L/R) and stereo RMS (sum-of-power)
+    /// to match dpMeter5's SUM mode crest factor display.
+    ///
+    /// NOTE: This mixes scales — single-channel peak vs summed-power RMS — which
+    /// gives a value ~3 dB lower than per-channel crest factor for balanced stereo.
+    /// The mathematically correct approach would be max(crest_L, crest_R).
+    /// We use dpMeter5's convention for now to match the widely-used reference.
+    /// TODO: Add a "correct" mode toggle in the future.
     pub fn crest_factor_db_stereo(&self) -> f32 {
         let peak = self.peak_max_stereo();
         let rms = self.rms_integrated_stereo();
@@ -717,5 +778,37 @@ mod tests {
         assert!(det.true_peak_max() > 0.0);
         det.reset();
         assert_eq!(det.true_peak_max(), 0.0);
+    }
+
+    #[test]
+    fn test_running_sum_accuracy() {
+        // Verify the running sum stays accurate over many ring cycles
+        let window = 100;
+        let mut m = ChannelMeter::new(window);
+        // Fill window with 0.5, then cycle through many values
+        for _ in 0..window {
+            m.process_sample(0.5);
+        }
+        assert!(approx_eq(m.rms_momentary_linear(), 0.5));
+
+        // Cycle through 10000 more samples of 0.5 — running sum should stay stable
+        for _ in 0..10000 {
+            m.process_sample(0.5);
+        }
+        assert!(
+            approx_eq(m.rms_momentary_linear(), 0.5),
+            "running sum drifted: expected 0.5, got {}",
+            m.rms_momentary_linear()
+        );
+
+        // Switch to 0.3 and let it fill the window
+        for _ in 0..window {
+            m.process_sample(0.3);
+        }
+        assert!(
+            approx_eq(m.rms_momentary_linear(), 0.3),
+            "after level change: expected 0.3, got {}",
+            m.rms_momentary_linear()
+        );
     }
 }

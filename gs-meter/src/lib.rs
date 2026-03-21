@@ -184,9 +184,11 @@ impl Plugin for GsMeter {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
+        self.stereo_meter.set_sample_rate(self.sample_rate);
         let window_ms = self.params.rms_window_ms.value();
         let window_samples = (self.sample_rate * window_ms / 1000.0) as usize;
-        self.stereo_meter = StereoMeter::new(window_samples);
+        self.stereo_meter.set_window_size(window_samples);
+        self.stereo_meter.reset();
         self.last_window_ms = window_ms;
         true
     }
