@@ -288,8 +288,9 @@ impl View for FilterResponseView {
             canvas.stroke_path(&path, &grid_paint);
         }
 
-        // --- Shared point count for spectrum and response curves ---
-        let num_points = width.max(1.0) as usize;
+        // Point count for spectrum and response curves.
+        // Cap at 256 — more than enough for visual quality, reduces femtovg tessellation cost.
+        let num_points = (width.max(1.0) as usize).min(256);
 
         // --- Input spectrum shadow ---
         // Copy data out of the lock immediately to avoid holding it during path construction

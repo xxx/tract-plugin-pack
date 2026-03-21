@@ -206,29 +206,18 @@ impl View for WavetableView {
             let alpha = 0.3 + (1.0 - depth) * 0.4;
 
             let mut path = vg::Path::new();
+            let draw_w = (width * 0.7) as usize;
+            let pts = draw_w.min(frame_size).max(1);
 
-            for (i, &sample) in frame.iter().enumerate() {
-                // Normalize sample to 0-1 range
-                let normalized = (sample - global_min) / range;
+            for pi in 0..pts {
+                let t = pi as f32 / pts as f32;
+                let si = ((t * frame_size as f32) as usize).min(frame_size - 1);
+                let normalized = (frame[si] - global_min) / range;
+                let x = bounds.x + padding + t * (width * 0.7) + perspective_x;
+                let y = bounds.y + bounds.h - padding * 2.0
+                    - (normalized * height * 0.4) + perspective_y;
 
-                // Overhead view: waveform height represents the "height" of the wave
-                // X position: waveform position + perspective offset to the right
-                // Y position: waveform amplitude + perspective offset upward
-                let x = bounds.x
-                    + padding
-                    + (i as f32 / frame_size as f32) * (width * 0.7)
-                    + perspective_x;
-
-                let y = bounds.y
-                    + bounds.h - padding * 2.0  // Start from bottom
-                    - (normalized * height * 0.4)  // Wave amplitude
-                    + perspective_y; // Move up for depth
-
-                if i == 0 {
-                    path.move_to(x, y);
-                } else {
-                    path.line_to(x, y);
-                }
+                if pi == 0 { path.move_to(x, y); } else { path.line_to(x, y); }
             }
 
             let color = vg::Color::rgba(
@@ -250,22 +239,18 @@ impl View for WavetableView {
 
             let mut path = vg::Path::new();
 
-            for (i, &sample) in frame.iter().enumerate() {
-                let normalized = (sample - global_min) / range;
+            let draw_w = (width * 0.7) as usize;
+            let pts = draw_w.min(frame_size).max(1);
 
-                let x = bounds.x
-                    + padding
-                    + (i as f32 / frame_size as f32) * (width * 0.7)
-                    + perspective_x;
+            for pi in 0..pts {
+                let t = pi as f32 / pts as f32;
+                let si = ((t * frame_size as f32) as usize).min(frame_size - 1);
+                let normalized = (frame[si] - global_min) / range;
+                let x = bounds.x + padding + t * (width * 0.7) + perspective_x;
+                let y = bounds.y + bounds.h - padding * 2.0
+                    - (normalized * height * 0.4) + perspective_y;
 
-                let y = bounds.y + bounds.h - padding * 2.0 - (normalized * height * 0.4)
-                    + perspective_y;
-
-                if i == 0 {
-                    path.move_to(x, y);
-                } else {
-                    path.line_to(x, y);
-                }
+                if pi == 0 { path.move_to(x, y); } else { path.line_to(x, y); }
             }
 
             let color = vg::Color::rgba(255, 200, 100, 255); // Bright orange for active
