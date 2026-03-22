@@ -17,7 +17,7 @@ A wavetable-based audio filter that uses wavetable frames as FIR filter kernels.
 
 ### GS Meter
 
-A lightweight loudness meter with integrated gain utility, purpose-built for clip-to-zero workflows. Designed to run 50+ instances per project without significant CPU or memory impact.
+A lightweight loudness meter with integrated gain utility, purpose-built for [clip-to-zero](#what-is-clip-to-zero) workflows. Designed to run 50+ instances per project without significant CPU or memory impact.
 
 - Peak max, true peak (ITU-R BS.1770-4), RMS integrated/momentary, crest factor
 - One-click gain-from-reading buttons for fast level matching
@@ -73,6 +73,11 @@ cargo clippy --workspace     # Lint check
 
 - [Wavetable Filter Manual](docs/wavetable-filter/wavetable-filter-manual.md)
 - [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
+
+## What is Clip-to-Zero?
+
+- [Clip-to-Zero video series](https://www.youtube.com/playlist?list=PLxik-POfUXY6i_fP0f4qXNwdMxh3PXxJx) (YouTube)
+- [Clip-to-Zero process document](https://docs.google.com/document/d/1Ogxa5-X_QdbtfLLQ_2mDEgPgHxNRLebQ7pps3rXewPM/edit?tab=t.0#heading=h.lwtkibvu0gr) (Google Docs)
 
 ## License
 
