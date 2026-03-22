@@ -37,8 +37,12 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin
             target
           key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-nih-plug
+        run: cargo install --git https://github.com/davemollen/nih-plug.git --branch finish-vst3-pr cargo-nih-plug
 
       - name: Build wavetable-filter
         run: cargo nih-plug bundle wavetable-filter --release
