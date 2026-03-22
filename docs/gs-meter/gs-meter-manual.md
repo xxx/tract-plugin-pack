@@ -41,7 +41,7 @@ This is the gain you adjust to match your reference level. The "→ Gain" button
 
 ### Reference
 
-Your target level. Range: -60 to 0 dB. Default: -14 dB.
+Your target level. Range: -60 to 0 dB. Default: 0 dB.
 
 When you click a "→ Gain" button, the gain is set to: `reference - meter_reading`. For example, if your reference is -14 dB and the integrated RMS reads -18 dB, clicking "→ Gain" sets gain to +4 dB.
 
