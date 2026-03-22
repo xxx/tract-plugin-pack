@@ -1,0 +1,55 @@
+name: Build Plugins
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+          - os: macos-latest
+            name: macos
+          - os: windows-latest
+            name: windows
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1-dev libxcb-icccm4-dev libxcb-dri2-0-dev libx11-xcb-dev libx11-dev libxcursor-dev libasound2-dev libgl-dev libdrm-dev libjack-jackd2-dev libwayland-dev libegl-dev
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build wavetable-filter
+        run: cargo nih-plug bundle wavetable-filter --release
+
+      - name: Build gs-meter
+        run: cargo nih-plug bundle gs-meter --release
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-${{ matrix.name }}
+          path: |
+            target/bundled/*.clap
+            target/bundled/*.vst3
