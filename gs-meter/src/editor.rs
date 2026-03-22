@@ -1,118 +1,269 @@
+//! Softbuffer-based editor for gs-meter. CPU rendering via tiny-skia, no GPU required.
+
+use baseview::{WindowHandle, WindowOpenOptions, WindowScalePolicy};
+use crossbeam::atomic::AtomicCell;
+use nih_plug::params::persist::PersistentField;
 use nih_plug::prelude::*;
-use nih_plug_vizia::vizia::prelude::*;
-use nih_plug_vizia::widgets::*;
-use nih_plug_vizia::{create_vizia_editor, ViziaState, ViziaTheming};
-use std::sync::atomic::Ordering;
+use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+use serde::{Deserialize, Serialize};
+use std::num::{NonZeroIsize, NonZeroU32};
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use crate::widgets;
 
 use crate::{GsMeterParams, MeterReadings};
 
 const WINDOW_WIDTH: u32 = 420;
 const WINDOW_HEIGHT: u32 = 540;
 
-const SCALE_STEPS: &[f64] = &[1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0];
+// ── Editor State (persisted by the host) ────────────────────────────────
 
-fn nearest_scale_idx(scale: f64) -> usize {
-    SCALE_STEPS
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| {
-            (*a - scale).abs().partial_cmp(&(*b - scale).abs()).unwrap()
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GsMeterEditorState {
+    #[serde(with = "nih_plug::params::persist::serialize_atomic_cell")]
+    size: AtomicCell<(u32, u32)>,
+    #[serde(skip)]
+    open: AtomicBool,
+}
+
+impl GsMeterEditorState {
+    pub fn from_size(width: u32, height: u32) -> Arc<Self> {
+        Arc::new(Self {
+            size: AtomicCell::new((width, height)),
+            open: AtomicBool::new(false),
         })
-        .map(|(i, _)| i)
-        .unwrap_or(0)
+    }
+
+    pub fn default_state() -> Arc<Self> {
+        Self::from_size(WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        self.size.load()
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open.load(Ordering::Acquire)
+    }
 }
 
-fn set_scale_param(cx: &mut EventContext, param: &nih_plug::prelude::IntParam, scale: f64) {
-    use nih_plug::prelude::Param;
-    let pct = (scale * 100.0).round() as i32;
-    let normalized = param.preview_normalized(pct);
-    cx.emit(RawParamEvent::BeginSetParameter(param.as_ptr()));
-    cx.emit(RawParamEvent::SetParameterNormalized(
-        param.as_ptr(),
-        normalized,
-    ));
-    cx.emit(RawParamEvent::EndSetParameter(param.as_ptr()));
+impl<'a> PersistentField<'a, GsMeterEditorState> for Arc<GsMeterEditorState> {
+    fn set(&self, new_value: GsMeterEditorState) {
+        self.size.store(new_value.size.load());
+    }
+
+    fn map<F, R>(&self, f: F) -> R
+    where
+        F: Fn(&GsMeterEditorState) -> R,
+    {
+        f(self)
+    }
 }
 
-pub(crate) fn default_state() -> Arc<ViziaState> {
-    ViziaState::new(|| (WINDOW_WIDTH, WINDOW_HEIGHT))
-}
+// ── Window Handler ──────────────────────────────────────────────────────
 
-#[derive(Lens, Clone)]
-struct Data {
+struct GsMeterWindow {
+    gui_context: Arc<dyn GuiContext>,
+    _sb_context: softbuffer::Context<SoftbufferHandleAdapter>,
+    sb_surface: softbuffer::Surface<SoftbufferHandleAdapter, SoftbufferHandleAdapter>,
+    pixmap: tiny_skia::Pixmap,
+    physical_width: u32,
+    physical_height: u32,
+    scale_factor: f32,
+
     params: Arc<GsMeterParams>,
     readings: Arc<MeterReadings>,
-    should_reset: Arc<std::sync::atomic::AtomicBool>,
-    ui_scale_pct: String,
+    should_reset: Arc<AtomicBool>,
+    text_renderer: widgets::TextRenderer,
 }
 
-enum DataEvent {
-    Reset,
-    SetGainFromReading(ReadingKind),
-    SetUiScalePct(String),
-    RestoreScale,
-}
+impl GsMeterWindow {
+    fn new(
+        window: &mut baseview::Window<'_>,
+        gui_context: Arc<dyn GuiContext>,
+        params: Arc<GsMeterParams>,
+        readings: Arc<MeterReadings>,
+        should_reset: Arc<AtomicBool>,
+        scale_factor: f32,
+    ) -> Self {
+        let (uw, uh) = params.editor_state.size();
+        let pw = (uw as f32 * scale_factor).round() as u32;
+        let ph = (uh as f32 * scale_factor).round() as u32;
 
-#[derive(Clone, Copy)]
-enum ReadingKind {
-    PeakMax,
-    TruePeakMax,
-    RmsIntegrated,
-    RmsMomentary,
-    RmsMomentaryMax,
-}
+        let target = baseview_window_to_surface_target(window);
+        let sb_context =
+            softbuffer::Context::new(target.clone()).expect("could not get softbuffer context");
+        let mut sb_surface =
+            softbuffer::Surface::new(&sb_context, target).expect("could not create softbuffer surface");
+        sb_surface
+            .resize(NonZeroU32::new(pw).unwrap(), NonZeroU32::new(ph).unwrap())
+            .unwrap();
 
-impl Model for Data {
-    fn event(&mut self, cx: &mut EventContext, event: &mut Event) {
-        event.map(|data_event, _| match data_event {
-            DataEvent::Reset => {
-                self.should_reset.store(true, Ordering::Relaxed);
-            }
-            DataEvent::SetGainFromReading(kind) => {
-                let meter_db = match kind {
-                    ReadingKind::PeakMax => {
-                        MeterReadings::load_db(&self.readings.peak_max_db)
-                    }
-                    ReadingKind::TruePeakMax => {
-                        MeterReadings::load_db(&self.readings.true_peak_max_db)
-                    }
-                    ReadingKind::RmsIntegrated => {
-                        MeterReadings::load_db(&self.readings.rms_integrated_db)
-                    }
-                    ReadingKind::RmsMomentary => {
-                        MeterReadings::load_db(&self.readings.rms_momentary_db)
-                    }
-                    ReadingKind::RmsMomentaryMax => {
-                        MeterReadings::load_db(&self.readings.rms_momentary_max_db)
-                    }
-                };
-                if meter_db <= -100.0 {
-                    return;
-                }
-                let reference = self.params.reference_level.value();
-                let target_gain_db = reference - meter_db;
-                let target_gain_linear = nih_plug::util::db_to_gain(target_gain_db);
-                let normalized = self.params.gain.preview_normalized(target_gain_linear);
-                cx.emit(RawParamEvent::BeginSetParameter(self.params.gain.as_ptr()));
-                cx.emit(RawParamEvent::SetParameterNormalized(
-                    self.params.gain.as_ptr(),
-                    normalized,
-                ));
-                cx.emit(RawParamEvent::EndSetParameter(self.params.gain.as_ptr()));
-            }
-            DataEvent::SetUiScalePct(pct) => {
-                self.ui_scale_pct = pct.clone();
-            }
-            DataEvent::RestoreScale => {
-                let saved_pct = self.params.ui_scale.value() as f64;
-                let scale = saved_pct / 100.0;
-                if (scale - 1.0).abs() > 0.01 {
-                    cx.set_user_scale_factor(scale);
-                    self.ui_scale_pct = format!("{}%", saved_pct.round() as u32);
-                }
-            }
-        });
+        let pixmap = tiny_skia::Pixmap::new(pw, ph).expect("could not create pixmap");
+        eprintln!("[INIT] logical={}x{}, scale={}, physical={}x{}", uw, uh, scale_factor, pw, ph);
+
+        // Load embedded font
+        let font_data = include_bytes!("fonts/DejaVuSans.ttf");
+        let text_renderer = widgets::TextRenderer::new(font_data);
+
+        Self {
+            gui_context,
+            _sb_context: sb_context,
+            sb_surface,
+            pixmap,
+            physical_width: pw,
+            physical_height: ph,
+            scale_factor,
+            params,
+            readings,
+            should_reset,
+            text_renderer,
+        }
+    }
+
+    fn draw(&mut self) {
+        let s = self.scale_factor;
+
+        // Clear background
+        self.pixmap.fill(widgets::color_bg());
+
+        let pad = 20.0 * s;
+        let row_h = 35.0 * s;
+        let label_w = 100.0 * s;
+        let font_size = 14.0 * s;
+        let title_size = 24.0 * s;
+        let slider_w = 200.0 * s;
+        let slider_h = 26.0 * s;
+        let value_w = 120.0 * s;
+        let btn_w = 70.0 * s;
+        let _btn_h = 24.0 * s;
+
+        let mut y = 15.0 * s;
+        let tr = &mut self.text_renderer;
+
+        // Title
+        tr.draw_text(&mut self.pixmap, pad, y + title_size, "GS Meter", title_size, widgets::color_text());
+        y += row_h;
+
+        // Read meter values
+        let peak_db = MeterReadings::load_db(&self.readings.peak_max_db);
+        let true_peak_db = MeterReadings::load_db(&self.readings.true_peak_max_db);
+        let rms_int_db = MeterReadings::load_db(&self.readings.rms_integrated_db);
+        let rms_mom_db = MeterReadings::load_db(&self.readings.rms_momentary_db);
+        let rms_max_db = MeterReadings::load_db(&self.readings.rms_momentary_max_db);
+        let crest_db = MeterReadings::load_db(&self.readings.crest_factor_db);
+
+        // Channel mode selector
+        let mode_idx = match self.params.channel_mode.value() {
+            crate::ChannelMode::Stereo => 0,
+            crate::ChannelMode::Left => 1,
+            crate::ChannelMode::Right => 2,
+        };
+        tr.draw_text(&mut self.pixmap, pad, y + font_size, "Channel", font_size, widgets::color_muted());
+        widgets::draw_stepped_selector(
+            &mut self.pixmap, tr, pad + label_w, y + 4.0 * s, slider_w, slider_h,
+            &["Stereo", "Left", "Right"], mode_idx,
+        );
+        y += row_h;
+
+        // Gain slider
+        let gain_db = nih_plug::util::gain_to_db(self.params.gain.value());
+        let gain_text = format!("{:.1} dB", gain_db);
+        tr.draw_text(&mut self.pixmap, pad, y + font_size, "Gain", font_size, widgets::color_muted());
+        widgets::draw_slider(
+            &mut self.pixmap, tr, pad + label_w, y + 4.0 * s, slider_w, slider_h,
+            "", &gain_text, self.params.gain.unmodulated_normalized_value(),
+        );
+        y += row_h;
+
+        // Reference slider
+        let ref_text = format!("{:.1} dB", self.params.reference_level.value());
+        tr.draw_text(&mut self.pixmap, pad, y + font_size, "Reference", font_size, widgets::color_muted());
+        widgets::draw_slider(
+            &mut self.pixmap, tr, pad + label_w, y + 4.0 * s, slider_w, slider_h,
+            "", &ref_text, self.params.reference_level.unmodulated_normalized_value(),
+        );
+        y += row_h;
+
+        // RMS Window slider
+        let window_text = format!("{:.0} ms", self.params.rms_window_ms.value());
+        tr.draw_text(&mut self.pixmap, pad, y + font_size, "RMS Window", font_size, widgets::color_muted());
+        widgets::draw_slider(
+            &mut self.pixmap, tr, pad + label_w, y + 4.0 * s, slider_w, slider_h,
+            "", &window_text, self.params.rms_window_ms.unmodulated_normalized_value(),
+        );
+        y += row_h;
+
+        // Readings header
+        tr.draw_text(&mut self.pixmap, pad, y + font_size + 2.0 * s, "Readings", font_size * 1.1, widgets::color_text());
+        y += 30.0 * s;
+
+        // Meter rows with → Gain buttons
+        let meter_rows: &[(&str, f32)] = &[
+            ("Peak Max", peak_db),
+            ("True Peak", true_peak_db),
+            ("RMS (Int)", rms_int_db),
+            ("RMS (Mom)", rms_mom_db),
+            ("RMS Max", rms_max_db),
+        ];
+
+        let gap = 10.0 * s;
+        for &(label, db) in meter_rows {
+            let val = format_db(db);
+            tr.draw_text(&mut self.pixmap, pad, y + font_size, label, font_size, widgets::color_muted());
+            tr.draw_text(&mut self.pixmap, pad + label_w + gap, y + font_size, &val, font_size, widgets::color_text());
+            widgets::draw_button(
+                &mut self.pixmap, tr,
+                pad + label_w + gap + value_w + gap, y + 2.0 * s,
+                btn_w, _btn_h, "\u{2192} Gain", false, false,
+            );
+            y += row_h;
+        }
+
+        // Crest (no button)
+        let crest_val = if crest_db <= -100.0 {
+            "-- dB".to_string()
+        } else {
+            format!("{:.1} dB", crest_db)
+        };
+        tr.draw_text(&mut self.pixmap, pad, y + font_size, "Crest", font_size, widgets::color_muted());
+        tr.draw_text(&mut self.pixmap, pad + label_w + gap, y + font_size, &crest_val, font_size, widgets::color_text());
+        y += row_h;
+
+        // Reset button
+        widgets::draw_button(&mut self.pixmap, tr, pad, y + 2.0 * s, 100.0 * s, 28.0 * s,
+            "Reset", false, false);
+    }
+
+    fn resize_buffers(&mut self) {
+        let pw = self.physical_width.max(1);
+        let ph = self.physical_height.max(1);
+        if let Some(new_pixmap) = tiny_skia::Pixmap::new(pw, ph) {
+            self.pixmap = new_pixmap;
+        }
+        let _ = self.sb_surface.resize(
+            NonZeroU32::new(pw).unwrap(),
+            NonZeroU32::new(ph).unwrap(),
+        );
+        self.params.editor_state.size.store((
+            (pw as f32 / self.scale_factor).round() as u32,
+            (ph as f32 / self.scale_factor).round() as u32,
+        ));
+    }
+
+    fn present(&mut self) {
+        let mut buffer = self.sb_surface.buffer_mut().unwrap();
+        let data = self.pixmap.data();
+        // Convert tiny-skia premultiplied RGBA to softbuffer 0x00RRGGBB
+        for (dst, src) in buffer.iter_mut().zip(data.chunks_exact(4)) {
+            let r = src[0] as u32;
+            let g = src[1] as u32;
+            let b = src[2] as u32;
+            *dst = 0xFF000000 | (r << 16) | (g << 8) | b;
+        }
+        buffer.present().unwrap();
     }
 }
 
@@ -124,239 +275,283 @@ fn format_db(db: f32) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+impl baseview::WindowHandler for GsMeterWindow {
+    fn on_frame(&mut self, _window: &mut baseview::Window) {
+        self.draw();
+        self.present();
+    }
+
+    fn on_event(
+        &mut self,
+        window: &mut baseview::Window,
+        event: baseview::Event,
+    ) -> baseview::EventStatus {
+        let _param_setter = ParamSetter::new(self.gui_context.as_ref());
+
+        match &event {
+            baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
+                self.physical_width = info.physical_size().width;
+                self.physical_height = info.physical_size().height;
+
+                self.resize_buffers();
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed { button: baseview::MouseButton::Left, .. }) => {
+                // TODO: Hit testing for buttons/sliders
+            }
+            baseview::Event::Keyboard(kb_event) => {
+                use keyboard_types::{Key, KeyState, Modifiers};
+                if kb_event.state == KeyState::Down && kb_event.modifiers.contains(Modifiers::CONTROL) {
+                    let old_scale = self.scale_factor;
+                    match &kb_event.key {
+                        Key::Character(c) if c == "=" || c == "+" => {
+                            self.scale_factor = (self.scale_factor + 0.25).min(3.0);
+                        }
+                        Key::Character(c) if c == "-" => {
+                            self.scale_factor = (self.scale_factor - 0.25).max(0.75);
+                        }
+                        _ => {}
+                    }
+                    if (self.scale_factor - old_scale).abs() > 0.01 {
+                        let new_w = (WINDOW_WIDTH as f32 * self.scale_factor).round() as u32;
+                        let new_h = (WINDOW_HEIGHT as f32 * self.scale_factor).round() as u32;
+                        // Update the editor state size so Editor::size() returns the new value
+                        self.params.editor_state.size.store((new_w, new_h));
+                        // Resize our child window
+                        window.resize(baseview::Size::new(new_w as f64, new_h as f64));
+                        // Ask the host/standalone to resize the parent container
+                        self.gui_context.request_resize();
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        baseview::EventStatus::Captured
+    }
+}
+
+// ── Editor trait implementation ──────────────────────────────────────────
+
+pub(crate) struct GsMeterEditor {
+    params: Arc<GsMeterParams>,
+    readings: Arc<MeterReadings>,
+    should_reset: Arc<AtomicBool>,
+    scaling_factor: AtomicCell<Option<f32>>,
+}
+
 pub(crate) fn create(
     params: Arc<GsMeterParams>,
     readings: Arc<MeterReadings>,
-    should_reset: Arc<std::sync::atomic::AtomicBool>,
-    editor_state: Arc<ViziaState>,
+    should_reset: Arc<AtomicBool>,
 ) -> Option<Box<dyn Editor>> {
-    create_vizia_editor(editor_state, ViziaTheming::Custom, move |cx, _| {
-        nih_plug_widgets::load_style(cx);
-
-        // Read saved scale from the persisted IntParam
-        let saved_scale_pct = params.ui_scale.value() as f64;
-        let initial_scale_pct = format!("{}%", saved_scale_pct.round() as u32);
-
-        Data {
-            params: params.clone(),
-            readings: readings.clone(),
-            should_reset: should_reset.clone(),
-            ui_scale_pct: initial_scale_pct,
-        }
-        .build(cx);
-
-        // Restore saved scale factor (must happen via event since
-        // set_user_scale_factor requires EventContext, not build Context)
-        cx.emit(DataEvent::RestoreScale);
-
-        VStack::new(cx, |cx| {
-            // Header row: title + scale controls
-            HStack::new(cx, |cx| {
-                Label::new(cx, "GS Meter")
-                    .font_size(24.0)
-                    .width(Stretch(1.0));
-
-                Button::new(
-                    cx,
-                    |cx| {
-                        let current = cx.user_scale_factor();
-                        let idx = nearest_scale_idx(current);
-                        if idx > 0 {
-                            let new_scale = SCALE_STEPS[idx - 1];
-                            cx.set_user_scale_factor(new_scale);
-                            let p = Data::params.get(cx);
-                            set_scale_param(cx, &p.ui_scale, new_scale);
-                            cx.emit(DataEvent::SetUiScalePct(
-                                format!("{}%", (new_scale * 100.0).round() as u32),
-                            ));
-                        }
-                    },
-                    |cx| Label::new(cx, "-"),
-                )
-                .width(Pixels(24.0))
-                .height(Pixels(24.0))
-                .class("scale-btn");
-
-                Label::new(cx, Data::ui_scale_pct)
-                    .width(Pixels(48.0))
-                    .height(Pixels(24.0))
-                    .class("scale-label");
-
-                Button::new(
-                    cx,
-                    |cx| {
-                        let current = cx.user_scale_factor();
-                        let idx = nearest_scale_idx(current);
-                        if idx < SCALE_STEPS.len() - 1 {
-                            let new_scale = SCALE_STEPS[idx + 1];
-                            cx.set_user_scale_factor(new_scale);
-                            let p = Data::params.get(cx);
-                            set_scale_param(cx, &p.ui_scale, new_scale);
-                            cx.emit(DataEvent::SetUiScalePct(
-                                format!("{}%", (new_scale * 100.0).round() as u32),
-                            ));
-                        }
-                    },
-                    |cx| Label::new(cx, "+"),
-                )
-                .width(Pixels(24.0))
-                .height(Pixels(24.0))
-                .class("scale-btn");
-            })
-            .height(Pixels(35.0))
-            .col_between(Pixels(4.0))
-            .child_top(Stretch(1.0))
-            .child_bottom(Stretch(1.0));
-
-            // Channel mode
-            HStack::new(cx, |cx| {
-                Label::new(cx, "Channel")
-                    .width(Pixels(100.0))
-                    .height(Pixels(28.0));
-                ParamSlider::new(cx, Data::params, |p| &p.channel_mode)
-                    .set_style(ParamSliderStyle::CurrentStepLabeled { even: true })
-                    .width(Pixels(200.0));
-            })
-            .height(Pixels(35.0))
-            .col_between(Pixels(10.0));
-
-            // Gain control
-            HStack::new(cx, |cx| {
-                Label::new(cx, "Gain")
-                    .width(Pixels(100.0))
-                    .height(Pixels(28.0));
-                ParamSlider::new(cx, Data::params, |p| &p.gain)
-                    .width(Pixels(200.0));
-            })
-            .height(Pixels(35.0))
-            .col_between(Pixels(10.0));
-
-            // Reference level
-            HStack::new(cx, |cx| {
-                Label::new(cx, "Reference")
-                    .width(Pixels(100.0))
-                    .height(Pixels(28.0));
-                ParamSlider::new(cx, Data::params, |p| &p.reference_level)
-                    .width(Pixels(200.0));
-            })
-            .height(Pixels(35.0))
-            .col_between(Pixels(10.0));
-
-            // RMS Window
-            HStack::new(cx, |cx| {
-                Label::new(cx, "RMS Window")
-                    .width(Pixels(100.0))
-                    .height(Pixels(28.0));
-                ParamSlider::new(cx, Data::params, |p| &p.rms_window_ms)
-                    .width(Pixels(200.0));
-            })
-            .height(Pixels(35.0))
-            .col_between(Pixels(10.0));
-
-            // Meter readings header
-            Label::new(cx, "Readings")
-                .font_size(16.0)
-                .height(Pixels(30.0));
-
-            // Peak Max
-            meter_row(
-                cx,
-                "Peak Max",
-                Data::readings.map(|r| format_db(MeterReadings::load_db(&r.peak_max_db))),
-                ReadingKind::PeakMax,
-            );
-
-            // True Peak Max
-            meter_row(
-                cx,
-                "True Peak",
-                Data::readings.map(|r| format_db(MeterReadings::load_db(&r.true_peak_max_db))),
-                ReadingKind::TruePeakMax,
-            );
-
-            // RMS Integrated
-            meter_row(
-                cx,
-                "RMS (Int)",
-                Data::readings.map(|r| format_db(MeterReadings::load_db(&r.rms_integrated_db))),
-                ReadingKind::RmsIntegrated,
-            );
-
-            // RMS Momentary
-            meter_row(
-                cx,
-                "RMS (Mom)",
-                Data::readings.map(|r| format_db(MeterReadings::load_db(&r.rms_momentary_db))),
-                ReadingKind::RmsMomentary,
-            );
-
-            // RMS Momentary Max
-            meter_row(
-                cx,
-                "RMS Max",
-                Data::readings.map(|r| format_db(MeterReadings::load_db(&r.rms_momentary_max_db))),
-                ReadingKind::RmsMomentaryMax,
-            );
-
-            // Crest Factor (no gain button)
-            HStack::new(cx, |cx| {
-                Label::new(cx, "Crest")
-                    .width(Pixels(80.0))
-                    .height(Pixels(28.0));
-                Label::new(
-                    cx,
-                    Data::readings.map(|r| {
-                        let db = MeterReadings::load_db(&r.crest_factor_db);
-                        if db <= -100.0 {
-                            "-- dB".to_string()
-                        } else {
-                            format!("{:.1} dB", db)
-                        }
-                    }),
-                )
-                .width(Pixels(120.0))
-                .height(Pixels(28.0));
-            })
-            .height(Pixels(35.0))
-            .col_between(Pixels(10.0));
-
-            // Reset button
-            Button::new(
-                cx,
-                |cx| cx.emit(DataEvent::Reset),
-                |cx| Label::new(cx, "Reset"),
-            )
-            .width(Pixels(100.0))
-            .height(Pixels(30.0));
-        })
-        .row_between(Pixels(4.0))
-        .child_left(Pixels(20.0))
-        .child_right(Pixels(20.0))
-        .child_top(Pixels(15.0))
-        .child_bottom(Pixels(15.0));
-    })
+    Some(Box::new(GsMeterEditor {
+        params,
+        readings,
+        should_reset,
+        #[cfg(target_os = "macos")]
+        scaling_factor: AtomicCell::new(None),
+        #[cfg(not(target_os = "macos"))]
+        scaling_factor: AtomicCell::new(Some(1.5)),
+    }))
 }
 
-fn meter_row<L>(cx: &mut Context, label: &str, value_lens: L, kind: ReadingKind)
-where
-    L: Lens<Target = String>,
-{
-    HStack::new(cx, |cx| {
-        Label::new(cx, label)
-            .width(Pixels(100.0))
-            .height(Pixels(28.0));
-        Label::new(cx, value_lens)
-            .width(Pixels(120.0))
-            .height(Pixels(28.0));
-        Button::new(
-            cx,
-            move |cx| cx.emit(DataEvent::SetGainFromReading(kind)),
-            |cx| Label::new(cx, "→ Gain"),
-        )
-        .width(Pixels(70.0))
-        .height(Pixels(24.0));
-    })
-    .height(Pixels(35.0))
-    .col_between(Pixels(10.0));
+impl Editor for GsMeterEditor {
+    fn spawn(
+        &self,
+        parent: ParentWindowHandle,
+        context: Arc<dyn GuiContext>,
+    ) -> Box<dyn std::any::Any + Send> {
+        let (uw, uh) = self.params.editor_state.size();
+        let scaling_factor = self.scaling_factor.load();
+        let gui_context = Arc::clone(&context);
+        let params = Arc::clone(&self.params);
+        let readings = Arc::clone(&self.readings);
+        let should_reset = Arc::clone(&self.should_reset);
+
+        let window = baseview::Window::open_parented(
+            &ParentWindowHandleAdapter(parent),
+            WindowOpenOptions {
+                title: String::from("GS Meter"),
+                // Open at the scaled size directly (scale factor controls rendering, not DPI)
+                size: {
+                    let sf = scaling_factor.unwrap_or(1.0) as f64;
+                    baseview::Size::new(uw as f64 * sf, uh as f64 * sf)
+                },
+                scale: WindowScalePolicy::ScaleFactor(1.0),
+                gl_config: None,
+            },
+            move |window| {
+                GsMeterWindow::new(
+                    window,
+                    gui_context,
+                    params,
+                    readings,
+                    should_reset,
+                    scaling_factor.unwrap_or(1.0),
+                )
+            },
+        );
+
+        self.params.editor_state.open.store(true, Ordering::Release);
+        Box::new(GsMeterEditorHandle {
+            state: self.params.editor_state.clone(),
+            window,
+        })
+    }
+
+    fn size(&self) -> (u32, u32) {
+        self.params.editor_state.size()
+    }
+
+    fn set_scale_factor(&self, factor: f32) -> bool {
+        if self.params.editor_state.is_open() {
+            return false;
+        }
+        self.scaling_factor.store(Some(factor));
+        true
+    }
+
+    fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
+    fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
+    fn param_values_changed(&self) {}
+}
+
+struct GsMeterEditorHandle {
+    state: Arc<GsMeterEditorState>,
+    window: WindowHandle,
+}
+
+unsafe impl Send for GsMeterEditorHandle {}
+
+impl Drop for GsMeterEditorHandle {
+    fn drop(&mut self) {
+        self.state.open.store(false, Ordering::Release);
+        self.window.close();
+    }
+}
+
+// ── Raw window handle adapters ──────────────────────────────────────────
+
+struct ParentWindowHandleAdapter(nih_plug::editor::ParentWindowHandle);
+
+unsafe impl HasRawWindowHandle for ParentWindowHandleAdapter {
+    fn raw_window_handle(&self) -> RawWindowHandle {
+        match self.0 {
+            ParentWindowHandle::X11Window(window) => {
+                let mut handle = raw_window_handle::XcbWindowHandle::empty();
+                handle.window = window;
+                RawWindowHandle::Xcb(handle)
+            }
+            ParentWindowHandle::AppKitNsView(ns_view) => {
+                let mut handle = raw_window_handle::AppKitWindowHandle::empty();
+                handle.ns_view = ns_view;
+                RawWindowHandle::AppKit(handle)
+            }
+            ParentWindowHandle::Win32Hwnd(hwnd) => {
+                let mut handle = raw_window_handle::Win32WindowHandle::empty();
+                handle.hwnd = hwnd;
+                RawWindowHandle::Win32(handle)
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SoftbufferHandleAdapter {
+    raw_display_handle: raw_window_handle_06::RawDisplayHandle,
+    raw_window_handle: raw_window_handle_06::RawWindowHandle,
+}
+
+impl raw_window_handle_06::HasDisplayHandle for SoftbufferHandleAdapter {
+    fn display_handle(
+        &self,
+    ) -> Result<raw_window_handle_06::DisplayHandle<'_>, raw_window_handle_06::HandleError> {
+        unsafe {
+            Ok(raw_window_handle_06::DisplayHandle::borrow_raw(
+                self.raw_display_handle,
+            ))
+        }
+    }
+}
+
+impl raw_window_handle_06::HasWindowHandle for SoftbufferHandleAdapter {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle_06::WindowHandle<'_>, raw_window_handle_06::HandleError> {
+        unsafe {
+            Ok(raw_window_handle_06::WindowHandle::borrow_raw(
+                self.raw_window_handle,
+            ))
+        }
+    }
+}
+
+fn baseview_window_to_surface_target(
+    window: &baseview::Window<'_>,
+) -> SoftbufferHandleAdapter {
+    use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
+
+    let raw_display = window.raw_display_handle();
+    let raw_window = window.raw_window_handle();
+
+    SoftbufferHandleAdapter {
+        raw_display_handle: match raw_display {
+            raw_window_handle::RawDisplayHandle::AppKit(_) => {
+                raw_window_handle_06::RawDisplayHandle::AppKit(
+                    raw_window_handle_06::AppKitDisplayHandle::new(),
+                )
+            }
+            raw_window_handle::RawDisplayHandle::Xlib(handle) => {
+                raw_window_handle_06::RawDisplayHandle::Xlib(
+                    raw_window_handle_06::XlibDisplayHandle::new(
+                        NonNull::new(handle.display),
+                        handle.screen,
+                    ),
+                )
+            }
+            raw_window_handle::RawDisplayHandle::Xcb(handle) => {
+                raw_window_handle_06::RawDisplayHandle::Xcb(
+                    raw_window_handle_06::XcbDisplayHandle::new(
+                        NonNull::new(handle.connection),
+                        handle.screen,
+                    ),
+                )
+            }
+            raw_window_handle::RawDisplayHandle::Windows(_) => {
+                raw_window_handle_06::RawDisplayHandle::Windows(
+                    raw_window_handle_06::WindowsDisplayHandle::new(),
+                )
+            }
+            _ => todo!("Unsupported display handle"),
+        },
+        raw_window_handle: match raw_window {
+            raw_window_handle::RawWindowHandle::AppKit(handle) => {
+                raw_window_handle_06::RawWindowHandle::AppKit(
+                    raw_window_handle_06::AppKitWindowHandle::new(
+                        NonNull::new(handle.ns_view).unwrap(),
+                    ),
+                )
+            }
+            raw_window_handle::RawWindowHandle::Xlib(handle) => {
+                raw_window_handle_06::RawWindowHandle::Xlib(
+                    raw_window_handle_06::XlibWindowHandle::new(handle.window),
+                )
+            }
+            raw_window_handle::RawWindowHandle::Xcb(handle) => {
+                raw_window_handle_06::RawWindowHandle::Xcb(
+                    raw_window_handle_06::XcbWindowHandle::new(
+                        NonZeroU32::new(handle.window).unwrap(),
+                    ),
+                )
+            }
+            raw_window_handle::RawWindowHandle::Win32(handle) => {
+                let mut raw_handle = raw_window_handle_06::Win32WindowHandle::new(
+                    NonZeroIsize::new(handle.hwnd as isize).unwrap(),
+                );
+                raw_handle.hinstance = NonZeroIsize::new(handle.hinstance as isize);
+                raw_window_handle_06::RawWindowHandle::Win32(raw_handle)
+            }
+            _ => todo!("Unsupported window handle"),
+        },
+    }
 }
