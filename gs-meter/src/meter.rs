@@ -1,6 +1,8 @@
 //! Core metering DSP: peak tracking, RMS computation, crest factor, true peak.
 //! All levels are in linear amplitude; dB conversion happens at display time.
 
+use std::simd::{f32x16, num::SimdFloat};
+
 /// Maximum supported RMS window in samples (3000ms at 192kHz).
 const MAX_WINDOW_SAMPLES: usize = 576_000;
 
@@ -35,6 +37,61 @@ const ITU_COEFFS: [[f32; TRUE_PEAK_TAPS]; TRUE_PEAK_PHASES] = [
       0.0332031250000,-0.0196533203125, 0.0109863281250, 0.0017089843750],
 ];
 
+/// ITU coefficients zero-padded to 16 for SIMD f32x16 dot product.
+const ITU_COEFFS_PADDED: [[f32; 16]; TRUE_PEAK_PHASES] = {
+    let mut padded = [[0.0_f32; 16]; TRUE_PEAK_PHASES];
+    let mut p = 0;
+    while p < TRUE_PEAK_PHASES {
+        let mut t = 0;
+        while t < TRUE_PEAK_TAPS {
+            padded[p][t] = ITU_COEFFS[p][t];
+            t += 1;
+        }
+        p += 1;
+    }
+    padded
+};
+
+/// SIMD dot product of 12 contiguous samples against 16-element padded coefficients.
+#[inline(always)]
+fn dot12_simd(history: &[f32], coeffs: &[f32; 16]) -> f32 {
+    let mut h = [0.0_f32; 16];
+    h[..12].copy_from_slice(&history[..12]);
+    let hv = f32x16::from_array(h);
+    let cv = f32x16::from_array(*coeffs);
+    (hv * cv).reduce_sum()
+}
+
+/// SIMD scan: find peak absolute value and sum-of-squares across a buffer.
+/// Returns (peak, sum_of_squares_f64).
+fn simd_peak_sumsq(samples: &[f32]) -> (f32, f64) {
+    let chunks = samples.len() / 16;
+    let mut peak_v = f32x16::splat(0.0);
+    let mut sumsq_accum = 0.0_f64;
+
+    for i in 0..chunks {
+        let v = f32x16::from_slice(&samples[i * 16..]);
+        let abs_v = v.abs();
+        peak_v = peak_v.simd_max(abs_v);
+        // Accumulate sum-of-squares per chunk, promote to f64 per chunk
+        sumsq_accum += (v * v).reduce_sum() as f64;
+    }
+
+    let mut peak = peak_v.reduce_max();
+
+    // Scalar tail
+    let tail_start = chunks * 16;
+    for &s in &samples[tail_start..] {
+        let abs = s.abs();
+        if abs > peak {
+            peak = abs;
+        }
+        sumsq_accum += (s as f64) * (s as f64);
+    }
+
+    (peak, sumsq_accum)
+}
+
 /// Oversampling mode based on input sample rate, per ITU-R BS.1770-4 Annex 2.
 #[derive(Clone, Copy, PartialEq)]
 enum TruePeakMode {
@@ -47,10 +104,12 @@ enum TruePeakMode {
 }
 
 /// True peak detector using polyphase oversampling (ITU-R BS.1770-4).
+/// Uses a double-buffered history for contiguous SIMD reads.
 pub struct TruePeakDetector {
-    /// Circular history buffer.
-    history: [f32; TRUE_PEAK_TAPS],
-    /// Write position in history.
+    /// Double-buffered history: 2 × 12 elements. Writing to both halves
+    /// ensures a contiguous 12-element slice is always available at any pos.
+    history: [f32; TRUE_PEAK_TAPS * 2],
+    /// Write position (0..TRUE_PEAK_TAPS-1).
     pos: usize,
     /// Highest true peak (linear) since last reset.
     true_peak_max: f32,
@@ -67,14 +126,13 @@ impl Default for TruePeakDetector {
 impl TruePeakDetector {
     pub fn new() -> Self {
         Self {
-            history: [0.0; TRUE_PEAK_TAPS],
+            history: [0.0; TRUE_PEAK_TAPS * 2],
             pos: 0,
             true_peak_max: 0.0,
             mode: TruePeakMode::Oversample4x,
         }
     }
 
-    /// Set the oversampling mode based on the host sample rate.
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.mode = if sample_rate >= 192000.0 {
             TruePeakMode::Bypass
@@ -94,27 +152,48 @@ impl TruePeakDetector {
     #[inline]
     pub fn process_sample(&mut self, sample: f32) {
         if self.mode == TruePeakMode::Bypass {
-            return; // Sample peak tracked by ChannelMeter directly
+            return;
         }
 
+        // Write to both halves of the double buffer
         self.history[self.pos] = sample;
-        self.pos = (self.pos + 1) % TRUE_PEAK_TAPS;
+        self.history[self.pos + TRUE_PEAK_TAPS] = sample;
+        self.pos += 1;
+        if self.pos == TRUE_PEAK_TAPS {
+            self.pos = 0;
+        }
 
-        // Select which phases to evaluate based on oversampling mode
+        // The contiguous history slice for dot product starts at pos
+        // and reads 12 elements (oldest to newest).
+        // The original code read newest-first (tap 0 = newest), so we
+        // need reversed coefficients. But ITU_COEFFS Phase 0 and Phase 3
+        // are reverses of each other, and we use padded coefficients that
+        // match the standard's tap ordering. The slice at pos is oldest-first,
+        // so we reverse the coefficient order by reading the slice from the
+        // END of the double buffer backwards. Instead, we read from
+        // (pos + TAPS - 1) downward — but with double buffer, we can just
+        // use the slice starting at pos directly if we reverse the coefficients.
+        //
+        // Simpler approach: the history at [pos..pos+12] is in order
+        // [oldest, ..., newest]. The original convolution was
+        // h[0]*newest + h[1]*(newest-1) + ... = sum(h[tap] * x[n-tap]).
+        // With oldest-first slice: slice[0]=x[n-11], slice[11]=x[n].
+        // We need: sum(h[tap] * slice[11-tap]) = sum(h_rev[i] * slice[i])
+        // where h_rev is the reversed coefficients.
+        // BUT: Phase 0 reversed = Phase 3, and Phase 1 reversed = Phase 2.
+        // So we can use ITU_COEFFS[3-p] with the oldest-first slice.
+        let hist = &self.history[self.pos..self.pos + TRUE_PEAK_TAPS];
+
         let phases: &[usize] = match self.mode {
             TruePeakMode::Oversample4x => &[0, 1, 2, 3],
-            TruePeakMode::Oversample2x => &[0, 2], // 2x: only evaluate at 0 and 0.5 positions
+            TruePeakMode::Oversample2x => &[0, 2],
             TruePeakMode::Bypass => unreachable!(),
         };
 
         for &p in phases {
-            let phase = &ITU_COEFFS[p];
-            let mut sum = 0.0_f32;
-            for (tap, &coeff) in phase.iter().enumerate() {
-                let idx = (self.pos + TRUE_PEAK_TAPS - 1 - tap) % TRUE_PEAK_TAPS;
-                sum += self.history[idx] * coeff;
-            }
-            let abs = sum.abs();
+            // Use reversed phase: oldest-first slice × reversed coefficients
+            let rev_p = TRUE_PEAK_PHASES - 1 - p;
+            let abs = dot12_simd(hist, &ITU_COEFFS_PADDED[rev_p]).abs();
             if abs > self.true_peak_max {
                 self.true_peak_max = abs;
             }
@@ -234,6 +313,38 @@ impl ChannelMeter {
         }
     }
 
+    /// Process a full buffer slice. Uses SIMD for peak finding and sum-of-squares,
+    /// then runs true peak FIR and momentary ring update per-sample.
+    pub fn process_buffer_channel(&mut self, samples: &[f32]) {
+        // Pass 1: SIMD peak scan + sum-of-squares for integrated RMS
+        let (buf_peak, buf_sumsq) = simd_peak_sumsq(samples);
+        if buf_peak > self.peak_max {
+            self.peak_max = buf_peak;
+        }
+        self.rms_sum += buf_sumsq;
+        self.rms_count += samples.len() as u64;
+
+        // Pass 2: Per-sample true peak FIR + momentary ring update
+        // (these have per-sample state dependencies that prevent batching)
+        for &sample in samples {
+            self.true_peak.process_sample(sample);
+
+            let sq_f32 = sample * sample;
+            if self.rms_ring_filled == self.rms_window_size {
+                self.rms_ring_sum -= self.rms_ring[self.rms_ring_pos] as f64;
+            }
+            self.rms_ring[self.rms_ring_pos] = sq_f32;
+            self.rms_ring_sum += sq_f32 as f64;
+            self.rms_ring_pos += 1;
+            if self.rms_ring_pos >= self.rms_window_size {
+                self.rms_ring_pos = 0;
+            }
+            if self.rms_ring_filled < self.rms_window_size {
+                self.rms_ring_filled += 1;
+            }
+        }
+    }
+
     /// Update momentary max. Called once per buffer to match dpMeter5's
     /// update granularity (per-sample tracking finds higher peaks due to
     /// finer temporal resolution, giving values ~0.5 dB above dpMeter5).
@@ -340,12 +451,8 @@ impl StereoMeter {
 
     /// Process L/R samples from a nih-plug buffer.
     pub fn process_buffer(&mut self, left_samples: &[f32], right_samples: &[f32]) {
-        for &s in left_samples {
-            self.left.process_sample(s);
-        }
-        for &s in right_samples {
-            self.right.process_sample(s);
-        }
+        self.left.process_buffer_channel(left_samples);
+        self.right.process_buffer_channel(right_samples);
         // Update momentary max once per buffer (matches dpMeter5's granularity)
         self.left.update_momentary_max();
         self.right.update_momentary_max();
@@ -924,5 +1031,125 @@ mod tests {
         assert!(approx_eq(m.rms_momentary_linear(), 0.3));
         m.process_sample(0.0);
         assert!(approx_eq(m.rms_momentary_linear(), 0.0));
+    }
+
+    #[test]
+    fn test_buffer_channel_matches_scalar() {
+        // Verify process_buffer_channel gives identical results to process_sample loop
+        let samples: Vec<f32> = (0..1024)
+            .map(|i| (i as f32 / 1024.0 * std::f32::consts::TAU * 5.0).sin() * 0.8)
+            .collect();
+
+        let mut scalar = ChannelMeter::new(100);
+        for &s in &samples {
+            scalar.process_sample(s);
+        }
+        scalar.update_momentary_max();
+
+        let mut batched = ChannelMeter::new(100);
+        batched.process_buffer_channel(&samples);
+        batched.update_momentary_max();
+
+        assert!(
+            approx_eq(scalar.peak_max(), batched.peak_max()),
+            "peak: scalar={}, batched={}", scalar.peak_max(), batched.peak_max()
+        );
+        assert!(
+            approx_eq(scalar.rms_integrated_linear(), batched.rms_integrated_linear()),
+            "rms_int: scalar={}, batched={}", scalar.rms_integrated_linear(), batched.rms_integrated_linear()
+        );
+        assert!(
+            approx_eq(scalar.rms_momentary_linear(), batched.rms_momentary_linear()),
+            "rms_mom: scalar={}, batched={}", scalar.rms_momentary_linear(), batched.rms_momentary_linear()
+        );
+        assert!(
+            approx_eq(scalar.true_peak_max(), batched.true_peak_max()),
+            "true_peak: scalar={}, batched={}", scalar.true_peak_max(), batched.true_peak_max()
+        );
+        assert!(
+            approx_eq(scalar.rms_momentary_max(), batched.rms_momentary_max()),
+            "rms_mom_max: scalar={}, batched={}", scalar.rms_momentary_max(), batched.rms_momentary_max()
+        );
+    }
+
+    #[test]
+    fn test_simd_peak_sumsq() {
+        let samples: Vec<f32> = vec![0.1, -0.5, 0.3, 0.9, -0.2, 0.0, 0.4, -0.7,
+                                      0.6, -0.1, 0.8, -0.3, 0.2, -0.9, 0.5, -0.4];
+        let (peak, sumsq) = simd_peak_sumsq(&samples);
+
+        // Scalar reference
+        let expected_peak = samples.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
+        let expected_sumsq: f64 = samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+
+        assert!(
+            approx_eq(peak, expected_peak),
+            "peak: simd={}, scalar={}", peak, expected_peak
+        );
+        assert!(
+            (sumsq - expected_sumsq).abs() < 1e-4,
+            "sumsq: simd={}, scalar={}", sumsq, expected_sumsq
+        );
+    }
+
+    #[test]
+    fn test_simd_peak_sumsq_tail() {
+        // Non-multiple-of-16 length to exercise scalar tail
+        let samples: Vec<f32> = (0..37)
+            .map(|i| (i as f32 * 0.1).sin())
+            .collect();
+        let (peak, sumsq) = simd_peak_sumsq(&samples);
+
+        let expected_peak = samples.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
+        let expected_sumsq: f64 = samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+
+        assert!(
+            approx_eq(peak, expected_peak),
+            "tail peak: simd={}, scalar={}", peak, expected_peak
+        );
+        assert!(
+            (sumsq - expected_sumsq).abs() < 1e-4,
+            "tail sumsq: simd={}, scalar={}", sumsq, expected_sumsq
+        );
+    }
+
+    #[test]
+    fn test_dot12_simd_matches_scalar() {
+        let history: [f32; 12] = [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8, 0.9, -1.0, 0.5, -0.3];
+        for phase in 0..4 {
+            let simd_result = dot12_simd(&history, &ITU_COEFFS_PADDED[phase]);
+            let scalar_result: f32 = history.iter()
+                .zip(ITU_COEFFS[phase].iter())
+                .map(|(h, c)| h * c)
+                .sum();
+            assert!(
+                (simd_result - scalar_result).abs() < 1e-5,
+                "phase {}: simd={}, scalar={}", phase, simd_result, scalar_result
+            );
+        }
+    }
+
+    #[test]
+    fn test_stereo_set_sample_rate() {
+        let mut m = StereoMeter::new(100);
+        m.set_sample_rate(96000.0);
+        // Should propagate to both channels — feed a signal and check true peak works
+        let signal: Vec<f32> = (0..30)
+            .map(|i| (i as f64 / 3.0 * std::f64::consts::TAU).sin() as f32)
+            .collect();
+        m.process_buffer(&signal, &signal);
+        assert!(m.true_peak_max_stereo() >= m.peak_max_stereo());
+    }
+
+    #[test]
+    fn test_stereo_set_window_size() {
+        let mut m = StereoMeter::new(100);
+        let signal: Vec<f32> = vec![0.5; 100];
+        m.process_buffer(&signal, &signal);
+        assert!(m.rms_momentary_max_stereo() > 0.0);
+
+        // Resize should clear momentary max
+        m.set_window_size(200);
+        assert_eq!(m.rms_momentary_max_stereo(), 0.0);
     }
 }

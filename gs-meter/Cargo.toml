@@ -11,9 +11,18 @@ name = "gs-meter"
 path = "src/main.rs"
 
 [dependencies]
-nih-plug-widgets = { path = "../nih-plug-widgets" }
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["simd", "standalone"] }
-nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+# Softbuffer GUI (CPU rendering, no GPU)
+baseview = { git = "https://github.com/RustAudio/baseview.git", rev = "9a0b42c09d712777b2edb4c5e0cb6baf21e988f0", features = ["opengl"] }
+softbuffer = { version = "0.4", default-features = false, features = ["kms", "x11"] }
+raw-window-handle = "0.5"
+raw-window-handle-06 = { package = "raw-window-handle", version = "0.6" }
+tiny-skia = "0.11"
+fontdue = "0.9"
+keyboard-types = "0.6"
+crossbeam = "0.8"
+atomic_float = "0.1"
+serde = { version = "1.0", features = ["derive"] }
 
 [package.metadata.bundler]
 name = "GS Meter"

@@ -1,9 +1,12 @@
+#![feature(portable_simd)]
+
 use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 mod editor;
 pub mod meter;
+pub mod widgets;
 
 use meter::{linear_to_db, StereoMeter};
 
@@ -62,7 +65,6 @@ pub enum ChannelMode {
 
 pub struct GsMeter {
     params: Arc<GsMeterParams>,
-    editor_state: Arc<nih_plug_vizia::ViziaState>,
     stereo_meter: StereoMeter,
     sample_rate: f32,
     last_window_ms: f32,
@@ -72,8 +74,8 @@ pub struct GsMeter {
 
 #[derive(Params)]
 pub struct GsMeterParams {
-    #[id = "ui_scale"]
-    pub ui_scale: IntParam,
+    #[persist = "editor-state"]
+    pub editor_state: Arc<editor::GsMeterEditorState>,
 
     #[id = "gain"]
     pub gain: FloatParam,
@@ -96,7 +98,6 @@ impl Default for GsMeter {
 
         Self {
             params: Arc::new(GsMeterParams::new()),
-            editor_state: editor::default_state(),
             stereo_meter: StereoMeter::new(window_samples),
             sample_rate: default_sr,
             last_window_ms: default_window_ms,
@@ -109,8 +110,7 @@ impl Default for GsMeter {
 impl GsMeterParams {
     fn new() -> Self {
         Self {
-            ui_scale: IntParam::new("UI Scale", 100, IntRange::Linear { min: 100, max: 300 })
-                .with_unit("%"),
+            editor_state: editor::GsMeterEditorState::default_state(),
 
             gain: FloatParam::new(
                 "Gain",
@@ -128,7 +128,7 @@ impl GsMeterParams {
 
             reference_level: FloatParam::new(
                 "Reference",
-                -14.0,
+                0.0,
                 FloatRange::Linear {
                     min: -60.0,
                     max: 0.0,
@@ -179,7 +179,6 @@ impl Plugin for GsMeter {
             self.params.clone(),
             self.readings.clone(),
             self.should_reset.clone(),
-            self.editor_state.clone(),
         )
     }
 
