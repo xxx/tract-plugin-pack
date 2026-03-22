@@ -23,12 +23,14 @@ dpMeter5 is the standard meter for clip-to-zero, but running 100+ instances of a
 - **CPU rendering** -- no OpenGL, no GPU driver loaded. Zero memory overhead when the GUI is closed.
 - **SIMD metering** -- peak detection and RMS accumulation use f32x16 SIMD, true peak FIR uses SIMD dot products.
 
-Benchmarks (48 kHz / 1024 samples, GUI closed, single core):
+Benchmarks (Bitwig, 48 kHz / 1024 samples, GUI closed):
 
-| Instances | CPU | Per Instance |
-|---|---|---|
-| 50 | ~16% | 0.32% |
-| 200 | ~30% | 0.15% |
+| Instances | CPU | RSS | Per Instance |
+|---|---|---|---|
+| 50 | 3.3% | 113 MB | ~1.8 MB, 0.05% CPU |
+| 100 | 5.0% | 203 MB | ~1.8 MB, 0.05% CPU |
+| 200 | 8.6% | 381 MB | ~1.8 MB, 0.04% CPU |
+| 300 | 15.1% | 560 MB | ~1.8 MB, 0.05% CPU |
 
 
 ## Installation
@@ -64,6 +66,17 @@ When you click a "-> Gain" button, the gain is set to: `reference - meter_readin
 The sliding window size for momentary RMS measurement. Range: 50 to 3000 ms. Default: 600 ms.
 
 This matches dpMeter5's RMS Window setting. Changing it resets the momentary max.
+
+### Meter Mode
+
+- **dB** -- RMS-based metering with peak, true peak, integrated/momentary RMS, and crest factor
+- **LUFS** -- EBU R128 loudness metering with K-weighted integrated, short-term, momentary, true peak, and loudness range (LRA)
+
+Each mode has its own independent gain and reference values. Switching modes switches which gain is applied to the audio signal.
+
+In LUFS mode, gain is displayed in LU (Loudness Units) and reference in LUFS. The gain-match formula is the same: `Gain = Reference - Reading`. For example, with reference at -14.0 LUFS and integrated reading at -20.0 LUFS, clicking "-> Gain" sets gain to +6.0 LU.
+
+The LUFS mode default reference is -14.0 LUFS (common streaming target). The dB mode default reference is 0.0 dBFS (clip-to-zero).
 
 ### Channel Mode
 
@@ -107,21 +120,43 @@ Crest factor: `Peak Max (dB) - RMS Integrated (dB)`. Shows the dynamic range of 
 
 In Stereo mode, crest factor uses the stereo peak (max of L/R) and stereo RMS (sum of power). This matches dpMeter5's convention but gives values ~3 dB lower than a per-channel crest factor for balanced stereo content.
 
+## LUFS Mode Readings
+
+### Integrated
+
+EBU R128 integrated loudness in LUFS. Uses two-stage gating: absolute gate at -70 LUFS, then relative gate at -10 LU below the absolute-gated mean. Accumulates 400ms blocks with 75% overlap (100ms hop).
+
+### Short-Term / ST Max
+
+Short-term loudness over a 3-second sliding window, in LUFS. ST Max tracks the highest short-term value since reset.
+
+### Momentary / Mom Max
+
+Momentary loudness over a 400ms sliding window, in LUFS. Mom Max tracks the highest momentary value since reset.
+
+### True Peak
+
+Same true peak measurement as dB mode, displayed in dBTP.
+
+### LRA
+
+Loudness Range in LU. Measures the dynamic range of the program material using the 10th and 95th percentiles of gated short-term loudness blocks. Does not have a gain-match button (it's a range measurement, not an absolute level).
+
 ### -> Gain Buttons
 
-Each reading (except Crest) has a "-> Gain" button that sets: `Gain = Reference - Reading`.
+Each reading (except Crest in dB mode and LRA in LUFS mode) has a "-> Gain" button that sets: `Gain = Reference - Reading`.
 
-Use this after letting the meter accumulate for a representative section of audio. The integrated RMS button is the most useful for clip-to-zero -- it tells you how much gain to add to hit your reference level.
+In dB mode, use the integrated RMS button for clip-to-zero. In LUFS mode, use the integrated loudness button for broadcast/streaming level matching.
 
 ### Reset
 
-Clears all accumulated values: peak max, true peak, integrated RMS, momentary max, and crest factor. Momentary RMS continues from the current window contents.
+Clears all accumulated values in both modes: peak, true peak, RMS, crest, and all LUFS measurements (integrated, short-term, momentary, LRA).
 
 **Double-click** any slider or the channel selector to reset it to its default value.
 
 ## Clip-to-Zero Workflow
 
-1. Insert GS Meter on every track and bus (it's cheap -- 50 instances use 16% CPU)
+1. Insert GS Meter on every track and bus (it's cheap -- 100 instances use 5% CPU)
 2. Set your reference level to 0 dB (the default)
 3. Play a representative section of the song
 4. Click the "-> Gain" button next to Peak Max to auto-set the gain
@@ -130,7 +165,8 @@ Clears all accumulated values: peak max, true peak, integrated RMS, momentary ma
 ## Technical Notes
 
 - **No audio-thread allocations** -- the process() callback never allocates heap memory
-- **Pre-allocated RMS ring buffer** -- sized for 3000 ms at 192 kHz (worst case), no resize on the audio thread
+- **EBU R128 / ITU-R BS.1770-4** -- K-weighting filter (4th-order IIR), gated integration, loudness range with cached O(n log n) percentile computation
+- **Pre-allocated buffers** -- RMS rings, LUFS momentary/short-term windows, and LRA scratch buffer are all pre-allocated at construction
 - **CPU rendering** -- uses tiny-skia (software rasterizer) + fontdue (glyph cache) + softbuffer (pixel buffer). No OpenGL context, no GPU drivers loaded
 - **SIMD** -- uses Rust's portable SIMD (`std::simd::f32x16`) for peak detection, sum-of-squares, and true peak FIR convolution
 - **Embedded font** -- DejaVu Sans, compiled into the binary. No runtime font loading

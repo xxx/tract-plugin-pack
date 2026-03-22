@@ -10,7 +10,7 @@ Tract Plugin Pack is a Cargo workspace containing multiple audio effect plugins 
 
 **Wavetable Filter** — uses wavetable frames as FIR filter kernels. Two modes: Raw (direct convolution, zero latency) and Phaseless (STFT magnitude-only filtering, no pre-ringing). GUI uses nih_plug_vizia.
 
-**GS Meter** — lightweight loudness meter with gain utility for clip-to-zero workflows. Tracks peak, true peak (ITU-R BS.1770-4), RMS integrated/momentary, crest factor. GUI uses softbuffer + tiny-skia (CPU rendering, no GPU). Designed for 100+ instances per project.
+**GS Meter** — lightweight loudness meter with gain utility for clip-to-zero workflows. dB mode: peak, true peak (ITU-R BS.1770-4), RMS integrated/momentary, crest factor. LUFS mode: EBU R128 integrated/short-term/momentary loudness, LRA, true peak. Per-mode gain and reference with gain-match buttons. GUI uses softbuffer + tiny-skia (CPU rendering, no GPU). Designed for 100+ instances per project.
 
 ## Workspace Structure
 
@@ -95,7 +95,7 @@ Tests are inline `#[cfg(test)]` modules:
 
 ### Key Design Decisions
 
-- **GS Meter uses CPU rendering** (softbuffer + tiny-skia + fontdue) instead of vizia/OpenGL. This eliminates 25 MB of GPU driver overhead (Mesa/LLVM) per instance. At 50 instances: 16% CPU, 48 MB total.
+- **GS Meter uses CPU rendering** (softbuffer + tiny-skia + fontdue) instead of vizia/OpenGL. This eliminates 25 MB of GPU driver overhead (Mesa/LLVM) per instance. At 300 instances (Bitwig, 48kHz/1024): 15% CPU, 560 MB RSS (~1.8 MB per instance).
 - **True peak uses exact ITU-R BS.1770-4 coefficients** (48-tap, 4-phase polyphase FIR). Double-buffered history for contiguous SIMD dot products. Sample-rate-aware: 4x OS at <96kHz, 2x at 96-192kHz, bypass at >=192kHz.
 - **Stereo RMS uses sum-of-power** (matches dpMeter5 SUM mode): `sqrt(ms_L + ms_R)`.
 - **Crest factor uses dpMeter5's convention** (peak_stereo vs rms_stereo), not the mathematically correct max(crest_L, crest_R). Documented for future "correct mode" toggle.

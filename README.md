@@ -19,11 +19,11 @@ A wavetable-based audio filter that uses wavetable frames as FIR filter kernels.
 
 A lightweight loudness meter with integrated gain utility, purpose-built for [clip-to-zero](#what-is-clip-to-zero) workflows. Designed to run 100+ instances per project without significant CPU or memory impact.
 
-- Peak max, true peak (ITU-R BS.1770-4), RMS integrated/momentary, crest factor
-- One-click gain-from-reading buttons for fast level matching
+- dB and LUFS modes with per-mode gain/reference and gain-match buttons
+- Peak max, true peak (ITU-R BS.1770-4), RMS, EBU R128 (integrated, short-term, momentary, LRA)
 - CPU-rendered GUI (tiny-skia + softbuffer) -- no GPU drivers loaded
 - SIMD-optimized metering (`f32x16`)
-- Scales sub-linearly: 50 instances @ 16% CPU, 200 @ 30% (single core, GUI closed)
+- ~1.8 MB RSS and 0.05% CPU per instance (300 instances @ 15% CPU, 560 MB total)
 
 ## Build Requirements
 

@@ -180,9 +180,16 @@ pub struct LufsMeter {
     samples_per_st_block: usize,
     samples_per_st_hop: usize,
 
-    // Cached LRA to avoid O(n²) computation on audio thread
+    // Cached integrated loudness to avoid O(n) scans every buffer
+    cached_integrated: f64,
+    cached_integrated_block_count: usize,
+
+    // Cached LRA to avoid recomputation on audio thread
     cached_lra: f64,
     cached_lra_block_count: usize,
+
+    // Pre-allocated scratch buffer for O(n log n) LRA percentile sort
+    lra_scratch: Vec<f64>,
 
     sample_rate: f64,
 }
@@ -234,8 +241,13 @@ impl LufsMeter {
             samples_per_st_block,
             samples_per_st_hop,
 
+            cached_integrated: f64::NEG_INFINITY,
+            cached_integrated_block_count: 0,
+
             cached_lra: f64::NEG_INFINITY,
             cached_lra_block_count: 0,
+
+            lra_scratch: vec![0.0; MAX_ST_ENTRIES],
 
             sample_rate,
         }
@@ -271,6 +283,8 @@ impl LufsMeter {
         self.st_block_energies[..self.st_block_count.min(MAX_ST_ENTRIES)].fill(0.0);
         self.st_block_count = 0;
         self.st_hop_counter = 0;
+        self.cached_integrated = f64::NEG_INFINITY;
+        self.cached_integrated_block_count = 0;
         self.cached_lra = f64::NEG_INFINITY;
         self.cached_lra_block_count = 0;
     }
@@ -406,9 +420,19 @@ impl LufsMeter {
 
     /// Integrated loudness with EBU R128 two-stage gating, in LUFS.
     ///
+    /// Cached: only recomputes when new blocks have been added.
     /// Step 1: Absolute gate at -70 LUFS.
     /// Step 2: Relative gate at -10 LU below the absolute-gated mean.
-    pub fn integrated_lufs(&self) -> f64 {
+    pub fn integrated_lufs(&mut self) -> f64 {
+        if self.block_ring_count == self.cached_integrated_block_count {
+            return self.cached_integrated;
+        }
+        self.cached_integrated = self.compute_integrated_lufs();
+        self.cached_integrated_block_count = self.block_ring_count;
+        self.cached_integrated
+    }
+
+    fn compute_integrated_lufs(&self) -> f64 {
         if self.block_ring_count == 0 {
             return f64::NEG_INFINITY;
         }
@@ -467,7 +491,7 @@ impl LufsMeter {
         self.cached_lra
     }
 
-    fn compute_loudness_range(&self) -> f64 {
+    fn compute_loudness_range(&mut self) -> f64 {
         if self.st_block_count < 2 {
             return 0.0;
         }
@@ -496,51 +520,13 @@ impl LufsMeter {
         // rel_gate = abs_mean * 10^(-20/10) = abs_mean * 0.01
         let rel_gate_energy = abs_mean * 0.01;
 
-        // Collect gated energies into a scratch area within st_block_energies bounds.
-        // We can't allocate, so we count first, then use index-based percentile lookup.
-        // Since we need sorted values for percentile computation, we'll gather indices
-        // and use a simple selection approach. However, with no allocation allowed,
-        // we need to be creative.
-        //
-        // Strategy: count the gated entries, then do two linear scans to find the
-        // 10th and 95th percentile values using a partial-sort-free approach.
-        // Actually, for correctness we need sorted values. Since the st_block_energies
-        // vec is pre-allocated with MAX_ST_ENTRIES, we can use the unused tail portion
-        // (from st_block_count..MAX_ST_ENTRIES) as scratch space, but that still
-        // requires sorting. We'll do an in-place copy-and-sort of the gated subset
-        // in the unused tail.
-        //
-        // Wait — we can't mutate self in a &self method. We need a different approach.
-        // Use a stack-allocated buffer for small counts and fall back to scanning.
-        //
-        // Since we're bounded to MAX_ST_ENTRIES (7200), we can use a fixed stack buffer.
-        // 7200 * 8 bytes = 57.6 KB — too much for the stack in a real-time context.
-        //
-        // Alternative: two-pass linear scan to find percentile values without sorting.
-        // Pass 1: find min and max of gated values, count them.
-        // Pass 2: use histogram-based or selection approach.
-        //
-        // Simplest correct approach: since this is called per-buffer (not per-sample),
-        // and 7200 entries is small, we can do a simple O(n*log(n)) sort of a small
-        // temporary Vec — but we said no allocations after construction.
-        //
-        // Final approach: we know the gated count. Use two linear scans with
-        // nth_element logic — find the value at the 10th percentile rank and
-        // 95th percentile rank by counting how many values are <= each candidate.
-        // This is O(n^2) but n <= 7200 and it's called rarely (once per buffer).
-        //
-        // Actually, the simplest approach: count gated entries, then for each
-        // percentile, scan through and find the value at that rank using quickselect
-        // without allocation... but quickselect needs mutable access.
-        //
-        // Let's just do the O(n^2) counting approach. For each gated value,
-        // count how many gated values are <= it. The value whose rank matches
-        // the target percentile index is our answer.
-
+        // Copy gated energies into pre-allocated scratch buffer and sort.
+        // O(n log n) instead of the previous O(n^2) rank-counting approach.
         let mut gated_count = 0_usize;
         for i in 0..count {
             let e = self.st_block_energies[i];
             if e > abs_gate_energy && e > rel_gate_energy {
+                self.lra_scratch[gated_count] = e;
                 gated_count += 1;
             }
         }
@@ -549,83 +535,20 @@ impl LufsMeter {
             return 0.0;
         }
 
+        // Sort the gated subset for percentile lookup
+        self.lra_scratch[..gated_count].sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+
         // Target ranks (0-based) for 10th and 95th percentiles
-        // Per EBU R128, use ceil for 10th and floor for 95th
         let rank_10 = ((gated_count as f64 * 0.10).ceil() as usize).saturating_sub(1);
         let rank_95 = ((gated_count as f64 * 0.95).ceil() as usize).saturating_sub(1);
 
-        // Find the values at these ranks using counting
-        let energy_10 = self.find_rank_energy(abs_gate_energy, rel_gate_energy, count, rank_10);
-        let energy_95 = self.find_rank_energy(abs_gate_energy, rel_gate_energy, count, rank_95);
+        let energy_10 = self.lra_scratch[rank_10];
+        let energy_95 = self.lra_scratch[rank_95];
 
         let loudness_10 = energy_to_loudness(energy_10);
         let loudness_95 = energy_to_loudness(energy_95);
 
         (loudness_95 - loudness_10).max(0.0)
-    }
-
-    /// Find the energy value at a given rank among gated entries.
-    /// Uses O(n^2) counting: for each gated value, count how many gated values are < it
-    /// (or <= it for tie-breaking). Returns the value at the target rank.
-    fn find_rank_energy(
-        &self,
-        abs_gate: f64,
-        rel_gate: f64,
-        count: usize,
-        target_rank: usize,
-    ) -> f64 {
-        // Collect the gated value at the target rank by finding, for each candidate,
-        // how many gated values are strictly less than it. The smallest candidate
-        // whose "less-than count" <= target_rank and "less-or-equal count" > target_rank
-        // is our answer.
-        //
-        // Simplified: find the candidate with the smallest value such that
-        // at least (target_rank + 1) gated values are <= it.
-        let mut best = f64::INFINITY;
-
-        for i in 0..count {
-            let candidate = self.st_block_energies[i];
-            if candidate <= abs_gate || candidate <= rel_gate {
-                continue;
-            }
-
-            // Count how many gated values are <= candidate
-            let mut le_count = 0_usize;
-            for j in 0..count {
-                let e = self.st_block_energies[j];
-                if e > abs_gate && e > rel_gate && e <= candidate {
-                    le_count += 1;
-                }
-            }
-
-            // Count how many gated values are strictly less than candidate
-            let mut lt_count = 0_usize;
-            for j in 0..count {
-                let e = self.st_block_energies[j];
-                if e > abs_gate && e > rel_gate && e < candidate {
-                    lt_count += 1;
-                }
-            }
-
-            // This candidate covers ranks [lt_count .. le_count-1]
-            if lt_count <= target_rank && le_count > target_rank && candidate < best {
-                best = candidate;
-            }
-        }
-
-        if best.is_infinite() {
-            // Fallback: return the max gated value
-            let mut max_e = 0.0_f64;
-            for i in 0..count {
-                let e = self.st_block_energies[i];
-                if e > abs_gate && e > rel_gate && e > max_e {
-                    max_e = e;
-                }
-            }
-            max_e
-        } else {
-            best
-        }
     }
 
     /// Update peak (max) momentary and short-term values.
