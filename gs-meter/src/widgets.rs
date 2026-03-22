@@ -216,6 +216,7 @@ pub fn draw_rect_outline(
 /// Draw a button with a centred label.
 ///
 /// `hovered` brightens the background slightly; `pressed` darkens it.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_button(
     pixmap: &mut Pixmap,
     text_renderer: &mut TextRenderer,
@@ -250,6 +251,7 @@ pub fn draw_button(
 /// right-aligned value string.
 ///
 /// `normalized_value` should be in 0.0..=1.0.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_slider(
     pixmap: &mut Pixmap,
     text_renderer: &mut TextRenderer,
@@ -295,6 +297,7 @@ pub fn draw_slider(
 ///
 /// Each segment is an equal-width button; the one at `active_index` is
 /// highlighted with the accent colour.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_stepped_selector(
     pixmap: &mut Pixmap,
     text_renderer: &mut TextRenderer,
@@ -337,68 +340,6 @@ pub fn draw_stepped_selector(
     }
 }
 
-/// Draw a meter row: a left label, a value string, and an optional
-/// "-> Gain" button.
-///
-/// This mirrors the `meter_row` helper in the vizia-based editor. Returns the
-/// bounding rectangle of the button (if drawn) so the caller can do hit
-/// testing.
-pub fn draw_meter_row(
-    pixmap: &mut Pixmap,
-    text_renderer: &mut TextRenderer,
-    x: f32,
-    y: f32,
-    w: f32,
-    label: &str,
-    value_text: &str,
-    has_button: bool,
-    button_hovered: bool,
-) -> Option<[f32; 4]> {
-    let row_h: f32 = 28.0;
-    let text_size: f32 = 13.0;
-    let text_y = y + (row_h + text_size) * 0.5 - 2.0;
-
-    let label_w: f32 = 100.0;
-    let value_w: f32 = 120.0;
-    let gap: f32 = 10.0;
-
-    // Label
-    text_renderer.draw_text(pixmap, x, text_y, label, text_size, color_muted());
-
-    // Value
-    text_renderer.draw_text(
-        pixmap,
-        x + label_w + gap,
-        text_y,
-        value_text,
-        text_size,
-        color_text(),
-    );
-
-    // Optional button
-    if has_button {
-        let btn_x = x + label_w + gap + value_w + gap;
-        let btn_w: f32 = 70.0;
-        let btn_h: f32 = 24.0;
-        let btn_y = y + (row_h - btn_h) * 0.5;
-
-        draw_button(
-            pixmap,
-            text_renderer,
-            btn_x,
-            btn_y,
-            btn_w,
-            btn_h,
-            "\u{2192} Gain", // "-> Gain" using Unicode right arrow
-            button_hovered,
-            false,
-        );
-
-        Some([btn_x, btn_y, btn_w, btn_h])
-    } else {
-        None
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -687,33 +628,6 @@ mod tests {
         draw_stepped_selector(&mut pm, &mut renderer, 0.0, 0.0, 100.0, 28.0, &[], 0);
     }
 
-    #[test]
-    fn test_draw_meter_row_with_button() {
-        let data = test_font_data();
-        let mut renderer = TextRenderer::new(&data);
-        let mut pm = Pixmap::new(400, 50).unwrap();
-        let btn = draw_meter_row(
-            &mut pm, &mut renderer,
-            5.0, 5.0, 380.0,
-            "Peak Max", "-1.2 dB", true, false,
-        );
-        assert!(btn.is_some(), "should return button rect when has_button=true");
-        let [_bx, _by, bw, bh] = btn.unwrap();
-        assert!(bw > 0.0 && bh > 0.0, "button should have positive dimensions");
-    }
-
-    #[test]
-    fn test_draw_meter_row_without_button() {
-        let data = test_font_data();
-        let mut renderer = TextRenderer::new(&data);
-        let mut pm = Pixmap::new(400, 50).unwrap();
-        let btn = draw_meter_row(
-            &mut pm, &mut renderer,
-            5.0, 5.0, 380.0,
-            "Crest", "12.3 dB", false, false,
-        );
-        assert!(btn.is_none(), "should return None when has_button=false");
-    }
 
     #[test]
     fn test_glyph_cache_reuse() {

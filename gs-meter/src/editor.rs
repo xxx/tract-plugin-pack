@@ -365,16 +365,13 @@ impl GsMeterWindow {
     }
 
     fn set_param_stepped(&self, setter: &ParamSetter, id: ParamId, index: i32) {
-        match id {
-            ParamId::ChannelMode => {
-                let mode = match index {
-                    0 => crate::ChannelMode::Stereo,
-                    1 => crate::ChannelMode::Left,
-                    _ => crate::ChannelMode::Right,
-                };
-                setter.set_parameter(&self.params.channel_mode, mode);
-            }
-            _ => {}
+        if id == ParamId::ChannelMode {
+            let mode = match index {
+                0 => crate::ChannelMode::Stereo,
+                1 => crate::ChannelMode::Left,
+                _ => crate::ChannelMode::Right,
+            };
+            setter.set_parameter(&self.params.channel_mode, mode);
         }
     }
 
