@@ -517,6 +517,11 @@ impl baseview::WindowHandler for GsMeterWindow {
                     self.last_click_time = now;
                     self.last_click_action = Some(region.action);
 
+                    // End any pending drag before processing new click
+                    if let Some(prev_id) = self.drag_active.take() {
+                        self.end_set_param(&setter, prev_id);
+                    }
+
                     match region.action {
                         HitAction::Slider(param_id) => {
                             if is_double_click {
@@ -806,7 +811,8 @@ fn baseview_window_to_surface_target(
             raw_window_handle::RawWindowHandle::Xcb(handle) => {
                 raw_window_handle_06::RawWindowHandle::Xcb(
                     raw_window_handle_06::XcbWindowHandle::new(
-                        NonZeroU32::new(handle.window).unwrap(),
+                        NonZeroU32::new(handle.window)
+                            .expect("XCB window handle is 0 — host provided invalid parent"),
                     ),
                 )
             }

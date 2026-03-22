@@ -156,8 +156,9 @@ impl TextRenderer {
             ch,
             size_tenths: (size * 10.0) as u32,
         };
+        let font = &self.font;
         self.cache.entry(key).or_insert_with_key(|k| {
-            let (metrics, bitmap) = self.font.rasterize(k.ch, size);
+            let (metrics, bitmap) = font.rasterize(k.ch, size);
             GlyphEntry { bitmap, metrics }
         })
     }

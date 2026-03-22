@@ -39,7 +39,7 @@ Tests live in `src/lib.rs` and `src/wavetable.rs` (inline `#[cfg(test)]` modules
 - **Use the LSP tool**: Prefer the LSP tool over grep for code navigation — go-to-definition, find-references, and hover for type info. Fall back to grep only when LSP is unavailable.
 - **Never commit unless asked**: Do not create git commits unless the user explicitly requests it.
 - **No allocations on the audio thread**: `process()` must never allocate. Use pre-allocated buffers, `try_lock()` for shared data, and avoid `Vec::new()`, `clone()` of collections, or `String` operations in the hot path.
-- **No unsafe code**: Do not use `unsafe` blocks. Find safe alternatives or restructure the code to avoid needing unsafe.
+- **No unsafe code**: Do not use `unsafe` blocks. Find safe alternatives or restructure the code to avoid needing unsafe. Exception: FFI windowing glue (raw-window-handle trait impls, `Send` for window handles) where the underlying API requires it.
 
 ## Architecture
 
