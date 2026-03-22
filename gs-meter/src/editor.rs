@@ -589,15 +589,17 @@ impl Editor for GsMeterEditor {
         let readings = Arc::clone(&self.readings);
         let should_reset = Arc::clone(&self.should_reset);
 
+        // Update editor state to scaled size so the host allocates enough space
+        let sf = scaling_factor.unwrap_or(1.0);
+        let scaled_w = (WINDOW_WIDTH as f32 * sf).round() as u32;
+        let scaled_h = (WINDOW_HEIGHT as f32 * sf).round() as u32;
+        self.params.editor_state.size.store((scaled_w, scaled_h));
+
         let window = baseview::Window::open_parented(
             &ParentWindowHandleAdapter(parent),
             WindowOpenOptions {
                 title: String::from("GS Meter"),
-                // Open at the scaled size directly (scale factor controls rendering, not DPI)
-                size: {
-                    let sf = scaling_factor.unwrap_or(1.0) as f64;
-                    baseview::Size::new(uw as f64 * sf, uh as f64 * sf)
-                },
+                size: baseview::Size::new(scaled_w as f64, scaled_h as f64),
                 scale: WindowScalePolicy::ScaleFactor(1.0),
                 gl_config: None,
             },
@@ -621,7 +623,10 @@ impl Editor for GsMeterEditor {
     }
 
     fn size(&self) -> (u32, u32) {
-        self.params.editor_state.size()
+        let sf = self.scaling_factor.load().unwrap_or(1.0);
+        let w = (WINDOW_WIDTH as f32 * sf).round() as u32;
+        let h = (WINDOW_HEIGHT as f32 * sf).round() as u32;
+        (w, h)
     }
 
     fn set_scale_factor(&self, factor: f32) -> bool {
