@@ -28,11 +28,16 @@ A lightweight loudness meter with integrated gain utility, purpose-built for [cl
 ## Build Requirements
 
 - Rust nightly toolchain (automatically configured via `rust-toolchain.toml`)
-- Linux: `libxcb`, `libxcb-util`, `libasound2-dev`
+- Linux system dependencies (see below)
 
 ```bash
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Ubuntu / Debian
+sudo apt install libxcb1-dev libxcb-icccm4-dev libxcb-dri2-0-dev libx11-xcb-dev \
+  libx11-dev libxcursor-dev libasound2-dev libgl-dev libdrm-dev \
+  libjack-jackd2-dev libwayland-dev libegl-dev
 ```
 
 ## Building
