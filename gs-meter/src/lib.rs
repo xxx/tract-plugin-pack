@@ -18,6 +18,13 @@ pub struct MeterReadings {
     pub rms_momentary_db: std::sync::atomic::AtomicI32,
     pub rms_momentary_max_db: std::sync::atomic::AtomicI32,
     pub crest_factor_db: std::sync::atomic::AtomicI32,
+    // LUFS mode readings (Phase 2 will populate with real values)
+    pub lufs_integrated: std::sync::atomic::AtomicI32,
+    pub lufs_short_term: std::sync::atomic::AtomicI32,
+    pub lufs_short_term_max: std::sync::atomic::AtomicI32,
+    pub lufs_momentary: std::sync::atomic::AtomicI32,
+    pub lufs_momentary_max: std::sync::atomic::AtomicI32,
+    pub lufs_range: std::sync::atomic::AtomicI32,
 }
 
 impl MeterReadings {
@@ -29,6 +36,12 @@ impl MeterReadings {
             rms_momentary_db: std::sync::atomic::AtomicI32::new(-10000),
             rms_momentary_max_db: std::sync::atomic::AtomicI32::new(-10000),
             crest_factor_db: std::sync::atomic::AtomicI32::new(-10000),
+            lufs_integrated: std::sync::atomic::AtomicI32::new(-10000),
+            lufs_short_term: std::sync::atomic::AtomicI32::new(-10000),
+            lufs_short_term_max: std::sync::atomic::AtomicI32::new(-10000),
+            lufs_momentary: std::sync::atomic::AtomicI32::new(-10000),
+            lufs_momentary_max: std::sync::atomic::AtomicI32::new(-10000),
+            lufs_range: std::sync::atomic::AtomicI32::new(-10000),
         }
     }
 
@@ -63,6 +76,17 @@ pub enum ChannelMode {
     Right,
 }
 
+#[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
+pub enum MeterMode {
+    #[id = "db"]
+    #[name = "dB"]
+    Db,
+
+    #[id = "lufs"]
+    #[name = "LUFS"]
+    Lufs,
+}
+
 pub struct GsMeter {
     params: Arc<GsMeterParams>,
     stereo_meter: StereoMeter,
@@ -88,6 +112,9 @@ pub struct GsMeterParams {
 
     #[id = "channel_mode"]
     pub channel_mode: EnumParam<ChannelMode>,
+
+    #[id = "meter_mode"]
+    pub meter_mode: EnumParam<MeterMode>,
 }
 
 impl Default for GsMeter {
@@ -150,6 +177,7 @@ impl GsMeterParams {
             .with_value_to_string(formatters::v2s_f32_rounded(0)),
 
             channel_mode: EnumParam::new("Channel", ChannelMode::Stereo),
+            meter_mode: EnumParam::new("Mode", MeterMode::Db),
         }
     }
 }
@@ -274,6 +302,14 @@ impl Plugin for GsMeter {
         MeterReadings::store_db(&self.readings.rms_momentary_db, linear_to_db(rms_mom));
         MeterReadings::store_db(&self.readings.rms_momentary_max_db, linear_to_db(rms_mom_max));
         MeterReadings::store_db(&self.readings.crest_factor_db, crest);
+
+        // LUFS placeholders — Phase 2 will replace with real EBU R128 computation
+        MeterReadings::store_db(&self.readings.lufs_integrated, f32::NEG_INFINITY);
+        MeterReadings::store_db(&self.readings.lufs_short_term, f32::NEG_INFINITY);
+        MeterReadings::store_db(&self.readings.lufs_short_term_max, f32::NEG_INFINITY);
+        MeterReadings::store_db(&self.readings.lufs_momentary, f32::NEG_INFINITY);
+        MeterReadings::store_db(&self.readings.lufs_momentary_max, f32::NEG_INFINITY);
+        MeterReadings::store_db(&self.readings.lufs_range, f32::NEG_INFINITY);
 
         ProcessStatus::Normal
     }

@@ -87,6 +87,7 @@ enum ParamId {
     Reference,
     RmsWindow,
     ChannelMode,
+    MeterMode,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -271,6 +272,29 @@ impl GsMeterWindow {
         }
         y += row_h;
 
+        // Meter mode selector (dB / LUFS)
+        let meter_mode = self.params.meter_mode.value();
+        let meter_mode_idx = match meter_mode {
+            crate::MeterMode::Db => 0,
+            crate::MeterMode::Lufs => 1,
+        };
+        tr.draw_text(&mut self.pixmap, pad, y + font_size, "Mode", font_size, widgets::color_muted());
+        let mode_sel_x = pad + label_w;
+        let mode_sel_y = y + 4.0 * s;
+        widgets::draw_stepped_selector(
+            &mut self.pixmap, tr, mode_sel_x, mode_sel_y, slider_w, slider_h,
+            &["dB", "LUFS"], meter_mode_idx,
+        );
+        let mode_seg_w = slider_w / 2.0;
+        for i in 0..2 {
+            self.hit_regions.push(HitRegion {
+                x: mode_sel_x + i as f32 * mode_seg_w, y: mode_sel_y,
+                w: mode_seg_w, h: slider_h,
+                action: HitAction::SteppedSegment { param: ParamId::MeterMode, index: i },
+            });
+        }
+        y += row_h;
+
         // Helper: draw a labeled slider and register its hit region
         macro_rules! slider_row {
             ($label:expr, $param:expr, $param_id:expr, $value_text:expr) => {
@@ -295,44 +319,66 @@ impl GsMeterWindow {
         let ref_text = format!("{:.1} dB", self.params.reference_level.value());
         slider_row!("Reference", self.params.reference_level, ParamId::Reference, &ref_text);
 
-        let window_text = format!("{:.0} ms", self.params.rms_window_ms.value());
-        slider_row!("RMS Window", self.params.rms_window_ms, ParamId::RmsWindow, &window_text);
+        // RMS Window only in dB mode
+        if meter_mode == crate::MeterMode::Db {
+            let window_text = format!("{:.0} ms", self.params.rms_window_ms.value());
+            slider_row!("RMS Window", self.params.rms_window_ms, ParamId::RmsWindow, &window_text);
+        }
 
         // Readings header
         tr.draw_text(&mut self.pixmap, pad, y + font_size + 2.0 * s, "Readings", font_size * 1.1, widgets::color_text());
         y += 30.0 * s;
 
-        // Meter rows with → Gain buttons
-        let gain_sources = [
-            ("Peak Max", peak_db, GainSource::PeakMax),
-            ("True Peak", true_peak_db, GainSource::TruePeak),
-            ("RMS (Int)", rms_int_db, GainSource::RmsIntegrated),
-            ("RMS (Mom)", rms_mom_db, GainSource::RmsMomentary),
-            ("RMS Max", rms_max_db, GainSource::RmsMomentaryMax),
-        ];
+        if meter_mode == crate::MeterMode::Db {
+            // ── dB mode readings ──
+            let gain_sources = [
+                ("Peak Max", peak_db, GainSource::PeakMax),
+                ("True Peak", true_peak_db, GainSource::TruePeak),
+                ("RMS (Int)", rms_int_db, GainSource::RmsIntegrated),
+                ("RMS (Mom)", rms_mom_db, GainSource::RmsMomentary),
+                ("RMS Max", rms_max_db, GainSource::RmsMomentaryMax),
+            ];
 
-        for &(label, db, source) in &gain_sources {
-            let val = format_db(db);
-            tr.draw_text(&mut self.pixmap, pad, y + font_size, label, font_size, widgets::color_muted());
-            tr.draw_text(&mut self.pixmap, pad + label_w + gap, y + font_size, &val, font_size, widgets::color_text());
-            let bx = pad + label_w + gap + value_w + gap;
-            let by = y + 2.0 * s;
-            widgets::draw_button(
-                &mut self.pixmap, tr, bx, by, btn_w, btn_h,
-                "\u{2192} Gain", false, false,
-            );
-            self.hit_regions.push(HitRegion {
-                x: bx, y: by, w: btn_w, h: btn_h,
-                action: HitAction::Button(ButtonAction::GainFromReading(source)),
-            });
+            for &(label, db, source) in &gain_sources {
+                let val = format_db(db);
+                tr.draw_text(&mut self.pixmap, pad, y + font_size, label, font_size, widgets::color_muted());
+                tr.draw_text(&mut self.pixmap, pad + label_w + gap, y + font_size, &val, font_size, widgets::color_text());
+                let bx = pad + label_w + gap + value_w + gap;
+                let by = y + 2.0 * s;
+                widgets::draw_button(
+                    &mut self.pixmap, tr, bx, by, btn_w, btn_h,
+                    "\u{2192} Gain", false, false,
+                );
+                self.hit_regions.push(HitRegion {
+                    x: bx, y: by, w: btn_w, h: btn_h,
+                    action: HitAction::Button(ButtonAction::GainFromReading(source)),
+                });
+                y += row_h;
+            }
+
+            // Crest (no button)
+            let crest_val = if crest_db <= -100.0 { "-- dB".to_string() } else { format!("{:.1} dB", crest_db) };
+            tr.draw_text(&mut self.pixmap, pad, y + font_size, "Crest", font_size, widgets::color_muted());
+            tr.draw_text(&mut self.pixmap, pad + label_w + gap, y + font_size, &crest_val, font_size, widgets::color_text());
             y += row_h;
-        }
+        } else {
+            // ── LUFS mode readings (placeholders) ──
+            let lufs_rows: &[(&str, &str)] = &[
+                ("Integrated", &format_lufs(MeterReadings::load_db(&self.readings.lufs_integrated))),
+                ("Short-Term", &format_lufs(MeterReadings::load_db(&self.readings.lufs_short_term))),
+                ("ST Max", &format_lufs(MeterReadings::load_db(&self.readings.lufs_short_term_max))),
+                ("Momentary", &format_lufs(MeterReadings::load_db(&self.readings.lufs_momentary))),
+                ("Mom Max", &format_lufs(MeterReadings::load_db(&self.readings.lufs_momentary_max))),
+                ("True Peak", &format_dbtp(MeterReadings::load_db(&self.readings.true_peak_max_db))),
+                ("LRA", &format_lu(MeterReadings::load_db(&self.readings.lufs_range))),
+            ];
 
-        // Crest (no button)
-        let crest_val = if crest_db <= -100.0 { "-- dB".to_string() } else { format!("{:.1} dB", crest_db) };
-        tr.draw_text(&mut self.pixmap, pad, y + font_size, "Crest", font_size, widgets::color_muted());
-        tr.draw_text(&mut self.pixmap, pad + label_w + gap, y + font_size, &crest_val, font_size, widgets::color_text());
-        y += row_h;
+            for &(label, val) in lufs_rows {
+                tr.draw_text(&mut self.pixmap, pad, y + font_size, label, font_size, widgets::color_muted());
+                tr.draw_text(&mut self.pixmap, pad + label_w + gap, y + font_size, val, font_size, widgets::color_text());
+                y += row_h;
+            }
+        }
 
         // Reset button
         let reset_x = pad;
@@ -352,6 +398,7 @@ impl GsMeterWindow {
             ParamId::Reference => setter.begin_set_parameter(&self.params.reference_level),
             ParamId::RmsWindow => setter.begin_set_parameter(&self.params.rms_window_ms),
             ParamId::ChannelMode => setter.begin_set_parameter(&self.params.channel_mode),
+            ParamId::MeterMode => setter.begin_set_parameter(&self.params.meter_mode),
         }
     }
 
@@ -361,6 +408,7 @@ impl GsMeterWindow {
             ParamId::Reference => setter.set_parameter_normalized(&self.params.reference_level, normalized),
             ParamId::RmsWindow => setter.set_parameter_normalized(&self.params.rms_window_ms, normalized),
             ParamId::ChannelMode => setter.set_parameter_normalized(&self.params.channel_mode, normalized),
+            ParamId::MeterMode => setter.set_parameter_normalized(&self.params.meter_mode, normalized),
         }
     }
 
@@ -372,6 +420,12 @@ impl GsMeterWindow {
                 _ => crate::ChannelMode::Right,
             };
             setter.set_parameter(&self.params.channel_mode, mode);
+        } else if id == ParamId::MeterMode {
+            let mode = match index {
+                0 => crate::MeterMode::Db,
+                _ => crate::MeterMode::Lufs,
+            };
+            setter.set_parameter(&self.params.meter_mode, mode);
         }
     }
 
@@ -398,6 +452,11 @@ impl GsMeterWindow {
                 setter.set_parameter_normalized(&self.params.channel_mode, self.params.channel_mode.default_normalized_value());
                 setter.end_set_parameter(&self.params.channel_mode);
             }
+            ParamId::MeterMode => {
+                setter.begin_set_parameter(&self.params.meter_mode);
+                setter.set_parameter_normalized(&self.params.meter_mode, self.params.meter_mode.default_normalized_value());
+                setter.end_set_parameter(&self.params.meter_mode);
+            }
         }
     }
 
@@ -407,6 +466,7 @@ impl GsMeterWindow {
             ParamId::Reference => setter.end_set_parameter(&self.params.reference_level),
             ParamId::RmsWindow => setter.end_set_parameter(&self.params.rms_window_ms),
             ParamId::ChannelMode => setter.end_set_parameter(&self.params.channel_mode),
+            ParamId::MeterMode => setter.end_set_parameter(&self.params.meter_mode),
         }
     }
 
@@ -455,11 +515,19 @@ impl GsMeterWindow {
 }
 
 fn format_db(db: f32) -> String {
-    if db <= -100.0 {
-        "-inf dB".to_string()
-    } else {
-        format!("{:.1} dB", db)
-    }
+    if db <= -100.0 { "-inf dB".to_string() } else { format!("{:.1} dB", db) }
+}
+
+fn format_lufs(val: f32) -> String {
+    if val <= -100.0 { "-- LUFS".to_string() } else { format!("{:.1} LUFS", val) }
+}
+
+fn format_dbtp(val: f32) -> String {
+    if val <= -100.0 { "-inf dBTP".to_string() } else { format!("{:.1} dBTP", val) }
+}
+
+fn format_lu(val: f32) -> String {
+    if val <= -100.0 { "-- LU".to_string() } else { format!("{:.1} LU", val) }
 }
 
 impl baseview::WindowHandler for GsMeterWindow {
