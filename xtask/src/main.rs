@@ -24,7 +24,7 @@ fn bundle() -> Result<()> {
     println!("Building plugin bundles...");
 
     let status = Command::new("cargo")
-        .args(&["xtask", "bundle", "wavetable-filter", "--release"])
+        .args(["xtask", "bundle", "wavetable-filter", "--release"])
         .status()?;
 
     if !status.success() {
@@ -39,7 +39,7 @@ fn bundle_universal() -> Result<()> {
     println!("Building universal plugin bundles...");
 
     let status = Command::new("cargo")
-        .args(&["xtask", "bundle-universal", "wavetable-filter", "--release"])
+        .args(["xtask", "bundle-universal", "wavetable-filter", "--release"])
         .status()?;
 
     if !status.success() {
