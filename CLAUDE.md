@@ -10,7 +10,7 @@ Tract Plugin Pack is a Cargo workspace containing multiple audio effect plugins 
 
 **Wavetable Filter** — uses wavetable frames as FIR filter kernels. Two modes: Raw (direct convolution, zero latency) and Phaseless (STFT magnitude-only filtering, no pre-ringing). GUI uses nih_plug_vizia.
 
-**GS Meter** — lightweight loudness meter with gain utility for clip-to-zero workflows. Tracks peak, true peak (ITU-R BS.1770-4), RMS integrated/momentary, crest factor. GUI uses softbuffer + tiny-skia (CPU rendering, no GPU). Designed for 50+ instances per project.
+**GS Meter** — lightweight loudness meter with gain utility for clip-to-zero workflows. Tracks peak, true peak (ITU-R BS.1770-4), RMS integrated/momentary, crest factor. GUI uses softbuffer + tiny-skia (CPU rendering, no GPU). Designed for 100+ instances per project.
 
 ## Workspace Structure
 

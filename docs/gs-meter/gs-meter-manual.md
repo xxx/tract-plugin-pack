@@ -12,13 +12,13 @@ colorlinks: true
 
 ## What is GS Meter?
 
-GS Meter is a lightweight loudness meter with an integrated gain utility, purpose-built for clip-to-zero workflows. It is designed to replace dpMeter5 in projects where you need a meter on every track, bus, and master -- 50+ instances without killing your CPU or eating your RAM.
+GS Meter is a lightweight loudness meter with an integrated gain utility, purpose-built for clip-to-zero workflows. It is designed to replace dpMeter5 in projects where you need a meter on every track, bus, and master -- 100+ instances without killing your CPU or eating your RAM.
 
 **If you're not doing clip-to-zero, this plugin is probably not for you.** It has no visual meters, no bar graphs, no loudness history. It shows numbers and lets you set gain from them. That's it.
 
 ## Why does this exist?
 
-dpMeter5 is the standard meter for clip-to-zero, but running 50+ instances of any full-featured meter adds up. GS Meter is built from the ground up for density:
+dpMeter5 is the standard meter for clip-to-zero, but running 100+ instances of any full-featured meter adds up. GS Meter is built from the ground up for density:
 
 - **CPU rendering** -- no OpenGL, no GPU driver loaded. Zero memory overhead when the GUI is closed.
 - **SIMD metering** -- peak detection and RMS accumulation use f32x16 SIMD, true peak FIR uses SIMD dot products.
