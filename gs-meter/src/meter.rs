@@ -1032,4 +1032,124 @@ mod tests {
         m.process_sample(0.0);
         assert!(approx_eq(m.rms_momentary_linear(), 0.0));
     }
+
+    #[test]
+    fn test_buffer_channel_matches_scalar() {
+        // Verify process_buffer_channel gives identical results to process_sample loop
+        let samples: Vec<f32> = (0..1024)
+            .map(|i| (i as f32 / 1024.0 * std::f32::consts::TAU * 5.0).sin() * 0.8)
+            .collect();
+
+        let mut scalar = ChannelMeter::new(100);
+        for &s in &samples {
+            scalar.process_sample(s);
+        }
+        scalar.update_momentary_max();
+
+        let mut batched = ChannelMeter::new(100);
+        batched.process_buffer_channel(&samples);
+        batched.update_momentary_max();
+
+        assert!(
+            approx_eq(scalar.peak_max(), batched.peak_max()),
+            "peak: scalar={}, batched={}", scalar.peak_max(), batched.peak_max()
+        );
+        assert!(
+            approx_eq(scalar.rms_integrated_linear(), batched.rms_integrated_linear()),
+            "rms_int: scalar={}, batched={}", scalar.rms_integrated_linear(), batched.rms_integrated_linear()
+        );
+        assert!(
+            approx_eq(scalar.rms_momentary_linear(), batched.rms_momentary_linear()),
+            "rms_mom: scalar={}, batched={}", scalar.rms_momentary_linear(), batched.rms_momentary_linear()
+        );
+        assert!(
+            approx_eq(scalar.true_peak_max(), batched.true_peak_max()),
+            "true_peak: scalar={}, batched={}", scalar.true_peak_max(), batched.true_peak_max()
+        );
+        assert!(
+            approx_eq(scalar.rms_momentary_max(), batched.rms_momentary_max()),
+            "rms_mom_max: scalar={}, batched={}", scalar.rms_momentary_max(), batched.rms_momentary_max()
+        );
+    }
+
+    #[test]
+    fn test_simd_peak_sumsq() {
+        let samples: Vec<f32> = vec![0.1, -0.5, 0.3, 0.9, -0.2, 0.0, 0.4, -0.7,
+                                      0.6, -0.1, 0.8, -0.3, 0.2, -0.9, 0.5, -0.4];
+        let (peak, sumsq) = simd_peak_sumsq(&samples);
+
+        // Scalar reference
+        let expected_peak = samples.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
+        let expected_sumsq: f64 = samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+
+        assert!(
+            approx_eq(peak, expected_peak),
+            "peak: simd={}, scalar={}", peak, expected_peak
+        );
+        assert!(
+            (sumsq - expected_sumsq).abs() < 1e-4,
+            "sumsq: simd={}, scalar={}", sumsq, expected_sumsq
+        );
+    }
+
+    #[test]
+    fn test_simd_peak_sumsq_tail() {
+        // Non-multiple-of-16 length to exercise scalar tail
+        let samples: Vec<f32> = (0..37)
+            .map(|i| (i as f32 * 0.1).sin())
+            .collect();
+        let (peak, sumsq) = simd_peak_sumsq(&samples);
+
+        let expected_peak = samples.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
+        let expected_sumsq: f64 = samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+
+        assert!(
+            approx_eq(peak, expected_peak),
+            "tail peak: simd={}, scalar={}", peak, expected_peak
+        );
+        assert!(
+            (sumsq - expected_sumsq).abs() < 1e-4,
+            "tail sumsq: simd={}, scalar={}", sumsq, expected_sumsq
+        );
+    }
+
+    #[test]
+    fn test_dot12_simd_matches_scalar() {
+        let history: [f32; 12] = [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8, 0.9, -1.0, 0.5, -0.3];
+        for phase in 0..4 {
+            let simd_result = dot12_simd(&history, &ITU_COEFFS_PADDED[phase]);
+            let scalar_result: f32 = history.iter()
+                .zip(ITU_COEFFS[phase].iter())
+                .map(|(h, c)| h * c)
+                .sum();
+            assert!(
+                (simd_result - scalar_result).abs() < 1e-5,
+                "phase {}: simd={}, scalar={}", phase, simd_result, scalar_result
+            );
+        }
+    }
+
+    #[test]
+    fn test_stereo_set_sample_rate() {
+        let mut m = StereoMeter::new(100);
+        m.set_sample_rate(96000.0);
+        // Should propagate to both channels — feed a signal and check true peak works
+        let signal: Vec<f32> = (0..30)
+            .map(|i| (i as f64 / 3.0 * std::f64::consts::TAU).sin() as f32)
+            .collect();
+        m.process_buffer(&signal, &signal);
+        assert!(m.true_peak_max_stereo() >= m.peak_max_stereo());
+    }
+
+    #[test]
+    fn test_stereo_set_window_size() {
+        let mut m = StereoMeter::new(100);
+        let signal: Vec<f32> = vec![0.5; 100];
+        m.process_buffer(&signal, &signal);
+        assert!(m.rms_momentary_max_stereo() > 0.0);
+
+        // Resize should clear momentary max
+        m.set_window_size(200);
+        assert_eq!(m.rms_momentary_max_stereo(), 0.0);
+    }
 }
