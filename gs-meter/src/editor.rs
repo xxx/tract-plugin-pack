@@ -64,6 +64,46 @@ impl<'a> PersistentField<'a, GsMeterEditorState> for Arc<GsMeterEditorState> {
 
 // ── Window Handler ──────────────────────────────────────────────────────
 
+/// A rectangular hit region with an associated action.
+#[derive(Clone)]
+struct HitRegion {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    action: HitAction,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum HitAction {
+    Slider(ParamId),
+    SteppedSegment { param: ParamId, index: i32 },
+    Button(ButtonAction),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ParamId {
+    Gain,
+    Reference,
+    RmsWindow,
+    ChannelMode,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ButtonAction {
+    Reset,
+    GainFromReading(GainSource),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum GainSource {
+    PeakMax,
+    TruePeak,
+    RmsIntegrated,
+    RmsMomentary,
+    RmsMomentaryMax,
+}
+
 struct GsMeterWindow {
     gui_context: Arc<dyn GuiContext>,
     _sb_context: softbuffer::Context<SoftbufferHandleAdapter>,
@@ -77,6 +117,14 @@ struct GsMeterWindow {
     readings: Arc<MeterReadings>,
     should_reset: Arc<AtomicBool>,
     text_renderer: widgets::TextRenderer,
+
+    /// Hit regions rebuilt each frame during draw().
+    hit_regions: Vec<HitRegion>,
+    /// Currently dragging a slider.
+    drag_active: Option<ParamId>,
+    /// Mouse position in physical pixels.
+    mouse_x: f32,
+    mouse_y: f32,
 }
 
 impl GsMeterWindow {
@@ -120,13 +168,18 @@ impl GsMeterWindow {
             readings,
             should_reset,
             text_renderer,
+            hit_regions: Vec::new(),
+            drag_active: None,
+            mouse_x: 0.0,
+            mouse_y: 0.0,
         }
     }
 
     fn draw(&mut self) {
         let s = self.scale_factor;
 
-        // Clear background
+        // Clear hit regions and background
+        self.hit_regions.clear();
         self.pixmap.fill(widgets::color_bg());
 
         let pad = 20.0 * s;
@@ -138,7 +191,8 @@ impl GsMeterWindow {
         let slider_h = 26.0 * s;
         let value_w = 120.0 * s;
         let btn_w = 70.0 * s;
-        let _btn_h = 24.0 * s;
+        let btn_h = 24.0 * s;
+        let gap = 10.0 * s;
 
         let mut y = 15.0 * s;
         let tr = &mut self.text_renderer;
@@ -162,79 +216,136 @@ impl GsMeterWindow {
             crate::ChannelMode::Right => 2,
         };
         tr.draw_text(&mut self.pixmap, pad, y + font_size, "Channel", font_size, widgets::color_muted());
+        let sel_x = pad + label_w;
+        let sel_y = y + 4.0 * s;
         widgets::draw_stepped_selector(
-            &mut self.pixmap, tr, pad + label_w, y + 4.0 * s, slider_w, slider_h,
+            &mut self.pixmap, tr, sel_x, sel_y, slider_w, slider_h,
             &["Stereo", "Left", "Right"], mode_idx,
         );
+        // Register hit regions for each segment
+        let seg_w = slider_w / 3.0;
+        for i in 0..3 {
+            self.hit_regions.push(HitRegion {
+                x: sel_x + i as f32 * seg_w, y: sel_y, w: seg_w, h: slider_h,
+                action: HitAction::SteppedSegment { param: ParamId::ChannelMode, index: i },
+            });
+        }
         y += row_h;
 
-        // Gain slider
-        let gain_db = nih_plug::util::gain_to_db(self.params.gain.value());
-        let gain_text = format!("{:.1} dB", gain_db);
-        tr.draw_text(&mut self.pixmap, pad, y + font_size, "Gain", font_size, widgets::color_muted());
-        widgets::draw_slider(
-            &mut self.pixmap, tr, pad + label_w, y + 4.0 * s, slider_w, slider_h,
-            "", &gain_text, self.params.gain.unmodulated_normalized_value(),
-        );
-        y += row_h;
+        // Helper: draw a labeled slider and register its hit region
+        macro_rules! slider_row {
+            ($label:expr, $param:expr, $param_id:expr, $value_text:expr) => {
+                tr.draw_text(&mut self.pixmap, pad, y + font_size, $label, font_size, widgets::color_muted());
+                let sx = pad + label_w;
+                let sy = y + 4.0 * s;
+                widgets::draw_slider(
+                    &mut self.pixmap, tr, sx, sy, slider_w, slider_h,
+                    "", $value_text, $param.unmodulated_normalized_value(),
+                );
+                self.hit_regions.push(HitRegion {
+                    x: sx, y: sy, w: slider_w, h: slider_h,
+                    action: HitAction::Slider($param_id),
+                });
+                y += row_h;
+            };
+        }
 
-        // Reference slider
+        let gain_text = format!("{:.1} dB", nih_plug::util::gain_to_db(self.params.gain.value()));
+        slider_row!("Gain", self.params.gain, ParamId::Gain, &gain_text);
+
         let ref_text = format!("{:.1} dB", self.params.reference_level.value());
-        tr.draw_text(&mut self.pixmap, pad, y + font_size, "Reference", font_size, widgets::color_muted());
-        widgets::draw_slider(
-            &mut self.pixmap, tr, pad + label_w, y + 4.0 * s, slider_w, slider_h,
-            "", &ref_text, self.params.reference_level.unmodulated_normalized_value(),
-        );
-        y += row_h;
+        slider_row!("Reference", self.params.reference_level, ParamId::Reference, &ref_text);
 
-        // RMS Window slider
         let window_text = format!("{:.0} ms", self.params.rms_window_ms.value());
-        tr.draw_text(&mut self.pixmap, pad, y + font_size, "RMS Window", font_size, widgets::color_muted());
-        widgets::draw_slider(
-            &mut self.pixmap, tr, pad + label_w, y + 4.0 * s, slider_w, slider_h,
-            "", &window_text, self.params.rms_window_ms.unmodulated_normalized_value(),
-        );
-        y += row_h;
+        slider_row!("RMS Window", self.params.rms_window_ms, ParamId::RmsWindow, &window_text);
 
         // Readings header
         tr.draw_text(&mut self.pixmap, pad, y + font_size + 2.0 * s, "Readings", font_size * 1.1, widgets::color_text());
         y += 30.0 * s;
 
         // Meter rows with → Gain buttons
-        let meter_rows: &[(&str, f32)] = &[
-            ("Peak Max", peak_db),
-            ("True Peak", true_peak_db),
-            ("RMS (Int)", rms_int_db),
-            ("RMS (Mom)", rms_mom_db),
-            ("RMS Max", rms_max_db),
+        let gain_sources = [
+            ("Peak Max", peak_db, GainSource::PeakMax),
+            ("True Peak", true_peak_db, GainSource::TruePeak),
+            ("RMS (Int)", rms_int_db, GainSource::RmsIntegrated),
+            ("RMS (Mom)", rms_mom_db, GainSource::RmsMomentary),
+            ("RMS Max", rms_max_db, GainSource::RmsMomentaryMax),
         ];
 
-        let gap = 10.0 * s;
-        for &(label, db) in meter_rows {
+        for &(label, db, source) in &gain_sources {
             let val = format_db(db);
             tr.draw_text(&mut self.pixmap, pad, y + font_size, label, font_size, widgets::color_muted());
             tr.draw_text(&mut self.pixmap, pad + label_w + gap, y + font_size, &val, font_size, widgets::color_text());
+            let bx = pad + label_w + gap + value_w + gap;
+            let by = y + 2.0 * s;
             widgets::draw_button(
-                &mut self.pixmap, tr,
-                pad + label_w + gap + value_w + gap, y + 2.0 * s,
-                btn_w, _btn_h, "\u{2192} Gain", false, false,
+                &mut self.pixmap, tr, bx, by, btn_w, btn_h,
+                "\u{2192} Gain", false, false,
             );
+            self.hit_regions.push(HitRegion {
+                x: bx, y: by, w: btn_w, h: btn_h,
+                action: HitAction::Button(ButtonAction::GainFromReading(source)),
+            });
             y += row_h;
         }
 
         // Crest (no button)
-        let crest_val = if crest_db <= -100.0 {
-            "-- dB".to_string()
-        } else {
-            format!("{:.1} dB", crest_db)
-        };
+        let crest_val = if crest_db <= -100.0 { "-- dB".to_string() } else { format!("{:.1} dB", crest_db) };
         tr.draw_text(&mut self.pixmap, pad, y + font_size, "Crest", font_size, widgets::color_muted());
         tr.draw_text(&mut self.pixmap, pad + label_w + gap, y + font_size, &crest_val, font_size, widgets::color_text());
         y += row_h;
 
         // Reset button
-        widgets::draw_button(&mut self.pixmap, tr, pad, y + 2.0 * s, 100.0 * s, 28.0 * s,
-            "Reset", false, false);
+        let reset_x = pad;
+        let reset_y = y + 2.0 * s;
+        let reset_w = 100.0 * s;
+        let reset_h = 28.0 * s;
+        widgets::draw_button(&mut self.pixmap, tr, reset_x, reset_y, reset_w, reset_h, "Reset", false, false);
+        self.hit_regions.push(HitRegion {
+            x: reset_x, y: reset_y, w: reset_w, h: reset_h,
+            action: HitAction::Button(ButtonAction::Reset),
+        });
+    }
+
+    fn begin_set_param(&self, setter: &ParamSetter, id: ParamId) {
+        match id {
+            ParamId::Gain => setter.begin_set_parameter(&self.params.gain),
+            ParamId::Reference => setter.begin_set_parameter(&self.params.reference_level),
+            ParamId::RmsWindow => setter.begin_set_parameter(&self.params.rms_window_ms),
+            ParamId::ChannelMode => setter.begin_set_parameter(&self.params.channel_mode),
+        }
+    }
+
+    fn set_param_normalized(&self, setter: &ParamSetter, id: ParamId, normalized: f32) {
+        match id {
+            ParamId::Gain => setter.set_parameter_normalized(&self.params.gain, normalized),
+            ParamId::Reference => setter.set_parameter_normalized(&self.params.reference_level, normalized),
+            ParamId::RmsWindow => setter.set_parameter_normalized(&self.params.rms_window_ms, normalized),
+            ParamId::ChannelMode => setter.set_parameter_normalized(&self.params.channel_mode, normalized),
+        }
+    }
+
+    fn set_param_stepped(&self, setter: &ParamSetter, id: ParamId, index: i32) {
+        match id {
+            ParamId::ChannelMode => {
+                let mode = match index {
+                    0 => crate::ChannelMode::Stereo,
+                    1 => crate::ChannelMode::Left,
+                    _ => crate::ChannelMode::Right,
+                };
+                setter.set_parameter(&self.params.channel_mode, mode);
+            }
+            _ => {}
+        }
+    }
+
+    fn end_set_param(&self, setter: &ParamSetter, id: ParamId) {
+        match id {
+            ParamId::Gain => setter.end_set_parameter(&self.params.gain),
+            ParamId::Reference => setter.end_set_parameter(&self.params.reference_level),
+            ParamId::RmsWindow => setter.end_set_parameter(&self.params.rms_window_ms),
+            ParamId::ChannelMode => setter.end_set_parameter(&self.params.channel_mode),
+        }
     }
 
     fn resize_buffers(&mut self) {
@@ -295,8 +406,73 @@ impl baseview::WindowHandler for GsMeterWindow {
 
                 self.resize_buffers();
             }
+            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved { position, .. }) => {
+                self.mouse_x = position.x as f32;
+                self.mouse_y = position.y as f32;
+
+                // Handle slider drag
+                if let Some(param_id) = self.drag_active {
+                    if let Some(region) = self.hit_regions.iter().find(|r| {
+                        matches!(&r.action, HitAction::Slider(id) if *id == param_id)
+                    }) {
+                        let normalized = ((self.mouse_x - region.x) / region.w).clamp(0.0, 1.0);
+                        let setter = ParamSetter::new(self.gui_context.as_ref());
+                        self.set_param_normalized(&setter, param_id, normalized);
+                    }
+                }
+            }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed { button: baseview::MouseButton::Left, .. }) => {
-                // TODO: Hit testing for buttons/sliders
+                let mx = self.mouse_x;
+                let my = self.mouse_y;
+
+                // Find which hit region was clicked
+                let hit = self.hit_regions.iter().find(|r| {
+                    mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h
+                }).cloned();
+
+                if let Some(region) = hit {
+                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                    match region.action {
+                        HitAction::Slider(param_id) => {
+                            self.drag_active = Some(param_id);
+                            let normalized = ((mx - region.x) / region.w).clamp(0.0, 1.0);
+                            self.begin_set_param(&setter, param_id);
+                            self.set_param_normalized(&setter, param_id, normalized);
+                        }
+                        HitAction::SteppedSegment { param, index } => {
+                            self.begin_set_param(&setter, param);
+                            self.set_param_stepped(&setter, param, index);
+                            self.end_set_param(&setter, param);
+                        }
+                        HitAction::Button(ButtonAction::Reset) => {
+                            self.should_reset.store(true, Ordering::Relaxed);
+                        }
+                        HitAction::Button(ButtonAction::GainFromReading(source)) => {
+                            let meter_db = match source {
+                                GainSource::PeakMax => MeterReadings::load_db(&self.readings.peak_max_db),
+                                GainSource::TruePeak => MeterReadings::load_db(&self.readings.true_peak_max_db),
+                                GainSource::RmsIntegrated => MeterReadings::load_db(&self.readings.rms_integrated_db),
+                                GainSource::RmsMomentary => MeterReadings::load_db(&self.readings.rms_momentary_db),
+                                GainSource::RmsMomentaryMax => MeterReadings::load_db(&self.readings.rms_momentary_max_db),
+                            };
+                            if meter_db > -100.0 {
+                                let reference = self.params.reference_level.value();
+                                let target_gain_db = reference - meter_db;
+                                let target_gain_linear = nih_plug::util::db_to_gain(target_gain_db);
+                                let normalized = self.params.gain.preview_normalized(target_gain_linear);
+                                setter.begin_set_parameter(&self.params.gain);
+                                setter.set_parameter_normalized(&self.params.gain, normalized);
+                                setter.end_set_parameter(&self.params.gain);
+                            }
+                        }
+                    }
+                }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased { button: baseview::MouseButton::Left, .. }) => {
+                if let Some(param_id) = self.drag_active.take() {
+                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                    self.end_set_param(&setter, param_id);
+                }
             }
             baseview::Event::Keyboard(kb_event) => {
                 use keyboard_types::{Key, KeyState, Modifiers};
