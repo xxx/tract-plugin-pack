@@ -154,14 +154,6 @@ Clears all accumulated values in both modes: peak, true peak, RMS, crest, and al
 
 **Double-click** any slider or the channel selector to reset it to its default value.
 
-## Clip-to-Zero Workflow
-
-1. Insert GS Meter on every track and bus (it's cheap -- 100 instances use 5% CPU)
-2. Set your reference level to 0 dB (the default)
-3. Play a representative section of the song
-4. Click the "-> Gain" button next to Peak Max to auto-set the gain
-5. Reset and repeat if needed
-
 ## Technical Notes
 
 - **No audio-thread allocations** -- the process() callback never allocates heap memory
