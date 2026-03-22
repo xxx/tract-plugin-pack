@@ -23,7 +23,7 @@ A lightweight loudness meter with integrated gain utility, purpose-built for [cl
 - One-click gain-from-reading buttons for fast level matching
 - CPU-rendered GUI (tiny-skia + softbuffer) -- no GPU drivers loaded
 - SIMD-optimized metering (`f32x16`)
-- 50 instances: ~16% CPU, 48 MB memory (GUI closed, 48 kHz)
+- Scales sub-linearly: 50 instances @ 16% CPU, 200 @ 30% (single core, GUI closed)
 
 ## Build Requirements
 

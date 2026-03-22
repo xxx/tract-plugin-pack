@@ -22,7 +22,13 @@ dpMeter5 is the standard meter for clip-to-zero, but running 100+ instances of a
 
 - **CPU rendering** -- no OpenGL, no GPU driver loaded. Zero memory overhead when the GUI is closed.
 - **SIMD metering** -- peak detection and RMS accumulation use f32x16 SIMD, true peak FIR uses SIMD dot products.
-- **50 instances: ~16% CPU, 48 MB total memory** (measured at 48 kHz / 1024 samples, GUI closed).
+
+Benchmarks (48 kHz / 1024 samples, GUI closed, single core):
+
+| Instances | CPU | Per Instance |
+|---|---|---|
+| 50 | ~16% | 0.32% |
+| 200 | ~30% | 0.15% |
 
 
 ## Installation
