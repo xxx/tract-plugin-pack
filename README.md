@@ -47,7 +47,11 @@ cargo build --bin wavetable-filter --release
 cargo build --bin gs-meter --release
 ```
 
-Plugins are installed to `~/.vst3/` and `~/.clap/`.
+The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` file (you only need one -- use whichever your DAW supports) to your plugin directory:
+
+- **Linux**: `~/.vst3/` or `~/.clap/`
+- **macOS**: `~/Library/Audio/Plug-Ins/VST3/` or `~/Library/Audio/Plug-Ins/CLAP/`
+- **Windows**: `C:\Program Files\Common Files\VST3\` or `C:\Program Files\Common Files\CLAP\`
 
 ## Workspace Structure
 
