@@ -125,6 +125,9 @@ struct GsMeterWindow {
     /// Mouse position in physical pixels.
     mouse_x: f32,
     mouse_y: f32,
+    /// Timestamp of last click for double-click detection.
+    last_click_time: std::time::Instant,
+    last_click_action: Option<HitAction>,
 }
 
 impl GsMeterWindow {
@@ -172,6 +175,8 @@ impl GsMeterWindow {
             drag_active: None,
             mouse_x: 0.0,
             mouse_y: 0.0,
+            last_click_time: std::time::Instant::now(),
+            last_click_action: None,
         }
     }
 
@@ -339,6 +344,32 @@ impl GsMeterWindow {
         }
     }
 
+    fn reset_param_to_default(&self, setter: &ParamSetter, id: ParamId) {
+        use nih_plug::prelude::Param;
+        match id {
+            ParamId::Gain => {
+                setter.begin_set_parameter(&self.params.gain);
+                setter.set_parameter_normalized(&self.params.gain, self.params.gain.default_normalized_value());
+                setter.end_set_parameter(&self.params.gain);
+            }
+            ParamId::Reference => {
+                setter.begin_set_parameter(&self.params.reference_level);
+                setter.set_parameter_normalized(&self.params.reference_level, self.params.reference_level.default_normalized_value());
+                setter.end_set_parameter(&self.params.reference_level);
+            }
+            ParamId::RmsWindow => {
+                setter.begin_set_parameter(&self.params.rms_window_ms);
+                setter.set_parameter_normalized(&self.params.rms_window_ms, self.params.rms_window_ms.default_normalized_value());
+                setter.end_set_parameter(&self.params.rms_window_ms);
+            }
+            ParamId::ChannelMode => {
+                setter.begin_set_parameter(&self.params.channel_mode);
+                setter.set_parameter_normalized(&self.params.channel_mode, self.params.channel_mode.default_normalized_value());
+                setter.end_set_parameter(&self.params.channel_mode);
+            }
+        }
+    }
+
     fn end_set_param(&self, setter: &ParamSetter, id: ParamId) {
         match id {
             ParamId::Gain => setter.end_set_parameter(&self.params.gain),
@@ -432,17 +463,31 @@ impl baseview::WindowHandler for GsMeterWindow {
 
                 if let Some(region) = hit {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
+                    let now = std::time::Instant::now();
+                    let is_double_click = now.duration_since(self.last_click_time).as_millis() < 400
+                        && self.last_click_action.as_ref() == Some(&region.action);
+                    self.last_click_time = now;
+                    self.last_click_action = Some(region.action);
+
                     match region.action {
                         HitAction::Slider(param_id) => {
-                            self.drag_active = Some(param_id);
-                            let normalized = ((mx - region.x) / region.w).clamp(0.0, 1.0);
-                            self.begin_set_param(&setter, param_id);
-                            self.set_param_normalized(&setter, param_id, normalized);
+                            if is_double_click {
+                                self.reset_param_to_default(&setter, param_id);
+                            } else {
+                                self.drag_active = Some(param_id);
+                                let normalized = ((mx - region.x) / region.w).clamp(0.0, 1.0);
+                                self.begin_set_param(&setter, param_id);
+                                self.set_param_normalized(&setter, param_id, normalized);
+                            }
                         }
                         HitAction::SteppedSegment { param, index } => {
-                            self.begin_set_param(&setter, param);
-                            self.set_param_stepped(&setter, param, index);
-                            self.end_set_param(&setter, param);
+                            if is_double_click {
+                                self.reset_param_to_default(&setter, param);
+                            } else {
+                                self.begin_set_param(&setter, param);
+                                self.set_param_stepped(&setter, param, index);
+                                self.end_set_param(&setter, param);
+                            }
                         }
                         HitAction::Button(ButtonAction::Reset) => {
                             self.should_reset.store(true, Ordering::Relaxed);
