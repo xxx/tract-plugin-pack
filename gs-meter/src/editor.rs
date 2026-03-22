@@ -105,6 +105,13 @@ enum GainSource {
     RmsIntegrated,
     RmsMomentary,
     RmsMomentaryMax,
+    // LUFS mode sources
+    LufsIntegrated,
+    LufsShortTerm,
+    LufsShortTermMax,
+    LufsMomentary,
+    LufsMomentaryMax,
+    LufsTruePeak,
 }
 
 struct GsMeterWindow {
@@ -182,6 +189,22 @@ impl GsMeterWindow {
             mouse_y: 0.0,
             last_click_time: std::time::Instant::now(),
             last_click_action: None,
+        }
+    }
+
+    fn active_gain(&self) -> &FloatParam {
+        if self.params.meter_mode.value() == crate::MeterMode::Lufs {
+            &self.params.gain_lufs
+        } else {
+            &self.params.gain
+        }
+    }
+
+    fn active_reference(&self) -> &FloatParam {
+        if self.params.meter_mode.value() == crate::MeterMode::Lufs {
+            &self.params.reference_lufs
+        } else {
+            &self.params.reference_level
         }
     }
 
@@ -313,11 +336,27 @@ impl GsMeterWindow {
             };
         }
 
-        let gain_text = format!("{:.1} dB", nih_plug::util::gain_to_db(self.params.gain.value()));
-        slider_row!("Gain", self.params.gain, ParamId::Gain, &gain_text);
+        let (active_gain, active_ref) = if meter_mode == crate::MeterMode::Lufs {
+            (&self.params.gain_lufs, &self.params.reference_lufs)
+        } else {
+            (&self.params.gain, &self.params.reference_level)
+        };
 
-        let ref_text = format!("{:.1} dB", self.params.reference_level.value());
-        slider_row!("Reference", self.params.reference_level, ParamId::Reference, &ref_text);
+        let gain_db = nih_plug::util::gain_to_db(active_gain.value());
+        let gain_text = if meter_mode == crate::MeterMode::Lufs {
+            format!("{:.1} LU", gain_db)
+        } else {
+            format!("{:.1} dB", gain_db)
+        };
+        slider_row!("Gain", active_gain, ParamId::Gain, &gain_text);
+
+        let ref_val = active_ref.value();
+        let ref_text = if meter_mode == crate::MeterMode::Lufs {
+            format!("{:.1} LUFS", ref_val)
+        } else {
+            format!("{:.1} dB", ref_val)
+        };
+        slider_row!("Reference", active_ref, ParamId::Reference, &ref_text);
 
         // RMS Window only in dB mode
         if meter_mode == crate::MeterMode::Db {
@@ -362,22 +401,45 @@ impl GsMeterWindow {
             tr.draw_text(&mut self.pixmap, pad + label_w + gap, y + font_size, &crest_val, font_size, widgets::color_text());
             y += row_h;
         } else {
-            // ── LUFS mode readings (placeholders) ──
-            let lufs_rows: &[(&str, &str)] = &[
-                ("Integrated", &format_lufs(MeterReadings::load_db(&self.readings.lufs_integrated))),
-                ("Short-Term", &format_lufs(MeterReadings::load_db(&self.readings.lufs_short_term))),
-                ("ST Max", &format_lufs(MeterReadings::load_db(&self.readings.lufs_short_term_max))),
-                ("Momentary", &format_lufs(MeterReadings::load_db(&self.readings.lufs_momentary))),
-                ("Mom Max", &format_lufs(MeterReadings::load_db(&self.readings.lufs_momentary_max))),
-                ("True Peak", &format_dbtp(MeterReadings::load_db(&self.readings.true_peak_max_db))),
-                ("LRA", &format_lu(MeterReadings::load_db(&self.readings.lufs_range))),
+            // ── LUFS mode readings with gain-match buttons ──
+            let lufs_integrated = MeterReadings::load_db(&self.readings.lufs_integrated);
+            let lufs_short_term = MeterReadings::load_db(&self.readings.lufs_short_term);
+            let lufs_short_term_max = MeterReadings::load_db(&self.readings.lufs_short_term_max);
+            let lufs_momentary = MeterReadings::load_db(&self.readings.lufs_momentary);
+            let lufs_momentary_max = MeterReadings::load_db(&self.readings.lufs_momentary_max);
+            let lufs_true_peak = MeterReadings::load_db(&self.readings.true_peak_max_db);
+            let lufs_range = MeterReadings::load_db(&self.readings.lufs_range);
+
+            let lufs_gain_sources = [
+                ("Integrated", format_lufs(lufs_integrated), GainSource::LufsIntegrated),
+                ("Short-Term", format_lufs(lufs_short_term), GainSource::LufsShortTerm),
+                ("ST Max", format_lufs(lufs_short_term_max), GainSource::LufsShortTermMax),
+                ("Momentary", format_lufs(lufs_momentary), GainSource::LufsMomentary),
+                ("Mom Max", format_lufs(lufs_momentary_max), GainSource::LufsMomentaryMax),
+                ("True Peak", format_dbtp(lufs_true_peak), GainSource::LufsTruePeak),
             ];
 
-            for &(label, val) in lufs_rows {
+            for (label, formatted, source) in &lufs_gain_sources {
                 tr.draw_text(&mut self.pixmap, pad, y + font_size, label, font_size, widgets::color_muted());
-                tr.draw_text(&mut self.pixmap, pad + label_w + gap, y + font_size, val, font_size, widgets::color_text());
+                tr.draw_text(&mut self.pixmap, pad + label_w + gap, y + font_size, formatted, font_size, widgets::color_text());
+                let bx = pad + label_w + gap + value_w + gap;
+                let by = y + 2.0 * s;
+                widgets::draw_button(
+                    &mut self.pixmap, tr, bx, by, btn_w, btn_h,
+                    "\u{2192} Gain", false, false,
+                );
+                self.hit_regions.push(HitRegion {
+                    x: bx, y: by, w: btn_w, h: btn_h,
+                    action: HitAction::Button(ButtonAction::GainFromReading(*source)),
+                });
                 y += row_h;
             }
+
+            // LRA (no gain-match button — it's a range, not an absolute level)
+            let lra_val = format_lu(lufs_range);
+            tr.draw_text(&mut self.pixmap, pad, y + font_size, "LRA", font_size, widgets::color_muted());
+            tr.draw_text(&mut self.pixmap, pad + label_w + gap, y + font_size, &lra_val, font_size, widgets::color_text());
+            y += row_h;
         }
 
         // Reset button
@@ -394,8 +456,8 @@ impl GsMeterWindow {
 
     fn begin_set_param(&self, setter: &ParamSetter, id: ParamId) {
         match id {
-            ParamId::Gain => setter.begin_set_parameter(&self.params.gain),
-            ParamId::Reference => setter.begin_set_parameter(&self.params.reference_level),
+            ParamId::Gain => setter.begin_set_parameter(self.active_gain()),
+            ParamId::Reference => setter.begin_set_parameter(self.active_reference()),
             ParamId::RmsWindow => setter.begin_set_parameter(&self.params.rms_window_ms),
             ParamId::ChannelMode => setter.begin_set_parameter(&self.params.channel_mode),
             ParamId::MeterMode => setter.begin_set_parameter(&self.params.meter_mode),
@@ -404,8 +466,8 @@ impl GsMeterWindow {
 
     fn set_param_normalized(&self, setter: &ParamSetter, id: ParamId, normalized: f32) {
         match id {
-            ParamId::Gain => setter.set_parameter_normalized(&self.params.gain, normalized),
-            ParamId::Reference => setter.set_parameter_normalized(&self.params.reference_level, normalized),
+            ParamId::Gain => setter.set_parameter_normalized(self.active_gain(), normalized),
+            ParamId::Reference => setter.set_parameter_normalized(self.active_reference(), normalized),
             ParamId::RmsWindow => setter.set_parameter_normalized(&self.params.rms_window_ms, normalized),
             ParamId::ChannelMode => setter.set_parameter_normalized(&self.params.channel_mode, normalized),
             ParamId::MeterMode => setter.set_parameter_normalized(&self.params.meter_mode, normalized),
@@ -433,14 +495,16 @@ impl GsMeterWindow {
         use nih_plug::prelude::Param;
         match id {
             ParamId::Gain => {
-                setter.begin_set_parameter(&self.params.gain);
-                setter.set_parameter_normalized(&self.params.gain, self.params.gain.default_normalized_value());
-                setter.end_set_parameter(&self.params.gain);
+                let gain = self.active_gain();
+                setter.begin_set_parameter(gain);
+                setter.set_parameter_normalized(gain, gain.default_normalized_value());
+                setter.end_set_parameter(gain);
             }
             ParamId::Reference => {
-                setter.begin_set_parameter(&self.params.reference_level);
-                setter.set_parameter_normalized(&self.params.reference_level, self.params.reference_level.default_normalized_value());
-                setter.end_set_parameter(&self.params.reference_level);
+                let reference = self.active_reference();
+                setter.begin_set_parameter(reference);
+                setter.set_parameter_normalized(reference, reference.default_normalized_value());
+                setter.end_set_parameter(reference);
             }
             ParamId::RmsWindow => {
                 setter.begin_set_parameter(&self.params.rms_window_ms);
@@ -462,8 +526,8 @@ impl GsMeterWindow {
 
     fn end_set_param(&self, setter: &ParamSetter, id: ParamId) {
         match id {
-            ParamId::Gain => setter.end_set_parameter(&self.params.gain),
-            ParamId::Reference => setter.end_set_parameter(&self.params.reference_level),
+            ParamId::Gain => setter.end_set_parameter(self.active_gain()),
+            ParamId::Reference => setter.end_set_parameter(self.active_reference()),
             ParamId::RmsWindow => setter.end_set_parameter(&self.params.rms_window_ms),
             ParamId::ChannelMode => setter.end_set_parameter(&self.params.channel_mode),
             ParamId::MeterMode => setter.end_set_parameter(&self.params.meter_mode),
@@ -511,6 +575,70 @@ impl GsMeterWindow {
             *dst = 0xFF000000 | (r << 16) | (g << 8) | b;
         }
         buffer.present().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gain_match_reference_minus_reading() {
+        // Reference -14 LUFS, reading -20 LUFS -> need +6 dB gain
+        assert_eq!(gain_match_db(-14.0, -20.0), Some(6.0));
+    }
+
+    #[test]
+    fn test_gain_match_negative_gain() {
+        // Reference -23 LUFS, reading -14 LUFS -> need -9 dB gain (too loud)
+        assert_eq!(gain_match_db(-23.0, -14.0), Some(-9.0));
+    }
+
+    #[test]
+    fn test_gain_match_zero_when_matched() {
+        // Already at target -> 0 dB gain
+        assert_eq!(gain_match_db(-14.0, -14.0), Some(0.0));
+    }
+
+    #[test]
+    fn test_gain_match_invalid_reading_returns_none() {
+        // Reading at or below floor -> no valid measurement
+        assert_eq!(gain_match_db(-14.0, -100.0), None);
+        assert_eq!(gain_match_db(-14.0, -200.0), None);
+    }
+
+    #[test]
+    fn test_gain_match_just_above_floor() {
+        // Reading just above -100 dB floor -> valid measurement
+        let result = gain_match_db(-14.0, -99.99);
+        assert!(result.is_some());
+        let gain = result.unwrap();
+        assert!((gain - 85.99).abs() < 0.02);
+    }
+
+    #[test]
+    fn test_gain_match_works_for_db_mode_too() {
+        // dB mode: reference 0 dBFS, peak at -3 dB -> need +3 dB
+        assert_eq!(gain_match_db(0.0, -3.0), Some(3.0));
+    }
+
+    #[test]
+    fn test_gain_match_positive_reading() {
+        // Reading above 0 (clipping) -> large negative gain
+        assert_eq!(gain_match_db(-14.0, 2.0), Some(-16.0));
+    }
+}
+
+/// Compute the gain adjustment (in dB) needed to match a meter reading to a reference level.
+/// Returns None if the reading is below the -100 dB floor (no valid measurement).
+/// Works identically for dB and LUFS modes since both are absolute dB-scale units.
+/// Note: the returned value may exceed the gain parameter's range (-40..+40 dB);
+/// nih-plug's parameter system will clamp it when applied.
+fn gain_match_db(reference: f32, meter_reading: f32) -> Option<f32> {
+    if meter_reading <= -100.0 {
+        None
+    } else {
+        Some(reference - meter_reading)
     }
 }
 
@@ -623,15 +751,20 @@ impl baseview::WindowHandler for GsMeterWindow {
                                 GainSource::RmsIntegrated => MeterReadings::load_db(&self.readings.rms_integrated_db),
                                 GainSource::RmsMomentary => MeterReadings::load_db(&self.readings.rms_momentary_db),
                                 GainSource::RmsMomentaryMax => MeterReadings::load_db(&self.readings.rms_momentary_max_db),
+                                GainSource::LufsIntegrated => MeterReadings::load_db(&self.readings.lufs_integrated),
+                                GainSource::LufsShortTerm => MeterReadings::load_db(&self.readings.lufs_short_term),
+                                GainSource::LufsShortTermMax => MeterReadings::load_db(&self.readings.lufs_short_term_max),
+                                GainSource::LufsMomentary => MeterReadings::load_db(&self.readings.lufs_momentary),
+                                GainSource::LufsMomentaryMax => MeterReadings::load_db(&self.readings.lufs_momentary_max),
+                                GainSource::LufsTruePeak => MeterReadings::load_db(&self.readings.true_peak_max_db),
                             };
-                            if meter_db > -100.0 {
-                                let reference = self.params.reference_level.value();
-                                let target_gain_db = reference - meter_db;
+                            if let Some(target_gain_db) = gain_match_db(self.active_reference().value(), meter_db) {
                                 let target_gain_linear = nih_plug::util::db_to_gain(target_gain_db);
-                                let normalized = self.params.gain.preview_normalized(target_gain_linear);
-                                setter.begin_set_parameter(&self.params.gain);
-                                setter.set_parameter_normalized(&self.params.gain, normalized);
-                                setter.end_set_parameter(&self.params.gain);
+                                let active_gain = self.active_gain();
+                                let normalized = active_gain.preview_normalized(target_gain_linear);
+                                setter.begin_set_parameter(active_gain);
+                                setter.set_parameter_normalized(active_gain, normalized);
+                                setter.end_set_parameter(active_gain);
                             }
                         }
                     }

@@ -109,6 +109,12 @@ pub struct GsMeterParams {
     #[id = "reference"]
     pub reference_level: FloatParam,
 
+    #[id = "gain_lufs"]
+    pub gain_lufs: FloatParam,
+
+    #[id = "reference_lufs"]
+    pub reference_lufs: FloatParam,
+
     #[id = "rms_window"]
     pub rms_window_ms: FloatParam,
 
@@ -165,6 +171,31 @@ impl GsMeterParams {
                 },
             )
             .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
+            gain_lufs: FloatParam::new(
+                "Gain (LUFS)",
+                util::db_to_gain(0.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(-40.0),
+                    max: util::db_to_gain(40.0),
+                    factor: FloatRange::skew_factor(-1.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" LU")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+
+            reference_lufs: FloatParam::new(
+                "Reference (LUFS)",
+                -14.0,
+                FloatRange::Linear {
+                    min: -60.0,
+                    max: 0.0,
+                },
+            )
+            .with_unit(" LUFS")
             .with_value_to_string(formatters::v2s_f32_rounded(1)),
 
             rms_window_ms: FloatParam::new(
@@ -261,10 +292,15 @@ impl Plugin for GsMeter {
         let channel_slices = buffer.as_slice();
 
         // Apply gain sample-by-sample (with smoothing)
+        // Use mode-appropriate gain parameter
+        let meter_mode = self.params.meter_mode.value();
         // Indexing two channels simultaneously — iterator doesn't apply cleanly
         #[allow(clippy::needless_range_loop)]
         for i in 0..num_samples {
-            let gain = self.params.gain.smoothed.next();
+            let gain = match meter_mode {
+                MeterMode::Db => self.params.gain.smoothed.next(),
+                MeterMode::Lufs => self.params.gain_lufs.smoothed.next(),
+            };
             channel_slices[0][i] *= gain;
             channel_slices[1][i] *= gain;
         }
