@@ -12,3 +12,4 @@
 !wavetable-filter/tests/fixtures/*.wt
 *.png
 !docs/wavetable-filter/*.png
+!docs/gs-meter/*.png

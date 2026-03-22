@@ -8,6 +8,8 @@ colorlinks: true
 
 # GS Meter Manual
 
+![GS Meter interface](screenshot.png){ width=50% }
+
 ## What is GS Meter?
 
 GS Meter is a lightweight loudness meter with an integrated gain utility, purpose-built for clip-to-zero workflows. It is designed to replace dpMeter5 in projects where you need a meter on every track, bus, and master -- 50+ instances without killing your CPU or eating your RAM.
