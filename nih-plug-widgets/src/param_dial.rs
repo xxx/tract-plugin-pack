@@ -125,53 +125,49 @@ impl View for ParamDial {
                 self.param_base.end_set_parameter(cx);
                 meta.consume();
             }
-            WindowEvent::MouseUp(MouseButton::Left) => {
-                if self.drag_active {
-                    self.drag_active = false;
-                    cx.release();
-                    cx.set_active(false);
-                    self.param_base.end_set_parameter(cx);
-                    meta.consume();
-                }
+            WindowEvent::MouseUp(MouseButton::Left) if self.drag_active => {
+                self.drag_active = false;
+                cx.release();
+                cx.set_active(false);
+                self.param_base.end_set_parameter(cx);
+                meta.consume();
             }
-            WindowEvent::MouseMove(_x, y) => {
-                if self.drag_active {
-                    // Vertical drag: up = increase, down = decrease
-                    // 200px of travel = full 0->1 range (scaled by DPI)
-                    let pixels_per_full_range = 200.0 / cx.scale_factor();
+            WindowEvent::MouseMove(_x, y) if self.drag_active => {
+                // Vertical drag: up = increase, down = decrease
+                // 200px of travel = full 0->1 range (scaled by DPI)
+                let pixels_per_full_range = 200.0 / cx.scale_factor();
 
-                    if cx.modifiers().shift() {
-                        let status =
-                            *self
-                                .granular_drag_status
-                                .get_or_insert(GranularDragStatus {
-                                    starting_y_coordinate: *y,
-                                    starting_value: self
-                                        .param_base
-                                        .unmodulated_normalized_value(),
-                                });
-                        let delta_y = status.starting_y_coordinate - *y;
-                        let delta_value =
-                            (delta_y / pixels_per_full_range) * GRANULAR_DRAG_MULTIPLIER;
-                        let new_value = (status.starting_value + delta_value).clamp(0.0, 1.0);
-                        self.param_base.set_normalized_value(cx, new_value);
-                    } else {
-                        self.granular_drag_status = None;
-                        let delta_y = self.drag_start_y - *y;
-                        let delta_value = delta_y / pixels_per_full_range;
-                        let new_value =
-                            (self.drag_start_value + delta_value).clamp(0.0, 1.0);
-                        self.param_base.set_normalized_value(cx, new_value);
-                    }
+                if cx.modifiers().shift() {
+                    let status =
+                        *self
+                            .granular_drag_status
+                            .get_or_insert(GranularDragStatus {
+                                starting_y_coordinate: *y,
+                                starting_value: self
+                                    .param_base
+                                    .unmodulated_normalized_value(),
+                            });
+                    let delta_y = status.starting_y_coordinate - *y;
+                    let delta_value =
+                        (delta_y / pixels_per_full_range) * GRANULAR_DRAG_MULTIPLIER;
+                    let new_value = (status.starting_value + delta_value).clamp(0.0, 1.0);
+                    self.param_base.set_normalized_value(cx, new_value);
+                } else {
+                    self.granular_drag_status = None;
+                    let delta_y = self.drag_start_y - *y;
+                    let delta_value = delta_y / pixels_per_full_range;
+                    let new_value =
+                        (self.drag_start_value + delta_value).clamp(0.0, 1.0);
+                    self.param_base.set_normalized_value(cx, new_value);
                 }
             }
-            WindowEvent::KeyUp(_, Some(Key::Shift)) => {
-                if self.drag_active && self.granular_drag_status.is_some() {
-                    // Snap out of granular drag: update start to current position/value
-                    self.granular_drag_status = None;
-                    self.drag_start_y = cx.mouse().cursory;
-                    self.drag_start_value = self.param_base.unmodulated_normalized_value();
-                }
+            WindowEvent::KeyUp(_, Some(Key::Shift))
+                if self.drag_active && self.granular_drag_status.is_some() =>
+            {
+                // Snap out of granular drag: update start to current position/value
+                self.granular_drag_status = None;
+                self.drag_start_y = cx.mouse().cursory;
+                self.drag_start_value = self.param_base.unmodulated_normalized_value();
             }
             WindowEvent::MouseScroll(_scroll_x, scroll_y) => {
                 self.scrolled_lines += scroll_y;

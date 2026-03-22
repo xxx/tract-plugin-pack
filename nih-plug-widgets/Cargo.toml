@@ -5,5 +5,5 @@ edition = "2021"
 publish = false
 
 [dependencies]
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["simd"] }
-nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+nih_plug = { git = "https://github.com/davemollen/nih-plug.git", branch = "finish-vst3-pr", features = ["simd"] }
+nih_plug_vizia = { git = "https://github.com/davemollen/nih-plug.git", branch = "finish-vst3-pr" }
