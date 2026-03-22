@@ -17,7 +17,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb1-dev libxcb-util-dev libasound2-dev libgl-dev
+          sudo apt-get install -y libxcb1-dev libxcb-util-dev libasound2-dev libgl-dev libdrm-dev libxkbcommon-dev
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly

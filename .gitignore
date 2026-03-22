@@ -1,7 +1,7 @@
 .idea/
 .superpowers/
 /target
-Cargo.lock
+# Cargo.lock is committed for reproducible builds
 *.so
 *.dll
 *.dylib
