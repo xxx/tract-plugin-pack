@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 mod editor;
+pub mod lufs;
 pub mod meter;
 pub mod widgets;
 
@@ -90,6 +91,7 @@ pub enum MeterMode {
 pub struct GsMeter {
     params: Arc<GsMeterParams>,
     stereo_meter: StereoMeter,
+    lufs_meter: lufs::LufsMeter,
     sample_rate: f32,
     last_window_ms: f32,
     readings: Arc<MeterReadings>,
@@ -126,6 +128,7 @@ impl Default for GsMeter {
         Self {
             params: Arc::new(GsMeterParams::new()),
             stereo_meter: StereoMeter::new(window_samples),
+            lufs_meter: lufs::LufsMeter::new(default_sr as f64),
             sample_rate: default_sr,
             last_window_ms: default_window_ms,
             readings: Arc::new(MeterReadings::new()),
@@ -218,10 +221,12 @@ impl Plugin for GsMeter {
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
         self.stereo_meter.set_sample_rate(self.sample_rate);
+        self.lufs_meter.set_sample_rate(self.sample_rate as f64);
         let window_ms = self.params.rms_window_ms.value();
         let window_samples = (self.sample_rate * window_ms / 1000.0) as usize;
         self.stereo_meter.set_window_size(window_samples);
         self.stereo_meter.reset();
+        self.lufs_meter.reset();
         self.last_window_ms = window_ms;
         true
     }
@@ -235,6 +240,7 @@ impl Plugin for GsMeter {
         // Check for reset request from GUI
         if self.should_reset.swap(false, Ordering::Relaxed) {
             self.stereo_meter.reset();
+            self.lufs_meter.reset();
         }
 
         // Check if RMS window size changed
@@ -266,6 +272,13 @@ impl Plugin for GsMeter {
         // Meter the post-gain signal
         let (left, right) = channel_slices.split_at(1);
         self.stereo_meter.process_buffer(left[0], right[0]);
+
+        // LUFS metering (K-weighted, always runs regardless of mode so values
+        // are available immediately when switching to LUFS mode)
+        for i in 0..num_samples {
+            self.lufs_meter.process_sample(left[0][i], right[0][i]);
+        }
+        self.lufs_meter.update_maxes();
 
         // Update shared readings for GUI
         let mode = self.params.channel_mode.value();
@@ -303,13 +316,13 @@ impl Plugin for GsMeter {
         MeterReadings::store_db(&self.readings.rms_momentary_max_db, linear_to_db(rms_mom_max));
         MeterReadings::store_db(&self.readings.crest_factor_db, crest);
 
-        // LUFS placeholders — Phase 2 will replace with real EBU R128 computation
-        MeterReadings::store_db(&self.readings.lufs_integrated, f32::NEG_INFINITY);
-        MeterReadings::store_db(&self.readings.lufs_short_term, f32::NEG_INFINITY);
-        MeterReadings::store_db(&self.readings.lufs_short_term_max, f32::NEG_INFINITY);
-        MeterReadings::store_db(&self.readings.lufs_momentary, f32::NEG_INFINITY);
-        MeterReadings::store_db(&self.readings.lufs_momentary_max, f32::NEG_INFINITY);
-        MeterReadings::store_db(&self.readings.lufs_range, f32::NEG_INFINITY);
+        // LUFS readings from EBU R128 metering
+        MeterReadings::store_db(&self.readings.lufs_integrated, self.lufs_meter.integrated_lufs() as f32);
+        MeterReadings::store_db(&self.readings.lufs_short_term, self.lufs_meter.short_term_lufs() as f32);
+        MeterReadings::store_db(&self.readings.lufs_short_term_max, self.lufs_meter.short_term_max_lufs() as f32);
+        MeterReadings::store_db(&self.readings.lufs_momentary, self.lufs_meter.momentary_lufs() as f32);
+        MeterReadings::store_db(&self.readings.lufs_momentary_max, self.lufs_meter.momentary_max_lufs() as f32);
+        MeterReadings::store_db(&self.readings.lufs_range, self.lufs_meter.loudness_range() as f32);
 
         ProcessStatus::Normal
     }
