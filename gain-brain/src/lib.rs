@@ -52,6 +52,8 @@ pub struct GainBrain {
     group_file: Option<groups::GroupFile>,
     /// Last generation we observed from the group slot (to detect external writes).
     last_seen_generation: u32,
+    /// Last baseline_generation we observed (to detect rebaseline events).
+    last_baseline_generation: u32,
     /// Last gain value (millibels) we wrote/received to/from the group slot.
     last_sent_gain_millibels: i32,
     /// The param value (millibels) from the previous buffer. Used to detect
@@ -62,6 +64,8 @@ pub struct GainBrain {
     last_group: i32,
     /// The link_mode from the previous buffer (to detect mode changes).
     last_link_mode: LinkMode,
+    /// The invert state from the previous buffer (to detect toggles).
+    last_invert: bool,
     /// Sample rate, stored from initialize().
     sample_rate: f32,
     /// Sidecar for group-driven gain overrides. The process loop checks this
@@ -114,10 +118,12 @@ impl Default for GainBrain {
             params: Arc::new(GainBrainParams::new()),
             group_file,
             last_seen_generation: 0,
+            last_baseline_generation: 0,
             last_sent_gain_millibels: 0,
             last_param_value_mb: 0,
             last_group: 0,
             last_link_mode: LinkMode::Absolute,
+            last_invert: false,
             sample_rate: 44100.0,
             group_gain_override: Arc::new(AtomicI32::new(NO_OVERRIDE)),
             relative_baseline_mb: 0,
@@ -246,10 +252,12 @@ struct SyncState<'a> {
     instance_id: u32,
     params: &'a GainBrainParams,
     last_seen_generation: &'a mut u32,
+    last_baseline_generation: &'a mut u32,
     last_sent_gain_millibels: &'a mut i32,
     last_param_value_mb: &'a mut i32,
     last_group: &'a mut i32,
     last_link_mode: &'a mut LinkMode,
+    last_invert: &'a mut bool,
     group_gain_override: &'a AtomicI32,
     relative_baseline_mb: &'a mut i32,
     effective_gain_db: &'a mut f32,
@@ -267,10 +275,12 @@ impl GainBrain {
             instance_id: self.instance_id,
             params: &self.params,
             last_seen_generation: &mut self.last_seen_generation,
+            last_baseline_generation: &mut self.last_baseline_generation,
             last_sent_gain_millibels: &mut self.last_sent_gain_millibels,
             last_param_value_mb: &mut self.last_param_value_mb,
             last_group: &mut self.last_group,
             last_link_mode: &mut self.last_link_mode,
+            last_invert: &mut self.last_invert,
             group_gain_override: &self.group_gain_override,
             relative_baseline_mb: &mut self.relative_baseline_mb,
             effective_gain_db: &mut self.effective_gain_db,
@@ -300,12 +310,51 @@ impl GainBrain {
             return;
         }
 
+        let invert = state.params.invert.value();
+
+        // ── INVERT TOGGLE: re-write slot to prevent discontinuity ────
+        // When invert changes, the slot needs to reflect the new polarity
+        // so other instances don't see a massive delta on the next write.
+        if invert != *state.last_invert {
+            let effective_mb = db_to_millibels(*state.effective_gain_db);
+            let write_mb = if invert { -effective_mb } else { effective_mb };
+            nih_log!("[{}] INVERT TOGGLE: {}→{} effective={} write={} (rebaseline)",
+                state.instance_id, *state.last_invert, invert, effective_mb, write_mb);
+            // Use rebaseline write so readers update their baseline without applying a delta
+            group_file.write_slot_rebaseline(group as u8, write_mb);
+            *state.last_sent_gain_millibels = write_mb;
+            let updated_slot = group_file.read_slot(group as u8);
+            *state.last_seen_generation = updated_slot.generation;
+            *state.last_baseline_generation = updated_slot.baseline_generation;
+            *state.last_invert = invert;
+        }
+
         let slot = group_file.read_slot(group as u8);
 
         // ── READ PATH: check for external changes ──────────────────────
         let id = state.instance_id;
-        let invert = state.params.invert.value();
-        if slot.generation != *state.last_seen_generation
+
+        // If baseline_generation changed, another instance toggled invert.
+        // Re-baseline without applying a delta to avoid a discontinuity.
+        if slot.baseline_generation != *state.last_baseline_generation {
+            nih_log!("[{id}] REBASELINE: baseline_gen {}→{} slot={}",
+                *state.last_baseline_generation, slot.baseline_generation, slot.gain_millibels);
+            *state.relative_baseline_mb = slot.gain_millibels;
+            *state.last_sent_gain_millibels = slot.gain_millibels;
+            *state.last_seen_generation = slot.generation;
+            *state.last_baseline_generation = slot.baseline_generation;
+            // For absolute mode, adopt the new value (potentially inverted)
+            if link_mode == LinkMode::Absolute {
+                let applied_mb = if invert {
+                    (-slot.gain_millibels).clamp(-6000, 6000)
+                } else {
+                    slot.gain_millibels
+                };
+                state.group_gain_override.store(applied_mb, Ordering::Relaxed);
+                *state.effective_gain_db = millibels_to_db(applied_mb);
+            }
+            // For relative mode: baseline updated, effective unchanged — no jump
+        } else if slot.generation != *state.last_seen_generation
             && slot.gain_millibels != *state.last_sent_gain_millibels
         {
             match link_mode {
@@ -466,6 +515,7 @@ impl GainBrain {
         *state.last_param_value_mb = db_to_millibels(current_param_db);
 
         *state.last_seen_generation = slot.generation;
+        *state.last_baseline_generation = slot.baseline_generation;
     }
 }
 

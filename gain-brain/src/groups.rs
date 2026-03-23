@@ -22,6 +22,7 @@ const NUM_GROUPS: usize = 16;
 // Offsets within a slot
 const SLOT_GAIN_OFFSET: usize = 0;
 const SLOT_GEN_OFFSET: usize = 4;
+const SLOT_BASELINE_GEN_OFFSET: usize = 8;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -34,6 +35,9 @@ pub struct GroupFile {
 pub struct GroupSlot {
     pub gain_millibels: i32,
     pub generation: u32,
+    /// Incremented when an invert toggle or similar event requires readers
+    /// to re-baseline without applying a delta.
+    pub baseline_generation: u32,
 }
 
 // ── Implementation ──────────────────────────────────────────────────────────
@@ -137,9 +141,14 @@ impl GroupFile {
             u32::from_le_bytes(self.mmap[offset + SLOT_GEN_OFFSET..offset + SLOT_GEN_OFFSET + 4]
                 .try_into()
                 .unwrap());
+        let baseline_generation =
+            u32::from_le_bytes(self.mmap[offset + SLOT_BASELINE_GEN_OFFSET..offset + SLOT_BASELINE_GEN_OFFSET + 4]
+                .try_into()
+                .unwrap());
         GroupSlot {
             gain_millibels,
             generation,
+            baseline_generation,
         }
     }
 
@@ -147,7 +156,6 @@ impl GroupFile {
     pub fn write_slot(&mut self, group: u8, gain_millibels: i32) {
         let offset = Self::slot_offset(group);
 
-        // Read current generation, then bump it.
         let old_gen =
             u32::from_le_bytes(self.mmap[offset + SLOT_GEN_OFFSET..offset + SLOT_GEN_OFFSET + 4]
                 .try_into()
@@ -158,6 +166,28 @@ impl GroupFile {
             .copy_from_slice(&gain_millibels.to_le_bytes());
         self.mmap[offset + SLOT_GEN_OFFSET..offset + SLOT_GEN_OFFSET + 4]
             .copy_from_slice(&new_gen.to_le_bytes());
+    }
+
+    /// Write gain and increment BOTH generation and baseline_generation.
+    /// Used for invert toggles: readers should re-baseline without applying a delta.
+    pub fn write_slot_rebaseline(&mut self, group: u8, gain_millibels: i32) {
+        let offset = Self::slot_offset(group);
+
+        let old_gen =
+            u32::from_le_bytes(self.mmap[offset + SLOT_GEN_OFFSET..offset + SLOT_GEN_OFFSET + 4]
+                .try_into()
+                .unwrap());
+        let old_baseline =
+            u32::from_le_bytes(self.mmap[offset + SLOT_BASELINE_GEN_OFFSET..offset + SLOT_BASELINE_GEN_OFFSET + 4]
+                .try_into()
+                .unwrap());
+
+        self.mmap[offset + SLOT_GAIN_OFFSET..offset + SLOT_GAIN_OFFSET + 4]
+            .copy_from_slice(&gain_millibels.to_le_bytes());
+        self.mmap[offset + SLOT_GEN_OFFSET..offset + SLOT_GEN_OFFSET + 4]
+            .copy_from_slice(&old_gen.wrapping_add(1).to_le_bytes());
+        self.mmap[offset + SLOT_BASELINE_GEN_OFFSET..offset + SLOT_BASELINE_GEN_OFFSET + 4]
+            .copy_from_slice(&old_baseline.wrapping_add(1).to_le_bytes());
     }
 
     // ── Private helpers ─────────────────────────────────────────────────────
