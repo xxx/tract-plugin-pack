@@ -80,6 +80,7 @@ enum HitAction {
     Button(ButtonAction),
     GroupDecrement,
     GroupIncrement,
+    ToggleInvert,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -338,17 +339,21 @@ impl GainBrainWindow {
             );
             let link_x = pad + label_w;
             let link_y = y + 4.0 * s;
+            // Reduce link selector width to make room for Inv button
+            let inv_w = 40.0 * s;
+            let inv_gap = 8.0 * s;
+            let link_selector_w = slider_w - inv_w - inv_gap;
             widgets::draw_stepped_selector(
                 &mut self.pixmap,
                 tr,
                 link_x,
                 link_y,
-                slider_w,
+                link_selector_w,
                 slider_h,
                 &["Abs", "Rel"],
                 link_idx,
             );
-            let link_seg_w = slider_w / 2.0;
+            let link_seg_w = link_selector_w / 2.0;
             for i in 0..2_i32 {
                 self.hit_regions.push(HitRegion {
                     x: link_x + i as f32 * link_seg_w,
@@ -361,6 +366,17 @@ impl GainBrainWindow {
                     },
                 });
             }
+
+            // Inv toggle button
+            let inv_active = self.params.invert.value();
+            let inv_x = link_x + link_selector_w + inv_gap;
+            let inv_y = link_y;
+            widgets::draw_button(&mut self.pixmap, tr, inv_x, inv_y, inv_w, slider_h, "Inv", inv_active, false);
+            self.hit_regions.push(HitRegion {
+                x: inv_x, y: inv_y, w: inv_w, h: slider_h,
+                action: HitAction::ToggleInvert,
+            });
+
             y += row_h;
         }
 
@@ -622,6 +638,12 @@ impl baseview::WindowHandler for GainBrainWindow {
                             setter.begin_set_parameter(&self.params.group);
                             setter.set_parameter(&self.params.group, next);
                             setter.end_set_parameter(&self.params.group);
+                        }
+                        HitAction::ToggleInvert => {
+                            let current = self.params.invert.value();
+                            setter.begin_set_parameter(&self.params.invert);
+                            setter.set_parameter(&self.params.invert, !current);
+                            setter.end_set_parameter(&self.params.invert);
                         }
                         HitAction::Button(ButtonAction::ScaleDown) => {
                             self.apply_scale_change(-0.25, window);

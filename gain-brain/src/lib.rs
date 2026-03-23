@@ -93,6 +93,9 @@ pub struct GainBrainParams {
 
     #[id = "link_mode"]
     pub link_mode: EnumParam<LinkMode>,
+
+    #[id = "invert"]
+    pub invert: BoolParam,
 }
 
 impl Default for GainBrain {
@@ -146,6 +149,8 @@ impl GainBrainParams {
             group: IntParam::new("Group", 0, IntRange::Linear { min: 0, max: 16 }),
 
             link_mode: EnumParam::new("Link Mode", LinkMode::Absolute),
+
+            invert: BoolParam::new("Invert", false),
         }
     }
 }
@@ -299,21 +304,28 @@ impl GainBrain {
 
         // ── READ PATH: check for external changes ──────────────────────
         let id = state.instance_id;
+        let invert = state.params.invert.value();
         if slot.generation != *state.last_seen_generation
             && slot.gain_millibels != *state.last_sent_gain_millibels
         {
             match link_mode {
                 LinkMode::Absolute => {
-                    nih_log!("[{id}] READ abs: slot={} gen={} last_sent={} → override",
-                        slot.gain_millibels, slot.generation, *state.last_sent_gain_millibels);
+                    let applied_mb = if invert {
+                        (-slot.gain_millibels).clamp(-6000, 6000)
+                    } else {
+                        slot.gain_millibels
+                    };
+                    nih_log!("[{id}] READ abs: slot={} gen={} last_sent={} invert={} → override={}",
+                        slot.gain_millibels, slot.generation, *state.last_sent_gain_millibels, invert, applied_mb);
                     state
                         .group_gain_override
-                        .store(slot.gain_millibels, Ordering::Relaxed);
+                        .store(applied_mb, Ordering::Relaxed);
                     *state.last_sent_gain_millibels = slot.gain_millibels;
-                    *state.effective_gain_db = millibels_to_db(slot.gain_millibels);
+                    *state.effective_gain_db = millibels_to_db(applied_mb);
                 }
                 LinkMode::Relative => {
-                    let delta_mb = slot.gain_millibels - *state.relative_baseline_mb;
+                    let raw_delta = slot.gain_millibels - *state.relative_baseline_mb;
+                    let delta_mb = if invert { -raw_delta } else { raw_delta };
                     let current_mb = db_to_millibels(*state.effective_gain_db);
                     let new_mb = current_mb + delta_mb;
                     let clamped_db = clamp_db(millibels_to_db(new_mb));
@@ -321,8 +333,8 @@ impl GainBrain {
                     let slot_db = millibels_to_db(slot.gain_millibels);
                     let new_db = millibels_to_db(clamped_mb);
                     let offset_db = slot_db - new_db;
-                    nih_log!("[{id}] READ rel: slot={:.1}dB baseline={} delta={} eff={:.1}→{:.1}dB offset={:.1}dB",
-                        slot_db, *state.relative_baseline_mb, delta_mb,
+                    nih_log!("[{id}] READ rel: slot={:.1}dB baseline={} delta={} invert={} eff={:.1}→{:.1}dB offset={:.1}dB",
+                        slot_db, *state.relative_baseline_mb, delta_mb, invert,
                         millibels_to_db(current_mb), new_db, offset_db);
                     state
                         .group_gain_override
@@ -345,11 +357,12 @@ impl GainBrain {
         let current_mb = db_to_millibels(current_gain_db);
 
         if current_mb != *state.last_param_value_mb {
-            nih_log!("[{id}] WRITE: param changed {}→{} (effective was {:.1})",
-                *state.last_param_value_mb, current_mb, *state.effective_gain_db);
+            let write_mb = if invert { -current_mb } else { current_mb };
+            nih_log!("[{id}] WRITE: param changed {}→{} write={} invert={} (effective was {:.1})",
+                *state.last_param_value_mb, current_mb, write_mb, invert, *state.effective_gain_db);
             *state.effective_gain_db = current_gain_db;
-            group_file.write_slot(group as u8, current_mb);
-            *state.last_sent_gain_millibels = current_mb;
+            group_file.write_slot(group as u8, write_mb);
+            *state.last_sent_gain_millibels = write_mb;
             let updated_slot = group_file.read_slot(group as u8);
             *state.last_seen_generation = updated_slot.generation;
         }
@@ -384,18 +397,25 @@ impl GainBrain {
 
         let was_active = (1..=16).contains(&old_group);
 
+        let invert = state.params.invert.value();
+
         if !was_active {
             // Newly joining a group (old group was 0).
             match new_link_mode {
                 LinkMode::Absolute => {
-                    // Adopt the group's current gain.
+                    // Adopt the group's current gain (inverted if enabled).
+                    let applied_mb = if invert {
+                        (-slot.gain_millibels).clamp(-6000, 6000)
+                    } else {
+                        slot.gain_millibels
+                    };
                     state
                         .group_gain_override
-                        .store(slot.gain_millibels, Ordering::Relaxed);
+                        .store(applied_mb, Ordering::Relaxed);
                     *state.last_sent_gain_millibels = slot.gain_millibels;
                 }
                 LinkMode::Relative => {
-                    // Keep current gain, baseline to group's value.
+                    // Keep current gain, baseline to group's value (tracks slot, not inverted).
                     *state.relative_baseline_mb = slot.gain_millibels;
                     *state.last_sent_gain_millibels = effective_mb;
                 }
@@ -404,9 +424,14 @@ impl GainBrain {
             match (old_link_mode, new_link_mode) {
                 // Absolute -> Absolute (group changed): adopt new group's gain.
                 (LinkMode::Absolute, LinkMode::Absolute) => {
+                    let applied_mb = if invert {
+                        (-slot.gain_millibels).clamp(-6000, 6000)
+                    } else {
+                        slot.gain_millibels
+                    };
                     state
                         .group_gain_override
-                        .store(slot.gain_millibels, Ordering::Relaxed);
+                        .store(applied_mb, Ordering::Relaxed);
                     *state.last_sent_gain_millibels = slot.gain_millibels;
                 }
                 // Absolute -> Relative: keep current gain, baseline to it.
@@ -416,9 +441,14 @@ impl GainBrain {
                 }
                 // Relative -> Absolute: snap to group's current gain.
                 (LinkMode::Relative, LinkMode::Absolute) => {
+                    let applied_mb = if invert {
+                        (-slot.gain_millibels).clamp(-6000, 6000)
+                    } else {
+                        slot.gain_millibels
+                    };
                     state
                         .group_gain_override
-                        .store(slot.gain_millibels, Ordering::Relaxed);
+                        .store(applied_mb, Ordering::Relaxed);
                     *state.last_sent_gain_millibels = slot.gain_millibels;
                 }
                 // Relative -> Relative (group changed): keep gain, baseline to new group.

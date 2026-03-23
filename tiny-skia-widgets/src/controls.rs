@@ -21,13 +21,11 @@ pub fn draw_button(
     w: f32,
     h: f32,
     label: &str,
-    hovered: bool,
-    pressed: bool,
+    active: bool,
+    _hovered: bool,
 ) {
-    let bg = if pressed {
-        Color::from_rgba8(0x20, 0x22, 0x28, 0xff)
-    } else if hovered {
-        Color::from_rgba8(0x35, 0x37, 0x3e, 0xff)
+    let bg = if active {
+        color_accent()
     } else {
         color_control_bg()
     };
@@ -40,7 +38,12 @@ pub fn draw_button(
     let tw = text_renderer.text_width(label, text_size);
     let tx = x + (w - tw) * 0.5;
     let ty = y + (h + text_size) * 0.5 - 2.0; // approximate baseline offset
-    text_renderer.draw_text(pixmap, tx, ty, label, text_size, color_text());
+    let text_color = if active {
+        Color::from_rgba8(0x1a, 0x1c, 0x22, 0xff) // dark text on accent bg
+    } else {
+        color_text()
+    };
+    text_renderer.draw_text(pixmap, tx, ty, label, text_size, text_color);
 }
 
 /// Draw a horizontal slider with a fill bar, a left-aligned label, and a
