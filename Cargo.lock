@@ -1514,7 +1514,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af8d8cbea8f21307d7e84bca254772981296f058a1d36b461bf4d83a7499fc9e"
 dependencies = [
  "log",
- "memmap2",
+ "memmap2 0.6.2",
  "slotmap",
  "tinyvec",
  "ttf-parser 0.19.2",
@@ -1619,6 +1619,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
 dependencies = [
  "byteorder",
+]
+
+[[package]]
+name = "gain-brain"
+version = "0.1.0"
+dependencies = [
+ "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=9a0b42c09d712777b2edb4c5e0cb6baf21e988f0)",
+ "crossbeam",
+ "fontdue",
+ "keyboard-types",
+ "memmap2 0.9.10",
+ "nih_plug",
+ "raw-window-handle 0.5.2",
+ "raw-window-handle 0.6.2",
+ "serde",
+ "softbuffer",
+ "tiny-skia",
 ]
 
 [[package]]
@@ -2230,6 +2247,15 @@ name = "memmap2"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d28bba84adfe6646737845bc5ebbfa2c08424eb1c37e94a1fd2a82adb56a872"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "memmap2"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3"
 dependencies = [
  "libc",
 ]

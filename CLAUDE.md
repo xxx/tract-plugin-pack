@@ -59,7 +59,7 @@ Tests are inline `#[cfg(test)]` modules:
 - **Prefer TDD**: Write tests before or alongside implementation. New DSP functions and data structures should have tests covering normal operation, edge cases, and error paths.
 - **Never commit unless asked**: Do not create git commits unless the user explicitly requests it. This is a hard rule with zero exceptions.
 - **No allocations on the audio thread**: `process()` must never allocate. Use pre-allocated buffers, `try_lock()` for shared data, and avoid `Vec::new()`, `clone()` of collections, or `String` operations in the hot path.
-- **No unsafe code**: Do not use `unsafe` blocks. Find safe alternatives or restructure the code to avoid needing unsafe. Exception: FFI windowing glue (raw-window-handle trait impls, `Send` for window handles) where the underlying API requires it.
+- **No unsafe code**: Do not use `unsafe` blocks. Find safe alternatives or restructure the code to avoid needing unsafe. Exceptions: FFI windowing glue (raw-window-handle trait impls, `Send` for window handles) where the underlying API requires it; `memmap2` constructors (`MmapMut::map_mut`) for cross-instance shared memory in gain-brain.
 - **Don't guess at fixes**: Write tests to verify, add debug logging to diagnose, dispatch agents to review. Never claim a fix works without evidence.
 - **Use the LSP tool**: Prefer the LSP tool over grep for code navigation. Fall back to grep only when LSP is unavailable.
 

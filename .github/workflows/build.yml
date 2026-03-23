@@ -50,6 +50,9 @@ jobs:
       - name: Build gs-meter
         run: cargo nih-plug bundle gs-meter --release
 
+      - name: Build gain-brain
+        run: cargo nih-plug bundle gain-brain --release
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
