@@ -412,6 +412,8 @@ impl GainBrain {
             *state.effective_gain_db = current_gain_db;
             group_file.write_slot(group as u8, write_mb);
             *state.last_sent_gain_millibels = write_mb;
+            // Update baseline so future relative deltas are computed from this write
+            *state.relative_baseline_mb = write_mb;
             let updated_slot = group_file.read_slot(group as u8);
             *state.last_seen_generation = updated_slot.generation;
         }
