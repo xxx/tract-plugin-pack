@@ -546,33 +546,32 @@ impl baseview::WindowHandler for GainBrainWindow {
                 if let Some(HitAction::Dial(param_id)) = self.drag_active {
                     let shift_now = modifiers.contains(keyboard_types::Modifiers::SHIFT);
 
-                    // Detect shift transitions to re-anchor drag origin
+                    // drag_start_value stores dB, not normalized.
+                    // Detect shift transitions to re-anchor drag origin.
+                    let current_display_mb = self.display_gain_millibels.load(Ordering::Relaxed);
+                    let current_display_db = current_display_mb as f32 / 100.0;
                     if shift_now && !self.last_shift_state {
-                        // Shift just pressed: anchor granular drag here
                         self.granular_drag_start_y = self.mouse_y;
-                        self.granular_drag_start_value =
-                            self.params.gain.unmodulated_normalized_value();
+                        self.granular_drag_start_value = current_display_db;
                     } else if !shift_now && self.last_shift_state {
-                        // Shift just released: re-anchor normal drag here
                         self.drag_start_y = self.mouse_y;
-                        self.drag_start_value =
-                            self.params.gain.unmodulated_normalized_value();
+                        self.drag_start_value = current_display_db;
                     }
 
-                    let pixels_per_full_range = 600.0;
-                    if shift_now {
+                    // Drag in dB: 600px = 120 dB range, up = increase
+                    let db_per_pixel = 120.0 / 600.0;
+                    let target_db = if shift_now {
                         let delta_y = self.granular_drag_start_y - self.mouse_y;
-                        let delta_value = delta_y / pixels_per_full_range * 0.1;
-                        let normalized = (self.granular_drag_start_value + delta_value).clamp(0.0, 1.0);
-                        let setter = ParamSetter::new(self.gui_context.as_ref());
-                        self.set_param_normalized(&setter, param_id, normalized);
+                        (self.granular_drag_start_value + delta_y * db_per_pixel * 0.1).clamp(-60.0, 60.0)
                     } else {
                         let delta_y = self.drag_start_y - self.mouse_y;
-                        let delta_value = delta_y / pixels_per_full_range;
-                        let normalized = (self.drag_start_value + delta_value).clamp(0.0, 1.0);
-                        let setter = ParamSetter::new(self.gui_context.as_ref());
-                        self.set_param_normalized(&setter, param_id, normalized);
-                    }
+                        (self.drag_start_value + delta_y * db_per_pixel).clamp(-60.0, 60.0)
+                    };
+                    // Convert dB to the parameter's skewed normalized value
+                    let target_linear = nih_plug::util::db_to_gain(target_db);
+                    let normalized = self.params.gain.preview_normalized(target_linear);
+                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                    self.set_param_normalized(&setter, param_id, normalized);
 
                     self.last_shift_state = shift_now;
                 }
@@ -614,11 +613,15 @@ impl baseview::WindowHandler for GainBrainWindow {
                                 // effective gain differs (group override was active).
                                 self.group_gain_override.store(0, Ordering::Relaxed);
                             } else {
-                                let current_value = self.params.gain.unmodulated_normalized_value();
+                                // Use the displayed (effective) gain in dB for the drag
+                                // start, not the param value — they differ when a group
+                                // override is active and the param hasn't been updated.
+                                let display_mb = self.display_gain_millibels.load(Ordering::Relaxed);
+                                let display_db = display_mb as f32 / 100.0;
                                 self.drag_start_y = my;
-                                self.drag_start_value = current_value;
+                                self.drag_start_value = display_db;
                                 self.granular_drag_start_y = my;
-                                self.granular_drag_start_value = current_value;
+                                self.granular_drag_start_value = display_db;
                                 self.last_shift_state = modifiers.contains(keyboard_types::Modifiers::SHIFT);
                                 self.drag_active = Some(HitAction::Dial(param_id));
                                 self.begin_set_param(&setter, param_id);
