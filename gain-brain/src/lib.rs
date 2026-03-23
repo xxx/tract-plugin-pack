@@ -122,7 +122,7 @@ impl Default for GainBrain {
             last_sent_gain_millibels: 0,
             last_param_value_mb: 0,
             last_group: 0,
-            last_link_mode: LinkMode::Absolute,
+            last_link_mode: LinkMode::Relative,
             last_invert: false,
             sample_rate: 44100.0,
             group_gain_override: Arc::new(AtomicI32::new(NO_OVERRIDE)),
@@ -154,7 +154,7 @@ impl GainBrainParams {
 
             group: IntParam::new("Group", 0, IntRange::Linear { min: 0, max: 16 }),
 
-            link_mode: EnumParam::new("Link Mode", LinkMode::Absolute),
+            link_mode: EnumParam::new("Link Mode", LinkMode::Relative),
 
             invert: BoolParam::new("Invert", false),
         }
@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn test_link_mode_default() {
         let params = GainBrainParams::new();
-        assert_eq!(params.link_mode.value(), LinkMode::Absolute);
+        assert_eq!(params.link_mode.value(), LinkMode::Relative);
     }
 
     #[test]
