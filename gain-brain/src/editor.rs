@@ -15,7 +15,7 @@ use tiny_skia_widgets as widgets;
 use crate::GainBrainParams;
 
 const WINDOW_WIDTH: u32 = 300;
-const WINDOW_HEIGHT: u32 = 280;
+const WINDOW_HEIGHT: u32 = 250;
 
 // ── Editor State (persisted by the host) ────────────────────────────────
 
@@ -75,7 +75,7 @@ struct HitRegion {
 
 #[derive(Clone, Copy, PartialEq)]
 enum HitAction {
-    Slider(ParamId),
+    Dial(ParamId),
     SteppedSegment { param: ParamId, index: i32 },
     Button(ButtonAction),
     GroupDecrement,
@@ -90,7 +90,6 @@ enum ParamId {
 
 #[derive(Clone, Copy, PartialEq)]
 enum ButtonAction {
-    Reset,
     ScaleDown,
     ScaleUp,
 }
@@ -113,8 +112,12 @@ struct GainBrainWindow {
 
     /// Hit regions rebuilt each frame during draw().
     hit_regions: Vec<HitRegion>,
-    /// Currently dragging a slider.
-    drag_active: Option<ParamId>,
+    /// Currently dragging a slider or dial.
+    drag_active: Option<HitAction>,
+    /// Y coordinate where the current drag started (for dial vertical drag).
+    drag_start_y: f32,
+    /// Normalized value when the current drag started (for dial vertical drag).
+    drag_start_value: f32,
     /// Mouse position in physical pixels.
     mouse_x: f32,
     mouse_y: f32,
@@ -164,6 +167,8 @@ impl GainBrainWindow {
             text_renderer,
             hit_regions: Vec::new(),
             drag_active: None,
+            drag_start_y: 0.0,
+            drag_start_value: 0.0,
             mouse_x: 0.0,
             mouse_y: 0.0,
             last_click_time: std::time::Instant::now(),
@@ -350,82 +355,36 @@ impl GainBrainWindow {
             y += row_h;
         }
 
-        // ── Gain slider ──
+        // ── Gain dial ──
         let display_mb = self.display_gain_millibels.load(Ordering::Relaxed);
         let gain_db = display_mb as f32 / 100.0;
         let gain_text = format!("{:+.1} dB", gain_db);
-        tr.draw_text(
+        // Map dB linearly to 0-1 for the dial arc so the visual position
+        // matches the dB scale (not the skewed linear-gain parameter range).
+        let dial_normalized = ((gain_db - (-60.0)) / (60.0 - (-60.0))).clamp(0.0, 1.0);
+        let dial_radius = 40.0 * s;
+        let dial_total_h = dial_radius * 2.0 + 30.0 * s; // arc + label + value text
+        let dial_cx = self.physical_width as f32 / 2.0;
+        let dial_cy = y + dial_radius + 12.0 * s;
+        widgets::draw_dial(
             &mut self.pixmap,
-            pad,
-            y + font_size,
+            tr,
+            dial_cx,
+            dial_cy,
+            dial_radius,
             "Gain",
-            font_size,
-            widgets::color_muted(),
-        );
-        let gain_sx = pad + label_w;
-        let gain_sy = y + 4.0 * s;
-        // Compute slider position from the effective gain (display atomic),
-        // not from the parameter value — group sync may have overridden it.
-        let display_linear = nih_plug::util::db_to_gain(gain_db);
-        let slider_normalized = self.params.gain.preview_normalized(display_linear);
-        widgets::draw_slider(
-            &mut self.pixmap,
-            tr,
-            gain_sx,
-            gain_sy,
-            slider_w,
-            slider_h,
-            "",
             &gain_text,
-            slider_normalized,
+            dial_normalized,
         );
+        // Hit region covers the full dial area for vertical drag
         self.hit_regions.push(HitRegion {
-            x: gain_sx,
-            y: gain_sy,
-            w: slider_w,
-            h: slider_h,
-            action: HitAction::Slider(ParamId::Gain),
+            x: dial_cx - dial_radius - 10.0 * s,
+            y,
+            w: dial_radius * 2.0 + 20.0 * s,
+            h: dial_total_h,
+            action: HitAction::Dial(ParamId::Gain),
         });
-        y += row_h;
-
-        // ── Gain readout ──
-        let readout_size = 18.0 * s;
-        let readout_text = format!("{:+.1} dB", gain_db);
-        let readout_w = tr.text_width(&readout_text, readout_size);
-        let readout_x = (self.physical_width as f32 - readout_w) / 2.0;
-        tr.draw_text(
-            &mut self.pixmap,
-            readout_x,
-            y + readout_size,
-            &readout_text,
-            readout_size,
-            widgets::color_accent(),
-        );
-        y += row_h;
-
-        // ── Reset button ──
-        let reset_w = 100.0 * s;
-        let reset_h = 28.0 * s;
-        let reset_x = (self.physical_width as f32 - reset_w) / 2.0;
-        let reset_y = y + 2.0 * s;
-        widgets::draw_button(
-            &mut self.pixmap,
-            tr,
-            reset_x,
-            reset_y,
-            reset_w,
-            reset_h,
-            "Reset",
-            false,
-            false,
-        );
-        self.hit_regions.push(HitRegion {
-            x: reset_x,
-            y: reset_y,
-            w: reset_w,
-            h: reset_h,
-            action: HitAction::Button(ButtonAction::Reset),
-        });
+        let _ = y + dial_total_h; // suppress unused warning; y is the layout cursor
     }
 
     fn begin_set_param(&self, setter: &ParamSetter, id: ParamId) {
@@ -555,15 +514,14 @@ impl baseview::WindowHandler for GainBrainWindow {
                 self.mouse_x = position.x as f32;
                 self.mouse_y = position.y as f32;
 
-                // Handle slider drag
-                if let Some(param_id) = self.drag_active {
-                    if let Some(region) = self.hit_regions.iter().find(|r| {
-                        matches!(&r.action, HitAction::Slider(id) if *id == param_id)
-                    }) {
-                        let normalized = ((self.mouse_x - region.x) / region.w).clamp(0.0, 1.0);
-                        let setter = ParamSetter::new(self.gui_context.as_ref());
-                        self.set_param_normalized(&setter, param_id, normalized);
-                    }
+                if let Some(HitAction::Dial(param_id)) = self.drag_active {
+                    // Vertical drag for dials: 600px = full range, up = increase
+                    let pixels_per_full_range = 600.0;
+                    let delta_y = self.drag_start_y - self.mouse_y;
+                    let delta_value = delta_y / pixels_per_full_range;
+                    let normalized = (self.drag_start_value + delta_value).clamp(0.0, 1.0);
+                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                    self.set_param_normalized(&setter, param_id, normalized);
                 }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
@@ -590,20 +548,19 @@ impl baseview::WindowHandler for GainBrainWindow {
                     self.last_click_action = Some(region.action);
 
                     // End any pending drag before processing new click
-                    if let Some(prev_id) = self.drag_active.take() {
-                        self.end_set_param(&setter, prev_id);
+                    if let Some(HitAction::Dial(id)) = self.drag_active.take() {
+                        self.end_set_param(&setter, id);
                     }
 
                     match region.action {
-                        HitAction::Slider(param_id) => {
+                        HitAction::Dial(param_id) => {
                             if is_double_click {
                                 self.reset_param_to_default(&setter, param_id);
                             } else {
-                                self.drag_active = Some(param_id);
-                                let normalized =
-                                    ((mx - region.x) / region.w).clamp(0.0, 1.0);
+                                self.drag_start_y = my;
+                                self.drag_start_value = self.params.gain.unmodulated_normalized_value();
+                                self.drag_active = Some(HitAction::Dial(param_id));
                                 self.begin_set_param(&setter, param_id);
-                                self.set_param_normalized(&setter, param_id, normalized);
                             }
                         }
                         HitAction::SteppedSegment { param, index } => {
@@ -635,16 +592,6 @@ impl baseview::WindowHandler for GainBrainWindow {
                         HitAction::Button(ButtonAction::ScaleUp) => {
                             self.apply_scale_change(0.25, window);
                         }
-                        HitAction::Button(ButtonAction::Reset) => {
-                            // Reset gain to 0 dB
-                            let setter = ParamSetter::new(self.gui_context.as_ref());
-                            let default_gain = nih_plug::util::db_to_gain(0.0);
-                            let normalized =
-                                self.params.gain.preview_normalized(default_gain);
-                            setter.begin_set_parameter(&self.params.gain);
-                            setter.set_parameter_normalized(&self.params.gain, normalized);
-                            setter.end_set_parameter(&self.params.gain);
-                        }
                     }
                 }
             }
@@ -669,9 +616,9 @@ impl baseview::WindowHandler for GainBrainWindow {
                 button: baseview::MouseButton::Left,
                 ..
             }) => {
-                if let Some(param_id) = self.drag_active.take() {
+                if let Some(HitAction::Dial(id)) = self.drag_active.take() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
-                    self.end_set_param(&setter, param_id);
+                    self.end_set_param(&setter, id);
                 }
             }
             baseview::Event::Keyboard(kb_event) => {
