@@ -365,7 +365,7 @@ impl GainBrainWindow {
         let dial_radius = 40.0 * s;
         let dial_total_h = dial_radius * 2.0 + 30.0 * s; // arc + label + value text
         let dial_cx = self.physical_width as f32 / 2.0;
-        let dial_cy = y + dial_radius + 12.0 * s;
+        let dial_cy = y + dial_radius + 20.0 * s;
         widgets::draw_dial(
             &mut self.pixmap,
             tr,

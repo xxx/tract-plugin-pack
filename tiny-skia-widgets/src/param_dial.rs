@@ -166,7 +166,7 @@ pub fn draw_dial(
     let label_x = cx - label_w * 0.5;
     // Place label above the center; the top of the arc is at cy - radius,
     // so put the baseline a little above that.
-    let label_y = cy - radius - stroke_width - 2.0;
+    let label_y = cy - radius - stroke_width - 8.0;
     text_renderer.draw_text(pixmap, label_x, label_y, label, text_size, color_muted());
 
     // --- Value text centered below the arc ---
