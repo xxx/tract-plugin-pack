@@ -12,13 +12,17 @@ Tract Plugin Pack is a Cargo workspace containing multiple audio effect plugins 
 
 **GS Meter** — lightweight loudness meter with gain utility for clip-to-zero workflows. dB mode: peak, true peak (ITU-R BS.1770-4), RMS integrated/momentary, crest factor. LUFS mode: EBU R128 integrated/short-term/momentary loudness, LRA, true peak. Per-mode gain and reference with gain-match buttons. GUI uses softbuffer + tiny-skia (CPU rendering, no GPU). Designed for 100+ instances per project.
 
+**Gain Brain** — lightweight gain utility with cross-instance group linking via mmap IPC. 16 groups, Absolute/Relative link modes, Invert toggle for mirrored gain movement. GUI uses softbuffer + tiny-skia (CPU rendering). ~8 KB per instance headless. Inspired by BlueCat's Gain Suite.
+
 ## Workspace Structure
 
 ```
 tract-plugin-pack/
 ├── wavetable-filter/       # Wavetable-based filter plugin (vizia GUI)
 ├── gs-meter/               # Loudness meter + gain utility (softbuffer GUI)
+├── gain-brain/             # Gain utility with group linking (softbuffer GUI)
 ├── nih-plug-widgets/       # Shared vizia widgets (ParamDial, CSS theme)
+├── tiny-skia-widgets/      # Shared CPU-rendered widgets (dial, slider, button)
 ├── docs/                   # Plugin manuals (markdown + PDF)
 └── xtask/                  # Build tooling
 ```
@@ -31,19 +35,22 @@ Requires **nightly Rust** (enforced via `rust-toolchain.toml`) for portable SIMD
 # Plugin bundles (VST3 + CLAP)
 cargo nih-plug bundle wavetable-filter --release
 cargo nih-plug bundle gs-meter --release
+cargo nih-plug bundle gain-brain --release
 
 # Standalone binaries
 cargo build --bin wavetable-filter --release
 cargo build --bin gs-meter --release
+cargo build --bin gain-brain --release
 
 # Debug standalone (for GUI testing without DAW)
 cargo build --bin gs-meter
+cargo build --bin gain-brain
 ```
 
 ## Testing & Linting
 
 ```bash
-cargo test --workspace                            # all tests (80+)
+cargo test --workspace                            # all tests (150+)
 cargo clippy --workspace -- -D warnings           # lint (CI uses -D warnings)
 cargo fmt --check
 ```
@@ -51,7 +58,9 @@ cargo fmt --check
 Tests are inline `#[cfg(test)]` modules:
 - `wavetable-filter/src/lib.rs` and `wavetable-filter/src/wavetable.rs` — 30 DSP tests
 - `gs-meter/src/meter.rs` — 50 meter tests (RMS, peak, true peak, SIMD, stereo)
-- `gs-meter/src/widgets.rs` — 13 widget rendering tests
+- `gain-brain/src/groups.rs` — 11 mmap IPC tests
+- `gain-brain/src/lib.rs` — 16 sync/conversion tests
+- `tiny-skia-widgets/` — 20 widget rendering tests (dial, slider, button, text)
 - Test fixtures: `wavetable-filter/tests/fixtures/`
 
 ## Development Practices
@@ -82,15 +91,27 @@ Tests are inline `#[cfg(test)]` modules:
 | `gs-meter/src/lib.rs` | Plugin integration, process() loop, parameter definitions |
 | `gs-meter/src/meter.rs` | Core metering DSP: RMS, peak, true peak (ITU BS.1770-4), crest factor, SIMD |
 | `gs-meter/src/editor.rs` | Softbuffer + baseview editor, hit testing, mouse interaction, scaling |
-| `gs-meter/src/widgets.rs` | tiny-skia drawing primitives: labels, buttons, sliders, text renderer |
 | `gs-meter/src/fonts/DejaVuSans.ttf` | Embedded font for CPU text rendering |
+
+### Gain Brain
+
+| File | Role |
+|------|------|
+| `gain-brain/src/lib.rs` | Plugin struct, params, process(), group sync logic |
+| `gain-brain/src/groups.rs` | Mmap IPC: GroupFile, shared memory layout, read/write slots |
+| `gain-brain/src/editor.rs` | Softbuffer + baseview editor with rotary dial |
+| `gain-brain/src/fonts/DejaVuSans.ttf` | Embedded font for CPU text rendering |
 
 ### Shared
 
 | File | Role |
 |------|------|
-| `nih-plug-widgets/src/lib.rs` | Re-exports ParamDial, provides `load_style()` for vizia CSS |
-| `nih-plug-widgets/src/param_dial.rs` | Custom rotary knob widget with modulation indicator |
+| `tiny-skia-widgets/src/primitives.rs` | Color palette, draw_rect, draw_rect_outline |
+| `tiny-skia-widgets/src/text.rs` | TextRenderer with fontdue glyph cache |
+| `tiny-skia-widgets/src/controls.rs` | draw_button, draw_slider, draw_stepped_selector |
+| `tiny-skia-widgets/src/param_dial.rs` | Arc-based rotary dial widget (draw_dial) |
+| `nih-plug-widgets/src/lib.rs` | Re-exports vizia ParamDial, provides `load_style()` for vizia CSS |
+| `nih-plug-widgets/src/param_dial.rs` | Vizia rotary knob widget with modulation indicator |
 | `nih-plug-widgets/src/style.css` | Dark theme CSS for vizia plugins |
 
 ### Key Design Decisions
@@ -100,6 +121,8 @@ Tests are inline `#[cfg(test)]` modules:
 - **Stereo RMS uses sum-of-power** (matches dpMeter5 SUM mode): `sqrt(ms_L + ms_R)`.
 - **Crest factor uses dpMeter5's convention** (peak_stereo vs rms_stereo), not the mathematically correct max(crest_L, crest_R). Documented for future "correct mode" toggle.
 - **RMS momentary uses O(1) running sum** (f64 precision, incremental add/subtract) instead of O(N) ring scan per buffer.
+- **Gain Brain uses mmap IPC** (memmap2) for cross-instance group linking. 272-byte shared file with 16 group slots. The fd is closed after mapping — zero persistent file descriptors. ~8 KB per instance headless.
+- **Gain Brain inversion** is applied on both reads and writes. The slot stores the writer's coordinate-space value. `write_slot_rebaseline` (bumps `baseline_generation`) is used only for invert toggle events, not for normal writes. Relative readers re-baseline on `baseline_generation` changes without applying a delta.
 - **nih-plug dependency** currently points to `davemollen/nih-plug` branch `finish-vst3-pr` for nightly SIMD compatibility and VST3 license fix.
 
 ### Wavetable File Formats

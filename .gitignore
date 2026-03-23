@@ -13,3 +13,4 @@
 *.png
 !docs/wavetable-filter/*.png
 !docs/gs-meter/*.png
+!docs/gain-brain/*.png

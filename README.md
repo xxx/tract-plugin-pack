@@ -25,6 +25,17 @@ A lightweight loudness meter with integrated gain utility, purpose-built for [cl
 - SIMD-optimized metering (`f32x16`)
 - ~1.8 MB RSS and 0.05% CPU per instance (300 instances @ 15% CPU, 560 MB total)
 
+### Gain Brain
+
+A lightweight gain utility with cross-instance group linking. Multiple instances can be assigned to the same group (1-16), and changing gain on any grouped instance applies that change to all others.
+
+- 16 groups with Absolute (identical values) and Relative (delta-based) link modes
+- Invert toggle for mirrored gain movement (ducking, sidechain-style workflows)
+- Cross-instance IPC via memory-mapped file (works across DAW sandbox boundaries)
+- CPU-rendered GUI with rotary dial (tiny-skia + softbuffer)
+- ~8 KB per instance headless, ~3 MB for 200 instances
+- Inspired by [BlueCat's Gain Suite](https://www.bluecataudio.com/Products/Product_GainSuite/)
+
 ## Build Requirements
 
 - Rust nightly toolchain (automatically configured via `rust-toolchain.toml`)
@@ -46,10 +57,12 @@ sudo apt install libxcb1-dev libxcb-icccm4-dev libxcb-dri2-0-dev libx11-xcb-dev 
 # Build all plugins (VST3 + CLAP)
 cargo nih-plug bundle wavetable-filter --release
 cargo nih-plug bundle gs-meter --release
+cargo nih-plug bundle gain-brain --release
 
 # Standalone binaries
 cargo build --bin wavetable-filter --release
 cargo build --bin gs-meter --release
+cargo build --bin gain-brain --release
 ```
 
 The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` file (you only need one -- use whichever your DAW supports) to your plugin directory:
@@ -64,17 +77,20 @@ The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` fil
 tract-plugin-pack/
 ├── wavetable-filter/       # Wavetable-based filter plugin
 ├── gs-meter/               # Loudness meter + gain utility
-├── nih-plug-widgets/       # Shared GUI widgets (ParamDial, CSS theme)
+├── gain-brain/             # Gain utility with group linking
+├── nih-plug-widgets/       # Shared vizia widgets (ParamDial, CSS theme)
+├── tiny-skia-widgets/      # Shared CPU-rendered widgets (dial, slider, button)
 ├── docs/                   # Plugin manuals
 │   ├── wavetable-filter/
-│   └── gs-meter/
+│   ├── gs-meter/
+│   └── gain-brain/
 └── xtask/                  # Build tooling
 ```
 
 ## Testing
 
 ```bash
-cargo test --workspace       # All tests (80+)
+cargo test --workspace       # All tests (150+)
 cargo clippy --workspace     # Lint check
 ```
 
@@ -82,6 +98,7 @@ cargo clippy --workspace     # Lint check
 
 - [Wavetable Filter Manual](docs/wavetable-filter/wavetable-filter-manual.md)
 - [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
+- [Gain Brain Manual](docs/gain-brain/gain-brain-manual.md)
 
 ## What is Clip-to-Zero?
 
