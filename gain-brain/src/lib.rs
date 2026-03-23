@@ -294,10 +294,12 @@ impl GainBrain {
         let mode_changed = link_mode != *state.last_link_mode;
 
         if group_changed || mode_changed {
+            #[cfg(debug_assertions)]
             nih_log!("[{}] TRANSITION: group {}→{} mode {:?}→{:?} effective={:.1}dB param={:.1}dB",
                 state.instance_id, *state.last_group, group, *state.last_link_mode, link_mode,
                 *state.effective_gain_db, util::gain_to_db(state.params.gain.value()));
             Self::handle_transition(&mut state, group_file, group, link_mode);
+            #[cfg(debug_assertions)]
             nih_log!("[{}] AFTER TRANSITION: baseline={} last_sent={} effective={:.1}dB",
                 state.instance_id, *state.relative_baseline_mb,
                 *state.last_sent_gain_millibels, *state.effective_gain_db);
@@ -313,14 +315,12 @@ impl GainBrain {
         let invert = state.params.invert.value();
 
         // ── INVERT TOGGLE: re-write slot to prevent discontinuity ────
-        // When invert changes, the slot needs to reflect the new polarity
-        // so other instances don't see a massive delta on the next write.
         if invert != *state.last_invert {
             let effective_mb = db_to_millibels(*state.effective_gain_db);
             let write_mb = if invert { -effective_mb } else { effective_mb };
+            #[cfg(debug_assertions)]
             nih_log!("[{}] INVERT TOGGLE: {}→{} effective={} write={} (rebaseline)",
                 state.instance_id, *state.last_invert, invert, effective_mb, write_mb);
-            // Use rebaseline write so readers update their baseline without applying a delta
             group_file.write_slot_rebaseline(group as u8, write_mb);
             *state.last_sent_gain_millibels = write_mb;
             let updated_slot = group_file.read_slot(group as u8);
@@ -332,18 +332,21 @@ impl GainBrain {
         let slot = group_file.read_slot(group as u8);
 
         // ── READ PATH: check for external changes ──────────────────────
-        let id = state.instance_id;
+        // Track whether a read fired this buffer so the write path doesn't
+        // overwrite effective_gain_db with the stale param value.
+        let mut read_fired = false;
 
-        // If baseline_generation changed, another instance toggled invert.
-        // Re-baseline without applying a delta to avoid a discontinuity.
+        // If baseline_generation changed, another instance toggled invert
+        // or performed a rebaseline write. Re-baseline without applying a delta.
         if slot.baseline_generation != *state.last_baseline_generation {
-            nih_log!("[{id}] REBASELINE: baseline_gen {}→{} slot={}",
-                *state.last_baseline_generation, slot.baseline_generation, slot.gain_millibels);
+            #[cfg(debug_assertions)]
+            nih_log!("[{}] REBASELINE: baseline_gen {}→{} slot={}",
+                state.instance_id, *state.last_baseline_generation,
+                slot.baseline_generation, slot.gain_millibels);
             *state.relative_baseline_mb = slot.gain_millibels;
             *state.last_sent_gain_millibels = slot.gain_millibels;
             *state.last_seen_generation = slot.generation;
             *state.last_baseline_generation = slot.baseline_generation;
-            // For absolute mode, adopt the new value (potentially inverted)
             if link_mode == LinkMode::Absolute {
                 let applied_mb = if invert {
                     (-slot.gain_millibels).clamp(-6000, 6000)
@@ -353,7 +356,7 @@ impl GainBrain {
                 state.group_gain_override.store(applied_mb, Ordering::Relaxed);
                 *state.effective_gain_db = millibels_to_db(applied_mb);
             }
-            // For relative mode: baseline updated, effective unchanged — no jump
+            read_fired = true;
         } else if slot.generation != *state.last_seen_generation
             && slot.gain_millibels != *state.last_sent_gain_millibels
         {
@@ -364,8 +367,10 @@ impl GainBrain {
                     } else {
                         slot.gain_millibels
                     };
-                    nih_log!("[{id}] READ abs: slot={} gen={} last_sent={} invert={} → override={}",
-                        slot.gain_millibels, slot.generation, *state.last_sent_gain_millibels, invert, applied_mb);
+                    #[cfg(debug_assertions)]
+                    nih_log!("[{}] READ abs: slot={} gen={} last_sent={} invert={} → override={}",
+                        state.instance_id, slot.gain_millibels, slot.generation,
+                        *state.last_sent_gain_millibels, invert, applied_mb);
                     state
                         .group_gain_override
                         .store(applied_mb, Ordering::Relaxed);
@@ -379,12 +384,14 @@ impl GainBrain {
                     let new_mb = current_mb + delta_mb;
                     let clamped_db = clamp_db(millibels_to_db(new_mb));
                     let clamped_mb = db_to_millibels(clamped_db);
-                    let slot_db = millibels_to_db(slot.gain_millibels);
-                    let new_db = millibels_to_db(clamped_mb);
-                    let offset_db = slot_db - new_db;
-                    nih_log!("[{id}] READ rel: slot={:.1}dB baseline={} delta={} invert={} eff={:.1}→{:.1}dB offset={:.1}dB",
-                        slot_db, *state.relative_baseline_mb, delta_mb, invert,
-                        millibels_to_db(current_mb), new_db, offset_db);
+                    #[cfg(debug_assertions)] {
+                        let slot_db = millibels_to_db(slot.gain_millibels);
+                        let new_db = millibels_to_db(clamped_mb);
+                        let offset_db = slot_db - new_db;
+                        nih_log!("[{}] READ rel: slot={:.1}dB baseline={} delta={} invert={} eff={:.1}→{:.1}dB offset={:.1}dB",
+                            state.instance_id, slot_db, *state.relative_baseline_mb, delta_mb, invert,
+                            millibels_to_db(current_mb), new_db, offset_db);
+                    }
                     state
                         .group_gain_override
                         .store(clamped_mb, Ordering::Relaxed);
@@ -394,28 +401,34 @@ impl GainBrain {
                 }
             }
             *state.last_seen_generation = slot.generation;
+            read_fired = true;
         }
 
         // ── WRITE PATH: detect user-initiated gain changes ─────────────
-        // Compare param value against what it was LAST buffer, not against
-        // last_sent. After a group override, the param still holds the old
-        // value (we can't set it from the audio thread), so comparing
-        // against last_sent would cause us to write the stale param value
-        // back to the slot, overwriting the override.
         let current_gain_db = util::gain_to_db(state.params.gain.value());
         let current_mb = db_to_millibels(current_gain_db);
 
         if current_mb != *state.last_param_value_mb {
             let write_mb = if invert { -current_mb } else { current_mb };
-            nih_log!("[{id}] WRITE: param changed {}→{} write={} invert={} (effective was {:.1})",
-                *state.last_param_value_mb, current_mb, write_mb, invert, *state.effective_gain_db);
-            *state.effective_gain_db = current_gain_db;
+            #[cfg(debug_assertions)]
+            nih_log!("[{}] WRITE: param changed {}→{} write={} invert={} (effective was {:.1})",
+                state.instance_id, *state.last_param_value_mb, current_mb, write_mb, invert,
+                *state.effective_gain_db);
+            // Only update effective_gain_db from the param if the read path
+            // didn't fire this buffer — otherwise we'd overwrite the remote
+            // delta with the stale param value.
+            if !read_fired {
+                *state.effective_gain_db = current_gain_db;
+            }
+            // All normal writes use write_slot (not rebaseline).
+            // write_slot_rebaseline is reserved for the invert TOGGLE event
+            // only — using it for every inverted write would cause relative
+            // readers to silently drop all deltas from inverted writers.
             group_file.write_slot(group as u8, write_mb);
-            *state.last_sent_gain_millibels = write_mb;
-            // Update baseline so future relative deltas are computed from this write
-            *state.relative_baseline_mb = write_mb;
             let updated_slot = group_file.read_slot(group as u8);
             *state.last_seen_generation = updated_slot.generation;
+            *state.last_sent_gain_millibels = write_mb;
+            *state.relative_baseline_mb = write_mb;
         }
         *state.last_param_value_mb = current_mb;
     }
