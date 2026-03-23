@@ -112,12 +112,18 @@ struct GainBrainWindow {
 
     /// Hit regions rebuilt each frame during draw().
     hit_regions: Vec<HitRegion>,
-    /// Currently dragging a slider or dial.
+    /// Currently dragging a dial.
     drag_active: Option<HitAction>,
     /// Y coordinate where the current drag started (for dial vertical drag).
     drag_start_y: f32,
     /// Normalized value when the current drag started (for dial vertical drag).
     drag_start_value: f32,
+    /// Shift state from the last mouse event, for detecting transitions.
+    last_shift_state: bool,
+    /// When shift is pressed mid-drag, snapshot the current Y and value
+    /// so the fine-control drag is relative to that point.
+    granular_drag_start_y: f32,
+    granular_drag_start_value: f32,
     /// Mouse position in physical pixels.
     mouse_x: f32,
     mouse_y: f32,
@@ -169,6 +175,9 @@ impl GainBrainWindow {
             drag_active: None,
             drag_start_y: 0.0,
             drag_start_value: 0.0,
+            last_shift_state: false,
+            granular_drag_start_y: 0.0,
+            granular_drag_start_value: 0.0,
             mouse_x: 0.0,
             mouse_y: 0.0,
             last_click_time: std::time::Instant::now(),
@@ -510,23 +519,47 @@ impl baseview::WindowHandler for GainBrainWindow {
                 self.physical_height = info.physical_size().height;
                 self.resize_buffers();
             }
-            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved { position, .. }) => {
+            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved { position, modifiers }) => {
                 self.mouse_x = position.x as f32;
                 self.mouse_y = position.y as f32;
 
                 if let Some(HitAction::Dial(param_id)) = self.drag_active {
-                    // Vertical drag for dials: 600px = full range, up = increase
+                    let shift_now = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+
+                    // Detect shift transitions to re-anchor drag origin
+                    if shift_now && !self.last_shift_state {
+                        // Shift just pressed: anchor granular drag here
+                        self.granular_drag_start_y = self.mouse_y;
+                        self.granular_drag_start_value =
+                            self.params.gain.unmodulated_normalized_value();
+                    } else if !shift_now && self.last_shift_state {
+                        // Shift just released: re-anchor normal drag here
+                        self.drag_start_y = self.mouse_y;
+                        self.drag_start_value =
+                            self.params.gain.unmodulated_normalized_value();
+                    }
+
                     let pixels_per_full_range = 600.0;
-                    let delta_y = self.drag_start_y - self.mouse_y;
-                    let delta_value = delta_y / pixels_per_full_range;
-                    let normalized = (self.drag_start_value + delta_value).clamp(0.0, 1.0);
-                    let setter = ParamSetter::new(self.gui_context.as_ref());
-                    self.set_param_normalized(&setter, param_id, normalized);
+                    if shift_now {
+                        let delta_y = self.granular_drag_start_y - self.mouse_y;
+                        let delta_value = delta_y / pixels_per_full_range * 0.1;
+                        let normalized = (self.granular_drag_start_value + delta_value).clamp(0.0, 1.0);
+                        let setter = ParamSetter::new(self.gui_context.as_ref());
+                        self.set_param_normalized(&setter, param_id, normalized);
+                    } else {
+                        let delta_y = self.drag_start_y - self.mouse_y;
+                        let delta_value = delta_y / pixels_per_full_range;
+                        let normalized = (self.drag_start_value + delta_value).clamp(0.0, 1.0);
+                        let setter = ParamSetter::new(self.gui_context.as_ref());
+                        self.set_param_normalized(&setter, param_id, normalized);
+                    }
+
+                    self.last_shift_state = shift_now;
                 }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
                 button: baseview::MouseButton::Left,
-                ..
+                modifiers,
             }) => {
                 let mx = self.mouse_x;
                 let my = self.mouse_y;
@@ -557,8 +590,12 @@ impl baseview::WindowHandler for GainBrainWindow {
                             if is_double_click {
                                 self.reset_param_to_default(&setter, param_id);
                             } else {
+                                let current_value = self.params.gain.unmodulated_normalized_value();
                                 self.drag_start_y = my;
-                                self.drag_start_value = self.params.gain.unmodulated_normalized_value();
+                                self.drag_start_value = current_value;
+                                self.granular_drag_start_y = my;
+                                self.granular_drag_start_value = current_value;
+                                self.last_shift_state = modifiers.contains(keyboard_types::Modifiers::SHIFT);
                                 self.drag_active = Some(HitAction::Dial(param_id));
                                 self.begin_set_param(&setter, param_id);
                             }
