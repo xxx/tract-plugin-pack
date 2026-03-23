@@ -8,7 +8,8 @@ colorlinks: true
 
 # GS Meter Manual
 
-![GS Meter interface](screenshot.png){ width=50% }
+![GS Meter dB mode](screenshot-db.png){ width=45% }
+![GS Meter LUFS mode](screenshot-lufs.png){ width=45% }
 
 ## What is GS Meter?
 
