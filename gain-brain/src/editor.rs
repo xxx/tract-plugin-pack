@@ -109,6 +109,8 @@ struct GainBrainWindow {
     params: Arc<GainBrainParams>,
     /// Effective gain in millibels, written by the audio thread.
     display_gain_millibels: Arc<std::sync::atomic::AtomicI32>,
+    /// Write here to force the audio thread to retarget the gain smoother.
+    group_gain_override: Arc<std::sync::atomic::AtomicI32>,
     text_renderer: widgets::TextRenderer,
 
     /// Hit regions rebuilt each frame during draw().
@@ -139,6 +141,7 @@ impl GainBrainWindow {
         gui_context: Arc<dyn GuiContext>,
         params: Arc<GainBrainParams>,
         display_gain_millibels: Arc<std::sync::atomic::AtomicI32>,
+        group_gain_override: Arc<std::sync::atomic::AtomicI32>,
         shared_scale: Arc<AtomicCell<f32>>,
         scale_factor: f32,
     ) -> Self {
@@ -171,6 +174,7 @@ impl GainBrainWindow {
             shared_scale,
             params,
             display_gain_millibels,
+            group_gain_override,
             text_renderer,
             hit_regions: Vec::new(),
             drag_active: None,
@@ -605,6 +609,10 @@ impl baseview::WindowHandler for GainBrainWindow {
                         HitAction::Dial(param_id) => {
                             if is_double_click {
                                 self.reset_param_to_default(&setter, param_id);
+                                // Force the audio thread to retarget the smoother
+                                // in case the param was already at default but the
+                                // effective gain differs (group override was active).
+                                self.group_gain_override.store(0, Ordering::Relaxed);
                             } else {
                                 let current_value = self.params.gain.unmodulated_normalized_value();
                                 self.drag_start_y = my;
@@ -708,6 +716,7 @@ impl baseview::WindowHandler for GainBrainWindow {
 pub(crate) struct GainBrainEditor {
     params: Arc<GainBrainParams>,
     display_gain_millibels: Arc<std::sync::atomic::AtomicI32>,
+    group_gain_override: Arc<std::sync::atomic::AtomicI32>,
     /// Shared with GainBrainWindow so Editor::size() reflects runtime changes.
     scaling_factor: Arc<AtomicCell<f32>>,
 }
@@ -715,10 +724,12 @@ pub(crate) struct GainBrainEditor {
 pub(crate) fn create(
     params: Arc<GainBrainParams>,
     display_gain_millibels: Arc<std::sync::atomic::AtomicI32>,
+    group_gain_override: Arc<std::sync::atomic::AtomicI32>,
 ) -> Option<Box<dyn Editor>> {
     Some(Box::new(GainBrainEditor {
         params,
         display_gain_millibels,
+        group_gain_override,
         scaling_factor: Arc::new(AtomicCell::new(1.5)),
     }))
 }
@@ -733,6 +744,7 @@ impl Editor for GainBrainEditor {
         let gui_context = Arc::clone(&context);
         let params = Arc::clone(&self.params);
         let display_gain = Arc::clone(&self.display_gain_millibels);
+        let gain_override = Arc::clone(&self.group_gain_override);
         let shared_scale = Arc::clone(&self.scaling_factor);
 
         let scaled_w = (WINDOW_WIDTH as f32 * sf).round() as u32;
@@ -747,7 +759,7 @@ impl Editor for GainBrainEditor {
                 scale: WindowScalePolicy::ScaleFactor(1.0),
                 gl_config: None,
             },
-            move |window| GainBrainWindow::new(window, gui_context, params, display_gain, shared_scale, sf),
+            move |window| GainBrainWindow::new(window, gui_context, params, display_gain, gain_override, shared_scale, sf),
         );
 
         self.params

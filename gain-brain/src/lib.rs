@@ -184,7 +184,7 @@ impl Plugin for GainBrain {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        editor::create(self.params.clone(), self.display_gain_millibels.clone())
+        editor::create(self.params.clone(), self.display_gain_millibels.clone(), self.group_gain_override.clone())
     }
 
     fn initialize(
