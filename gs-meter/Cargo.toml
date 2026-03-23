@@ -18,7 +18,7 @@ softbuffer = { version = "0.4", default-features = false, features = ["kms", "x1
 raw-window-handle = "0.5"
 raw-window-handle-06 = { package = "raw-window-handle", version = "0.6" }
 tiny-skia = "0.11"
-fontdue = "0.9"
+tiny-skia-widgets = { path = "../tiny-skia-widgets" }
 keyboard-types = "0.6"
 crossbeam = "0.8"
 atomic_float = "0.1"

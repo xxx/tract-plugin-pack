@@ -11,7 +11,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::widgets;
+use tiny_skia_widgets as widgets;
 use crate::GainBrainParams;
 
 const WINDOW_WIDTH: u32 = 300;

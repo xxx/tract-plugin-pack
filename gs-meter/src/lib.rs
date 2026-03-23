@@ -7,7 +7,6 @@ use std::sync::Arc;
 mod editor;
 pub mod lufs;
 pub mod meter;
-pub mod widgets;
 
 use meter::{linear_to_db, StereoMeter};
 

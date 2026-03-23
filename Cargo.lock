@@ -1627,7 +1627,6 @@ version = "0.1.0"
 dependencies = [
  "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=9a0b42c09d712777b2edb4c5e0cb6baf21e988f0)",
  "crossbeam",
- "fontdue",
  "keyboard-types",
  "memmap2 0.9.10",
  "nih_plug",
@@ -1636,6 +1635,7 @@ dependencies = [
  "serde",
  "softbuffer",
  "tiny-skia",
+ "tiny-skia-widgets",
 ]
 
 [[package]]
@@ -1829,7 +1829,6 @@ dependencies = [
  "atomic_float 0.1.0",
  "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=9a0b42c09d712777b2edb4c5e0cb6baf21e988f0)",
  "crossbeam",
- "fontdue",
  "keyboard-types",
  "nih_plug",
  "raw-window-handle 0.5.2",
@@ -1837,6 +1836,7 @@ dependencies = [
  "serde",
  "softbuffer",
  "tiny-skia",
+ "tiny-skia-widgets",
 ]
 
 [[package]]
@@ -3899,6 +3899,14 @@ dependencies = [
  "arrayref",
  "bytemuck",
  "strict-num",
+]
+
+[[package]]
+name = "tiny-skia-widgets"
+version = "0.1.0"
+dependencies = [
+ "fontdue",
+ "tiny-skia",
 ]
 
 [[package]]

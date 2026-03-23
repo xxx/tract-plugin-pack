@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 mod editor;
 pub mod groups;
-pub mod widgets;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 

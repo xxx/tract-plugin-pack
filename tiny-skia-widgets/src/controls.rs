@@ -1,213 +1,9 @@
-//! Minimal widget primitives for rendering a meter plugin GUI using tiny-skia and fontdue.
-//!
-//! All drawing targets a [`tiny_skia::Pixmap`]. Coordinates are in physical pixels;
-//! the caller is responsible for DPI scaling. No event handling lives here — only
-//! pure drawing functions.
+//! Composite widget drawing functions: buttons, sliders, stepped selectors.
 
-use std::collections::HashMap;
-use tiny_skia::{Color, Paint, Pixmap, PremultipliedColorU8, Rect, Transform};
+use tiny_skia::{Color, Pixmap};
 
-// ---------------------------------------------------------------------------
-// Color constants — dark theme matching the vizia CSS in style.css
-// ---------------------------------------------------------------------------
-
-// Color helper and theme constants.
-// tiny-skia's Color::from_rgba8 is not const, so we use inline functions.
-
-#[inline]
-pub fn color_bg() -> Color { Color::from_rgba8(0x1a, 0x1c, 0x22, 0xff) }
-#[inline]
-pub fn color_text() -> Color { Color::from_rgba8(0xe0, 0xe0, 0xe0, 0xff) }
-#[inline]
-pub fn color_accent() -> Color { Color::from_rgba8(0x4f, 0xc3, 0xf7, 0xff) }
-#[inline]
-pub fn color_muted() -> Color { Color::from_rgba8(0xa0, 0xa0, 0xa0, 0xff) }
-#[inline]
-pub fn color_control_bg() -> Color { Color::from_rgba8(0x2a, 0x2c, 0x32, 0xff) }
-#[inline]
-pub fn color_border() -> Color { Color::from_rgba8(0x40, 0x40, 0x40, 0xff) }
-
-// ---------------------------------------------------------------------------
-// TextRenderer — fontdue-based glyph rasteriser with a simple cache
-// ---------------------------------------------------------------------------
-
-/// Key for the glyph cache: character + quantised pixel size.
-#[derive(Hash, Eq, PartialEq, Clone)]
-struct GlyphKey {
-    ch: char,
-    /// Font size multiplied by 10 and truncated, giving 0.1 px resolution while
-    /// keeping the key cheap to hash.
-    size_tenths: u32,
-}
-
-/// Cached rasterisation result for a single glyph.
-struct GlyphEntry {
-    /// Coverage bitmap (one byte per pixel, row-major).
-    bitmap: Vec<u8>,
-    metrics: fontdue::Metrics,
-}
-
-/// A thin wrapper around [`fontdue::Font`] that caches rasterised glyphs and
-/// provides simple text-drawing helpers.
-pub struct TextRenderer {
-    font: fontdue::Font,
-    cache: HashMap<GlyphKey, GlyphEntry>,
-}
-
-impl TextRenderer {
-    /// Create a new renderer from raw font data (TTF or OTF).
-    ///
-    /// The caller supplies the bytes — typically via `include_bytes!()` on an
-    /// embedded font file.
-    pub fn new(font_data: &[u8]) -> Self {
-        let settings = fontdue::FontSettings {
-            collection_index: 0,
-            scale: 40.0,
-            load_substitutions: true,
-        };
-        let font =
-            fontdue::Font::from_bytes(font_data, settings).expect("failed to parse font data");
-        Self {
-            font,
-            cache: HashMap::new(),
-        }
-    }
-
-    /// Measure the width of `text` at the given pixel `size` without drawing.
-    pub fn text_width(&mut self, text: &str, size: f32) -> f32 {
-        let mut width: f32 = 0.0;
-        for ch in text.chars() {
-            let entry = self.rasterise(ch, size);
-            width += entry.metrics.advance_width;
-        }
-        width
-    }
-
-    /// Draw `text` onto `pixmap` with its baseline at (`x`, `y`).
-    ///
-    /// `color` is the foreground colour; alpha compositing uses the glyph
-    /// coverage as opacity.
-    pub fn draw_text(
-        &mut self,
-        pixmap: &mut Pixmap,
-        mut x: f32,
-        y: f32,
-        text: &str,
-        size: f32,
-        color: Color,
-    ) {
-        let pm_width = pixmap.width() as i32;
-        let pm_height = pixmap.height() as i32;
-
-        for ch in text.chars() {
-            let entry = self.rasterise(ch, size);
-            let metrics = entry.metrics;
-            let bitmap = &entry.bitmap;
-
-            // Top-left corner in pixel coordinates.
-            let gx = (x + metrics.xmin as f32).round() as i32;
-            let gy = (y - metrics.ymin as f32 - metrics.height as f32 + 1.0).round() as i32;
-
-            // Blit the coverage bitmap into the pixmap.
-            let src_r = (color.red() * 255.0) as u32;
-            let src_g = (color.green() * 255.0) as u32;
-            let src_b = (color.blue() * 255.0) as u32;
-
-            for row in 0..metrics.height {
-                for col in 0..metrics.width {
-                    let px = gx + col as i32;
-                    let py = gy + row as i32;
-                    if px < 0 || py < 0 || px >= pm_width || py >= pm_height {
-                        continue;
-                    }
-                    let coverage = bitmap[row * metrics.width + col] as u32;
-                    if coverage == 0 {
-                        continue;
-                    }
-
-                    let idx = (py as u32 * pixmap.width() + px as u32) as usize;
-                    let dst = pixmap.pixels_mut()[idx];
-
-                    // Source-over compositing with pre-multiplied alpha.
-                    let sa = coverage; // 0..255
-                    let inv_sa = 255 - sa;
-
-                    let out_r = ((src_r * sa + dst.red() as u32 * inv_sa) / 255) as u8;
-                    let out_g = ((src_g * sa + dst.green() as u32 * inv_sa) / 255) as u8;
-                    let out_b = ((src_b * sa + dst.blue() as u32 * inv_sa) / 255) as u8;
-                    let out_a = (sa + (dst.alpha() as u32 * inv_sa) / 255) as u8;
-
-                    pixmap.pixels_mut()[idx] =
-                        PremultipliedColorU8::from_rgba(out_r, out_g, out_b, out_a).unwrap();
-                }
-            }
-
-            x += metrics.advance_width;
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Internal helpers
-    // ------------------------------------------------------------------
-
-    /// Rasterise (or fetch from cache) a single glyph.
-    fn rasterise(&mut self, ch: char, size: f32) -> &GlyphEntry {
-        let key = GlyphKey {
-            ch,
-            size_tenths: (size * 10.0) as u32,
-        };
-        let font = &self.font;
-        self.cache.entry(key).or_insert_with_key(|k| {
-            let (metrics, bitmap) = font.rasterize(k.ch, size);
-            GlyphEntry { bitmap, metrics }
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Primitive drawing helpers
-// ---------------------------------------------------------------------------
-
-/// Fill a rectangle on `pixmap`.
-pub fn draw_rect(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, color: Color) {
-    let Some(rect) = Rect::from_xywh(x, y, w, h) else {
-        return;
-    };
-    let mut paint = Paint::default();
-    paint.set_color(color);
-    paint.anti_alias = false;
-    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-}
-
-/// Stroke a rectangle outline on `pixmap`.
-pub fn draw_rect_outline(
-    pixmap: &mut Pixmap,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    color: Color,
-    stroke_width: f32,
-) {
-    if w <= 0.0 || h <= 0.0 {
-        return;
-    }
-    // Top edge
-    draw_rect(pixmap, x, y, w, stroke_width, color);
-    // Bottom edge
-    draw_rect(pixmap, x, y + h - stroke_width, w, stroke_width, color);
-    // Left edge
-    draw_rect(pixmap, x, y + stroke_width, stroke_width, h - 2.0 * stroke_width, color);
-    // Right edge
-    draw_rect(
-        pixmap,
-        x + w - stroke_width,
-        y + stroke_width,
-        stroke_width,
-        h - 2.0 * stroke_width,
-        color,
-    );
-}
+use crate::primitives::*;
+use crate::text::TextRenderer;
 
 // ---------------------------------------------------------------------------
 // Composite widgets
@@ -340,7 +136,6 @@ pub fn draw_stepped_selector(
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -348,6 +143,7 @@ pub fn draw_stepped_selector(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tiny_skia::{Pixmap, PremultipliedColorU8};
 
     /// Build a minimal valid TrueType font with a single .notdef glyph (600
     /// units advance width). All characters map to glyph 0, so `text_width`
@@ -515,65 +311,6 @@ mod tests {
     }
 
     #[test]
-    fn test_draw_rect_basic() {
-        let mut pm = Pixmap::new(100, 100).unwrap();
-        draw_rect(&mut pm, 10.0, 10.0, 20.0, 20.0, color_accent());
-        let px = pixel_at(&pm, 15, 15);
-        assert!(px.alpha() > 0, "rectangle should have been drawn");
-    }
-
-    #[test]
-    fn test_draw_rect_outline_basic() {
-        let mut pm = Pixmap::new(100, 100).unwrap();
-        draw_rect_outline(&mut pm, 10.0, 10.0, 30.0, 30.0, color_border(), 1.0);
-        let corner = pixel_at(&pm, 10, 10);
-        assert!(corner.alpha() > 0, "outline corner should be drawn");
-        let centre = pixel_at(&pm, 25, 25);
-        assert_eq!(centre.alpha(), 0, "outline interior should be empty");
-    }
-
-    #[test]
-    fn test_draw_rect_zero_size() {
-        let mut pm = Pixmap::new(50, 50).unwrap();
-        // Should not panic on zero or negative dimensions.
-        draw_rect(&mut pm, 0.0, 0.0, 0.0, 0.0, color_bg());
-        draw_rect(&mut pm, 0.0, 0.0, -5.0, 10.0, color_bg());
-        draw_rect_outline(&mut pm, 0.0, 0.0, 0.0, 0.0, color_border(), 1.0);
-    }
-
-    #[test]
-    fn test_text_renderer_creation() {
-        let data = test_font_data();
-        let _renderer = TextRenderer::new(&data);
-    }
-
-    #[test]
-    fn test_text_width_empty_string() {
-        let data = test_font_data();
-        let mut renderer = TextRenderer::new(&data);
-        let w = renderer.text_width("", 14.0);
-        assert_eq!(w, 0.0);
-    }
-
-    #[test]
-    fn test_text_width_nonempty() {
-        let data = test_font_data();
-        let mut renderer = TextRenderer::new(&data);
-        // With the minimal font every char maps to .notdef (600/1000 em
-        // advance). At 14 px the advance is 14 * 600/1000 = 8.4 per char.
-        let w = renderer.text_width("AB", 14.0);
-        assert!(w > 0.0, "non-empty text should have positive width");
-    }
-
-    #[test]
-    fn test_draw_text_does_not_panic() {
-        let data = test_font_data();
-        let mut renderer = TextRenderer::new(&data);
-        let mut pm = Pixmap::new(200, 50).unwrap();
-        renderer.draw_text(&mut pm, 5.0, 30.0, "Hello!", 14.0, color_text());
-    }
-
-    #[test]
     fn test_draw_button_states() {
         let data = test_font_data();
         let mut renderer = TextRenderer::new(&data);
@@ -626,18 +363,5 @@ mod tests {
         let mut renderer = TextRenderer::new(&data);
         let mut pm = Pixmap::new(100, 50).unwrap();
         draw_stepped_selector(&mut pm, &mut renderer, 0.0, 0.0, 100.0, 28.0, &[], 0);
-    }
-
-
-    #[test]
-    fn test_glyph_cache_reuse() {
-        let data = test_font_data();
-        let mut renderer = TextRenderer::new(&data);
-        // First call populates the cache.
-        let w1 = renderer.text_width("AAA", 16.0);
-        // Second call should hit the cache and return the same width.
-        let w2 = renderer.text_width("AAA", 16.0);
-        assert_eq!(w1, w2, "cached and fresh widths must match");
-        assert!(!renderer.cache.is_empty(), "cache should be populated");
     }
 }
