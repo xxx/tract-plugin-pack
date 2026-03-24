@@ -298,11 +298,25 @@ impl TinylimitWindow {
         let out_l_x = out_label_x - meter_bar_w - meter_gap / 2.0;
         let out_r_x = out_label_x + meter_gap / 2.0;
 
+        // Read threshold and ceiling for meter indicators
+        let threshold_db = self.params.threshold.value();
+        let ceiling_db = self.params.ceiling.value();
+
         // Draw meter bars first (no text_renderer needed)
         draw_meter_bar(&mut self.pixmap, in_l_x, meter_top, meter_bar_w, meter_h, in_peak_l);
         draw_meter_bar(&mut self.pixmap, in_r_x, meter_top, meter_bar_w, meter_h, in_peak_r);
         draw_meter_bar(&mut self.pixmap, out_l_x, meter_top, meter_bar_w, meter_h, out_peak_l);
         draw_meter_bar(&mut self.pixmap, out_r_x, meter_top, meter_bar_w, meter_h, out_peak_r);
+
+        // Threshold indicator on input meters (spans both L/R bars)
+        let thresh_indicator_x = in_l_x - 2.0 * s;
+        let thresh_indicator_w = (in_r_x + meter_bar_w) - in_l_x + 4.0 * s;
+        draw_meter_indicator(&mut self.pixmap, thresh_indicator_x, meter_top, thresh_indicator_w, meter_h, threshold_db);
+
+        // Ceiling indicator on output meters (spans both L/R bars)
+        let ceil_indicator_x = out_l_x - 2.0 * s;
+        let ceil_indicator_w = (out_r_x + meter_bar_w) - out_l_x + 4.0 * s;
+        draw_meter_indicator(&mut self.pixmap, ceil_indicator_x, meter_top, ceil_indicator_w, meter_h, ceiling_db);
 
         // Now borrow text_renderer for all text/widget drawing
         let tr = &mut self.text_renderer;
@@ -669,6 +683,18 @@ fn draw_meter_bar(pixmap: &mut tiny_skia::Pixmap, x: f32, y: f32, w: f32, h: f32
 
     // Border
     widgets::draw_rect_outline(pixmap, x, y, w, h, widgets::color_border(), 1.0);
+}
+
+/// Draw a horizontal indicator line on a meter at a given dB level.
+/// Used for threshold (on input meters) and ceiling (on output meters).
+fn draw_meter_indicator(pixmap: &mut tiny_skia::Pixmap, x: f32, y: f32, w: f32, h: f32, db: f32) {
+    let db_clamped = db.clamp(-60.0, 0.0);
+    let fraction = (db_clamped + 60.0) / 60.0;
+    let line_y = y + h - h * fraction;
+
+    // Draw a 2px horizontal line in a visible color (yellow/orange)
+    let indicator_color = tiny_skia::Color::from_rgba8(0xff, 0xc0, 0x40, 0xff);
+    widgets::draw_rect(pixmap, x, line_y - 1.0, w, 2.0, indicator_color);
 }
 
 /// Format a dB value for meter display.
