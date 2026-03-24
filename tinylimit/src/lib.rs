@@ -67,6 +67,8 @@ pub struct Tinylimit {
     readings: Arc<MeterReadings>,
     true_peak_detectors: [TruePeakDetector; 2],
     last_reported_latency: u32,
+    last_attack_ms: f32,
+    last_release_ms: f32,
 }
 
 // ── Params ─────────────────────────────────────────────────────────────────────
@@ -125,6 +127,8 @@ impl Default for Tinylimit {
             readings: Arc::new(MeterReadings::new()),
             true_peak_detectors: [TruePeakDetector::new(), TruePeakDetector::new()],
             last_reported_latency: 0,
+            last_attack_ms: f32::NAN,
+            last_release_ms: f32::NAN,
         }
     }
 }
@@ -298,8 +302,12 @@ impl Plugin for Tinylimit {
         let gain_link = self.params.gain_link.value();
         let isp = self.params.isp.value();
 
-        // Update limiter envelope / lookahead from current params
-        self.limiter.set_params(attack_ms, release_ms);
+        // Update limiter envelope / lookahead from current params (only when changed)
+        if attack_ms != self.last_attack_ms || release_ms != self.last_release_ms {
+            self.limiter.set_params(attack_ms, release_ms);
+            self.last_attack_ms = attack_ms;
+            self.last_release_ms = release_ms;
+        }
 
         // Report latency to host (only when changed)
         let latency = self.limiter.latency_samples() as u32;
@@ -324,12 +332,31 @@ impl Plugin for Tinylimit {
         let right = &mut rest[0][..num_samples];
 
         // 1. Apply input gain (smoothed), measure input peaks, then apply threshold boost (smoothed)
+        //
+        // Threshold and ceiling smoothers: read start/end values, convert to linear
+        // with exp() (2 calls per block instead of N powf calls), and lerp per-sample.
+        let db_to_linear_neg = -std::f32::consts::LN_10 / 20.0; // for 10^(-x/20)
+        let db_to_linear_pos = std::f32::consts::LN_10 / 20.0; // for 10^(x/20)
+
+        let threshold_db_start = self.params.threshold.smoothed.previous_value();
+        // Advance smoothers through the block
+        for _ in 0..num_samples {
+            let _ = self.params.threshold.smoothed.next();
+            let _ = self.params.ceiling.smoothed.next();
+        }
+        let threshold_db_end = self.params.threshold.smoothed.previous_value();
+        let ceiling_db_end = self.params.ceiling.smoothed.previous_value();
+
+        // Convert to linear domain (2 exp calls each instead of N powf calls)
+        let boost_start = (threshold_db_start * db_to_linear_neg).exp();
+        let boost_end = (threshold_db_end * db_to_linear_neg).exp();
+
+        let inv_num_samples = 1.0 / num_samples as f32;
+
         let mut input_peak_l = 0.0_f32;
         let mut input_peak_r = 0.0_f32;
         for i in 0..num_samples {
             let input_gain = self.params.input.smoothed.next();
-            let threshold_db = self.params.threshold.smoothed.next();
-            let ceiling_db = self.params.ceiling.smoothed.next();
 
             // Apply input gain first
             left[i] *= input_gain;
@@ -345,23 +372,20 @@ impl Plugin for Tinylimit {
                 input_peak_r = ar;
             }
 
-            // Then apply threshold boost
-            let threshold_boost = 10.0_f32.powf(-threshold_db / 20.0);
+            // Then apply threshold boost (cheap lerp instead of per-sample powf)
+            let t = i as f32 * inv_num_samples;
+            let threshold_boost = boost_start + t * (boost_end - boost_start);
             left[i] *= threshold_boost;
             right[i] *= threshold_boost;
-
-            // Compute effective ceiling per-sample (used after limiter, but we
-            // need the last value for the limiter call below)
-            let _ = ceiling_db; // advance smoother; ceiling used below via .value()
         }
 
         // Read final smoothed values for limiter block processing
         // (the smoothers have been advanced through the block above)
-        let threshold_db = self.params.threshold.value();
-        let ceiling_db = self.params.ceiling.value();
-        let ceiling_linear = 10.0_f32.powf(ceiling_db / 20.0);
+        let threshold_db = threshold_db_end;
+        let ceiling_db = ceiling_db_end;
+        let ceiling_linear = (ceiling_db * db_to_linear_pos).exp();
         let effective_ceiling_linear = if gain_link {
-            10.0_f32.powf(threshold_db / 20.0)
+            (threshold_db * db_to_linear_pos).exp()
         } else {
             ceiling_linear
         };

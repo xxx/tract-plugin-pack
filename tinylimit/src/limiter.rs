@@ -204,9 +204,8 @@ impl Limiter {
             delay_line_r: vec![0.0; max_lookahead_samples],
             delay_pos: 0,
             delay_len,
-            // Pre-allocate GR buffer large enough for typical block sizes.
-            // process_block will not allocate — it only uses existing capacity.
-            gr_buffer: vec![0.0; 8192],
+            // Sized by set_max_block_size() in initialize(); empty until then.
+            gr_buffer: Vec::new(),
             envelope: DualStageEnvelope::new(sample_rate, 5.0, 200.0),
             sample_rate,
             max_lookahead_ms,
@@ -293,19 +292,31 @@ impl Limiter {
         );
 
         // Step 1 & 2: Peak detection + gain computer
+        //
+        // For the hard knee case (knee_db < 0.01), skip log10 for sub-threshold
+        // samples (the common case — most samples don't exceed threshold).
+        let hard_knee = knee_db < 0.01;
         if let Some(tp) = true_peak {
             for i in 0..num_samples {
                 let peak_l = tp[0].process_sample_peak(left[i]);
                 let peak_r = tp[1].process_sample_peak(right[i]);
                 let peak = peak_l.max(peak_r);
-                let peak_db = 20.0 * peak.max(1e-10).log10();
-                self.gr_buffer[i] = gain_computer_db(peak_db, knee_db);
+                if hard_knee && peak <= 1.0 {
+                    self.gr_buffer[i] = 0.0;
+                } else {
+                    let peak_db = 20.0 * peak.max(1e-10).log10();
+                    self.gr_buffer[i] = gain_computer_db(peak_db, knee_db);
+                }
             }
         } else {
             for i in 0..num_samples {
                 let peak = left[i].abs().max(right[i].abs());
-                let peak_db = 20.0 * peak.max(1e-10).log10();
-                self.gr_buffer[i] = gain_computer_db(peak_db, knee_db);
+                if hard_knee && peak <= 1.0 {
+                    self.gr_buffer[i] = 0.0;
+                } else {
+                    let peak_db = 20.0 * peak.max(1e-10).log10();
+                    self.gr_buffer[i] = gain_computer_db(peak_db, knee_db);
+                }
             }
         }
 
@@ -330,8 +341,8 @@ impl Limiter {
             self.delay_line_l[self.delay_pos] = left[i];
             self.delay_line_r[self.delay_pos] = right[i];
 
-            // Apply gain reduction (dB to linear)
-            let gr_linear = 10.0_f32.powf(self.gr_buffer[i] / 20.0);
+            // Apply gain reduction (dB to linear): exp() is ~2x faster than powf()
+            let gr_linear = (self.gr_buffer[i] * (std::f32::consts::LN_10 / 20.0)).exp();
             let out_l = (delayed_l * gr_linear).clamp(-ceiling_linear, ceiling_linear);
             let out_r = (delayed_r * gr_linear).clamp(-ceiling_linear, ceiling_linear);
 
@@ -607,6 +618,7 @@ mod tests {
     fn test_limiter_output_below_ceiling() {
         let mut limiter = Limiter::new(48000.0, 10.0);
         limiter.set_params(5.0, 200.0);
+        limiter.set_max_block_size(1024);
         let mut left = vec![2.0_f32; 1024]; // +6 dBFS
         let mut right = vec![2.0_f32; 1024];
         let gr = limiter.process_block(&mut left, &mut right, 0.0, 0.5, 1.0, 1.0, None);
@@ -622,6 +634,7 @@ mod tests {
     fn test_limiter_quiet_signal_no_reduction() {
         let mut limiter = Limiter::new(48000.0, 10.0);
         limiter.set_params(5.0, 200.0);
+        limiter.set_max_block_size(512);
         // Signal at -20 dBFS (well below 0 dBFS threshold)
         let level = 0.1_f32;
         let mut left = vec![level; 512];
@@ -637,6 +650,7 @@ mod tests {
     fn test_limiter_reset_clears_state() {
         let mut limiter = Limiter::new(48000.0, 10.0);
         limiter.set_params(5.0, 200.0);
+        limiter.set_max_block_size(256);
         // Process a loud signal
         let mut left = vec![2.0_f32; 256];
         let mut right = vec![2.0_f32; 256];
@@ -664,6 +678,7 @@ mod tests {
     fn test_limiter_ceiling_below_zero() {
         let mut limiter = Limiter::new(48000.0, 10.0);
         limiter.set_params(5.0, 200.0);
+        limiter.set_max_block_size(1024);
         let ceiling_linear = 10.0_f32.powf(-3.0 / 20.0); // -3 dBFS
         let mut left = vec![2.0_f32; 1024];
         let mut right = vec![2.0_f32; 1024];
