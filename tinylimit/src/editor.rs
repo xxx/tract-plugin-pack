@@ -250,15 +250,23 @@ impl TinylimitWindow {
         let h = self.physical_height as f32;
 
         // Pre-collect all parameter values before entering the text_renderer borrow.
-        let all_params: [(ParamId, &str); 8] = [
+        // Row 1: signal flow (levels + routing)
+        // Row 2: limiter character (timing + shape)
+        let row1_params: [(ParamId, &str); 4] = [
             (ParamId::Input, "Input"),
             (ParamId::Threshold, "Thresh"),
             (ParamId::Ceiling, "Ceiling"),
+            (ParamId::StereoLink, "Link%"),
+        ];
+        let row2_params: [(ParamId, &str); 4] = [
             (ParamId::Attack, "Attack"),
             (ParamId::Release, "Release"),
             (ParamId::Knee, "Knee"),
-            (ParamId::StereoLink, "Link%"),
             (ParamId::Transient, "Transient"),
+        ];
+        let all_params: [(ParamId, &str); 8] = [
+            row1_params[0], row1_params[1], row1_params[2], row1_params[3],
+            row2_params[0], row2_params[1], row2_params[2], row2_params[3],
         ];
         let dial_data: Vec<(ParamId, &str, f32, String)> = all_params
             .iter()
@@ -280,7 +288,7 @@ impl TinylimitWindow {
         let pct_text = format!("{}%", (self.scale_factor * 100.0).round() as u32);
 
         // ── Layout zones ──
-        let top_margin = 40.0 * s;
+        let top_margin = 50.0 * s;
         let meter_area_w = 80.0 * s;
         let center_x = meter_area_w + pad;
         let center_w = w - 2.0 * (meter_area_w + pad);
@@ -499,55 +507,56 @@ impl TinylimitWindow {
             widgets::color_muted(),
         );
 
-        // ── Center column: 8 dials in 2 columns of 4 ──
+        // ── Center area: 8 dials in 2 rows of 4 ──
+        // Row 1: signal flow (Input, Thresh, Ceiling, Link%)
+        // Row 2: limiter character (Attack, Release, Knee, Transient)
         let dial_radius = 28.0 * s;
-        let dial_col_w = center_w / 2.0;
-        let dial_spacing_y = (meter_h - 20.0 * s) / 4.0;
-        let dial_col1_cx = center_x + dial_col_w / 2.0;
-        let dial_col2_cx = center_x + dial_col_w + dial_col_w / 2.0;
+        let dial_col_spacing = center_w / 4.0;
+        let dial_row_cy1 = meter_top + meter_h * 0.25;
+        let dial_row_cy2 = meter_top + meter_h * 0.60;
 
-        // Column 1: first 4 params (Input, Thresh, Ceiling, Attack)
+        // Row 1: first 4 params
         for (i, &(pid, label, normalized, ref value_text)) in dial_data[..4].iter().enumerate() {
-            let cy = meter_top + 20.0 * s + i as f32 * dial_spacing_y;
+            let cx = center_x + dial_col_spacing * (i as f32 + 0.5);
             widgets::draw_dial(
                 &mut self.pixmap,
                 tr,
-                dial_col1_cx,
-                cy,
+                cx,
+                dial_row_cy1,
                 dial_radius,
                 label,
                 value_text,
                 normalized,
             );
-            let hit_w = dial_radius * 2.0 + 20.0 * s;
-            let hit_h = dial_spacing_y;
+            let hit_w = dial_col_spacing;
+            let hit_h = meter_h * 0.35;
             self.hit_regions.push(HitRegion {
-                x: dial_col1_cx - hit_w / 2.0,
-                y: cy - hit_h / 2.0,
+                x: cx - hit_w / 2.0,
+                y: dial_row_cy1 - hit_h / 2.0,
                 w: hit_w,
                 h: hit_h,
                 action: HitAction::Dial(pid),
             });
         }
 
-        // Column 2: last 4 params (Release, Knee, Link%, Transient)
+        // Row 2: last 4 params
         for (i, &(pid, label, normalized, ref value_text)) in dial_data[4..].iter().enumerate() {
-            let cy = meter_top + 20.0 * s + i as f32 * dial_spacing_y;
+            let cx = center_x + dial_col_spacing * (i as f32 + 0.5);
             widgets::draw_dial(
                 &mut self.pixmap,
                 tr,
-                dial_col2_cx,
-                cy,
+                cx,
+                dial_row_cy2,
                 dial_radius,
                 label,
                 value_text,
                 normalized,
             );
-            let hit_w = dial_radius * 2.0 + 20.0 * s;
-            let hit_h = dial_spacing_y;
+            let hit_w = dial_col_spacing;
+            let hit_h = meter_h * 0.35;
             self.hit_regions.push(HitRegion {
-                x: dial_col2_cx - hit_w / 2.0,
-                y: cy - hit_h / 2.0,
+                x: cx - hit_w / 2.0,
+                y: dial_row_cy2 - hit_h / 2.0,
                 w: hit_w,
                 h: hit_h,
                 action: HitAction::Dial(pid),

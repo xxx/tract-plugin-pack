@@ -161,7 +161,8 @@ impl TinylimitParams {
                 },
             )
             .with_smoother(SmoothingStyle::Linear(20.0))
-            .with_unit(" dB"),
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
             ceiling: FloatParam::new(
                 "Ceiling",
@@ -172,7 +173,8 @@ impl TinylimitParams {
                 },
             )
             .with_smoother(SmoothingStyle::Linear(20.0))
-            .with_unit(" dB"),
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
             attack: FloatParam::new(
                 "Attack",
@@ -182,7 +184,8 @@ impl TinylimitParams {
                     max: 10.0,
                 },
             )
-            .with_unit(" ms"),
+            .with_unit(" ms")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
             release: FloatParam::new(
                 "Release",
@@ -193,7 +196,8 @@ impl TinylimitParams {
                     factor: FloatRange::skew_factor(-1.0),
                 },
             )
-            .with_unit(" ms"),
+            .with_unit(" ms")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
             knee: FloatParam::new(
                 "Knee",
@@ -203,7 +207,8 @@ impl TinylimitParams {
                     max: 12.0,
                 },
             )
-            .with_unit(" dB"),
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
             stereo_link: FloatParam::new(
                 "Stereo Link",
@@ -213,7 +218,8 @@ impl TinylimitParams {
                     max: 100.0,
                 },
             )
-            .with_unit(" %"),
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_rounded(0)),
 
             transient_mix: FloatParam::new(
                 "Transient Mix",
@@ -223,7 +229,8 @@ impl TinylimitParams {
                     max: 100.0,
                 },
             )
-            .with_unit(" %"),
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_rounded(0)),
 
             isp: BoolParam::new("ISP", false),
 
