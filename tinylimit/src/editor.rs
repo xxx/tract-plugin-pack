@@ -97,7 +97,30 @@ enum ButtonAction {
     ScaleUp,
     ToggleIsp,
     ToggleGainLink,
+    PresetPrev,
+    PresetNext,
+    PresetApply,
 }
+
+// ── Preset data ──────────────────────────────────────────────────────────
+
+struct LimiterPreset {
+    name: &'static str,
+    attack_ms: f32,
+    release_ms: f32,
+    knee_db: f32,
+    transient_pct: f32,
+}
+
+const PRESETS: &[LimiterPreset] = &[
+    LimiterPreset { name: "Aggressive",  attack_ms: 0.5,  release_ms: 50.0,  knee_db: 0.0, transient_pct: 35.0 },
+    LimiterPreset { name: "Loud",        attack_ms: 0.5,  release_ms: 40.0,  knee_db: 0.0, transient_pct: 60.0 },
+    LimiterPreset { name: "Punchy",      attack_ms: 1.0,  release_ms: 100.0, knee_db: 2.0, transient_pct: 50.0 },
+    LimiterPreset { name: "Safe",        attack_ms: 10.0, release_ms: 500.0, knee_db: 6.0, transient_pct: 75.0 },
+    LimiterPreset { name: "Smooth",      attack_ms: 7.0,  release_ms: 400.0, knee_db: 8.0, transient_pct: 70.0 },
+    LimiterPreset { name: "Transparent", attack_ms: 5.0,  release_ms: 300.0, knee_db: 4.0, transient_pct: 45.0 },
+    LimiterPreset { name: "Vocal",       attack_ms: 3.0,  release_ms: 150.0, knee_db: 4.0, transient_pct: 20.0 },
+];
 
 // ── Window Handler ──────────────────────────────────────────────────────
 
@@ -135,6 +158,8 @@ struct TinylimitWindow {
     /// Timestamp of last click for double-click detection.
     last_click_time: std::time::Instant,
     last_click_action: Option<HitAction>,
+    /// Currently selected preset index (editor-only state, not persisted).
+    current_preset: usize,
 }
 
 impl TinylimitWindow {
@@ -187,6 +212,7 @@ impl TinylimitWindow {
             mouse_y: 0.0,
             last_click_time: std::time::Instant::now(),
             last_click_action: None,
+            current_preset: 0,
         }
     }
 
@@ -229,6 +255,27 @@ impl TinylimitWindow {
     /// Format a parameter's current value for display.
     fn format_value(&self, id: ParamId) -> String {
         self.float_param(id).to_string()
+    }
+
+    /// Apply the current preset's values to attack, release, knee, and transient_mix.
+    fn apply_preset(&self, setter: &ParamSetter) {
+        let preset = &PRESETS[self.current_preset];
+
+        setter.begin_set_parameter(&self.params.attack);
+        setter.set_parameter(&self.params.attack, preset.attack_ms);
+        setter.end_set_parameter(&self.params.attack);
+
+        setter.begin_set_parameter(&self.params.release);
+        setter.set_parameter(&self.params.release, preset.release_ms);
+        setter.end_set_parameter(&self.params.release);
+
+        setter.begin_set_parameter(&self.params.knee);
+        setter.set_parameter(&self.params.knee, preset.knee_db);
+        setter.end_set_parameter(&self.params.knee);
+
+        setter.begin_set_parameter(&self.params.transient_mix);
+        setter.set_parameter(&self.params.transient_mix, preset.transient_pct);
+        setter.end_set_parameter(&self.params.transient_mix);
     }
 
     // ── Drawing ─────────────────────────────────────────────────────────
@@ -563,12 +610,81 @@ impl TinylimitWindow {
             });
         }
 
+        // ── Preset selector: [<]  Name  [>] ──
+        let center_mid = center_x + center_w / 2.0;
+        let preset_arrow_w = 28.0 * s;
+        let preset_arrow_h = 24.0 * s;
+        let preset_label_w = 110.0 * s;
+        let preset_total_w = preset_arrow_w * 2.0 + preset_label_w + 4.0 * s * 2.0;
+        let preset_row_y = dial_row_cy2 + dial_radius + 45.0 * s;
+        let preset_left_x = center_mid - preset_total_w / 2.0;
+
+        // Left arrow "<"
+        widgets::draw_button(
+            &mut self.pixmap,
+            tr,
+            preset_left_x,
+            preset_row_y,
+            preset_arrow_w,
+            preset_arrow_h,
+            "<",
+            false,
+            false,
+        );
+        self.hit_regions.push(HitRegion {
+            x: preset_left_x,
+            y: preset_row_y,
+            w: preset_arrow_w,
+            h: preset_arrow_h,
+            action: HitAction::Button(ButtonAction::PresetPrev),
+        });
+
+        // Preset name label (clickable — applies the preset)
+        let preset_name_x = preset_left_x + preset_arrow_w + 4.0 * s;
+        widgets::draw_button(
+            &mut self.pixmap,
+            tr,
+            preset_name_x,
+            preset_row_y,
+            preset_label_w,
+            preset_arrow_h,
+            PRESETS[self.current_preset].name,
+            false,
+            false,
+        );
+        self.hit_regions.push(HitRegion {
+            x: preset_name_x,
+            y: preset_row_y,
+            w: preset_label_w,
+            h: preset_arrow_h,
+            action: HitAction::Button(ButtonAction::PresetApply),
+        });
+        // Right arrow ">"
+        let preset_right_x = preset_name_x + preset_label_w + 4.0 * s;
+        widgets::draw_button(
+            &mut self.pixmap,
+            tr,
+            preset_right_x,
+            preset_row_y,
+            preset_arrow_w,
+            preset_arrow_h,
+            ">",
+            false,
+            false,
+        );
+        self.hit_regions.push(HitRegion {
+            x: preset_right_x,
+            y: preset_row_y,
+            w: preset_arrow_w,
+            h: preset_arrow_h,
+            action: HitAction::Button(ButtonAction::PresetNext),
+        });
+
         // ── Toggle buttons: ISP and Gain Link ──
         let btn_w = 80.0 * s;
         let btn_h = 26.0 * s;
         let btn_gap = 12.0 * s;
         let btn_row_y = meter_bottom + 4.0 * s;
-        let center_mid = center_x + center_w / 2.0;
 
         let isp_x = center_mid - btn_w - btn_gap / 2.0;
         widgets::draw_button(
@@ -826,6 +942,19 @@ impl baseview::WindowHandler for TinylimitWindow {
                         }
                         HitAction::Button(ButtonAction::ScaleUp) => {
                             self.apply_scale_change(0.25, window);
+                        }
+                        HitAction::Button(ButtonAction::PresetPrev) => {
+                            self.current_preset = if self.current_preset == 0 {
+                                PRESETS.len() - 1
+                            } else {
+                                self.current_preset - 1
+                            };
+                        }
+                        HitAction::Button(ButtonAction::PresetNext) => {
+                            self.current_preset = (self.current_preset + 1) % PRESETS.len();
+                        }
+                        HitAction::Button(ButtonAction::PresetApply) => {
+                            self.apply_preset(&setter);
                         }
                     }
                 }
