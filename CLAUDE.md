@@ -14,6 +14,8 @@ Tract Plugin Pack is a Cargo workspace containing multiple audio effect plugins 
 
 **Gain Brain** — lightweight gain utility with cross-instance group linking via mmap IPC. 16 groups, Absolute/Relative link modes, Invert toggle for mirrored gain movement. GUI uses softbuffer + tiny-skia (CPU rendering). ~8 KB per instance headless. Inspired by BlueCat's Gain Suite.
 
+**tinylimit** — low-latency wideband peak limiter for track-level use. Feed-forward with lookahead, dual-stage transient/dynamics envelope, soft knee (Giannoulis 2012), optional ISP (ITU-1770 true peak). 7 built-in character presets. GUI uses softbuffer + tiny-skia (CPU rendering). 50 instances @ 6.2% CPU, 50 MB RSS (~1.0 MB, 0.12% CPU per instance). Inspired by DMG Audio TrackLimit.
+
 ## Workspace Structure
 
 ```
@@ -21,6 +23,7 @@ tract-plugin-pack/
 ├── wavetable-filter/       # Wavetable-based filter plugin (vizia GUI)
 ├── gs-meter/               # Loudness meter + gain utility (softbuffer GUI)
 ├── gain-brain/             # Gain utility with group linking (softbuffer GUI)
+├── tinylimit/              # Wideband peak limiter (softbuffer GUI)
 ├── nih-plug-widgets/       # Shared vizia widgets (ParamDial, CSS theme)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets (dial, slider, button)
 ├── docs/                   # Plugin manuals (markdown + PDF)
@@ -36,21 +39,24 @@ Requires **nightly Rust** (enforced via `rust-toolchain.toml`) for portable SIMD
 cargo nih-plug bundle wavetable-filter --release
 cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle gain-brain --release
+cargo nih-plug bundle tinylimit --release
 
 # Standalone binaries
 cargo build --bin wavetable-filter --release
 cargo build --bin gs-meter --release
 cargo build --bin gain-brain --release
+cargo build --bin tinylimit --release
 
 # Debug standalone (for GUI testing without DAW)
 cargo build --bin gs-meter
 cargo build --bin gain-brain
+cargo build --bin tinylimit
 ```
 
 ## Testing & Linting
 
 ```bash
-cargo test --workspace                            # all tests (150+)
+cargo test --workspace                            # all tests (170+)
 cargo clippy --workspace -- -D warnings           # lint (CI uses -D warnings)
 cargo fmt --check
 ```
@@ -60,6 +66,7 @@ Tests are inline `#[cfg(test)]` modules:
 - `gs-meter/src/meter.rs` — 50 meter tests (RMS, peak, true peak, SIMD, stereo)
 - `gain-brain/src/groups.rs` — 11 mmap IPC tests
 - `gain-brain/src/lib.rs` — 16 sync/conversion tests
+- `tinylimit/src/limiter.rs` — 33 limiter tests (gain computer, envelope, lookahead, integration)
 - `tiny-skia-widgets/` — 20 widget rendering tests (dial, slider, button, text)
 - Test fixtures: `wavetable-filter/tests/fixtures/`
 
@@ -102,6 +109,16 @@ Tests are inline `#[cfg(test)]` modules:
 | `gain-brain/src/editor.rs` | Softbuffer + baseview editor with rotary dial |
 | `gain-brain/src/fonts/DejaVuSans.ttf` | Embedded font for CPU text rendering |
 
+### tinylimit
+
+| File | Role |
+|------|------|
+| `tinylimit/src/lib.rs` | Plugin struct, params, process(), metering atomics |
+| `tinylimit/src/limiter.rs` | Core DSP: gain computer, dual-stage envelope, lookahead backward pass |
+| `tinylimit/src/true_peak.rs` | ITU polyphase FIR true peak detector (copied from gs-meter) |
+| `tinylimit/src/editor.rs` | Softbuffer + baseview editor with meters, dials, presets |
+| `tinylimit/src/fonts/DejaVuSans.ttf` | Embedded font for CPU text rendering |
+
 ### Shared
 
 | File | Role |
@@ -123,6 +140,7 @@ Tests are inline `#[cfg(test)]` modules:
 - **RMS momentary uses O(1) running sum** (f64 precision, incremental add/subtract) instead of O(N) ring scan per buffer.
 - **Gain Brain uses mmap IPC** (memmap2) for cross-instance group linking. 272-byte shared file with 16 group slots. The fd is closed after mapping — zero persistent file descriptors. ~8 KB per instance headless.
 - **Gain Brain inversion** is applied on both reads and writes. The slot stores the writer's coordinate-space value. `write_slot_rebaseline` (bumps `baseline_generation`) is used only for invert toggle events, not for normal writes. Relative readers re-baseline on `baseline_generation` changes without applying a delta.
+- **tinylimit uses feed-forward lookahead** with a backward-pass gain reduction ramp (DanielRudrich approach). Signal flow: gain computer → lookahead backward pass → dual-stage envelope → apply to delayed audio → safety clip. Hard knee fast path skips log/exp for sub-threshold samples. `exp()` instead of `powf()` for gain application (2x faster). Threshold/ceiling lerped per block (2 `exp` calls) instead of per-sample `powf`.
 - **nih-plug dependency** currently points to `davemollen/nih-plug` branch `finish-vst3-pr` for nightly SIMD compatibility and VST3 license fix.
 
 ### Wavetable File Formats
