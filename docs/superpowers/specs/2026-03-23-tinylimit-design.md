@@ -12,7 +12,7 @@ Inspired by DMG Audio's TrackLimit. Instead of TrackLimit's proprietary "Style" 
 |-----------|------|-------|---------|-------|
 | `input` | FloatParam | -60 to +18 dB | 0.0 dB | Pre-limiter input gain, smoothed |
 | `threshold` | FloatParam | -60 to 0 dB | 0.0 dB | Gain boost before limiting. Lower = more limiting |
-| `ceiling` | FloatParam | -30 to 0 dB | 0.0 dB | Maximum output level |
+| `ceiling` | FloatParam | -30 to 0 dB | -0.1 dB | Maximum output level |
 | `attack` | FloatParam | 0.1 to 10 ms | 5.0 ms | Lookahead time (also sets plugin latency) |
 | `release` | FloatParam | 1 to 1000 ms | 200 ms | Release time for sustained (dynamics) stage |
 | `knee` | FloatParam | 0 to 12 dB | 0 dB | Soft knee width (0 = hard knee) |

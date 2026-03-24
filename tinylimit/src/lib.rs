@@ -166,7 +166,7 @@ impl TinylimitParams {
 
             ceiling: FloatParam::new(
                 "Ceiling",
-                0.0,
+                -0.1,
                 FloatRange::Linear {
                     min: -30.0,
                     max: 0.0,
