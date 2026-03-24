@@ -254,7 +254,7 @@ impl TinylimitWindow {
         // Row 2: limiter character (timing + shape)
         let row1_params: [(ParamId, &str); 4] = [
             (ParamId::Input, "Input"),
-            (ParamId::Threshold, "Thresh"),
+            (ParamId::Threshold, "Threshold"),
             (ParamId::Ceiling, "Ceiling"),
             (ParamId::StereoLink, "Link%"),
         ];
