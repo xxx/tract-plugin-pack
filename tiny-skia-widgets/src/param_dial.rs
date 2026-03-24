@@ -161,7 +161,7 @@ pub fn draw_dial(
     draw_filled_circle(pixmap, dot_x, dot_y, dot_radius, color_accent());
 
     // --- Label text centered above the arc ---
-    let text_size = (radius * 0.28).max(10.0);
+    let text_size = (radius * 0.38).max(11.0);
     let label_w = text_renderer.text_width(label, text_size);
     let label_x = cx - label_w * 0.5;
     // Place label above the center; the top of the arc is at cy - radius,

@@ -53,11 +53,15 @@ jobs:
       - name: Build gain-brain
         run: cargo nih-plug bundle gain-brain --release
 
+      - name: Build tinylimit
+        run: cargo nih-plug bundle tinylimit --release
+
       - name: Build standalones
         run: |
           cargo build --bin wavetable-filter --release
           cargo build --bin gs-meter --release
           cargo build --bin gain-brain --release
+          cargo build --bin tinylimit --release
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
