@@ -1,5 +1,5 @@
 [workspace]
-members = ["nih-plug-widgets", "wavetable-filter", "gs-meter", "gain-brain", "tiny-skia-widgets", "xtask"]
+members = ["nih-plug-widgets", "wavetable-filter", "gs-meter", "gain-brain", "tinylimit", "tiny-skia-widgets", "xtask"]
 resolver = "2"
 
 [profile.release]

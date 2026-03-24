@@ -36,6 +36,18 @@ A lightweight gain utility with cross-instance group linking. Multiple instances
 - ~8 KB per instance headless, ~3 MB for 200 instances
 - Inspired by [BlueCat's Gain Suite](https://www.bluecataudio.com/Products/Product_GainSuite/)
 
+### tinylimit
+
+A low-latency wideband peak limiter for track-level use. Feed-forward topology with lookahead and dual-stage transient/dynamics handling.
+
+- Individual attack, release, knee, and transient controls (no opaque "style" presets)
+- 7 built-in character presets (Transparent, Aggressive, Punchy, Smooth, Safe, Vocal, Loud)
+- Optional ISP (true peak targeting via ITU-R BS.1770-4)
+- Gain Link mode for auditioning limiting without loudness change
+- CPU-rendered GUI with input/output meters and GR readout (tiny-skia + softbuffer)
+- ~1.0 MB RSS and 0.12% CPU per instance (50 instances @ 6.2% CPU, 50 MB total)
+- Inspired by [DMG Audio TrackLimit](https://dmgaudio.com/products_tracklimit.php)
+
 ## Build Requirements
 
 - Rust nightly toolchain (automatically configured via `rust-toolchain.toml`)
@@ -58,11 +70,13 @@ sudo apt install libxcb1-dev libxcb-icccm4-dev libxcb-dri2-0-dev libx11-xcb-dev 
 cargo nih-plug bundle wavetable-filter --release
 cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle gain-brain --release
+cargo nih-plug bundle tinylimit --release
 
 # Standalone binaries
 cargo build --bin wavetable-filter --release
 cargo build --bin gs-meter --release
 cargo build --bin gain-brain --release
+cargo build --bin tinylimit --release
 ```
 
 The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` file (you only need one -- use whichever your DAW supports) to your plugin directory:
@@ -78,19 +92,21 @@ tract-plugin-pack/
 ├── wavetable-filter/       # Wavetable-based filter plugin
 ├── gs-meter/               # Loudness meter + gain utility
 ├── gain-brain/             # Gain utility with group linking
+├── tinylimit/              # Wideband peak limiter
 ├── nih-plug-widgets/       # Shared vizia widgets (ParamDial, CSS theme)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets (dial, slider, button)
 ├── docs/                   # Plugin manuals
 │   ├── wavetable-filter/
 │   ├── gs-meter/
-│   └── gain-brain/
+│   ├── gain-brain/
+│   └── tinylimit/
 └── xtask/                  # Build tooling
 ```
 
 ## Testing
 
 ```bash
-cargo test --workspace       # All tests (150+)
+cargo test --workspace       # All tests (170+)
 cargo clippy --workspace     # Lint check
 ```
 
@@ -99,6 +115,7 @@ cargo clippy --workspace     # Lint check
 - [Wavetable Filter Manual](docs/wavetable-filter/wavetable-filter-manual.md)
 - [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
 - [Gain Brain Manual](docs/gain-brain/gain-brain-manual.md)
+- [tinylimit Manual](docs/tinylimit/tinylimit-manual.md)
 
 ## What is Clip-to-Zero?
 
