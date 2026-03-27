@@ -1,20 +1,22 @@
 //! FFT-based spectral clipper with detail preservation.
 //!
-//! Two-stage architecture inspired by Newfangled Audio Saturate:
+//! Architecture inspired by Newfangled Audio Saturate:
 //!
-//! **Stage 1 — Per-bin spectral magnitude reduction (detail preservation):**
-//! STFT → for each bin, apply `ceiling * tanh(mag / ceiling)` to the magnitude
-//! while preserving phase. This compresses loud bins toward the ceiling while
-//! leaving quiet bins (detail) untouched. ISTFT to reconstruct.
+//! **Step 1 — Spectral split (loud/quiet separation):**
+//! STFT the input, split bins into loud (dominant, above -6 dB of peak) and
+//! quiet (detail, below -20 dB of peak) paths with a smooth crossfade in the
+//! transition band. ISTFT each path separately via overlap-add.
 //!
-//! **Stage 2 — Time-domain waveshaping (clipping character):**
-//! Apply `tanh(drive * x)` to the reconstructed time-domain signal. This
-//! produces flat-top clipping and harmonic generation. Because stage 1 has
-//! already reduced loud components, the quiet detail survives through the
-//! time-domain clip.
+//! **Step 2 — Time-domain clip + detail addition:**
+//! Apply `tanh(drive * original)` to the full reconstructed signal (loud +
+//! quiet = delayed input). This produces flat-top clipping at ±1.0. Then ADD
+//! the quiet (detail) component on top. The detail rides symmetrically around
+//! the clip level, producing the characteristic waveform: flat tops with
+//! small ripple from preserved spectral detail.
 //!
-//! The `amount` parameter (derived from drive) crossfades both stages
-//! simultaneously: at amount=0, passthrough; at amount=1, full processing.
+//! The `amount` parameter (derived from drive) crossfades between the clean
+//! signal and the processed signal: at amount=0, passthrough; at amount=1,
+//! full processing.
 //!
 //! FFT size 2048, hop size 512 (75% overlap, 4x redundancy), Hann window.
 
@@ -26,12 +28,13 @@ use std::sync::Arc;
 /// Maximum drive gain (24 dB).
 const GAIN_MAX: f32 = 15.848932;
 
-/// Bin magnitude ceiling reference for the per-bin spectral clipper.
-/// Set to 0.5 (Hann coherent gain). While the theoretical per-bin
-/// magnitude for a full-scale sine is 0.25 (coherent gain / 2 for
-/// two-sided split), using 0.5 provides a gentler ceiling that better
-/// preserves quiet detail bins at moderate drive levels.
-const FULL_SCALE_BIN_MAG: f32 = 0.5;
+/// Ratio of spectral peak above which bins are classified as 100% loud.
+/// -6 dB relative to the frame's peak magnitude.
+const LOUD_RATIO: f32 = 0.5;
+
+/// Ratio of spectral peak below which bins are classified as 100% quiet.
+/// -20 dB relative to the frame's peak magnitude.
+const QUIET_RATIO: f32 = 0.1;
 
 /// Compute the saturation blend `amount` (0–1) from the linear drive gain.
 ///
@@ -64,7 +67,7 @@ pub fn saturate_td(x: f32, amount: f32, drive: f32) -> f32 {
     x + amount * (clipped - x)
 }
 
-/// STFT-based spectral clipper with per-bin magnitude waveshaping.
+/// STFT-based spectral clipper with detail preservation.
 ///
 /// Feed one sample at a time via [`process_sample`]. Internally it accumulates
 /// samples, triggers FFT processing every `hop_size` samples, and reads from
@@ -75,8 +78,9 @@ pub fn saturate_td(x: f32, amount: f32, drive: f32) -> f32 {
 /// - `input_ring` (size `fft_size`): circular buffer of recent input samples.
 /// - `loud_output_ring` / `quiet_output_ring` (size `2 * fft_size` each):
 ///   separate overlap-add accumulation buffers for the loud and quiet spectral
-///   paths. The nonlinear `tanh` saturation is applied AFTER reconstruction
-///   from these buffers (not inside the STFT frame), preserving COLA normalization.
+///   paths. Tanh saturation clips the FULL signal (loud + quiet = delayed input),
+///   then the quiet (detail) component is added on top. This produces flat-top
+///   clipping with symmetric detail ripple around the clip level.
 /// - `read_pos` advances one sample at a time; `write_pos` leads by `fft_size`.
 /// - Every `hop_size` samples, an FFT frame is extracted from `input_ring`,
 ///   split into loud/quiet bins, and each path is ISTFT'd and overlap-added
@@ -214,15 +218,22 @@ impl SpectralClipper {
         self.loud_output_ring[self.read_pos] = 0.0;
         self.quiet_output_ring[self.read_pos] = 0.0;
 
-        // Apply tanh AFTER reconstruction (COLA-correct!).
-        // The loud path has been linearly reconstructed through the STFT,
-        // so overlap-add normalization is correct before we apply the
-        // nonlinear saturation.
-        let saturated_loud = (drive * loud_td).tanh();
-        let processed = saturated_loud + quiet_td;
-
-        // Original (unprocessed) = loud + quiet = delayed input (by COLA linearity)
+        // Apply tanh to the FULL reconstructed signal (loud + quiet = delayed
+        // input), then ADD the quiet (detail) component back on top.
+        //
+        // This produces the correct waveform shape (matching Newfangled Audio
+        // Saturate): tanh clips the full signal to flat tops at ±1.0, then
+        // the detail rides symmetrically on top as ripple. The detail peaks
+        // go slightly above 1.0 and troughs slightly below, giving symmetric
+        // variation around the clip level.
+        //
+        // Why not clip just the loud path? Because loud_td and quiet_td are
+        // correlated (they sum to the original), so clipping only the loud
+        // path leaves a "bias" from leaked fundamental energy in quiet_td.
+        // Clipping the full signal first eliminates this correlation.
         let original = loud_td + quiet_td;
+        let clipped_full = (drive * original).tanh();
+        let processed = clipped_full + quiet_td;
 
         // Amount crossfade: clean -> processed
         let output = original + amount * (processed - original);
@@ -239,7 +250,7 @@ impl SpectralClipper {
         // Process an FFT frame every hop_size samples
         if self.hop_counter >= self.hop_size {
             self.hop_counter = 0;
-            self.process_frame(drive);
+            self.process_frame();
         }
 
         output
@@ -250,8 +261,8 @@ impl SpectralClipper {
     /// **Step 1:** Forward FFT of windowed input frame.
     ///
     /// **Step 2:** Split bins into loud (above threshold) and quiet (below).
-    /// Threshold = `FULL_SCALE_BIN_MAG / drive`. Loud bins are the dominant
-    /// components that would cause clipping; quiet bins are the detail.
+    /// Threshold is peak-relative: loud bins are within 6 dB of the frame's
+    /// spectral peak; quiet bins are more than 20 dB below the peak.
     ///
     /// **Step 3:** ISTFT both paths separately.
     ///
@@ -260,10 +271,10 @@ impl SpectralClipper {
     /// processing here — tanh is applied AFTER reconstruction in
     /// `process_sample()` to preserve COLA normalization.
     ///
-    /// `drive` is used only for the loud/quiet split threshold
-    /// (`FULL_SCALE_BIN_MAG / drive`). The actual tanh saturation happens
-    /// post-reconstruction in `process_sample()`.
-    fn process_frame(&mut self, drive: f32) {
+    /// The split threshold is peak-relative (not drive-dependent).
+    /// The actual tanh saturation happens post-reconstruction in
+    /// `process_sample()`.
+    fn process_frame(&mut self) {
         let n = self.fft_size;
         let out_len = self.loud_output_ring.len();
 
@@ -283,18 +294,15 @@ impl SpectralClipper {
             *bin *= inv_n;
         }
 
-        // 3. Split bins into loud vs quiet with soft transition band.
-        //    threshold = FULL_SCALE_BIN_MAG / drive
-        //    At drive=1 (0 dB): threshold = 0.5 = full-scale → all quiet → passthrough
-        //    At drive=10 (20 dB): threshold = 0.05 → dominant bins are loud
-        //
-        //    A ±50% soft band around the threshold prevents hard classification
-        //    of bins near the boundary. Bins within the transition band are split
-        //    proportionally between loud and quiet paths.
-        let threshold = FULL_SCALE_BIN_MAG / drive;
-        let soft_band = threshold * 0.5;
-        let lo = threshold - soft_band; // below this = 100% quiet
-        let hi = threshold + soft_band; // above this = 100% loud
+        // 3. Split bins using peak-relative threshold.
+        //    The threshold adapts to the actual spectral content, ensuring
+        //    detail bins go to the quiet path regardless of drive level.
+        //    - Above LOUD_RATIO * peak (-6 dB): 100% loud (dominant components)
+        //    - Below QUIET_RATIO * peak (-20 dB): 100% quiet (detail)
+        //    - Between: smooth crossfade (14 dB transition band)
+        let max_mag = self.fft_buf.iter().map(|b| b.norm()).fold(0.0_f32, f32::max);
+        let hi = max_mag * LOUD_RATIO;
+        let lo = max_mag * QUIET_RATIO;
         let inv_band = if hi > lo { 1.0 / (hi - lo) } else { 1.0 };
 
         for k in 0..n {
@@ -784,7 +792,7 @@ mod tests {
         // Verify the per-bin ceiling formula directly:
         // ceiling * tanh(mag / ceiling) should compress loud, preserve quiet.
         let drive = 10.0_f32;
-        let ceiling = FULL_SCALE_BIN_MAG / drive; // 0.5/10 = 0.05
+        let ceiling = 0.5 / drive; // reference value / drive = 0.05
 
         // Loud bin (full-scale sine): mag = 0.5
         let loud_mag = 0.5_f32;
