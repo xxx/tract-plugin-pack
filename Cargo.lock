@@ -3536,6 +3536,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "satch"
+version = "0.1.0"
+dependencies = [
+ "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=9a0b42c09d712777b2edb4c5e0cb6baf21e988f0)",
+ "crossbeam",
+ "keyboard-types",
+ "nih_plug",
+ "raw-window-handle 0.5.2",
+ "raw-window-handle 0.6.2",
+ "rustfft",
+ "serde",
+ "softbuffer",
+ "tiny-skia",
+ "tiny-skia-widgets",
+]
+
+[[package]]
 name = "scoped-tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
