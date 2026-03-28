@@ -187,9 +187,14 @@ impl Plugin for Satch {
             let sp_l = self.spectral_l.process_sample(in_l, amount, drive_linear);
             let sp_r = self.spectral_r.process_sample(in_r, amount, drive_linear);
 
-            // Detail blend: 0% = time-domain, 100% = spectral
-            let wet_l = detail * sp_l + (1.0 - detail) * td_l;
-            let wet_r = detail * sp_r + (1.0 - detail) * td_r;
+            // Clip-aware detail blend: only restore spectral detail where clipping occurs.
+            // tanh²(drive * x) ≈ 0 in the linear region, ≈ 1 when fully saturated.
+            let clip_l = (drive_linear * dry_l).tanh().powi(2);
+            let clip_r = (drive_linear * dry_r).tanh().powi(2);
+            let lost_l = sp_l - td_l;
+            let lost_r = sp_r - td_r;
+            let wet_l = td_l + detail * clip_l * lost_l;
+            let wet_r = td_r + detail * clip_r * lost_r;
 
             // Dry/wet mix (dry is delayed to align)
             left[i] = mix * wet_l + (1.0 - mix) * dry_l;

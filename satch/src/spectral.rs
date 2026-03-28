@@ -1574,4 +1574,220 @@ mod tests {
         println!("\nDetail preservation ratio: {:.2}x", avg_var / td_avg_var.max(1e-10));
     }
 
+    // ── Clip-aware detail blend tests ────────────────────────────────
+
+    /// Simulate the full plugin pipeline: TD saturation + spectral + clip-aware blend.
+    ///
+    /// This mirrors the logic in lib.rs process() but without nih-plug dependencies.
+    /// The clip-aware blend uses `tanh²(drive * x)` as the clip mask so that
+    /// the spectral contribution is zero in unclipped regions and fully active
+    /// in saturated regions.
+    fn blend_with_clip_mask(input: &[f32], drive_linear: f32, detail: f32) -> Vec<f32> {
+        let (amount, drive) = compute_drive_params(drive_linear);
+        let mut sc = SpectralClipper::new(2048, 512);
+
+        // Dry delay to align with spectral latency (same as lib.rs)
+        let delay_len = 2048;
+        let mut dry_delay = vec![0.0_f32; delay_len];
+        let mut delay_pos = 0;
+
+        let mut output = Vec::with_capacity(input.len());
+
+        for &sample in input {
+            // Delay dry signal (same as lib.rs)
+            let dry = dry_delay[delay_pos];
+            dry_delay[delay_pos] = sample;
+            delay_pos = (delay_pos + 1) % delay_len;
+
+            // TD saturation on delayed dry
+            let td = saturate_td(dry, amount, drive);
+
+            // Spectral path (has built-in latency)
+            let sp = sc.process_sample(sample, amount, drive);
+
+            // Clip-aware blend: only restore spectral detail where clipping occurs
+            let clip_amount = (drive_linear * dry).tanh().powi(2);
+            let lost = sp - td;
+            let wet = td + detail * clip_amount * lost;
+
+            output.push(wet);
+        }
+
+        output
+    }
+
+    #[test]
+    fn test_clip_blend_unclipped_matches_td() {
+        // Quiet signal (0.05 amplitude, 440 Hz) at drive=10.
+        // clip_amount = tanh(10 * 0.05)^2 = tanh(0.5)^2 ≈ 0.21 — small but not zero.
+        // However, a truly quiet signal (well below clipping threshold) should
+        // produce near-identical output to TD because the signal barely enters
+        // the nonlinear region and sp ≈ td for unclipped material.
+        //
+        // At 0.05 amplitude with drive=10, tanh(0.5)^2 ≈ 0.21 — but the
+        // difference (sp - td) is also very small for linear-region signals.
+        // The combined effect: detail * clip * (sp - td) ≈ 0.
+        let drive_linear = 10.0_f32;
+        let detail = 1.0; // 100%
+        let (amount, drive) = compute_drive_params(drive_linear);
+
+        let input = make_sine(440.0, 0.05, 32768);
+
+        // TD-only path (with same delay alignment)
+        let delay_len = 2048;
+        let mut dry_delay = vec![0.0_f32; delay_len];
+        let mut delay_pos = 0;
+        let td_output: Vec<f32> = input
+            .iter()
+            .map(|&s| {
+                let dry = dry_delay[delay_pos];
+                dry_delay[delay_pos] = s;
+                delay_pos = (delay_pos + 1) % delay_len;
+                saturate_td(dry, amount, drive)
+            })
+            .collect();
+
+        // Full pipeline with clip-aware blend
+        let blended = blend_with_clip_mask(&input, drive_linear, detail);
+
+        // Compare after settling (skip 2 x fft_size)
+        let skip = 8192;
+        let mut max_diff = 0.0_f32;
+        let mut rms_diff = 0.0_f64;
+        let mut rms_signal = 0.0_f64;
+        let count = blended.len() - skip;
+        for i in skip..blended.len() {
+            let diff = (blended[i] - td_output[i]).abs();
+            max_diff = max_diff.max(diff);
+            rms_diff += (diff as f64).powi(2);
+            rms_signal += (td_output[i] as f64).powi(2);
+        }
+        rms_diff = (rms_diff / count as f64).sqrt();
+        rms_signal = (rms_signal / count as f64).sqrt();
+
+        // Less than 1% difference relative to signal level
+        let relative_error = if rms_signal > 1e-10 {
+            rms_diff / rms_signal
+        } else {
+            rms_diff
+        };
+        assert!(
+            relative_error < 0.01,
+            "unclipped material should match TD within 1%: relative_error={relative_error:.6}, max_diff={max_diff:.6}"
+        );
+    }
+
+    #[test]
+    fn test_clip_blend_adds_detail_in_clipped_regions() {
+        // Composite signal (0.8 * sin(100Hz) + 0.15 * sin(1kHz)) at drive=10.
+        // With Detail=100%, the clip-aware blend should add measurable texture
+        // (from spectral detail preservation) on flat-clipped sections.
+        let drive_linear = 10.0_f32;
+        let (amount, drive) = compute_drive_params(drive_linear);
+
+        let num = 65536;
+        let input: Vec<f32> = (0..num)
+            .map(|i| {
+                let t = i as f32 / SR;
+                0.8 * (2.0 * PI * 100.0 * t).sin()
+                    + 0.15 * (2.0 * PI * 1000.0 * t).sin()
+            })
+            .collect();
+
+        // TD-only path (with delay alignment)
+        let delay_len = 2048;
+        let mut dry_delay = vec![0.0_f32; delay_len];
+        let mut delay_pos = 0;
+        let td_output: Vec<f32> = input
+            .iter()
+            .map(|&s| {
+                let dry = dry_delay[delay_pos];
+                dry_delay[delay_pos] = s;
+                delay_pos = (delay_pos + 1) % delay_len;
+                saturate_td(dry, amount, drive)
+            })
+            .collect();
+
+        // Full pipeline with clip-aware blend at 100% detail
+        let blended = blend_with_clip_mask(&input, drive_linear, 1.0);
+
+        let skip = 8192;
+
+        // Measure flat-section variation for both
+        fn flat_variation(signal: &[f32], skip: usize) -> f64 {
+            let peak = signal[skip..].iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
+            let threshold = peak * 0.90;
+            let flat: Vec<f32> = signal[skip..]
+                .iter()
+                .filter(|&&s| s.abs() > threshold)
+                .copied()
+                .collect();
+            if flat.len() < 2 {
+                return 0.0;
+            }
+            let mut var = 0.0_f64;
+            for i in 1..flat.len() {
+                var += (flat[i] - flat[i - 1]).abs() as f64;
+            }
+            var / (flat.len() - 1) as f64
+        }
+
+        let td_var = flat_variation(&td_output, skip);
+        let blended_var = flat_variation(&blended, skip);
+
+        // Blended output must have > 1.5x more flat-section variation than TD
+        assert!(
+            blended_var > td_var * 1.5,
+            "clip-aware blend should add detail in clipped regions: blended_var={blended_var:.6}, td_var={td_var:.6}, ratio={:.2}x",
+            blended_var / td_var.max(1e-10)
+        );
+    }
+
+    #[test]
+    fn test_clip_blend_peaks_match_td() {
+        // Same composite signal. The output peak with Detail=100% must be
+        // close to the TD peak. The spectral path preserves quiet detail that
+        // rides above the tanh clip ceiling (quiet spectral components added on
+        // top), so peaks are slightly higher than pure TD. With 0.15 amplitude
+        // detail, ~12% overshoot is physically correct. Tolerance: +/-15%.
+        let drive_linear = 10.0_f32;
+        let (amount, drive) = compute_drive_params(drive_linear);
+
+        let num = 65536;
+        let input: Vec<f32> = (0..num)
+            .map(|i| {
+                let t = i as f32 / SR;
+                0.8 * (2.0 * PI * 100.0 * t).sin()
+                    + 0.15 * (2.0 * PI * 1000.0 * t).sin()
+            })
+            .collect();
+
+        // TD-only path (with delay alignment)
+        let delay_len = 2048;
+        let mut dry_delay = vec![0.0_f32; delay_len];
+        let mut delay_pos = 0;
+        let td_output: Vec<f32> = input
+            .iter()
+            .map(|&s| {
+                let dry = dry_delay[delay_pos];
+                dry_delay[delay_pos] = s;
+                delay_pos = (delay_pos + 1) % delay_len;
+                saturate_td(dry, amount, drive)
+            })
+            .collect();
+
+        // Full pipeline with clip-aware blend at 100% detail
+        let blended = blend_with_clip_mask(&input, drive_linear, 1.0);
+
+        let skip = 8192;
+        let td_peak = td_output[skip..].iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
+        let blended_peak = blended[skip..].iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
+
+        let ratio = blended_peak / td_peak;
+        assert!(
+            (0.85..=1.15).contains(&ratio),
+            "blended peak should be within +/-15% of TD peak: td_peak={td_peak:.4}, blended_peak={blended_peak:.4}, ratio={ratio:.4}"
+        );
+    }
+
 }
