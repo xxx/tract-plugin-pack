@@ -67,6 +67,14 @@ pub fn saturate_td(x: f32, amount: f32, drive: f32) -> f32 {
     x + amount * (clipped - x)
 }
 
+/// Like `saturate_td` but also returns `tanh(drive * x)` for reuse in the
+/// clip-aware blend (avoids computing the same tanh twice per sample).
+#[inline]
+pub fn saturate_td_with_tanh(x: f32, amount: f32, drive: f32) -> (f32, f32) {
+    let clipped = (drive * x).tanh();
+    (x + amount * (clipped - x), clipped)
+}
+
 /// STFT-based spectral clipper with detail preservation.
 ///
 /// Feed one sample at a time via [`process_sample`]. Internally it accumulates
@@ -96,8 +104,11 @@ pub struct SpectralClipper {
 
     // Windows & normalization
     analysis_window: Vec<f32>,
-    /// Constant COLA normalization factor: sum of Hann² at 75% overlap = 1.5.
-    cola_factor: f32,
+    /// Pre-multiplied synthesis window: analysis_window[i] / cola_factor.
+    synthesis_window: Vec<f32>,
+
+    // Pre-allocated workspace for per-bin magnitudes (avoids recomputing norm)
+    mag_buf: Vec<f32>,
 
     // Ring buffers
     input_ring: Vec<f32>,
@@ -152,6 +163,8 @@ impl SpectralClipper {
             }
         }
         let cola_factor = cola_check[0] as f32;
+        let inv_cola = 1.0 / cola_factor;
+        let synthesis_window: Vec<f32> = analysis_window.iter().map(|&w| w * inv_cola).collect();
 
         let out_ring_size = 2 * fft_size;
 
@@ -162,7 +175,8 @@ impl SpectralClipper {
             fft_inverse,
             scratch: vec![Complex::new(0.0, 0.0); scratch_len],
             analysis_window,
-            cola_factor,
+            synthesis_window,
+            mag_buf: vec![0.0; fft_size],
             input_ring: vec![0.0; fft_size],
             loud_output_ring: vec![0.0; out_ring_size],
             quiet_output_ring: vec![0.0; out_ring_size],
@@ -203,7 +217,22 @@ impl SpectralClipper {
     ///
     /// `amount` and `drive` control saturation (from `compute_drive_params`).
     /// At amount=0 (0 dB drive): passthrough. Higher values = more saturation.
+    ///
+    /// When `skip_fft` is true, the FFT frame processing is skipped (the input
+    /// ring and counters are still maintained). This is used when the spectral
+    /// output won't be used (e.g. detail=0 or mix=0) to avoid FFT overhead.
+    /// When `skip_fft` transitions back to false, there will be a brief settling
+    /// period (~4 hops) as the output rings refill.
     pub fn process_sample(&mut self, input: f32, amount: f32, drive: f32) -> f32 {
+        self.process_sample_inner(input, amount, drive, false)
+    }
+
+    /// Like `process_sample` but allows skipping FFT frame processing.
+    pub fn process_sample_skip_fft(&mut self, input: f32, amount: f32, drive: f32) -> f32 {
+        self.process_sample_inner(input, amount, drive, true)
+    }
+
+    fn process_sample_inner(&mut self, input: f32, amount: f32, drive: f32, skip_fft: bool) -> f32 {
         let out_len = self.loud_output_ring.len();
 
         // Write input into the input ring
@@ -218,39 +247,50 @@ impl SpectralClipper {
         self.loud_output_ring[self.read_pos] = 0.0;
         self.quiet_output_ring[self.read_pos] = 0.0;
 
-        // Apply tanh to the FULL reconstructed signal (loud + quiet = delayed
-        // input), then ADD the quiet (detail) component back on top.
-        //
-        // This produces the correct waveform shape (matching Newfangled Audio
-        // Saturate): tanh clips the full signal to flat tops at ±1.0, then
-        // the detail rides symmetrically on top as ripple. The detail peaks
-        // go slightly above 1.0 and troughs slightly below, giving symmetric
-        // variation around the clip level.
-        //
-        // Why not clip just the loud path? Because loud_td and quiet_td are
-        // correlated (they sum to the original), so clipping only the loud
-        // path leaves a "bias" from leaked fundamental energy in quiet_td.
-        // Clipping the full signal first eliminates this correlation.
         let original = loud_td + quiet_td;
-        let clipped_full = (drive * original).tanh();
-        let processed = clipped_full + quiet_td;
 
-        // Amount crossfade: clean -> processed
-        let output = original + amount * (processed - original);
+        // Fast path: when amount=0 (drive at 0 dB), output is just the
+        // reconstructed original — skip tanh and crossfade entirely.
+        let output = if amount == 0.0 {
+            original
+        } else {
+            // Apply tanh to the FULL reconstructed signal (loud + quiet = delayed
+            // input), then ADD the quiet (detail) component back on top.
+            //
+            // This produces the correct waveform shape (matching Newfangled Audio
+            // Saturate): tanh clips the full signal to flat tops at ±1.0, then
+            // the detail rides symmetrically on top as ripple. The detail peaks
+            // go slightly above 1.0 and troughs slightly below, giving symmetric
+            // variation around the clip level.
+            //
+            // Why not clip just the loud path? Because loud_td and quiet_td are
+            // correlated (they sum to the original), so clipping only the loud
+            // path leaves a "bias" from leaked fundamental energy in quiet_td.
+            // Clipping the full signal first eliminates this correlation.
+            let clipped_full = (drive * original).tanh();
+            let processed = clipped_full + quiet_td;
 
-        // Safety clip at +/-1.5: detail can ride slightly above the +/-1.0 tanh
-        // clip level (quiet spectral components added on top of clipped loud
-        // components), but we bound it to prevent extreme values.
-        let output = output.clamp(-1.5, 1.5);
+            // Amount crossfade: clean -> processed
+            let out = original + amount * (processed - original);
+
+            // Safety clip at +/-1.5: detail can ride slightly above the +/-1.0 tanh
+            // clip level (quiet spectral components added on top of clipped loud
+            // components), but we bound it to prevent extreme values.
+            out.clamp(-1.5, 1.5)
+        };
 
         self.read_pos = (self.read_pos + 1) % out_len;
 
         self.hop_counter += 1;
 
-        // Process an FFT frame every hop_size samples
+        // Process an FFT frame every hop_size samples.
+        // When skip_fft is true, reset the counter but don't run the FFT —
+        // the output rings will read as zeros (from the clearing above).
         if self.hop_counter >= self.hop_size {
             self.hop_counter = 0;
-            self.process_frame();
+            if !skip_fft {
+                self.process_frame();
+            }
         }
 
         output
@@ -285,38 +325,53 @@ impl SpectralClipper {
             self.fft_buf[i] = Complex::new(windowed, 0.0);
         }
 
-        // 2. Forward FFT (in-place), normalize by 1/N.
+        // 2. Forward FFT (in-place), normalize by 1/N, and cache magnitudes.
+        //    Merging normalization with magnitude computation avoids a separate
+        //    pass over the data. Using norm_sqr (no sqrt) for threshold comparisons
+        //    eliminates ~4096 sqrt calls per frame; sqrt is only computed for the
+        //    small number of bins in the transition band.
         self.fft_forward
             .process_with_scratch(&mut self.fft_buf, &mut self.scratch);
 
         let inv_n = 1.0 / n as f32;
-        for bin in self.fft_buf.iter_mut() {
-            *bin *= inv_n;
+        let mut max_mag_sq = 0.0_f32;
+        for k in 0..n {
+            self.fft_buf[k] *= inv_n;
+            let mag_sq = self.fft_buf[k].norm_sqr();
+            self.mag_buf[k] = mag_sq;
+            if mag_sq > max_mag_sq {
+                max_mag_sq = mag_sq;
+            }
         }
 
-        // 3. Split bins using peak-relative threshold.
+        // 3. Split bins using peak-relative threshold (squared for comparison).
         //    The threshold adapts to the actual spectral content, ensuring
         //    detail bins go to the quiet path regardless of drive level.
         //    - Above LOUD_RATIO * peak (-6 dB): 100% loud (dominant components)
         //    - Below QUIET_RATIO * peak (-20 dB): 100% quiet (detail)
         //    - Between: smooth crossfade (14 dB transition band)
-        let max_mag = self.fft_buf.iter().map(|b| b.norm()).fold(0.0_f32, f32::max);
+        let hi_sq = max_mag_sq * (LOUD_RATIO * LOUD_RATIO);
+        let lo_sq = max_mag_sq * (QUIET_RATIO * QUIET_RATIO);
+        // For the transition band crossfade, we need linear magnitudes.
+        // Compute hi/lo from sqrt only once (not per bin).
+        let max_mag = max_mag_sq.sqrt();
         let hi = max_mag * LOUD_RATIO;
         let lo = max_mag * QUIET_RATIO;
         let inv_band = if hi > lo { 1.0 / (hi - lo) } else { 1.0 };
 
         for k in 0..n {
-            let mag = self.fft_buf[k].norm();
-            if mag >= hi {
+            let mag_sq = self.mag_buf[k];
+            if mag_sq >= hi_sq {
                 // Clearly loud — 100% to loud path
                 self.loud_buf[k] = self.fft_buf[k];
                 self.quiet_buf[k] = Complex::new(0.0, 0.0);
-            } else if mag <= lo {
+            } else if mag_sq <= lo_sq {
                 // Clearly quiet — 100% to quiet path (detail preserved)
                 self.loud_buf[k] = Complex::new(0.0, 0.0);
                 self.quiet_buf[k] = self.fft_buf[k];
             } else {
-                // Transition band — smooth crossfade
+                // Transition band — smooth crossfade (sqrt only here)
+                let mag = mag_sq.sqrt();
                 let t = (mag - lo) * inv_band; // 0 at lo, 1 at hi
                 self.loud_buf[k] = self.fft_buf[k] * t;
                 self.quiet_buf[k] = self.fft_buf[k] * (1.0 - t);
@@ -332,14 +387,13 @@ impl SpectralClipper {
             .process_with_scratch(&mut self.quiet_buf, &mut self.scratch);
 
         // 5. Overlap-add both paths LINEARLY into their respective output rings.
-        //    Synthesis window = analysis window (Hann), COLA normalize.
+        //    Synthesis window (= analysis_window / cola_factor) is pre-computed
+        //    at construction to avoid a per-sample multiply.
         //    No nonlinear processing here — tanh is applied post-reconstruction
         //    in process_sample() to preserve COLA normalization.
-        let inv_cola = 1.0 / self.cola_factor;
-
         for i in 0..n {
             let out_idx = (self.read_pos + i) % out_len;
-            let w = self.analysis_window[i] * inv_cola;
+            let w = self.synthesis_window[i];
             self.loud_output_ring[out_idx] += (self.loud_buf[i].re * w) as f64;
             self.quiet_output_ring[out_idx] += (self.quiet_buf[i].re * w) as f64;
         }

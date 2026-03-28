@@ -165,6 +165,11 @@ impl Plugin for Satch {
         let detail = self.params.detail.value() / 100.0;
         let mix = self.params.mix.value() / 100.0;
 
+        // Skip FFT processing when the spectral result won't be used.
+        // detail=0: spectral contribution is multiplied by 0 in the blend.
+        // mix=0: entire wet path is unused (output = dry).
+        let skip_fft = detail == 0.0 || mix == 0.0;
+
         for i in 0..num_samples {
             let drive = self.params.drive.smoothed.next();
             let (amount, drive_linear) = spectral::compute_drive_params(drive);
@@ -179,18 +184,31 @@ impl Plugin for Satch {
             self.dry_delay_r[self.dry_delay_pos] = in_r;
             self.dry_delay_pos = (self.dry_delay_pos + 1) % self.dry_delay_l.len();
 
-            // Time-domain saturation path (on delayed dry signal)
-            let td_l = spectral::saturate_td(dry_l, amount, drive_linear);
-            let td_r = spectral::saturate_td(dry_r, amount, drive_linear);
+            // Time-domain saturation path (on delayed dry signal).
+            // Returns both the saturated output and tanh(drive*x) for reuse
+            // in the clip-aware blend (avoids computing tanh twice per channel).
+            let (td_l, tanh_l) = spectral::saturate_td_with_tanh(dry_l, amount, drive_linear);
+            let (td_r, tanh_r) = spectral::saturate_td_with_tanh(dry_r, amount, drive_linear);
 
-            // Spectral path (has built-in latency from STFT)
-            let sp_l = self.spectral_l.process_sample(in_l, amount, drive_linear);
-            let sp_r = self.spectral_r.process_sample(in_r, amount, drive_linear);
+            // Spectral path (has built-in latency from STFT).
+            // When skip_fft=true, ring buffer state is maintained but FFT
+            // frames are not computed (saves ~95% of CPU in this path).
+            let sp_l = if skip_fft {
+                self.spectral_l.process_sample_skip_fft(in_l, amount, drive_linear)
+            } else {
+                self.spectral_l.process_sample(in_l, amount, drive_linear)
+            };
+            let sp_r = if skip_fft {
+                self.spectral_r.process_sample_skip_fft(in_r, amount, drive_linear)
+            } else {
+                self.spectral_r.process_sample(in_r, amount, drive_linear)
+            };
 
             // Clip-aware detail blend: only restore spectral detail where clipping occurs.
             // tanh²(drive * x) ≈ 0 in the linear region, ≈ 1 when fully saturated.
-            let clip_l = (drive_linear * dry_l).tanh().powi(2);
-            let clip_r = (drive_linear * dry_r).tanh().powi(2);
+            // Reuse tanh from saturate_td (same argument: drive * dry).
+            let clip_l = tanh_l * tanh_l;
+            let clip_r = tanh_r * tanh_r;
             let lost_l = sp_l - td_l;
             let lost_r = sp_r - td_r;
             let wet_l = td_l + detail * clip_l * lost_l;
