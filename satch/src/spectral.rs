@@ -48,31 +48,38 @@ pub fn compute_drive_params(drive_linear: f32) -> (f32, f32) {
     (amount, drive_linear)
 }
 
-/// Time-domain saturation: drive-boost into a fixed tanh ceiling.
+/// Time-domain saturation: drive-boost with variable knee.
 ///
-/// `sat(x) = tanh(drive * x)`
+/// `knee` controls the clipping shape:
+/// - `knee=0`: hard clip — `clamp(drive * x, -1, 1)`
+/// - `knee=1`: soft clip — `tanh(drive * x)`
+/// - In between: linear crossfade between hard and soft
 ///
-/// Drive boosts the input into the tanh curve, which has a fixed ceiling
-/// of ±1.0. Small signals pass through nearly unchanged (`tanh(y) ≈ y`
-/// for small `y`), while loud signals are soft-clipped toward ±1.0.
-/// Higher drive = more of the signal is pushed into the saturated region.
+/// Drive boosts the input into the clipping curve. Small signals pass
+/// through nearly unchanged, while loud signals are clipped toward ±1.0.
 ///
 /// The `amount` parameter crossfades between clean and saturated:
 ///
 /// At amount=0 (0 dB drive): output = input (clean).
-/// At amount=1 (24 dB drive): output = tanh(drive * x) (peaks clipped to ±1).
+/// At amount=1 (24 dB drive): output = clipped (peaks at ±1).
 #[inline]
-pub fn saturate_td(x: f32, amount: f32, drive: f32) -> f32 {
-    let clipped = (drive * x).tanh();
+pub fn saturate_td(x: f32, amount: f32, drive: f32, knee: f32) -> f32 {
+    let driven = drive * x;
+    let hard = driven.clamp(-1.0, 1.0);
+    let soft = driven.tanh();
+    let clipped = hard + knee * (soft - hard);
     x + amount * (clipped - x)
 }
 
 /// Like `saturate_td` but also returns `tanh(drive * x)` for reuse in the
 /// clip-aware blend (avoids computing the same tanh twice per sample).
 #[inline]
-pub fn saturate_td_with_tanh(x: f32, amount: f32, drive: f32) -> (f32, f32) {
-    let clipped = (drive * x).tanh();
-    (x + amount * (clipped - x), clipped)
+pub fn saturate_td_with_tanh(x: f32, amount: f32, drive: f32, knee: f32) -> (f32, f32) {
+    let driven = drive * x;
+    let hard = driven.clamp(-1.0, 1.0);
+    let soft = driven.tanh();
+    let clipped = hard + knee * (soft - hard);
+    (x + amount * (clipped - x), soft)
 }
 
 /// STFT-based spectral clipper with detail preservation.
@@ -223,16 +230,16 @@ impl SpectralClipper {
     /// output won't be used (e.g. detail=0 or mix=0) to avoid FFT overhead.
     /// When `skip_fft` transitions back to false, there will be a brief settling
     /// period (~4 hops) as the output rings refill.
-    pub fn process_sample(&mut self, input: f32, amount: f32, drive: f32) -> f32 {
-        self.process_sample_inner(input, amount, drive, false)
+    pub fn process_sample(&mut self, input: f32, amount: f32, drive: f32, knee: f32) -> f32 {
+        self.process_sample_inner(input, amount, drive, knee, false)
     }
 
     /// Like `process_sample` but allows skipping FFT frame processing.
-    pub fn process_sample_skip_fft(&mut self, input: f32, amount: f32, drive: f32) -> f32 {
-        self.process_sample_inner(input, amount, drive, true)
+    pub fn process_sample_skip_fft(&mut self, input: f32, amount: f32, drive: f32, knee: f32) -> f32 {
+        self.process_sample_inner(input, amount, drive, knee, true)
     }
 
-    fn process_sample_inner(&mut self, input: f32, amount: f32, drive: f32, skip_fft: bool) -> f32 {
+    fn process_sample_inner(&mut self, input: f32, amount: f32, drive: f32, knee: f32, skip_fft: bool) -> f32 {
         let out_len = self.loud_output_ring.len();
 
         // Write input into the input ring
@@ -267,7 +274,10 @@ impl SpectralClipper {
             // correlated (they sum to the original), so clipping only the loud
             // path leaves a "bias" from leaked fundamental energy in quiet_td.
             // Clipping the full signal first eliminates this correlation.
-            let clipped_full = (drive * original).tanh();
+            let driven_full = drive * original;
+            let hard_full = driven_full.clamp(-1.0, 1.0);
+            let soft_full = driven_full.tanh();
+            let clipped_full = hard_full + knee * (soft_full - hard_full);
             let processed = clipped_full + quiet_td;
 
             // Amount crossfade: clean -> processed
@@ -419,7 +429,7 @@ mod tests {
         let mut sc = SpectralClipper::new(2048, 512);
         input
             .iter()
-            .map(|&s| sc.process_sample(s, amount, drive))
+            .map(|&s| sc.process_sample(s, amount, drive, 1.0))
             .collect()
     }
 
@@ -510,9 +520,9 @@ mod tests {
     fn test_saturate_td_unity_at_zero_drive() {
         let (amount, drive) = compute_drive_params(1.0); // 0 dB
         assert_eq!(amount, 0.0);
-        assert_eq!(saturate_td(0.5, amount, drive), 0.5);
-        assert_eq!(saturate_td(-0.9, amount, drive), -0.9);
-        assert_eq!(saturate_td(0.0, amount, drive), 0.0);
+        assert_eq!(saturate_td(0.5, amount, drive, 1.0), 0.5);
+        assert_eq!(saturate_td(-0.9, amount, drive, 1.0), -0.9);
+        assert_eq!(saturate_td(0.0, amount, drive, 1.0), 0.0);
     }
 
     #[test]
@@ -520,7 +530,7 @@ mod tests {
         // Drive boosts into tanh ceiling of 1.0. A 0.75 signal at max drive
         // should be pushed toward 1.0 but clamped there.
         let (amount, drive) = compute_drive_params(GAIN_MAX); // 24 dB
-        let out = saturate_td(0.75, amount, drive);
+        let out = saturate_td(0.75, amount, drive, 1.0);
         // tanh(15.85 * 0.75) = tanh(11.9) ≈ 1.0
         // At amount=1: output ≈ 1.0
         assert!(
@@ -544,7 +554,7 @@ mod tests {
         // clean via amount means small signals get a modest boost.
         let (amount, drive) = compute_drive_params(4.0); // ~12 dB
         let small = 0.01;
-        let out = saturate_td(small, amount, drive);
+        let out = saturate_td(small, amount, drive, 1.0);
         // tanh(4 * 0.01) = tanh(0.04) ≈ 0.04, blended: 0.01 + amount*(0.04 - 0.01)
         // amount at drive=4 ≈ 0.45, so out ≈ 0.01 + 0.45*0.03 ≈ 0.024
         assert!(
@@ -561,8 +571,8 @@ mod tests {
     #[test]
     fn test_saturate_td_negative_symmetry() {
         let (amount, drive) = compute_drive_params(GAIN_MAX);
-        let pos = saturate_td(0.75, amount, drive);
-        let neg = saturate_td(-0.75, amount, drive);
+        let pos = saturate_td(0.75, amount, drive, 1.0);
+        let neg = saturate_td(-0.75, amount, drive, 1.0);
         assert!(
             (pos + neg).abs() < 1e-6,
             "saturation should be symmetric: pos={pos}, neg={neg}"
@@ -577,7 +587,7 @@ mod tests {
         for drive_db in [6.0, 12.0, 18.0, 24.0] {
             let drive_lin = 10.0_f32.powf(drive_db / 20.0);
             let (amount, drive) = compute_drive_params(drive_lin);
-            let out = saturate_td(input, amount, drive);
+            let out = saturate_td(input, amount, drive, 1.0);
             assert!(
                 out >= prev_out - 0.001,
                 "more drive should push closer to ceiling: {drive_db} dB gave {out}, prev was {prev_out}"
@@ -591,6 +601,68 @@ mod tests {
         );
     }
 
+    // ── Knee parameter tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_hard_knee_produces_hard_clip() {
+        // At knee=0, output should be hard-clipped: clamp(drive*x, -1, 1)
+        // crossfaded with clean by amount.
+        let (amount, drive) = compute_drive_params(GAIN_MAX); // 24 dB
+        let input = 0.75_f32;
+        let out = saturate_td(input, amount, drive, 0.0);
+        // Hard clip: clamp(15.85 * 0.75, -1, 1) = 1.0
+        // At amount=1: out = input + 1.0 * (1.0 - input) = 1.0
+        let expected = input + amount * ((drive * input).clamp(-1.0, 1.0) - input);
+        assert!(
+            (out - expected).abs() < 1e-6,
+            "knee=0 should produce hard clip: expected {expected}, got {out}"
+        );
+    }
+
+    #[test]
+    fn test_soft_knee_matches_tanh() {
+        // At knee=1, output should match the original tanh behavior exactly.
+        let (amount, drive) = compute_drive_params(GAIN_MAX);
+        let input = 0.75_f32;
+        let out_soft = saturate_td(input, amount, drive, 1.0);
+        let expected = input + amount * ((drive * input).tanh() - input);
+        assert!(
+            (out_soft - expected).abs() < 1e-6,
+            "knee=1 should match tanh: expected {expected}, got {out_soft}"
+        );
+    }
+
+    #[test]
+    fn test_knee_interpolates() {
+        // At knee=0.5, output should be between hard and soft.
+        let (amount, drive) = compute_drive_params(GAIN_MAX);
+        let input = 0.75_f32;
+        let out_hard = saturate_td(input, amount, drive, 0.0);
+        let out_soft = saturate_td(input, amount, drive, 1.0);
+        let out_mid = saturate_td(input, amount, drive, 0.5);
+
+        // For a loud signal with high drive, hard clip (knee=0) produces a
+        // higher output than soft tanh (knee=1) because clamp(drive*x,-1,1)=1.0
+        // while tanh(drive*x) < 1.0 (asymptotically approaches 1.0).
+        // So out_hard >= out_soft, and out_mid should be between them.
+        let lo = out_soft.min(out_hard);
+        let hi = out_soft.max(out_hard);
+        assert!(
+            out_mid >= lo - 1e-6 && out_mid <= hi + 1e-6,
+            "knee=0.5 should interpolate between hard ({out_hard}) and soft ({out_soft}): got {out_mid}"
+        );
+
+        // Verify it's actually in the interior (not equal to either endpoint)
+        // for a signal that produces different hard/soft outputs.
+        if (out_hard - out_soft).abs() > 1e-4 {
+            let midpoint = (out_hard + out_soft) / 2.0;
+            assert!(
+                (out_mid - midpoint).abs() < (hi - lo) * 0.5 + 1e-6,
+                "knee=0.5 should be near the midpoint of hard and soft"
+            );
+        }
+    }
+
     // ── Spectral clipper: new algorithm tests ────────────────────────────
 
     #[test]
@@ -602,7 +674,7 @@ mod tests {
         let mut sc = SpectralClipper::new(2048, 512);
         let mut output = Vec::new();
         for &s in &input {
-            output.push(sc.process_sample(s, amount, drive));
+            output.push(sc.process_sample(s, amount, drive, 1.0));
         }
 
         let skip = 8192;
@@ -630,7 +702,7 @@ mod tests {
         let input = make_sine(440.0, 0.8, 32768);
         let mut sc = SpectralClipper::new(2048, 512);
         for &s in &input {
-            let out = sc.process_sample(s, amount, drive);
+            let out = sc.process_sample(s, amount, drive, 1.0);
             assert!(out.abs() <= 1.51, "output {out} exceeds safety clip");
         }
     }
@@ -655,7 +727,7 @@ mod tests {
         let mut sc = SpectralClipper::new(2048, 512);
         let mut output = Vec::new();
         for &s in &input {
-            output.push(sc.process_sample(s, amount, drive));
+            output.push(sc.process_sample(s, amount, drive, 1.0));
         }
 
         // Measure 5kHz energy in output using a simple bandpass approach:
@@ -686,7 +758,7 @@ mod tests {
         let mut sc = SpectralClipper::new(2048, 512);
         let mut output = Vec::new();
         for &s in &input {
-            output.push(sc.process_sample(s, amount, drive));
+            output.push(sc.process_sample(s, amount, drive, 1.0));
         }
 
         // After settling, output should match input (delayed by latency)
@@ -739,13 +811,13 @@ mod tests {
             .collect();
 
         // Time-domain only path
-        let td_output: Vec<f32> = input.iter().map(|&s| saturate_td(s, amount, drive)).collect();
+        let td_output: Vec<f32> = input.iter().map(|&s| saturate_td(s, amount, drive, 1.0)).collect();
 
         // Spectral path
         let mut sc = SpectralClipper::new(2048, 512);
         let sp_output: Vec<f32> = input
             .iter()
-            .map(|&s| sc.process_sample(s, amount, drive))
+            .map(|&s| sc.process_sample(s, amount, drive, 1.0))
             .collect();
 
         // Measure 5kHz energy via DFT bin magnitude in a late window.
@@ -808,13 +880,13 @@ mod tests {
                 .collect();
 
             // Time-domain only
-            let td_output: Vec<f32> = input.iter().map(|&s| saturate_td(s, amount, drive)).collect();
+            let td_output: Vec<f32> = input.iter().map(|&s| saturate_td(s, amount, drive, 1.0)).collect();
 
             // Spectral path
             let mut sc = SpectralClipper::new(2048, 512);
             let sp_output: Vec<f32> = input
                 .iter()
-                .map(|&s| sc.process_sample(s, amount, drive))
+                .map(|&s| sc.process_sample(s, amount, drive, 1.0))
                 .collect();
 
             // Measure HF energy (proxy for 3kHz detail preservation)
@@ -892,12 +964,12 @@ mod tests {
             })
             .collect();
 
-        let td_output: Vec<f32> = input.iter().map(|&s| saturate_td(s, amount, drive)).collect();
+        let td_output: Vec<f32> = input.iter().map(|&s| saturate_td(s, amount, drive, 1.0)).collect();
 
         let mut sc = SpectralClipper::new(2048, 512);
         let sp_output: Vec<f32> = input
             .iter()
-            .map(|&s| sc.process_sample(s, amount, drive))
+            .map(|&s| sc.process_sample(s, amount, drive, 1.0))
             .collect();
 
         // Measure the ratio of 8kHz to 2kHz energy in both outputs
@@ -957,7 +1029,7 @@ mod tests {
         let input = make_sine(440.0, 0.75, 8192);
         let output: Vec<f32> = input
             .iter()
-            .map(|&s| saturate_td(s, amount, drive))
+            .map(|&s| saturate_td(s, amount, drive, 1.0))
             .collect();
 
         let out_peak = peak_after(&output, 0);
@@ -1084,7 +1156,7 @@ mod tests {
 
         let td_output: Vec<f32> = input
             .iter()
-            .map(|&s| saturate_td(s, amount, drive))
+            .map(|&s| saturate_td(s, amount, drive, 1.0))
             .collect();
 
         let out_peak = peak_after(&td_output, 0);
@@ -1141,7 +1213,7 @@ mod tests {
         // TD path
         let td_output: Vec<f32> = input
             .iter()
-            .map(|&s| saturate_td(s, amount, drive))
+            .map(|&s| saturate_td(s, amount, drive, 1.0))
             .collect();
         let td_peak = peak_after(&td_output, 0);
 
@@ -1344,13 +1416,13 @@ mod tests {
 
                 // TD path (no latency)
                 let td_output: Vec<f32> =
-                    input.iter().map(|&s| saturate_td(s, amount, drive)).collect();
+                    input.iter().map(|&s| saturate_td(s, amount, drive, 1.0)).collect();
 
                 // Spectral path
                 let mut sc = SpectralClipper::new(2048, 512);
                 let sp_output: Vec<f32> = input
                     .iter()
-                    .map(|&s| sc.process_sample(s, amount, drive))
+                    .map(|&s| sc.process_sample(s, amount, drive, 1.0))
                     .collect();
 
                 // Extract one full cycle after settling
@@ -1566,11 +1638,11 @@ mod tests {
             .collect();
 
         // TD path
-        let td: Vec<f32> = input.iter().map(|&s| saturate_td(s, amount, drive)).collect();
+        let td: Vec<f32> = input.iter().map(|&s| saturate_td(s, amount, drive, 1.0)).collect();
 
         // Spectral path
         let mut sc = SpectralClipper::new(2048, 512);
-        let sp: Vec<f32> = input.iter().map(|&s| sc.process_sample(s, amount, drive)).collect();
+        let sp: Vec<f32> = input.iter().map(|&s| sc.process_sample(s, amount, drive, 1.0)).collect();
 
         let skip = 8192;
         let lat = 2048;
@@ -1654,10 +1726,10 @@ mod tests {
             delay_pos = (delay_pos + 1) % delay_len;
 
             // TD saturation on delayed dry
-            let td = saturate_td(dry, amount, drive);
+            let td = saturate_td(dry, amount, drive, 1.0);
 
             // Spectral path (has built-in latency)
-            let sp = sc.process_sample(sample, amount, drive);
+            let sp = sc.process_sample(sample, amount, drive, 1.0);
 
             // Clip-aware blend: only restore spectral detail where clipping occurs
             let clip_amount = (drive_linear * dry).tanh().powi(2);
@@ -1697,7 +1769,7 @@ mod tests {
                 let dry = dry_delay[delay_pos];
                 dry_delay[delay_pos] = s;
                 delay_pos = (delay_pos + 1) % delay_len;
-                saturate_td(dry, amount, drive)
+                saturate_td(dry, amount, drive, 1.0)
             })
             .collect();
 
@@ -1758,7 +1830,7 @@ mod tests {
                 let dry = dry_delay[delay_pos];
                 dry_delay[delay_pos] = s;
                 delay_pos = (delay_pos + 1) % delay_len;
-                saturate_td(dry, amount, drive)
+                saturate_td(dry, amount, drive, 1.0)
             })
             .collect();
 
@@ -1826,7 +1898,7 @@ mod tests {
                 let dry = dry_delay[delay_pos];
                 dry_delay[delay_pos] = s;
                 delay_pos = (delay_pos + 1) % delay_len;
-                saturate_td(dry, amount, drive)
+                saturate_td(dry, amount, drive, 1.0)
             })
             .collect();
 

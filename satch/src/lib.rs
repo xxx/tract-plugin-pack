@@ -31,6 +31,10 @@ pub struct SatchParams {
     #[id = "detail"]
     pub detail: FloatParam,
 
+    /// Knee: 0–100%, crossfades between hard clip (0%) and soft tanh (100%).
+    #[id = "knee"]
+    pub knee: FloatParam,
+
     /// Mix: 0–100%, dry/wet blend.
     #[id = "mix"]
     pub mix: FloatParam,
@@ -70,6 +74,17 @@ impl SatchParams {
             detail: FloatParam::new(
                 "Detail",
                 0.0,
+                FloatRange::Linear {
+                    min: 0.0,
+                    max: 100.0,
+                },
+            )
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_rounded(0)),
+
+            knee: FloatParam::new(
+                "Knee",
+                100.0,
                 FloatRange::Linear {
                     min: 0.0,
                     max: 100.0,
@@ -163,6 +178,7 @@ impl Plugin for Satch {
         let right = &mut rest[0][..num_samples];
 
         let detail = self.params.detail.value() / 100.0;
+        let knee = self.params.knee.value() / 100.0;
         let mix = self.params.mix.value() / 100.0;
 
         // Skip FFT processing when the spectral result won't be used.
@@ -187,21 +203,21 @@ impl Plugin for Satch {
             // Time-domain saturation path (on delayed dry signal).
             // Returns both the saturated output and tanh(drive*x) for reuse
             // in the clip-aware blend (avoids computing tanh twice per channel).
-            let (td_l, tanh_l) = spectral::saturate_td_with_tanh(dry_l, amount, drive_linear);
-            let (td_r, tanh_r) = spectral::saturate_td_with_tanh(dry_r, amount, drive_linear);
+            let (td_l, tanh_l) = spectral::saturate_td_with_tanh(dry_l, amount, drive_linear, knee);
+            let (td_r, tanh_r) = spectral::saturate_td_with_tanh(dry_r, amount, drive_linear, knee);
 
             // Spectral path (has built-in latency from STFT).
             // When skip_fft=true, ring buffer state is maintained but FFT
             // frames are not computed (saves ~95% of CPU in this path).
             let sp_l = if skip_fft {
-                self.spectral_l.process_sample_skip_fft(in_l, amount, drive_linear)
+                self.spectral_l.process_sample_skip_fft(in_l, amount, drive_linear, knee)
             } else {
-                self.spectral_l.process_sample(in_l, amount, drive_linear)
+                self.spectral_l.process_sample(in_l, amount, drive_linear, knee)
             };
             let sp_r = if skip_fft {
-                self.spectral_r.process_sample_skip_fft(in_r, amount, drive_linear)
+                self.spectral_r.process_sample_skip_fft(in_r, amount, drive_linear, knee)
             } else {
-                self.spectral_r.process_sample(in_r, amount, drive_linear)
+                self.spectral_r.process_sample(in_r, amount, drive_linear, knee)
             };
 
             // Clip-aware detail blend: only restore spectral detail where clipping occurs.
