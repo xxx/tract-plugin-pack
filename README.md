@@ -48,6 +48,18 @@ A low-latency wideband peak limiter for track-level use. Feed-forward topology w
 - ~1.0 MB RSS and 0.12% CPU per instance (50 instances @ 6.2% CPU, 50 MB total)
 - Inspired by [DMG Audio TrackLimit](https://dmgaudio.com/products_tracklimit.php)
 
+### satch
+
+A detail-preserving spectral saturator. Uses FFT-based spectral analysis to preserve quiet frequency components through the clipping process, producing textured flat-top clipping instead of featureless flat tops.
+
+- Independent **Gain** (input boost) and **Threshold** (clip ceiling) controls
+- **Detail** knob preserves quiet harmonics through clipped regions via per-bin spectral magnitude saturation
+- **Knee** crossfades between hard clip (0%) and soft tanh saturation (100%)
+- Clip-aware detail blend — only affects clipped portions, unclipped material is unchanged
+- CPU-rendered GUI (tiny-skia + softbuffer)
+- ~0.82 MB RSS and 0.14% CPU per instance (100 instances @ 13.7% CPU, 82 MB total)
+- Inspired by [Newfangled Audio Saturate](https://www.eventideaudio.com/plug-ins/newfangled-saturate/)
+
 ## Build Requirements
 
 - Rust nightly toolchain (automatically configured via `rust-toolchain.toml`)
@@ -71,12 +83,14 @@ cargo nih-plug bundle wavetable-filter --release
 cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle gain-brain --release
 cargo nih-plug bundle tinylimit --release
+cargo nih-plug bundle satch --release
 
 # Standalone binaries
 cargo build --bin wavetable-filter --release
 cargo build --bin gs-meter --release
 cargo build --bin gain-brain --release
 cargo build --bin tinylimit --release
+cargo build --bin satch --release
 ```
 
 The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` file (you only need one -- use whichever your DAW supports) to your plugin directory:
@@ -93,20 +107,22 @@ tract-plugin-pack/
 ├── gs-meter/               # Loudness meter + gain utility
 ├── gain-brain/             # Gain utility with group linking
 ├── tinylimit/              # Wideband peak limiter
+├── satch/                  # Spectral saturator with detail preservation
 ├── nih-plug-widgets/       # Shared vizia widgets (ParamDial, CSS theme)
-├── tiny-skia-widgets/      # Shared CPU-rendered widgets (dial, slider, button)
+├── tiny-skia-widgets/      # Shared CPU-rendered widgets, editor base scaffolding
 ├── docs/                   # Plugin manuals
 │   ├── wavetable-filter/
 │   ├── gs-meter/
 │   ├── gain-brain/
-│   └── tinylimit/
+│   ├── tinylimit/
+│   └── satch/
 └── xtask/                  # Build tooling
 ```
 
 ## Testing
 
 ```bash
-cargo test --workspace       # All tests (170+)
+cargo test --workspace       # All tests (218+)
 cargo clippy --workspace     # Lint check
 ```
 
@@ -116,6 +132,7 @@ cargo clippy --workspace     # Lint check
 - [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
 - [Gain Brain Manual](docs/gain-brain/gain-brain-manual.md)
 - [tinylimit Manual](docs/tinylimit/tinylimit-manual.md)
+- [satch Manual](docs/satch/satch-manual.md)
 
 ## What is Clip-to-Zero?
 
