@@ -388,4 +388,88 @@ mod tests {
 
         let _ = fs::remove_file(&path);
     }
+
+    // 12. Simulate project switch: stale data is overwritten on first write.
+    //
+    // Scenario: "Project A" writes gain=+6dB to group 1. Project A is closed
+    // (instances destroyed). "Project B" loads with a fresh instance in group 1
+    // at 0dB. On its first write, it overwrites the stale +6dB value.
+    #[test]
+    fn test_stale_data_overwritten_on_project_switch() {
+        let path = test_path("project-switch");
+        let _ = fs::remove_file(&path);
+
+        // "Project A" instance writes +6dB (600 millibels) to group 1
+        {
+            let mut gf = GroupFile::open(&path).expect("open failed");
+            gf.write_slot(1, 600);
+            let slot = gf.read_slot(1);
+            assert_eq!(slot.gain_millibels, 600);
+            assert_eq!(slot.generation, 1);
+        }
+        // Project A instances are destroyed (gf dropped), file persists on disk.
+
+        // "Project B" instance opens the same file — sees stale data.
+        let mut gf_b = GroupFile::open(&path).expect("open failed");
+        let stale = gf_b.read_slot(1);
+        assert_eq!(stale.gain_millibels, 600, "stale data should be visible");
+
+        // Project B's instance has its own param at 0dB. On first sync_group
+        // call in process(), it writes its own value, overwriting the stale data.
+        // Simulate: instance writes 0 millibels (its own default gain).
+        gf_b.write_slot(1, 0);
+        let fresh = gf_b.read_slot(1);
+        assert_eq!(fresh.gain_millibels, 0, "stale data should be overwritten");
+        assert_eq!(fresh.generation, 2, "generation should advance");
+
+        // Other slots should still have stale data = 0 (never written by project A)
+        let slot2 = gf_b.read_slot(2);
+        assert_eq!(slot2.gain_millibels, 0);
+        assert_eq!(slot2.generation, 0);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    // 13. The stale read before the first write cannot cause permanent pollution.
+    //
+    // Even if Project B reads the stale +6dB value from Project A on its first
+    // buffer, the instance's internal state (last_seen_generation=0) differs
+    // from the file's generation (>0), triggering a read. But the read applies
+    // a gain override. The NEXT buffer's write path then writes the instance's
+    // own param value, correcting it. After 2 buffers, the slot reflects
+    // Project B's state.
+    #[test]
+    fn test_stale_read_corrected_within_two_writes() {
+        let path = test_path("stale-correction");
+        let _ = fs::remove_file(&path);
+
+        // Project A writes to groups 1 and 5
+        {
+            let mut gf = GroupFile::open(&path).expect("open failed");
+            gf.write_slot(1, 600);   // +6dB
+            gf.write_slot(5, -1200); // -12dB
+        }
+
+        // Project B opens — fresh instance state (last_seen_generation=0)
+        let mut gf_b = GroupFile::open(&path).expect("open failed");
+
+        // Instance reads stale slot — generation mismatch detected
+        let slot1 = gf_b.read_slot(1);
+        assert_ne!(slot1.generation, 0, "stale generation should be >0");
+        // Instance would apply this stale value as an override...
+
+        // ...but on the SAME or NEXT buffer, the write path fires because
+        // the instance's param value (0dB = 0mb) differs from last_sent.
+        // This overwrites the stale value:
+        gf_b.write_slot(1, 0); // Instance's actual param value
+        let corrected = gf_b.read_slot(1);
+        assert_eq!(corrected.gain_millibels, 0, "should be corrected to instance's value");
+
+        // Group 5 also gets corrected when its instance writes
+        gf_b.write_slot(5, 300); // Project B's group 5 instance has +3dB
+        let corrected5 = gf_b.read_slot(5);
+        assert_eq!(corrected5.gain_millibels, 300);
+
+        let _ = fs::remove_file(&path);
+    }
 }

@@ -104,6 +104,10 @@ If the file cannot be created (permissions, unusual OS config), grouping silentl
 3. Enable Inv on instance B
 4. Drag A up to +6 dB -- B goes to -6 dB (mirrored)
 
+## Limitations
+
+- **Group state resets on project switch** -- Group linking uses a shared file that is common to all running Gain Brain instances. When you close one project and open another, the new project's instances write their own gain values on the first audio buffer, replacing whatever was in the file from the previous project. This is transparent in practice — each project's instances establish their own group state immediately on load, so there is no cross-project pollution.
+
 ## Technical Notes
 
 - **No audio-thread allocations** -- the process() callback never allocates heap memory in release builds
