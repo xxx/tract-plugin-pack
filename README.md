@@ -58,7 +58,7 @@ A detail-preserving spectral saturator. Uses FFT-based spectral analysis to pres
 - Clip-aware detail blend — only affects clipped portions, unclipped material is unchanged
 - CPU-rendered GUI (tiny-skia + softbuffer)
 - ~0.82 MB RSS and 0.14% CPU per instance (100 instances @ 13.7% CPU, 82 MB total)
-- Inspired by [Newfangled Audio Saturate](https://www.eventideaudio.com/plug-ins/newfangled-saturate/)
+- Inspired by [Newfangled Audio Saturate](https://www.newfangledaudio.com/saturate)
 
 ## Build Requirements
 
