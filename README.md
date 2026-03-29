@@ -13,7 +13,7 @@ A wavetable-based audio filter that uses wavetable frames as FIR filter kernels.
 - 3D/2D wavetable visualization, real-time filter response graph
 - Custom rotary knobs with DAW modulation indicators
 - SIMD-optimized convolution (`f32x16`)
-- Inspired by [Kilohearts FilterTable](https://kilohearts.com/products/filtertable) and [FreakyTable](https://ewanbristow.gumroad.com/l/freakytable)
+- Inspired by [Kilohearts FilterTable](https://kilohearts.com/products/filter_table) and [EB-FreakyTable](https://ewanbristow.gumroad.com/l/freakytable)
 
 ### GS Meter
 
