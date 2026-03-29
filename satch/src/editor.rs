@@ -50,7 +50,9 @@ impl SatchEditorState {
 
 impl<'a> PersistentField<'a, SatchEditorState> for Arc<SatchEditorState> {
     fn set(&self, new_value: SatchEditorState) {
-        self.size.store(new_value.size.load());
+        let sz = new_value.size.load();
+        nih_plug::nih_log!("[satch] PersistentField::set() size=({}, {})", sz.0, sz.1);
+        self.size.store(sz);
     }
 
     fn map<F, R>(&self, f: F) -> R
@@ -423,6 +425,7 @@ impl SatchWindow {
             let new_w = (WINDOW_WIDTH as f32 * self.scale_factor).round() as u32;
             let new_h = (WINDOW_HEIGHT as f32 * self.scale_factor).round() as u32;
             self.params.editor_state.size.store((new_w, new_h));
+            nih_plug::nih_log!("[satch] apply_scale_change() sf={:.2} stored=({}, {})", self.scale_factor, new_w, new_h);
             window.resize(baseview::Size::new(new_w as f64, new_h as f64));
             self.gui_context.request_resize();
         }
@@ -438,9 +441,10 @@ impl SatchWindow {
             NonZeroU32::new(pw).unwrap(),
             NonZeroU32::new(ph).unwrap(),
         );
+        nih_plug::nih_log!("[satch] resize_buffers() pw={} ph={} sf={:.2} storing=({}, {})", pw, ph, self.scale_factor, pw, ph);
         self.params.editor_state.size.store((
-            (pw as f32 / self.scale_factor).round() as u32,
-            (ph as f32 / self.scale_factor).round() as u32,
+            pw,
+            ph,
         ));
     }
 
@@ -603,6 +607,8 @@ pub(crate) struct SatchEditor {
 }
 
 pub(crate) fn create(params: Arc<SatchParams>) -> Option<Box<dyn Editor>> {
+    // NOTE: persisted state may not be restored yet (host calls create() before set()).
+    // Scale factor is derived from persisted size in spawn() instead.
     Some(Box::new(SatchEditor {
         params,
         scaling_factor: Arc::new(AtomicCell::new(1.0)),
@@ -615,14 +621,18 @@ impl Editor for SatchEditor {
         parent: ParentWindowHandle,
         context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
-        let sf = self.scaling_factor.load();
+        // Derive scale factor from persisted size (restored by host before spawn).
+        let (persisted_w, persisted_h) = self.params.editor_state.size();
+        let sf = (persisted_w as f32 / WINDOW_WIDTH as f32).clamp(0.75, 3.0);
+        self.scaling_factor.store(sf);
+        nih_plug::nih_log!("[satch] spawn() persisted=({}, {}) sf={:.2}", persisted_w, persisted_h, sf);
+
         let gui_context = Arc::clone(&context);
         let params = Arc::clone(&self.params);
         let shared_scale = Arc::clone(&self.scaling_factor);
 
-        let scaled_w = (WINDOW_WIDTH as f32 * sf).round() as u32;
-        let scaled_h = (WINDOW_HEIGHT as f32 * sf).round() as u32;
-        self.params.editor_state.size.store((scaled_w, scaled_h));
+        let scaled_w = persisted_w;
+        let scaled_h = persisted_h;
 
         let window = baseview::Window::open_parented(
             &ParentWindowHandleAdapter(parent),
