@@ -66,6 +66,12 @@ struct GainBrainWindow {
     display_gain_millibels: Arc<std::sync::atomic::AtomicI32>,
     /// Write here to force the audio thread to retarget the gain smoother.
     group_gain_override: Arc<std::sync::atomic::AtomicI32>,
+    /// Shared holder for the GuiContext — populated on spawn so the audio
+    /// thread's task_executor can update the host param even after the
+    /// editor window closes. Stored here to keep the Arc alive; the actual
+    /// usage is in `task_executor()` via the shared Mutex.
+    #[allow(dead_code)]
+    gui_context_holder: Arc<std::sync::Mutex<Option<Arc<dyn GuiContext>>>>,
     text_renderer: widgets::TextRenderer,
 
     /// Hit regions rebuilt each frame during draw().
@@ -91,12 +97,14 @@ struct GainBrainWindow {
 }
 
 impl GainBrainWindow {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         window: &mut baseview::Window<'_>,
         gui_context: Arc<dyn GuiContext>,
         params: Arc<GainBrainParams>,
         display_gain_millibels: Arc<std::sync::atomic::AtomicI32>,
         group_gain_override: Arc<std::sync::atomic::AtomicI32>,
+        gui_context_holder: Arc<std::sync::Mutex<Option<Arc<dyn GuiContext>>>>,
         shared_scale: Arc<AtomicCell<f32>>,
         scale_factor: f32,
     ) -> Self {
@@ -119,6 +127,7 @@ impl GainBrainWindow {
             params,
             display_gain_millibels,
             group_gain_override,
+            gui_context_holder,
             text_renderer,
             hit_regions: Vec::new(),
             drag_active: None,
@@ -701,6 +710,9 @@ pub(crate) struct GainBrainEditor {
     params: Arc<GainBrainParams>,
     display_gain_millibels: Arc<std::sync::atomic::AtomicI32>,
     group_gain_override: Arc<std::sync::atomic::AtomicI32>,
+    /// Shared holder for the GuiContext so the audio thread's task_executor
+    /// can use ParamSetter even when the editor window is closed.
+    gui_context_holder: Arc<std::sync::Mutex<Option<Arc<dyn GuiContext>>>>,
     /// Shared with GainBrainWindow so Editor::size() reflects runtime changes.
     scaling_factor: Arc<AtomicCell<f32>>,
 }
@@ -709,6 +721,7 @@ pub(crate) fn create(
     params: Arc<GainBrainParams>,
     display_gain_millibels: Arc<std::sync::atomic::AtomicI32>,
     group_gain_override: Arc<std::sync::atomic::AtomicI32>,
+    gui_context_holder: Arc<std::sync::Mutex<Option<Arc<dyn GuiContext>>>>,
 ) -> Option<Box<dyn Editor>> {
     // NOTE: persisted state may not be restored yet (host calls create() before set()).
     // Scale factor is derived from persisted size in spawn() instead.
@@ -716,6 +729,7 @@ pub(crate) fn create(
         params,
         display_gain_millibels,
         group_gain_override,
+        gui_context_holder,
         scaling_factor: Arc::new(AtomicCell::new(1.0)),
     }))
 }
@@ -726,6 +740,13 @@ impl Editor for GainBrainEditor {
         parent: ParentWindowHandle,
         context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
+        // Store the GuiContext in the shared holder so the audio thread's
+        // task_executor can use ParamSetter even after this window closes.
+        // The GuiContext Arc remains valid for the plugin's entire lifetime.
+        if let Ok(mut guard) = self.gui_context_holder.lock() {
+            *guard = Some(Arc::clone(&context));
+        }
+
         // Derive scale factor from persisted size (restored by host before spawn).
         let (persisted_w, persisted_h) = self.params.editor_state.size();
         let sf = (persisted_w as f32 / WINDOW_WIDTH as f32).clamp(0.75, 3.0);
@@ -735,6 +756,7 @@ impl Editor for GainBrainEditor {
         let params = Arc::clone(&self.params);
         let display_gain = Arc::clone(&self.display_gain_millibels);
         let gain_override = Arc::clone(&self.group_gain_override);
+        let gui_ctx_holder = Arc::clone(&self.gui_context_holder);
         let shared_scale = Arc::clone(&self.scaling_factor);
 
         let scaled_w = persisted_w;
@@ -755,6 +777,7 @@ impl Editor for GainBrainEditor {
                     params,
                     display_gain,
                     gain_override,
+                    gui_ctx_holder,
                     shared_scale,
                     sf,
                 )

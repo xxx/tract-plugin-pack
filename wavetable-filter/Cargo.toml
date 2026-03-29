@@ -12,8 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 nih-plug-widgets = { path = "../nih-plug-widgets" }
-nih_plug = { git = "https://github.com/davemollen/nih-plug.git", branch = "finish-vst3-pr", features = ["simd", "standalone"] }
-nih_plug_vizia = { git = "https://github.com/davemollen/nih-plug.git", branch = "finish-vst3-pr" }
+nih_plug = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr", features = ["simd", "standalone"] }
+nih_plug_vizia = { path = "../nih-plug/nih_plug_vizia" }
 hound = "3.5"
 atomic_float = "1.0"
 rfd = "0.17.2"

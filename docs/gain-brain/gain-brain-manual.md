@@ -72,15 +72,7 @@ Use the **-** / **+** buttons in the upper right corner, or **Ctrl+=** / **Ctrl+
 
 ### Cross-Instance Communication
 
-Gain Brain uses a memory-mapped file for cross-instance communication. All instances share a small (272-byte) file that holds the current gain value and change counter for each of the 16 groups. This works regardless of whether the DAW sandboxes plugin instances into separate processes.
-
-The shared file is located at:
-
-- **Linux**: `$XDG_RUNTIME_DIR/gain-brain-groups.bin`
-- **macOS**: `$TMPDIR/gain-brain-groups.bin`
-- **Windows**: `%LOCALAPPDATA%\Temp\gain-brain-groups.bin`
-
-If the file cannot be created (permissions, unusual OS config), grouping silently becomes unavailable and the plugin operates standalone.
+Gain Brain uses an in-process static global for cross-instance communication. All instances in the same host process share 16 lock-free atomic group slots directly in memory. No files are created or accessed. This is the standard approach used by cross-instance linking plugins (e.g. BlueCat Gain Suite) and works with every major DAW, which hosts all instances of the same plugin in one process by default.
 
 ### Absolute Mode Example
 
@@ -106,13 +98,13 @@ If the file cannot be created (permissions, unusual OS config), grouping silentl
 
 ## Limitations
 
-- **Group state resets on project switch** -- Group linking uses a shared file that is common to all running Gain Brain instances. When you close one project and open another, the new project's instances write their own gain values on the first audio buffer, replacing whatever was in the file from the previous project. This is transparent in practice — each project's instances establish their own group state immediately on load, so there is no cross-project pollution.
+- **Group linking requires same host process** -- All Gain Brain instances must be in the same host process for group linking to work. This is the default for every major DAW. Instances in separate processes (e.g. sandboxed plugin hosts) will each have independent group state.
 
 ## Technical Notes
 
 - **No audio-thread allocations** -- the process() callback never allocates heap memory in release builds
 - **CPU rendering** -- uses tiny-skia (software rasterizer) + fontdue (glyph cache) + softbuffer (pixel buffer). No OpenGL context, no GPU drivers loaded
-- **Memory-mapped IPC** -- 272-byte shared file via `memmap2`. Zero persistent file descriptors (fd is closed after mapping). Per-instance memory: ~8 KB headless
+- **In-process shared state** -- lock-free atomic slots, zero overhead. Per-instance memory: ~8 KB headless
 - **Zero latency** -- no lookahead or convolution, just a gain multiplier with 50ms linear smoothing
 - **Embedded font** -- DejaVu Sans, compiled into the binary. No runtime font loading
 
