@@ -24,6 +24,7 @@ A lightweight loudness meter with integrated gain utility, purpose-built for [cl
 - CPU-rendered GUI (tiny-skia + softbuffer) -- no GPU drivers loaded
 - SIMD-optimized metering (`f32x16`)
 - ~1.8 MB RSS and 0.05% CPU per instance (300 instances @ 15% CPU, 560 MB total)
+- Inspired by [TBProAudio dpMeter](https://www.tbproaudio.de/products/dpmeter)
 
 ### Gain Brain
 
