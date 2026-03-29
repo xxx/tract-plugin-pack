@@ -187,9 +187,21 @@ mod tests {
             }
         }
 
-        macro_rules! push_i16 { ($buf:expr, $v:expr) => { $buf.extend_from_slice(&($v as i16).to_be_bytes()); }; }
-        macro_rules! push_u16 { ($buf:expr, $v:expr) => { $buf.extend_from_slice(&($v as u16).to_be_bytes()); }; }
-        macro_rules! push_u32 { ($buf:expr, $v:expr) => { $buf.extend_from_slice(&($v as u32).to_be_bytes()); }; }
+        macro_rules! push_i16 {
+            ($buf:expr, $v:expr) => {
+                $buf.extend_from_slice(&($v as i16).to_be_bytes());
+            };
+        }
+        macro_rules! push_u16 {
+            ($buf:expr, $v:expr) => {
+                $buf.extend_from_slice(&($v as u16).to_be_bytes());
+            };
+        }
+        macro_rules! push_u32 {
+            ($buf:expr, $v:expr) => {
+                $buf.extend_from_slice(&($v as u32).to_be_bytes());
+            };
+        }
 
         // === head (54 bytes) ===
         let off = buf.len() as u32;
@@ -200,14 +212,20 @@ mod tests {
         push_u16!(buf, 0x000Bu16); // flags
         push_u16!(buf, 1000u16); // unitsPerEm
         buf.extend_from_slice(&[0u8; 16]); // created + modified
-        push_i16!(buf, 0); push_i16!(buf, 0); // xMin, yMin
-        push_i16!(buf, 0); push_i16!(buf, 0); // xMax, yMax
+        push_i16!(buf, 0);
+        push_i16!(buf, 0); // xMin, yMin
+        push_i16!(buf, 0);
+        push_i16!(buf, 0); // xMax, yMax
         push_u16!(buf, 0u16); // macStyle
         push_u16!(buf, 8u16); // lowestRecPPEM
         push_i16!(buf, 2); // fontDirectionHint
         push_i16!(buf, 0); // indexToLocFormat (short)
         push_i16!(buf, 0); // glyphDataFormat
-        entries.push(TableEntry { tag: *b"head", offset: off, length: buf.len() as u32 - off });
+        entries.push(TableEntry {
+            tag: *b"head",
+            offset: off,
+            length: buf.len() as u32 - off,
+        });
         pad4(&mut buf);
 
         // === hhea (36 bytes) ===
@@ -226,7 +244,11 @@ mod tests {
         buf.extend_from_slice(&[0u8; 8]); // reserved
         push_i16!(buf, 0); // metricDataFormat
         push_u16!(buf, 1u16); // numberOfHMetrics
-        entries.push(TableEntry { tag: *b"hhea", offset: off, length: buf.len() as u32 - off });
+        entries.push(TableEntry {
+            tag: *b"hhea",
+            offset: off,
+            length: buf.len() as u32 - off,
+        });
         pad4(&mut buf);
 
         // === maxp (32 bytes) ===
@@ -234,7 +256,11 @@ mod tests {
         buf.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]); // version 1.0
         push_u16!(buf, 1u16); // numGlyphs
         buf.extend_from_slice(&[0u8; 26]); // remaining fields
-        entries.push(TableEntry { tag: *b"maxp", offset: off, length: buf.len() as u32 - off });
+        entries.push(TableEntry {
+            tag: *b"maxp",
+            offset: off,
+            length: buf.len() as u32 - off,
+        });
         pad4(&mut buf);
 
         // === OS/2 (version 1, 86 bytes) ===
@@ -245,7 +271,8 @@ mod tests {
         push_u16!(buf, 5u16); // usWidthClass
         push_u16!(buf, 0u16); // fsType
         buf.extend_from_slice(&[0u8; 20]); // subscript/superscript
-        push_i16!(buf, 0); push_i16!(buf, 0); // strikeout
+        push_i16!(buf, 0);
+        push_i16!(buf, 0); // strikeout
         push_i16!(buf, 0); // sFamilyClass
         buf.extend_from_slice(&[0u8; 10]); // panose
         buf.extend_from_slice(&[0u8; 16]); // ulUnicodeRange
@@ -259,14 +286,22 @@ mod tests {
         push_u16!(buf, 800u16); // usWinAscent
         push_u16!(buf, 200u16); // usWinDescent
         buf.extend_from_slice(&[0u8; 8]); // ulCodePageRange
-        entries.push(TableEntry { tag: *b"OS/2", offset: off, length: buf.len() as u32 - off });
+        entries.push(TableEntry {
+            tag: *b"OS/2",
+            offset: off,
+            length: buf.len() as u32 - off,
+        });
         pad4(&mut buf);
 
         // === hmtx (4 bytes: one longHorMetric) ===
         let off = buf.len() as u32;
         push_u16!(buf, 600u16); // advanceWidth
         push_i16!(buf, 0); // lsb
-        entries.push(TableEntry { tag: *b"hmtx", offset: off, length: buf.len() as u32 - off });
+        entries.push(TableEntry {
+            tag: *b"hmtx",
+            offset: off,
+            length: buf.len() as u32 - off,
+        });
         pad4(&mut buf);
 
         // === cmap (274 bytes: format 0 with 256-byte array) ===
@@ -276,24 +311,36 @@ mod tests {
         push_u16!(buf, 1u16); // platformID (Macintosh)
         push_u16!(buf, 0u16); // encodingID (Roman)
         push_u32!(buf, 12u32); // offset to subtable
-        // Format 0 subtable
+                               // Format 0 subtable
         push_u16!(buf, 0u16); // format
         push_u16!(buf, 262u16); // length (6 + 256)
         push_u16!(buf, 0u16); // language
         buf.extend_from_slice(&[0u8; 256]); // all chars -> glyph 0
-        entries.push(TableEntry { tag: *b"cmap", offset: off, length: buf.len() as u32 - off });
+        entries.push(TableEntry {
+            tag: *b"cmap",
+            offset: off,
+            length: buf.len() as u32 - off,
+        });
         pad4(&mut buf);
 
         // === loca (4 bytes: 2 offsets for 1 glyph, short format) ===
         let off = buf.len() as u32;
         push_u16!(buf, 0u16); // offset[0]
         push_u16!(buf, 0u16); // offset[1] (glyph has zero length)
-        entries.push(TableEntry { tag: *b"loca", offset: off, length: buf.len() as u32 - off });
+        entries.push(TableEntry {
+            tag: *b"loca",
+            offset: off,
+            length: buf.len() as u32 - off,
+        });
         pad4(&mut buf);
 
         // === glyf (0 bytes: empty, .notdef has no outline) ===
         let off = buf.len() as u32;
-        entries.push(TableEntry { tag: *b"glyf", offset: off, length: 0 });
+        entries.push(TableEntry {
+            tag: *b"glyf",
+            offset: off,
+            length: 0,
+        });
 
         // --- Write table directory entries (sorted by tag) ---
         entries.sort_by(|a, b| a.tag.cmp(&b.tag));
@@ -318,9 +365,39 @@ mod tests {
         let data = test_font_data();
         let mut renderer = TextRenderer::new(&data);
         let mut pm = Pixmap::new(200, 50).unwrap();
-        draw_button(&mut pm, &mut renderer, 5.0, 5.0, 80.0, 30.0, "OK", false, false);
-        draw_button(&mut pm, &mut renderer, 5.0, 5.0, 80.0, 30.0, "OK", true, false);
-        draw_button(&mut pm, &mut renderer, 5.0, 5.0, 80.0, 30.0, "OK", false, true);
+        draw_button(
+            &mut pm,
+            &mut renderer,
+            5.0,
+            5.0,
+            80.0,
+            30.0,
+            "OK",
+            false,
+            false,
+        );
+        draw_button(
+            &mut pm,
+            &mut renderer,
+            5.0,
+            5.0,
+            80.0,
+            30.0,
+            "OK",
+            true,
+            false,
+        );
+        draw_button(
+            &mut pm,
+            &mut renderer,
+            5.0,
+            5.0,
+            80.0,
+            30.0,
+            "OK",
+            false,
+            true,
+        );
     }
 
     #[test]
@@ -329,9 +406,15 @@ mod tests {
         let mut renderer = TextRenderer::new(&data);
         let mut pm = Pixmap::new(300, 50).unwrap();
         draw_slider(
-            &mut pm, &mut renderer,
-            5.0, 5.0, 250.0, 28.0,
-            "Gain", "-3.0 dB", 0.5,
+            &mut pm,
+            &mut renderer,
+            5.0,
+            5.0,
+            250.0,
+            28.0,
+            "Gain",
+            "-3.0 dB",
+            0.5,
         );
         // Fill should cover roughly the left half of the slider track.
         let left_px = pixel_at(&pm, 10, 18);
@@ -344,7 +427,17 @@ mod tests {
         let mut renderer = TextRenderer::new(&data);
         let mut pm = Pixmap::new(300, 50).unwrap();
         // Values outside 0..1 should be clamped, not panic.
-        draw_slider(&mut pm, &mut renderer, 0.0, 0.0, 200.0, 28.0, "X", "0", -0.5);
+        draw_slider(
+            &mut pm,
+            &mut renderer,
+            0.0,
+            0.0,
+            200.0,
+            28.0,
+            "X",
+            "0",
+            -0.5,
+        );
         draw_slider(&mut pm, &mut renderer, 0.0, 0.0, 200.0, 28.0, "X", "0", 1.5);
     }
 
@@ -354,9 +447,14 @@ mod tests {
         let mut renderer = TextRenderer::new(&data);
         let mut pm = Pixmap::new(300, 50).unwrap();
         draw_stepped_selector(
-            &mut pm, &mut renderer,
-            5.0, 5.0, 250.0, 28.0,
-            &["Stereo", "Left", "Right"], 1,
+            &mut pm,
+            &mut renderer,
+            5.0,
+            5.0,
+            250.0,
+            28.0,
+            &["Stereo", "Left", "Right"],
+            1,
         );
     }
 

@@ -76,7 +76,7 @@ pub struct Tinylimit {
 #[derive(Params)]
 pub struct TinylimitParams {
     #[persist = "editor-state"]
-    pub editor_state: Arc<editor::TinylimitEditorState>,
+    pub editor_state: Arc<editor::EditorState>,
 
     /// Input gain: stored as linear gain, displayed/edited in dB.
     #[id = "input"]
@@ -136,7 +136,7 @@ impl Default for Tinylimit {
 impl TinylimitParams {
     fn new() -> Self {
         Self {
-            editor_state: editor::TinylimitEditorState::default_state(),
+            editor_state: editor::default_editor_state(),
 
             input: FloatParam::new(
                 "Input",
@@ -275,11 +275,10 @@ impl Plugin for Tinylimit {
     ) -> bool {
         let sr = buffer_config.sample_rate;
         self.limiter.set_sample_rate(sr);
-        self.limiter.set_max_block_size(buffer_config.max_buffer_size as usize);
-        self.limiter.set_params(
-            self.params.attack.value(),
-            self.params.release.value(),
-        );
+        self.limiter
+            .set_max_block_size(buffer_config.max_buffer_size as usize);
+        self.limiter
+            .set_params(self.params.attack.value(), self.params.release.value());
         self.limiter.reset();
         self.true_peak_detectors[0].set_sample_rate(sr);
         self.true_peak_detectors[0].reset();
@@ -460,22 +459,17 @@ fn linear_to_db(linear: f32) -> f32 {
 
 impl ClapPlugin for Tinylimit {
     const CLAP_ID: &'static str = "com.mpd.tinylimit";
-    const CLAP_DESCRIPTION: Option<&'static str> =
-        Some("A low-latency wideband peak limiter");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("A low-latency wideband peak limiter");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] = &[
-        ClapFeature::AudioEffect,
-        ClapFeature::Mastering,
-    ];
+    const CLAP_FEATURES: &'static [ClapFeature] =
+        &[ClapFeature::AudioEffect, ClapFeature::Mastering];
 }
 
 impl Vst3Plugin for Tinylimit {
     const VST3_CLASS_ID: [u8; 16] = *b"TinylimitMpdPlg\0";
-    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
-        Vst3SubCategory::Fx,
-        Vst3SubCategory::Dynamics,
-    ];
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
+        &[Vst3SubCategory::Fx, Vst3SubCategory::Dynamics];
 }
 
 nih_export_clap!(Tinylimit);

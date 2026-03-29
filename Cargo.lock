@@ -3944,7 +3944,14 @@ dependencies = [
 name = "tiny-skia-widgets"
 version = "0.1.0"
 dependencies = [
+ "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=9a0b42c09d712777b2edb4c5e0cb6baf21e988f0)",
+ "crossbeam",
  "fontdue",
+ "nih_plug",
+ "raw-window-handle 0.5.2",
+ "raw-window-handle 0.6.2",
+ "serde",
+ "softbuffer",
  "tiny-skia",
 ]
 

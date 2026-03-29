@@ -3,9 +3,7 @@
 //! Draws a 270-degree arc with a value indicator, label above, and value
 //! text below. Pure rendering — no interaction handling.
 
-use tiny_skia::{
-    FillRule, LineCap, Paint, Path, PathBuilder, Pixmap, Stroke, Transform,
-};
+use tiny_skia::{FillRule, LineCap, Paint, Path, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::primitives::{color_accent, color_muted, color_text};
 use crate::text::TextRenderer;
@@ -210,7 +208,13 @@ fn draw_filled_circle(pixmap: &mut Pixmap, cx: f32, cy: f32, radius: f32, color:
         let mut paint = Paint::default();
         paint.set_color(color);
         paint.anti_alias = true;
-        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
 }
 

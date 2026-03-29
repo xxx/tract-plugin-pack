@@ -4,12 +4,14 @@
 //! the caller is responsible for DPI scaling. No event handling lives here — only
 //! pure drawing functions.
 
+pub mod controls;
+pub mod editor_base;
+pub mod param_dial;
 pub mod primitives;
 pub mod text;
-pub mod controls;
-pub mod param_dial;
 
+pub use controls::*;
+pub use editor_base::*;
+pub use param_dial::*;
 pub use primitives::*;
 pub use text::*;
-pub use controls::*;
-pub use param_dial::*;

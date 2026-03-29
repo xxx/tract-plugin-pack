@@ -100,7 +100,7 @@ pub struct GsMeter {
 #[derive(Params)]
 pub struct GsMeterParams {
     #[persist = "editor-state"]
-    pub editor_state: Arc<editor::GsMeterEditorState>,
+    pub editor_state: Arc<editor::EditorState>,
 
     #[id = "gain"]
     pub gain: FloatParam,
@@ -145,7 +145,7 @@ impl Default for GsMeter {
 impl GsMeterParams {
     fn new() -> Self {
         Self {
-            editor_state: editor::GsMeterEditorState::default_state(),
+            editor_state: editor::default_editor_state(),
 
             gain: FloatParam::new(
                 "Gain",
@@ -348,16 +348,37 @@ impl Plugin for GsMeter {
         MeterReadings::store_db(&self.readings.true_peak_max_db, linear_to_db(true_peak));
         MeterReadings::store_db(&self.readings.rms_integrated_db, linear_to_db(rms_int));
         MeterReadings::store_db(&self.readings.rms_momentary_db, linear_to_db(rms_mom));
-        MeterReadings::store_db(&self.readings.rms_momentary_max_db, linear_to_db(rms_mom_max));
+        MeterReadings::store_db(
+            &self.readings.rms_momentary_max_db,
+            linear_to_db(rms_mom_max),
+        );
         MeterReadings::store_db(&self.readings.crest_factor_db, crest);
 
         // LUFS readings from EBU R128 metering
-        MeterReadings::store_db(&self.readings.lufs_integrated, self.lufs_meter.integrated_lufs() as f32);
-        MeterReadings::store_db(&self.readings.lufs_short_term, self.lufs_meter.short_term_lufs() as f32);
-        MeterReadings::store_db(&self.readings.lufs_short_term_max, self.lufs_meter.short_term_max_lufs() as f32);
-        MeterReadings::store_db(&self.readings.lufs_momentary, self.lufs_meter.momentary_lufs() as f32);
-        MeterReadings::store_db(&self.readings.lufs_momentary_max, self.lufs_meter.momentary_max_lufs() as f32);
-        MeterReadings::store_db(&self.readings.lufs_range, self.lufs_meter.loudness_range() as f32);
+        MeterReadings::store_db(
+            &self.readings.lufs_integrated,
+            self.lufs_meter.integrated_lufs() as f32,
+        );
+        MeterReadings::store_db(
+            &self.readings.lufs_short_term,
+            self.lufs_meter.short_term_lufs() as f32,
+        );
+        MeterReadings::store_db(
+            &self.readings.lufs_short_term_max,
+            self.lufs_meter.short_term_max_lufs() as f32,
+        );
+        MeterReadings::store_db(
+            &self.readings.lufs_momentary,
+            self.lufs_meter.momentary_lufs() as f32,
+        );
+        MeterReadings::store_db(
+            &self.readings.lufs_momentary_max,
+            self.lufs_meter.momentary_max_lufs() as f32,
+        );
+        MeterReadings::store_db(
+            &self.readings.lufs_range,
+            self.lufs_meter.loudness_range() as f32,
+        );
 
         ProcessStatus::Normal
     }

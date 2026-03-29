@@ -21,7 +21,7 @@ pub struct Satch {
 #[derive(Params)]
 pub struct SatchParams {
     #[persist = "editor-state"]
-    pub editor_state: Arc<editor::SatchEditorState>,
+    pub editor_state: Arc<editor::EditorState>,
 
     /// Gain: input level boost. Stored as linear gain, displayed/edited in dB.
     #[id = "gain"]
@@ -61,7 +61,7 @@ impl Default for Satch {
 impl SatchParams {
     fn new() -> Self {
         Self {
-            editor_state: editor::SatchEditorState::default_state(),
+            editor_state: editor::default_editor_state(),
             gain: FloatParam::new(
                 "Gain",
                 util::db_to_gain(0.0),
@@ -235,15 +235,25 @@ impl Plugin for Satch {
             // When skip_fft=true, ring buffer state is maintained but FFT
             // frames are not computed (saves ~95% of CPU in this path).
             let sp_l = if skip_fft {
-                self.spectral_l
-                    .process_sample_skip_fft_fast(in_l, gain, threshold, inv_threshold, knee)
+                self.spectral_l.process_sample_skip_fft_fast(
+                    in_l,
+                    gain,
+                    threshold,
+                    inv_threshold,
+                    knee,
+                )
             } else {
                 self.spectral_l
                     .process_sample_fast(in_l, gain, threshold, inv_threshold, knee)
             };
             let sp_r = if skip_fft {
-                self.spectral_r
-                    .process_sample_skip_fft_fast(in_r, gain, threshold, inv_threshold, knee)
+                self.spectral_r.process_sample_skip_fft_fast(
+                    in_r,
+                    gain,
+                    threshold,
+                    inv_threshold,
+                    knee,
+                )
             } else {
                 self.spectral_r
                     .process_sample_fast(in_r, gain, threshold, inv_threshold, knee)
@@ -273,22 +283,17 @@ impl Plugin for Satch {
 
 impl ClapPlugin for Satch {
     const CLAP_ID: &'static str = "com.mpd.satch";
-    const CLAP_DESCRIPTION: Option<&'static str> =
-        Some("A detail-preserving spectral saturator");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("A detail-preserving spectral saturator");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] = &[
-        ClapFeature::AudioEffect,
-        ClapFeature::Distortion,
-    ];
+    const CLAP_FEATURES: &'static [ClapFeature] =
+        &[ClapFeature::AudioEffect, ClapFeature::Distortion];
 }
 
 impl Vst3Plugin for Satch {
     const VST3_CLASS_ID: [u8; 16] = *b"SatchMpdPlugin\0\0";
-    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
-        Vst3SubCategory::Fx,
-        Vst3SubCategory::Distortion,
-    ];
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
+        &[Vst3SubCategory::Fx, Vst3SubCategory::Distortion];
 }
 
 nih_export_clap!(Satch);
@@ -514,8 +519,7 @@ mod tests {
             dry_delay[dry_pos] = input[i];
             dry_pos = (dry_pos + 1) % latency;
 
-            let (td, tanh_val) =
-                spectral::saturate_td_with_tanh(dry, gain, threshold, knee);
+            let (td, tanh_val) = spectral::saturate_td_with_tanh(dry, gain, threshold, knee);
             let sp = spectral_out[i];
 
             let clip_mask = tanh_val * tanh_val;
@@ -525,9 +529,7 @@ mod tests {
         }
 
         let skip = latency + 4096;
-        let peak = output[skip..]
-            .iter()
-            .fold(0.0_f32, |m, &s| m.max(s.abs()));
+        let peak = output[skip..].iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
 
         // TD clips at threshold, spectral detail can ride slightly above
         assert!(
@@ -577,8 +579,7 @@ mod tests {
             dry_delay[dry_pos] = input[i];
             dry_pos = (dry_pos + 1) % latency;
 
-            let (td, tanh_val) =
-                spectral::saturate_td_with_tanh(dry, gain, threshold, knee);
+            let (td, tanh_val) = spectral::saturate_td_with_tanh(dry, gain, threshold, knee);
             let sp = spectral_out[i];
             let clip_mask = tanh_val * tanh_val;
 

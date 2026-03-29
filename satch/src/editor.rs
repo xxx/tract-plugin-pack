@@ -1,66 +1,20 @@
 //! Softbuffer-based editor for satch. CPU rendering via tiny-skia.
 
-use baseview::{WindowHandle, WindowOpenOptions, WindowScalePolicy};
+use baseview::{WindowOpenOptions, WindowScalePolicy};
 use crossbeam::atomic::AtomicCell;
-use nih_plug::params::persist::PersistentField;
 use nih_plug::prelude::*;
-use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
-use serde::{Deserialize, Serialize};
-use std::num::{NonZeroIsize, NonZeroU32};
-use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tiny_skia_widgets as widgets;
 use crate::SatchParams;
+use tiny_skia_widgets as widgets;
 
 const WINDOW_WIDTH: u32 = 300;
 const WINDOW_HEIGHT: u32 = 380;
 
-// ── Editor State (persisted by the host) ────────────────────────────────
+pub use widgets::EditorState;
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SatchEditorState {
-    #[serde(with = "nih_plug::params::persist::serialize_atomic_cell")]
-    size: AtomicCell<(u32, u32)>,
-    #[serde(skip)]
-    open: AtomicBool,
-}
-
-impl SatchEditorState {
-    pub fn from_size(width: u32, height: u32) -> Arc<Self> {
-        Arc::new(Self {
-            size: AtomicCell::new((width, height)),
-            open: AtomicBool::new(false),
-        })
-    }
-
-    pub fn default_state() -> Arc<Self> {
-        Self::from_size(WINDOW_WIDTH, WINDOW_HEIGHT)
-    }
-
-    pub fn size(&self) -> (u32, u32) {
-        self.size.load()
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.open.load(Ordering::Acquire)
-    }
-}
-
-impl<'a> PersistentField<'a, SatchEditorState> for Arc<SatchEditorState> {
-    fn set(&self, new_value: SatchEditorState) {
-        let sz = new_value.size.load();
-        nih_plug::nih_log!("[satch] PersistentField::set() size=({}, {})", sz.0, sz.1);
-        self.size.store(sz);
-    }
-
-    fn map<F, R>(&self, f: F) -> R
-    where
-        F: Fn(&SatchEditorState) -> R,
-    {
-        f(self)
-    }
+pub fn default_editor_state() -> Arc<EditorState> {
+    EditorState::from_size(WINDOW_WIDTH, WINDOW_HEIGHT)
 }
 
 // ── Hit testing ─────────────────────────────────────────────────────────
@@ -100,9 +54,7 @@ enum ButtonAction {
 
 struct SatchWindow {
     gui_context: Arc<dyn GuiContext>,
-    _sb_context: softbuffer::Context<SoftbufferHandleAdapter>,
-    sb_surface: softbuffer::Surface<SoftbufferHandleAdapter, SoftbufferHandleAdapter>,
-    pixmap: tiny_skia::Pixmap,
+    surface: widgets::SoftbufferSurface,
     physical_width: u32,
     physical_height: u32,
     scale_factor: f32,
@@ -144,25 +96,14 @@ impl SatchWindow {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
         let ph = (WINDOW_HEIGHT as f32 * scale_factor).round() as u32;
 
-        let target = baseview_window_to_surface_target(window);
-        let sb_context =
-            softbuffer::Context::new(target.clone()).expect("could not get softbuffer context");
-        let mut sb_surface = softbuffer::Surface::new(&sb_context, target)
-            .expect("could not create softbuffer surface");
-        sb_surface
-            .resize(NonZeroU32::new(pw).unwrap(), NonZeroU32::new(ph).unwrap())
-            .unwrap();
-
-        let pixmap = tiny_skia::Pixmap::new(pw, ph).expect("could not create pixmap");
+        let surface = widgets::SoftbufferSurface::new(window, pw, ph);
 
         let font_data = include_bytes!("fonts/DejaVuSans.ttf");
         let text_renderer = widgets::TextRenderer::new(font_data);
 
         Self {
             gui_context,
-            _sb_context: sb_context,
-            sb_surface,
-            pixmap,
+            surface,
             physical_width: pw,
             physical_height: ph,
             scale_factor,
@@ -221,7 +162,7 @@ impl SatchWindow {
         let s = self.scale_factor;
 
         self.hit_regions.clear();
-        self.pixmap.fill(widgets::color_bg());
+        self.surface.pixmap.fill(widgets::color_bg());
 
         let pad = 20.0 * s;
         let title_size = 20.0 * s;
@@ -275,7 +216,7 @@ impl SatchWindow {
 
         // ── Title row with scale controls on the right ──
         tr.draw_text(
-            &mut self.pixmap,
+            &mut self.surface.pixmap,
             pad,
             y + title_size,
             "satch",
@@ -290,7 +231,7 @@ impl SatchWindow {
         let plus_x = w - pad - scale_btn_size;
         let plus_y = y + 2.0 * s;
         widgets::draw_button(
-            &mut self.pixmap,
+            &mut self.surface.pixmap,
             tr,
             plus_x,
             plus_y,
@@ -312,7 +253,7 @@ impl SatchWindow {
         let pct_x = plus_x - scale_label_w;
         let pct_text_w = tr.text_width(&pct_text, small_font);
         tr.draw_text(
-            &mut self.pixmap,
+            &mut self.surface.pixmap,
             pct_x + (scale_label_w - pct_text_w) / 2.0,
             plus_y + small_font + 4.0 * s,
             &pct_text,
@@ -323,7 +264,7 @@ impl SatchWindow {
         // "-" button
         let minus_x = pct_x - scale_btn_size;
         widgets::draw_button(
-            &mut self.pixmap,
+            &mut self.surface.pixmap,
             tr,
             minus_x,
             plus_y,
@@ -355,11 +296,20 @@ impl SatchWindow {
         for (i, (param_id, label, normalized, value_text)) in row1.iter().enumerate() {
             let cx = pad + col_spacing * (i as f32 + 0.5);
             widgets::draw_dial(
-                &mut self.pixmap, tr, cx, row1_cy, dial_radius,
-                label, value_text, *normalized,
+                &mut self.surface.pixmap,
+                tr,
+                cx,
+                row1_cy,
+                dial_radius,
+                label,
+                value_text,
+                *normalized,
             );
             self.hit_regions.push(HitRegion {
-                x: cx - col_spacing / 2.0, y: y, w: col_spacing, h: row_h,
+                x: cx - col_spacing / 2.0,
+                y,
+                w: col_spacing,
+                h: row_h,
                 action: HitAction::Dial(*param_id),
             });
         }
@@ -368,11 +318,20 @@ impl SatchWindow {
         for (i, (param_id, label, normalized, value_text)) in row2.iter().enumerate() {
             let cx = pad + col_spacing * (i as f32 + 0.5);
             widgets::draw_dial(
-                &mut self.pixmap, tr, cx, row2_cy, dial_radius,
-                label, value_text, *normalized,
+                &mut self.surface.pixmap,
+                tr,
+                cx,
+                row2_cy,
+                dial_radius,
+                label,
+                value_text,
+                *normalized,
             );
             self.hit_regions.push(HitRegion {
-                x: cx - col_spacing / 2.0, y: y + row_h, w: col_spacing, h: row_h,
+                x: cx - col_spacing / 2.0,
+                y: y + row_h,
+                w: col_spacing,
+                h: row_h,
                 action: HitAction::Dial(*param_id),
             });
         }
@@ -384,12 +343,21 @@ impl SatchWindow {
             let mix_cx = w - pad - mix_radius - 10.0 * s;
             let mix_cy = y + row_h * 2.5;
             widgets::draw_dial(
-                &mut self.pixmap, tr, mix_cx, mix_cy, mix_radius,
-                label, value_text, normalized,
+                &mut self.surface.pixmap,
+                tr,
+                mix_cx,
+                mix_cy,
+                mix_radius,
+                label,
+                value_text,
+                normalized,
             );
             let hit_w = col_spacing;
             self.hit_regions.push(HitRegion {
-                x: mix_cx - hit_w / 2.0, y: y + row_h * 2.0, w: hit_w, h: row_h,
+                x: mix_cx - hit_w / 2.0,
+                y: y + row_h * 2.0,
+                w: hit_w,
+                h: row_h,
                 action: HitAction::Dial(param_id),
             });
         }
@@ -424,8 +392,13 @@ impl SatchWindow {
             self.shared_scale.store(self.scale_factor);
             let new_w = (WINDOW_WIDTH as f32 * self.scale_factor).round() as u32;
             let new_h = (WINDOW_HEIGHT as f32 * self.scale_factor).round() as u32;
-            self.params.editor_state.size.store((new_w, new_h));
-            nih_plug::nih_log!("[satch] apply_scale_change() sf={:.2} stored=({}, {})", self.scale_factor, new_w, new_h);
+            self.params.editor_state.store_size(new_w, new_h);
+            nih_plug::nih_log!(
+                "[satch] apply_scale_change() sf={:.2} stored=({}, {})",
+                self.scale_factor,
+                new_w,
+                new_h
+            );
             window.resize(baseview::Size::new(new_w as f64, new_h as f64));
             self.gui_context.request_resize();
         }
@@ -434,38 +407,23 @@ impl SatchWindow {
     fn resize_buffers(&mut self) {
         let pw = self.physical_width.max(1);
         let ph = self.physical_height.max(1);
-        if let Some(new_pixmap) = tiny_skia::Pixmap::new(pw, ph) {
-            self.pixmap = new_pixmap;
-        }
-        let _ = self.sb_surface.resize(
-            NonZeroU32::new(pw).unwrap(),
-            NonZeroU32::new(ph).unwrap(),
-        );
-        nih_plug::nih_log!("[satch] resize_buffers() pw={} ph={} sf={:.2} storing=({}, {})", pw, ph, self.scale_factor, pw, ph);
-        self.params.editor_state.size.store((
+        self.surface.resize(pw, ph);
+        nih_plug::nih_log!(
+            "[satch] resize_buffers() pw={} ph={} sf={:.2} storing=({}, {})",
             pw,
             ph,
-        ));
-    }
-
-    fn present(&mut self) {
-        let mut buffer = self.sb_surface.buffer_mut().unwrap();
-        let data = self.pixmap.data();
-        // Convert tiny-skia premultiplied RGBA to softbuffer 0x00RRGGBB
-        for (dst, src) in buffer.iter_mut().zip(data.chunks_exact(4)) {
-            let r = src[0] as u32;
-            let g = src[1] as u32;
-            let b = src[2] as u32;
-            *dst = 0xFF000000 | (r << 16) | (g << 8) | b;
-        }
-        buffer.present().unwrap();
+            self.scale_factor,
+            pw,
+            ph
+        );
+        self.params.editor_state.store_size(pw, ph);
     }
 }
 
 impl baseview::WindowHandler for SatchWindow {
     fn on_frame(&mut self, _window: &mut baseview::Window) {
         self.draw();
-        self.present();
+        self.surface.present();
     }
 
     fn on_event(
@@ -479,7 +437,10 @@ impl baseview::WindowHandler for SatchWindow {
                 self.physical_height = info.physical_size().height;
                 self.resize_buffers();
             }
-            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved { position, modifiers }) => {
+            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved {
+                position,
+                modifiers,
+            }) => {
                 self.mouse_x = position.x as f32;
                 self.mouse_y = position.y as f32;
 
@@ -487,8 +448,7 @@ impl baseview::WindowHandler for SatchWindow {
                     let shift_now = modifiers.contains(keyboard_types::Modifiers::SHIFT);
 
                     // Get the current normalized value for detecting shift transitions
-                    let current_norm =
-                        self.float_param(param_id).unmodulated_normalized_value();
+                    let current_norm = self.float_param(param_id).unmodulated_normalized_value();
                     if shift_now && !self.last_shift_state {
                         self.granular_drag_start_y = self.mouse_y;
                         self.granular_drag_start_value = current_norm;
@@ -528,9 +488,9 @@ impl baseview::WindowHandler for SatchWindow {
                 if let Some(region) = hit {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
                     let now = std::time::Instant::now();
-                    let is_double_click =
-                        now.duration_since(self.last_click_time).as_millis() < 400
-                            && self.last_click_action.as_ref() == Some(&region.action);
+                    let is_double_click = now.duration_since(self.last_click_time).as_millis()
+                        < 400
+                        && self.last_click_action.as_ref() == Some(&region.action);
                     self.last_click_time = now;
                     self.last_click_action = Some(region.action);
 
@@ -544,15 +504,14 @@ impl baseview::WindowHandler for SatchWindow {
                             if is_double_click {
                                 self.reset_param_to_default(&setter, param_id);
                             } else {
-                                let norm = self
-                                    .float_param(param_id)
-                                    .unmodulated_normalized_value();
+                                let norm =
+                                    self.float_param(param_id).unmodulated_normalized_value();
                                 self.drag_start_y = my;
                                 self.drag_start_value = norm;
                                 self.granular_drag_start_y = my;
                                 self.granular_drag_start_value = norm;
-                                self.last_shift_state = modifiers
-                                    .contains(keyboard_types::Modifiers::SHIFT);
+                                self.last_shift_state =
+                                    modifiers.contains(keyboard_types::Modifiers::SHIFT);
                                 self.drag_active = Some(HitAction::Dial(param_id));
                                 self.begin_set_param(&setter, param_id);
                             }
@@ -622,20 +581,25 @@ impl Editor for SatchEditor {
         context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
         // Derive scale factor from persisted size (restored by host before spawn).
-        let (persisted_w, persisted_h) = self.params.editor_state.size();
+        let (persisted_w, _persisted_h) = self.params.editor_state.size();
         let sf = (persisted_w as f32 / WINDOW_WIDTH as f32).clamp(0.75, 3.0);
         self.scaling_factor.store(sf);
-        nih_plug::nih_log!("[satch] spawn() persisted=({}, {}) sf={:.2}", persisted_w, persisted_h, sf);
+        nih_plug::nih_log!(
+            "[satch] spawn() persisted=({}, {}) sf={:.2}",
+            persisted_w,
+            _persisted_h,
+            sf
+        );
 
         let gui_context = Arc::clone(&context);
         let params = Arc::clone(&self.params);
         let shared_scale = Arc::clone(&self.scaling_factor);
 
         let scaled_w = persisted_w;
-        let scaled_h = persisted_h;
+        let scaled_h = _persisted_h;
 
         let window = baseview::Window::open_parented(
-            &ParentWindowHandleAdapter(parent),
+            &widgets::ParentWindowHandleAdapter(parent),
             WindowOpenOptions {
                 title: String::from("satch"),
                 size: baseview::Size::new(scaled_w as f64, scaled_h as f64),
@@ -645,14 +609,11 @@ impl Editor for SatchEditor {
             move |window| SatchWindow::new(window, gui_context, params, shared_scale, sf),
         );
 
-        self.params
-            .editor_state
-            .open
-            .store(true, Ordering::Release);
-        Box::new(SatchEditorHandle {
-            state: self.params.editor_state.clone(),
+        self.params.editor_state.set_open(true);
+        Box::new(widgets::EditorHandle::new(
+            self.params.editor_state.clone(),
             window,
-        })
+        ))
     }
 
     fn size(&self) -> (u32, u32) {
@@ -673,150 +634,4 @@ impl Editor for SatchEditor {
     fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
     fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
     fn param_values_changed(&self) {}
-}
-
-struct SatchEditorHandle {
-    state: Arc<SatchEditorState>,
-    window: WindowHandle,
-}
-
-/// # Safety
-///
-/// The WindowHandle is created by baseview from the host-provided parent window
-/// and is only used on the GUI thread. The `Send` bound is required by nih-plug's
-/// `Editor::spawn` return type. This is the same pattern used by gain-brain and is
-/// safe as long as the handle is not accessed from multiple threads simultaneously,
-/// which nih-plug guarantees.
-unsafe impl Send for SatchEditorHandle {}
-
-impl Drop for SatchEditorHandle {
-    fn drop(&mut self) {
-        self.state.open.store(false, Ordering::Release);
-        self.window.close();
-    }
-}
-
-// ── Raw window handle adapters ──────────────────────────────────────────
-
-struct ParentWindowHandleAdapter(nih_plug::editor::ParentWindowHandle);
-
-unsafe impl HasRawWindowHandle for ParentWindowHandleAdapter {
-    fn raw_window_handle(&self) -> RawWindowHandle {
-        match self.0 {
-            ParentWindowHandle::X11Window(window) => {
-                let mut handle = raw_window_handle::XcbWindowHandle::empty();
-                handle.window = window;
-                RawWindowHandle::Xcb(handle)
-            }
-            ParentWindowHandle::AppKitNsView(ns_view) => {
-                let mut handle = raw_window_handle::AppKitWindowHandle::empty();
-                handle.ns_view = ns_view;
-                RawWindowHandle::AppKit(handle)
-            }
-            ParentWindowHandle::Win32Hwnd(hwnd) => {
-                let mut handle = raw_window_handle::Win32WindowHandle::empty();
-                handle.hwnd = hwnd;
-                RawWindowHandle::Win32(handle)
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-struct SoftbufferHandleAdapter {
-    raw_display_handle: raw_window_handle_06::RawDisplayHandle,
-    raw_window_handle: raw_window_handle_06::RawWindowHandle,
-}
-
-impl raw_window_handle_06::HasDisplayHandle for SoftbufferHandleAdapter {
-    fn display_handle(
-        &self,
-    ) -> Result<raw_window_handle_06::DisplayHandle<'_>, raw_window_handle_06::HandleError> {
-        unsafe {
-            Ok(raw_window_handle_06::DisplayHandle::borrow_raw(
-                self.raw_display_handle,
-            ))
-        }
-    }
-}
-
-impl raw_window_handle_06::HasWindowHandle for SoftbufferHandleAdapter {
-    fn window_handle(
-        &self,
-    ) -> Result<raw_window_handle_06::WindowHandle<'_>, raw_window_handle_06::HandleError> {
-        unsafe {
-            Ok(raw_window_handle_06::WindowHandle::borrow_raw(
-                self.raw_window_handle,
-            ))
-        }
-    }
-}
-
-fn baseview_window_to_surface_target(window: &baseview::Window<'_>) -> SoftbufferHandleAdapter {
-    use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle};
-
-    let raw_display = window.raw_display_handle();
-    let raw_window = window.raw_window_handle();
-
-    SoftbufferHandleAdapter {
-        raw_display_handle: match raw_display {
-            raw_window_handle::RawDisplayHandle::AppKit(_) => {
-                raw_window_handle_06::RawDisplayHandle::AppKit(
-                    raw_window_handle_06::AppKitDisplayHandle::new(),
-                )
-            }
-            raw_window_handle::RawDisplayHandle::Xlib(handle) => {
-                raw_window_handle_06::RawDisplayHandle::Xlib(
-                    raw_window_handle_06::XlibDisplayHandle::new(
-                        NonNull::new(handle.display),
-                        handle.screen,
-                    ),
-                )
-            }
-            raw_window_handle::RawDisplayHandle::Xcb(handle) => {
-                raw_window_handle_06::RawDisplayHandle::Xcb(
-                    raw_window_handle_06::XcbDisplayHandle::new(
-                        NonNull::new(handle.connection),
-                        handle.screen,
-                    ),
-                )
-            }
-            raw_window_handle::RawDisplayHandle::Windows(_) => {
-                raw_window_handle_06::RawDisplayHandle::Windows(
-                    raw_window_handle_06::WindowsDisplayHandle::new(),
-                )
-            }
-            _ => todo!("Unsupported display handle"),
-        },
-        raw_window_handle: match raw_window {
-            raw_window_handle::RawWindowHandle::AppKit(handle) => {
-                raw_window_handle_06::RawWindowHandle::AppKit(
-                    raw_window_handle_06::AppKitWindowHandle::new(
-                        NonNull::new(handle.ns_view).unwrap(),
-                    ),
-                )
-            }
-            raw_window_handle::RawWindowHandle::Xlib(handle) => {
-                raw_window_handle_06::RawWindowHandle::Xlib(
-                    raw_window_handle_06::XlibWindowHandle::new(handle.window),
-                )
-            }
-            raw_window_handle::RawWindowHandle::Xcb(handle) => {
-                raw_window_handle_06::RawWindowHandle::Xcb(
-                    raw_window_handle_06::XcbWindowHandle::new(
-                        NonZeroU32::new(handle.window)
-                            .expect("XCB window handle is 0 -- host provided invalid parent"),
-                    ),
-                )
-            }
-            raw_window_handle::RawWindowHandle::Win32(handle) => {
-                let mut raw_handle = raw_window_handle_06::Win32WindowHandle::new(
-                    NonZeroIsize::new(handle.hwnd as isize).unwrap(),
-                );
-                raw_handle.hinstance = NonZeroIsize::new(handle.hinstance as isize);
-                raw_window_handle_06::RawWindowHandle::Win32(raw_handle)
-            }
-            _ => todo!("Unsupported window handle"),
-        },
-    }
 }

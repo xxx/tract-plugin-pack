@@ -87,7 +87,7 @@ pub struct GainBrain {
 #[derive(Params)]
 pub struct GainBrainParams {
     #[persist = "editor-state"]
-    pub editor_state: Arc<editor::GainBrainEditorState>,
+    pub editor_state: Arc<editor::EditorState>,
 
     #[id = "gain"]
     pub gain: FloatParam,
@@ -136,7 +136,7 @@ impl Default for GainBrain {
 impl GainBrainParams {
     fn new() -> Self {
         Self {
-            editor_state: editor::GainBrainEditorState::default_state(),
+            editor_state: editor::default_editor_state(),
 
             gain: FloatParam::new(
                 "Gain",
@@ -184,7 +184,11 @@ impl Plugin for GainBrain {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        editor::create(self.params.clone(), self.display_gain_millibels.clone(), self.group_gain_override.clone())
+        editor::create(
+            self.params.clone(),
+            self.display_gain_millibels.clone(),
+            self.group_gain_override.clone(),
+        )
     }
 
     fn initialize(
@@ -212,11 +216,16 @@ impl Plugin for GainBrain {
         self.sync_group();
 
         // ── Check for pending group gain override ──────────────────────
-        let override_mb = self.group_gain_override.swap(NO_OVERRIDE, Ordering::Relaxed);
+        let override_mb = self
+            .group_gain_override
+            .swap(NO_OVERRIDE, Ordering::Relaxed);
         if override_mb != NO_OVERRIDE {
             let target_db = clamp_db(millibels_to_db(override_mb));
             let target_gain = util::db_to_gain(target_db);
-            self.params.gain.smoothed.set_target(self.sample_rate, target_gain);
+            self.params
+                .gain
+                .smoothed
+                .set_target(self.sample_rate, target_gain);
             self.effective_gain_db = target_db;
         } else if !(1..=16).contains(&self.params.group.value()) {
             // No group active — effective gain simply tracks the parameter
@@ -295,14 +304,25 @@ impl GainBrain {
 
         if group_changed || mode_changed {
             #[cfg(debug_assertions)]
-            nih_log!("[{}] TRANSITION: group {}→{} mode {:?}→{:?} effective={:.1}dB param={:.1}dB",
-                state.instance_id, *state.last_group, group, *state.last_link_mode, link_mode,
-                *state.effective_gain_db, util::gain_to_db(state.params.gain.value()));
+            nih_log!(
+                "[{}] TRANSITION: group {}→{} mode {:?}→{:?} effective={:.1}dB param={:.1}dB",
+                state.instance_id,
+                *state.last_group,
+                group,
+                *state.last_link_mode,
+                link_mode,
+                *state.effective_gain_db,
+                util::gain_to_db(state.params.gain.value())
+            );
             Self::handle_transition(&mut state, group_file, group, link_mode);
             #[cfg(debug_assertions)]
-            nih_log!("[{}] AFTER TRANSITION: baseline={} last_sent={} effective={:.1}dB",
-                state.instance_id, *state.relative_baseline_mb,
-                *state.last_sent_gain_millibels, *state.effective_gain_db);
+            nih_log!(
+                "[{}] AFTER TRANSITION: baseline={} last_sent={} effective={:.1}dB",
+                state.instance_id,
+                *state.relative_baseline_mb,
+                *state.last_sent_gain_millibels,
+                *state.effective_gain_db
+            );
             *state.last_group = group;
             *state.last_link_mode = link_mode;
         }
@@ -319,8 +339,14 @@ impl GainBrain {
             let effective_mb = db_to_millibels(*state.effective_gain_db);
             let write_mb = if invert { -effective_mb } else { effective_mb };
             #[cfg(debug_assertions)]
-            nih_log!("[{}] INVERT TOGGLE: {}→{} effective={} write={} (rebaseline)",
-                state.instance_id, *state.last_invert, invert, effective_mb, write_mb);
+            nih_log!(
+                "[{}] INVERT TOGGLE: {}→{} effective={} write={} (rebaseline)",
+                state.instance_id,
+                *state.last_invert,
+                invert,
+                effective_mb,
+                write_mb
+            );
             group_file.write_slot_rebaseline(group as u8, write_mb);
             *state.last_sent_gain_millibels = write_mb;
             let updated_slot = group_file.read_slot(group as u8);
@@ -340,9 +366,13 @@ impl GainBrain {
         // or performed a rebaseline write. Re-baseline without applying a delta.
         if slot.baseline_generation != *state.last_baseline_generation {
             #[cfg(debug_assertions)]
-            nih_log!("[{}] REBASELINE: baseline_gen {}→{} slot={}",
-                state.instance_id, *state.last_baseline_generation,
-                slot.baseline_generation, slot.gain_millibels);
+            nih_log!(
+                "[{}] REBASELINE: baseline_gen {}→{} slot={}",
+                state.instance_id,
+                *state.last_baseline_generation,
+                slot.baseline_generation,
+                slot.gain_millibels
+            );
             *state.relative_baseline_mb = slot.gain_millibels;
             *state.last_sent_gain_millibels = slot.gain_millibels;
             *state.last_seen_generation = slot.generation;
@@ -353,7 +383,9 @@ impl GainBrain {
                 } else {
                     slot.gain_millibels
                 };
-                state.group_gain_override.store(applied_mb, Ordering::Relaxed);
+                state
+                    .group_gain_override
+                    .store(applied_mb, Ordering::Relaxed);
                 *state.effective_gain_db = millibels_to_db(applied_mb);
             }
             read_fired = true;
@@ -368,9 +400,15 @@ impl GainBrain {
                         slot.gain_millibels
                     };
                     #[cfg(debug_assertions)]
-                    nih_log!("[{}] READ abs: slot={} gen={} last_sent={} invert={} → override={}",
-                        state.instance_id, slot.gain_millibels, slot.generation,
-                        *state.last_sent_gain_millibels, invert, applied_mb);
+                    nih_log!(
+                        "[{}] READ abs: slot={} gen={} last_sent={} invert={} → override={}",
+                        state.instance_id,
+                        slot.gain_millibels,
+                        slot.generation,
+                        *state.last_sent_gain_millibels,
+                        invert,
+                        applied_mb
+                    );
                     state
                         .group_gain_override
                         .store(applied_mb, Ordering::Relaxed);
@@ -384,7 +422,8 @@ impl GainBrain {
                     let new_mb = current_mb + delta_mb;
                     let clamped_db = clamp_db(millibels_to_db(new_mb));
                     let clamped_mb = db_to_millibels(clamped_db);
-                    #[cfg(debug_assertions)] {
+                    #[cfg(debug_assertions)]
+                    {
                         let slot_db = millibels_to_db(slot.gain_millibels);
                         let new_db = millibels_to_db(clamped_mb);
                         let offset_db = slot_db - new_db;
@@ -411,9 +450,15 @@ impl GainBrain {
         if current_mb != *state.last_param_value_mb {
             let write_mb = if invert { -current_mb } else { current_mb };
             #[cfg(debug_assertions)]
-            nih_log!("[{}] WRITE: param changed {}→{} write={} invert={} (effective was {:.1})",
-                state.instance_id, *state.last_param_value_mb, current_mb, write_mb, invert,
-                *state.effective_gain_db);
+            nih_log!(
+                "[{}] WRITE: param changed {}→{} write={} invert={} (effective was {:.1})",
+                state.instance_id,
+                *state.last_param_value_mb,
+                current_mb,
+                write_mb,
+                invert,
+                *state.effective_gain_db
+            );
             // Only update effective_gain_db from the param if the read path
             // didn't fire this buffer — otherwise we'd overwrite the remote
             // delta with the stale param value.
@@ -542,18 +587,13 @@ impl ClapPlugin for GainBrain {
         Some("A gain utility with cross-instance group linking");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] = &[
-        ClapFeature::AudioEffect,
-        ClapFeature::Utility,
-    ];
+    const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Utility];
 }
 
 impl Vst3Plugin for GainBrain {
     const VST3_CLASS_ID: [u8; 16] = *b"GainBrainMpdPlg\0";
-    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[
-        Vst3SubCategory::Fx,
-        Vst3SubCategory::Tools,
-    ];
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
+        &[Vst3SubCategory::Fx, Vst3SubCategory::Tools];
 }
 
 nih_export_clap!(GainBrain);

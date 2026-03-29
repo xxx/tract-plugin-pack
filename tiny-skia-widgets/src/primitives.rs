@@ -10,17 +10,29 @@ use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
 // tiny-skia's Color::from_rgba8 is not const, so we use inline functions.
 
 #[inline]
-pub fn color_bg() -> Color { Color::from_rgba8(0x1a, 0x1c, 0x22, 0xff) }
+pub fn color_bg() -> Color {
+    Color::from_rgba8(0x1a, 0x1c, 0x22, 0xff)
+}
 #[inline]
-pub fn color_text() -> Color { Color::from_rgba8(0xe0, 0xe0, 0xe0, 0xff) }
+pub fn color_text() -> Color {
+    Color::from_rgba8(0xe0, 0xe0, 0xe0, 0xff)
+}
 #[inline]
-pub fn color_accent() -> Color { Color::from_rgba8(0x4f, 0xc3, 0xf7, 0xff) }
+pub fn color_accent() -> Color {
+    Color::from_rgba8(0x4f, 0xc3, 0xf7, 0xff)
+}
 #[inline]
-pub fn color_muted() -> Color { Color::from_rgba8(0xa0, 0xa0, 0xa0, 0xff) }
+pub fn color_muted() -> Color {
+    Color::from_rgba8(0xa0, 0xa0, 0xa0, 0xff)
+}
 #[inline]
-pub fn color_control_bg() -> Color { Color::from_rgba8(0x2a, 0x2c, 0x32, 0xff) }
+pub fn color_control_bg() -> Color {
+    Color::from_rgba8(0x2a, 0x2c, 0x32, 0xff)
+}
 #[inline]
-pub fn color_border() -> Color { Color::from_rgba8(0x40, 0x40, 0x40, 0xff) }
+pub fn color_border() -> Color {
+    Color::from_rgba8(0x40, 0x40, 0x40, 0xff)
+}
 
 // ---------------------------------------------------------------------------
 // Primitive drawing helpers
@@ -55,7 +67,14 @@ pub fn draw_rect_outline(
     // Bottom edge
     draw_rect(pixmap, x, y + h - stroke_width, w, stroke_width, color);
     // Left edge
-    draw_rect(pixmap, x, y + stroke_width, stroke_width, h - 2.0 * stroke_width, color);
+    draw_rect(
+        pixmap,
+        x,
+        y + stroke_width,
+        stroke_width,
+        h - 2.0 * stroke_width,
+        color,
+    );
     // Right edge
     draw_rect(
         pixmap,
