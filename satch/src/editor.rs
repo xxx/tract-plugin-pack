@@ -15,7 +15,7 @@ use tiny_skia_widgets as widgets;
 use crate::SatchParams;
 
 const WINDOW_WIDTH: u32 = 300;
-const WINDOW_HEIGHT: u32 = 450;
+const WINDOW_HEIGHT: u32 = 380;
 
 // ── Editor State (persisted by the host) ────────────────────────────────
 
@@ -230,7 +230,10 @@ impl SatchWindow {
         let mut y = 12.0 * s;
 
         // Pre-collect dial data before taking &mut tr to avoid borrow conflicts.
-        let dial_data: [(ParamId, &str, f32, String); 5] = [
+        // Row 1: Gain, Threshold
+        // Row 2: Detail, Knee
+        // Bottom-right: Mix
+        let row1: [(ParamId, &str, f32, String); 2] = [
             (
                 ParamId::Gain,
                 "Gain",
@@ -243,12 +246,8 @@ impl SatchWindow {
                 self.params.threshold.unmodulated_normalized_value(),
                 self.format_value(ParamId::Threshold),
             ),
-            (
-                ParamId::Knee,
-                "Knee",
-                self.params.knee.unmodulated_normalized_value(),
-                self.format_value(ParamId::Knee),
-            ),
+        ];
+        let row2: [(ParamId, &str, f32, String); 2] = [
             (
                 ParamId::Detail,
                 "Detail",
@@ -256,12 +255,18 @@ impl SatchWindow {
                 self.format_value(ParamId::Detail),
             ),
             (
-                ParamId::Mix,
-                "Mix",
-                self.params.mix.unmodulated_normalized_value(),
-                self.format_value(ParamId::Mix),
+                ParamId::Knee,
+                "Knee",
+                self.params.knee.unmodulated_normalized_value(),
+                self.format_value(ParamId::Knee),
             ),
         ];
+        let mix_data = (
+            ParamId::Mix,
+            "Mix",
+            self.params.mix.unmodulated_normalized_value(),
+            self.format_value(ParamId::Mix),
+        );
         let pct_text = format!("{}%", (self.scale_factor * 100.0).round() as u32);
 
         let tr = &mut self.text_renderer;
@@ -336,35 +341,54 @@ impl SatchWindow {
 
         y += 36.0 * s; // title row height
 
-        // Compute available vertical space for the five dials
+        // Layout: 2 rows of 2 dials + Mix bottom-right
         let available_h = h - y - pad;
-        let dial_radius = (available_h / (5.0 * 3.0)).clamp(20.0 * s, 36.0 * s);
-        let dial_slot_h = available_h / 5.0;
-        let dial_cx = w / 2.0;
+        let dial_radius = 28.0 * s;
+        let col_spacing = (w - 2.0 * pad) / 2.0;
+        let row_h = available_h / 3.0;
+        let row1_cy = y + row_h * 0.5;
+        let row2_cy = y + row_h * 1.5;
 
-        for (i, (param_id, label, normalized, value_text)) in dial_data.iter().enumerate() {
-            let slot_top = y + i as f32 * dial_slot_h;
-            let dial_cy = slot_top + dial_slot_h / 2.0;
-
+        // Row 1: Gain, Threshold
+        for (i, (param_id, label, normalized, value_text)) in row1.iter().enumerate() {
+            let cx = pad + col_spacing * (i as f32 + 0.5);
             widgets::draw_dial(
-                &mut self.pixmap,
-                tr,
-                dial_cx,
-                dial_cy,
-                dial_radius,
-                label,
-                value_text,
-                *normalized,
+                &mut self.pixmap, tr, cx, row1_cy, dial_radius,
+                label, value_text, *normalized,
             );
-
-            // Hit region covers the full slot for easy vertical drag
-            let hit_w = dial_radius * 2.0 + 40.0 * s;
             self.hit_regions.push(HitRegion {
-                x: dial_cx - hit_w / 2.0,
-                y: slot_top,
-                w: hit_w,
-                h: dial_slot_h,
+                x: cx - col_spacing / 2.0, y: y, w: col_spacing, h: row_h,
                 action: HitAction::Dial(*param_id),
+            });
+        }
+
+        // Row 2: Detail, Knee
+        for (i, (param_id, label, normalized, value_text)) in row2.iter().enumerate() {
+            let cx = pad + col_spacing * (i as f32 + 0.5);
+            widgets::draw_dial(
+                &mut self.pixmap, tr, cx, row2_cy, dial_radius,
+                label, value_text, *normalized,
+            );
+            self.hit_regions.push(HitRegion {
+                x: cx - col_spacing / 2.0, y: y + row_h, w: col_spacing, h: row_h,
+                action: HitAction::Dial(*param_id),
+            });
+        }
+
+        // Mix: bottom-right corner, smaller
+        {
+            let (param_id, label, normalized, ref value_text) = mix_data;
+            let mix_radius = 22.0 * s;
+            let mix_cx = w - pad - mix_radius - 10.0 * s;
+            let mix_cy = y + row_h * 2.5;
+            widgets::draw_dial(
+                &mut self.pixmap, tr, mix_cx, mix_cy, mix_radius,
+                label, value_text, normalized,
+            );
+            let hit_w = col_spacing;
+            self.hit_regions.push(HitRegion {
+                x: mix_cx - hit_w / 2.0, y: y + row_h * 2.0, w: hit_w, h: row_h,
+                action: HitAction::Dial(param_id),
             });
         }
     }

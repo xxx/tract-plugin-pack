@@ -172,8 +172,8 @@ pub fn draw_dial(
     // --- Value text centered below the arc ---
     let value_w = text_renderer.text_width(value_text, text_size);
     let value_x = cx - value_w * 0.5;
-    // Place value text below the center; the bottom of the arc is at cy + radius.
-    let value_y = cy + radius + stroke_width + text_size + 2.0;
+    // Place value text just below the arc endpoints (at cy + 0.707*r).
+    let value_y = cy + radius * 0.71 + text_size + 4.0;
     text_renderer.draw_text(
         pixmap,
         value_x,
