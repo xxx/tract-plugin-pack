@@ -15,7 +15,7 @@ use tiny_skia_widgets as widgets;
 use crate::SatchParams;
 
 const WINDOW_WIDTH: u32 = 300;
-const WINDOW_HEIGHT: u32 = 380;
+const WINDOW_HEIGHT: u32 = 450;
 
 // ── Editor State (persisted by the host) ────────────────────────────────
 
@@ -81,7 +81,8 @@ enum HitAction {
 
 #[derive(Clone, Copy, PartialEq)]
 enum ParamId {
-    Drive,
+    Gain,
+    Threshold,
     Knee,
     Detail,
     Mix,
@@ -184,7 +185,8 @@ impl SatchWindow {
 
     fn float_param(&self, id: ParamId) -> &FloatParam {
         match id {
-            ParamId::Drive => &self.params.drive,
+            ParamId::Gain => &self.params.gain,
+            ParamId::Threshold => &self.params.threshold,
             ParamId::Knee => &self.params.knee,
             ParamId::Detail => &self.params.detail,
             ParamId::Mix => &self.params.mix,
@@ -228,12 +230,18 @@ impl SatchWindow {
         let mut y = 12.0 * s;
 
         // Pre-collect dial data before taking &mut tr to avoid borrow conflicts.
-        let dial_data: [(ParamId, &str, f32, String); 4] = [
+        let dial_data: [(ParamId, &str, f32, String); 5] = [
             (
-                ParamId::Drive,
-                "Drive",
-                self.params.drive.unmodulated_normalized_value(),
-                self.format_value(ParamId::Drive),
+                ParamId::Gain,
+                "Gain",
+                self.params.gain.unmodulated_normalized_value(),
+                self.format_value(ParamId::Gain),
+            ),
+            (
+                ParamId::Threshold,
+                "Threshold",
+                self.params.threshold.unmodulated_normalized_value(),
+                self.format_value(ParamId::Threshold),
             ),
             (
                 ParamId::Knee,
@@ -328,10 +336,10 @@ impl SatchWindow {
 
         y += 36.0 * s; // title row height
 
-        // Compute available vertical space for the four dials
+        // Compute available vertical space for the five dials
         let available_h = h - y - pad;
-        let dial_radius = (available_h / (4.0 * 3.0)).clamp(20.0 * s, 36.0 * s);
-        let dial_slot_h = available_h / 4.0;
+        let dial_radius = (available_h / (5.0 * 3.0)).clamp(20.0 * s, 36.0 * s);
+        let dial_slot_h = available_h / 5.0;
         let dial_cx = w / 2.0;
 
         for (i, (param_id, label, normalized, value_text)) in dial_data.iter().enumerate() {
@@ -363,8 +371,12 @@ impl SatchWindow {
 
     fn format_value(&self, id: ParamId) -> String {
         match id {
-            ParamId::Drive => {
-                let db = nih_plug::util::gain_to_db(self.params.drive.value());
+            ParamId::Gain => {
+                let db = nih_plug::util::gain_to_db(self.params.gain.value());
+                format!("{:.1} dB", db)
+            }
+            ParamId::Threshold => {
+                let db = nih_plug::util::gain_to_db(self.params.threshold.value());
                 format!("{:.1} dB", db)
             }
             ParamId::Knee => {
