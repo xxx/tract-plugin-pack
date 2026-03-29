@@ -54,8 +54,24 @@ pub fn saturate_td(x: f32, gain: f32, threshold: f32, knee: f32) -> f32 {
 /// in the clip mask (avoids computing tanh twice per sample).
 #[inline]
 pub fn saturate_td_with_tanh(x: f32, gain: f32, threshold: f32, knee: f32) -> (f32, f32) {
+    saturate_td_with_tanh_fast(x, gain, threshold, 1.0 / threshold, knee)
+}
+
+/// Fast variant of [`saturate_td_with_tanh`] that takes a precomputed
+/// `inv_threshold = 1.0 / threshold` to avoid a per-call division.
+///
+/// Used on the audio hot path where `inv_threshold` is computed once per
+/// sample and reused across both channels and the spectral path.
+#[inline]
+pub fn saturate_td_with_tanh_fast(
+    x: f32,
+    gain: f32,
+    threshold: f32,
+    inv_threshold: f32,
+    knee: f32,
+) -> (f32, f32) {
     let gained = gain * x;
-    let norm = gained / threshold;
+    let norm = gained * inv_threshold;
     let hard = gained.clamp(-threshold, threshold);
     let tanh_val = norm.tanh();
     let soft = threshold * tanh_val;
@@ -211,15 +227,54 @@ impl SpectralClipper {
     /// When `skip_fft` transitions back to false, there will be a brief settling
     /// period (~4 hops) as the output rings refill.
     pub fn process_sample(&mut self, input: f32, gain: f32, threshold: f32, knee: f32) -> f32 {
-        self.process_sample_inner(input, gain, threshold, knee, false)
+        let inv_threshold = 1.0 / threshold;
+        self.process_sample_inner(input, gain, threshold, inv_threshold, knee, false)
     }
 
     /// Like `process_sample` but allows skipping FFT frame processing.
     pub fn process_sample_skip_fft(&mut self, input: f32, gain: f32, threshold: f32, knee: f32) -> f32 {
-        self.process_sample_inner(input, gain, threshold, knee, true)
+        let inv_threshold = 1.0 / threshold;
+        self.process_sample_inner(input, gain, threshold, inv_threshold, knee, true)
     }
 
-    fn process_sample_inner(&mut self, input: f32, gain: f32, threshold: f32, knee: f32, skip_fft: bool) -> f32 {
+    /// Fast variant of [`process_sample`] that takes a precomputed
+    /// `inv_threshold = 1.0 / threshold`, avoiding a division per call.
+    /// Used from the plugin `process()` loop where `inv_threshold` is
+    /// computed once per sample and shared across both channels.
+    #[inline]
+    pub fn process_sample_fast(
+        &mut self,
+        input: f32,
+        gain: f32,
+        threshold: f32,
+        inv_threshold: f32,
+        knee: f32,
+    ) -> f32 {
+        self.process_sample_inner(input, gain, threshold, inv_threshold, knee, false)
+    }
+
+    /// Fast variant of [`process_sample_skip_fft`] with precomputed `inv_threshold`.
+    #[inline]
+    pub fn process_sample_skip_fft_fast(
+        &mut self,
+        input: f32,
+        gain: f32,
+        threshold: f32,
+        inv_threshold: f32,
+        knee: f32,
+    ) -> f32 {
+        self.process_sample_inner(input, gain, threshold, inv_threshold, knee, true)
+    }
+
+    fn process_sample_inner(
+        &mut self,
+        input: f32,
+        gain: f32,
+        threshold: f32,
+        inv_threshold: f32,
+        knee: f32,
+        skip_fft: bool,
+    ) -> f32 {
         let out_len = self.loud_output_ring.len();
 
         // Write input into the input ring
@@ -249,13 +304,14 @@ impl SpectralClipper {
         // Clipping the full signal first eliminates this correlation.
         let gained_full = gain * original;
         let hard_full = gained_full.clamp(-threshold, threshold);
-        let soft_full = threshold * (gained_full / threshold).tanh();
+        let soft_full = threshold * (gained_full * inv_threshold).tanh();
         let clipped_full = hard_full + knee * (soft_full - hard_full);
         let processed = clipped_full + quiet_td;
 
         // Safety clip: detail can ride above the threshold level, but bound
         // it to prevent extreme values. Allow 50% overshoot above threshold.
-        let output = processed.clamp(-threshold * 1.5, threshold * 1.5);
+        let safety = threshold * 1.5;
+        let output = processed.clamp(-safety, safety);
 
         self.read_pos = (self.read_pos + 1) % out_len;
 
@@ -348,11 +404,12 @@ impl SpectralClipper {
                 self.loud_buf[k] = Complex::new(0.0, 0.0);
                 self.quiet_buf[k] = self.fft_buf[k];
             } else {
-                // Transition band — smooth crossfade (sqrt only here)
+                // Transition band — smooth crossfade (sqrt only here).
+                // quiet = fft - loud avoids a second complex multiply.
                 let mag = mag_sq.sqrt();
                 let t = (mag - lo) * inv_band; // 0 at lo, 1 at hi
                 self.loud_buf[k] = self.fft_buf[k] * t;
-                self.quiet_buf[k] = self.fft_buf[k] * (1.0 - t);
+                self.quiet_buf[k] = self.fft_buf[k] - self.loud_buf[k];
             }
         }
 

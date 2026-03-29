@@ -199,6 +199,7 @@ impl Plugin for Satch {
         let detail = self.params.detail.value() / 100.0;
         let knee = self.params.knee.value() / 100.0;
         let mix = self.params.mix.value() / 100.0;
+        let dry_mix = 1.0 - mix;
 
         // Skip FFT processing when the spectral result won't be used.
         // detail=0: spectral contribution is multiplied by 0 in the blend.
@@ -208,6 +209,9 @@ impl Plugin for Satch {
         for i in 0..num_samples {
             let gain = self.params.gain.smoothed.next();
             let threshold = self.params.threshold.smoothed.next();
+            // Precompute reciprocal once per sample, reused across both
+            // channels and the spectral path (saves 3 divides per sample).
+            let inv_threshold = 1.0 / threshold;
 
             let in_l = left[i];
             let in_r = right[i];
@@ -223,26 +227,26 @@ impl Plugin for Satch {
             // Returns both the saturated output and tanh(gained/threshold)
             // for reuse in the clip mask.
             let (td_l, tanh_l) =
-                spectral::saturate_td_with_tanh(dry_l, gain, threshold, knee);
+                spectral::saturate_td_with_tanh_fast(dry_l, gain, threshold, inv_threshold, knee);
             let (td_r, tanh_r) =
-                spectral::saturate_td_with_tanh(dry_r, gain, threshold, knee);
+                spectral::saturate_td_with_tanh_fast(dry_r, gain, threshold, inv_threshold, knee);
 
             // Spectral path (has built-in latency from STFT).
             // When skip_fft=true, ring buffer state is maintained but FFT
             // frames are not computed (saves ~95% of CPU in this path).
             let sp_l = if skip_fft {
                 self.spectral_l
-                    .process_sample_skip_fft(in_l, gain, threshold, knee)
+                    .process_sample_skip_fft_fast(in_l, gain, threshold, inv_threshold, knee)
             } else {
                 self.spectral_l
-                    .process_sample(in_l, gain, threshold, knee)
+                    .process_sample_fast(in_l, gain, threshold, inv_threshold, knee)
             };
             let sp_r = if skip_fft {
                 self.spectral_r
-                    .process_sample_skip_fft(in_r, gain, threshold, knee)
+                    .process_sample_skip_fft_fast(in_r, gain, threshold, inv_threshold, knee)
             } else {
                 self.spectral_r
-                    .process_sample(in_r, gain, threshold, knee)
+                    .process_sample_fast(in_r, gain, threshold, inv_threshold, knee)
             };
 
             // Clip mask: tanh(gained/threshold)² is 0 when gained is small
@@ -257,8 +261,8 @@ impl Plugin for Satch {
             let wet_r = (td_r + detail * clip_r * lost_r).clamp(-threshold, threshold);
 
             // Dry/wet mix (dry is delayed to align)
-            left[i] = mix * wet_l + (1.0 - mix) * dry_l;
-            right[i] = mix * wet_r + (1.0 - mix) * dry_r;
+            left[i] = mix * wet_l + dry_mix * dry_l;
+            right[i] = mix * wet_r + dry_mix * dry_r;
         }
 
         ProcessStatus::Normal
