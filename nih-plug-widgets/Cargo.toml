@@ -6,4 +6,4 @@ publish = false
 
 [dependencies]
 nih_plug = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr", features = ["simd"] }
-nih_plug_vizia = { path = "../nih-plug/nih_plug_vizia" }
+nih_plug_vizia = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr" }

@@ -1628,7 +1628,7 @@ dependencies = [
  "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=9a0b42c09d712777b2edb4c5e0cb6baf21e988f0)",
  "crossbeam",
  "keyboard-types",
- "nih_plug 0.0.0 (git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr)",
+ "nih_plug",
  "raw-window-handle 0.5.2",
  "raw-window-handle 0.6.2",
  "serde",
@@ -1829,7 +1829,7 @@ dependencies = [
  "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=9a0b42c09d712777b2edb4c5e0cb6baf21e988f0)",
  "crossbeam",
  "keyboard-types",
- "nih_plug 0.0.0 (git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr)",
+ "nih_plug",
  "raw-window-handle 0.5.2",
  "raw-window-handle 0.6.2",
  "serde",
@@ -2440,7 +2440,7 @@ dependencies = [
 name = "nih-plug-widgets"
 version = "0.1.0"
 dependencies = [
- "nih_plug 0.0.0 (git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr)",
+ "nih_plug",
  "nih_plug_vizia",
 ]
 
@@ -2455,34 +2455,6 @@ dependencies = [
  "once_cell",
  "termcolor",
  "time",
- "windows 0.44.0",
-]
-
-[[package]]
-name = "nih_plug"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "anymap3",
- "atomic_float 0.1.0",
- "atomic_refcell",
- "backtrace",
- "bitflags 1.3.2",
- "cfg-if",
- "clap-sys",
- "core-foundation",
- "crossbeam",
- "libc",
- "log",
- "midi-consts",
- "nih_log",
- "nih_plug_derive 0.1.0",
- "objc",
- "parking_lot",
- "raw-window-handle 0.5.2",
- "serde",
- "serde_json",
- "widestring",
  "windows 0.44.0",
 ]
 
@@ -2510,7 +2482,7 @@ dependencies = [
  "midi-consts",
  "midir",
  "nih_log",
- "nih_plug_derive 0.1.0 (git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr)",
+ "nih_plug_derive",
  "objc",
  "parking_lot",
  "raw-window-handle 0.5.2",
@@ -2530,15 +2502,6 @@ source = "git+https://github.com/robbert-vdh/nih_plug_assets.git#a04e327923e120b
 [[package]]
 name = "nih_plug_derive"
 version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "nih_plug_derive"
-version = "0.1.0"
 source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#f01fffba658b9fb04b0e6840d57317113545a135"
 dependencies = [
  "proc-macro2",
@@ -2549,10 +2512,11 @@ dependencies = [
 [[package]]
 name = "nih_plug_vizia"
 version = "0.0.0"
+source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#f01fffba658b9fb04b0e6840d57317113545a135"
 dependencies = [
  "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=2c1b1a7b0fef1a29a5150a6a8f6fef6a0cbab8c4)",
  "crossbeam",
- "nih_plug 0.0.0",
+ "nih_plug",
  "nih_plug_assets",
  "serde",
  "vizia",
@@ -3570,7 +3534,7 @@ dependencies = [
  "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=9a0b42c09d712777b2edb4c5e0cb6baf21e988f0)",
  "crossbeam",
  "keyboard-types",
- "nih_plug 0.0.0 (git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr)",
+ "nih_plug",
  "raw-window-handle 0.5.2",
  "raw-window-handle 0.6.2",
  "rustfft",
@@ -3975,7 +3939,7 @@ dependencies = [
  "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=9a0b42c09d712777b2edb4c5e0cb6baf21e988f0)",
  "crossbeam",
  "fontdue",
- "nih_plug 0.0.0 (git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr)",
+ "nih_plug",
  "raw-window-handle 0.5.2",
  "raw-window-handle 0.6.2",
  "serde",
@@ -4002,7 +3966,7 @@ dependencies = [
  "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=9a0b42c09d712777b2edb4c5e0cb6baf21e988f0)",
  "crossbeam",
  "keyboard-types",
- "nih_plug 0.0.0 (git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr)",
+ "nih_plug",
  "raw-window-handle 0.5.2",
  "raw-window-handle 0.6.2",
  "serde",
@@ -4574,7 +4538,7 @@ dependencies = [
  "atomic_float 1.1.0",
  "hound",
  "nih-plug-widgets",
- "nih_plug 0.0.0 (git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr)",
+ "nih_plug",
  "nih_plug_vizia",
  "realfft",
  "rfd",
