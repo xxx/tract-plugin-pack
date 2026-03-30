@@ -32,9 +32,9 @@ A lightweight gain utility with cross-instance group linking. Multiple instances
 
 - 16 groups with Absolute (identical values) and Relative (delta-based) link modes
 - Invert toggle for mirrored gain movement (ducking, sidechain-style workflows)
-- Cross-instance IPC via memory-mapped file (works across DAW sandbox boundaries)
+- In-process shared state with cumulative canonical delta sync (lock-free atomics, zero overhead)
 - CPU-rendered GUI with rotary dial (tiny-skia + softbuffer)
-- ~8 KB per instance headless, ~3 MB for 200 instances
+- ~0.24 MB RSS and 0.02% CPU per instance (200 instances @ 3.8% CPU, 107 MB total)
 - Inspired by [BlueCat's Gain Suite](https://www.bluecataudio.com/Products/Product_GainSuite/)
 
 ### tinylimit
