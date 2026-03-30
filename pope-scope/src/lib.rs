@@ -183,7 +183,7 @@ impl PopeScopeParams {
                 0.0,
                 FloatRange::Linear {
                     min: -48.0,
-                    max: 0.0,
+                    max: 12.0,
                 },
             )
             .with_unit(" dB")

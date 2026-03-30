@@ -52,6 +52,65 @@ pub fn to_color(argb: u32) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba(r, g, b, a).unwrap()
 }
 
+/// Return an ARGB u32 with overridden alpha (0.0-1.0).
+pub fn to_color_alpha_u32(argb: u32, alpha: f32) -> u32 {
+    let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (a << 24) | (argb & 0x00FF_FFFF)
+}
+
+/// Shift the hue of an ARGB color by `degrees` (0-360). Used to
+/// distinguish multiple channels of the same track.
+pub fn hue_shift_u32(argb: u32, degrees: f32) -> u32 {
+    let a = (argb >> 24) & 0xFF;
+    let r = ((argb >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((argb >> 8) & 0xFF) as f32 / 255.0;
+    let b = (argb & 0xFF) as f32 / 255.0;
+
+    // RGB to HSV
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+
+    let mut h = if delta < 0.001 {
+        0.0
+    } else if (max - r).abs() < 0.001 {
+        60.0 * (((g - b) / delta) % 6.0)
+    } else if (max - g).abs() < 0.001 {
+        60.0 * (((b - r) / delta) + 2.0)
+    } else {
+        60.0 * (((r - g) / delta) + 4.0)
+    };
+    let s = if max < 0.001 { 0.0 } else { delta / max };
+    let v = max;
+
+    // Shift hue
+    h = (h + degrees) % 360.0;
+    if h < 0.0 { h += 360.0; }
+
+    // HSV to RGB
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r2, g2, b2) = if h < 60.0 {
+        (c, x, 0.0)
+    } else if h < 120.0 {
+        (x, c, 0.0)
+    } else if h < 180.0 {
+        (0.0, c, x)
+    } else if h < 240.0 {
+        (0.0, x, c)
+    } else if h < 300.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+
+    let ro = ((r2 + m) * 255.0).round() as u32;
+    let go = ((g2 + m) * 255.0).round() as u32;
+    let bo = ((b2 + m) * 255.0).round() as u32;
+    (a << 24) | (ro << 16) | (go << 8) | bo
+}
+
 /// Convert an ARGB u32 to a tiny-skia Color with overridden alpha (0.0-1.0).
 pub fn to_color_alpha(argb: u32, alpha: f32) -> tiny_skia::Color {
     let r = ((argb >> 16) & 0xFF) as f32 / 255.0;

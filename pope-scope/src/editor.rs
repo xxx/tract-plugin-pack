@@ -368,26 +368,31 @@ impl PopeScopeWindow {
                                 );
                             }
                         }
-                        // Draw waveform
-                        let samples = if mix_to_mono && !snap.mono_mix.is_empty() {
-                            &snap.mono_mix
+                        // Draw waveform(s)
+                        if mix_to_mono && !snap.mono_mix.is_empty() {
+                            renderer::draw_waveform(
+                                &mut self.surface.pixmap,
+                                &snap.mono_mix,
+                                wx, ty, ww, track_h,
+                                min_db_val, max_db_val,
+                                snap.display_color, draw_style_val,
+                            );
                         } else if !snap.audio_data.is_empty() {
-                            &snap.audio_data[0]
-                        } else {
-                            continue;
-                        };
-                        renderer::draw_waveform(
-                            &mut self.surface.pixmap,
-                            samples,
-                            wx,
-                            ty,
-                            ww,
-                            track_h,
-                            min_db_val,
-                            max_db_val,
-                            snap.display_color,
-                            draw_style_val,
-                        );
+                            for (ch, ch_data) in snap.audio_data.iter().enumerate() {
+                                let color = if snap.audio_data.len() == 1 || ch == 0 {
+                                    snap.display_color
+                                } else {
+                                    theme::hue_shift_u32(snap.display_color, ch as f32 * 30.0)
+                                };
+                                renderer::draw_waveform(
+                                    &mut self.surface.pixmap,
+                                    ch_data,
+                                    wx, ty, ww, track_h,
+                                    min_db_val, max_db_val,
+                                    color, draw_style_val,
+                                );
+                            }
+                        }
                         // Draw peak hold line
                         if snap.slot_index < self.peak_holds.len() {
                             let peak_db = self.peak_holds[snap.slot_index].peak_db;
@@ -479,25 +484,30 @@ impl PopeScopeWindow {
                         }
                     }
                     for snap in &visible {
-                        let samples = if mix_to_mono && !snap.mono_mix.is_empty() {
-                            &snap.mono_mix
+                        if mix_to_mono && !snap.mono_mix.is_empty() {
+                            renderer::draw_waveform(
+                                &mut self.surface.pixmap,
+                                &snap.mono_mix,
+                                wx, wy, ww, wh,
+                                min_db_val, max_db_val,
+                                snap.display_color, draw_style_val,
+                            );
                         } else if !snap.audio_data.is_empty() {
-                            &snap.audio_data[0]
-                        } else {
-                            continue;
-                        };
-                        renderer::draw_waveform(
-                            &mut self.surface.pixmap,
-                            samples,
-                            wx,
-                            wy,
-                            ww,
-                            wh,
-                            min_db_val,
-                            max_db_val,
-                            snap.display_color,
-                            draw_style_val,
-                        );
+                            for (ch, ch_data) in snap.audio_data.iter().enumerate() {
+                                let color = if snap.audio_data.len() == 1 || ch == 0 {
+                                    snap.display_color
+                                } else {
+                                    theme::hue_shift_u32(snap.display_color, ch as f32 * 30.0)
+                                };
+                                renderer::draw_waveform(
+                                    &mut self.surface.pixmap,
+                                    ch_data,
+                                    wx, wy, ww, wh,
+                                    min_db_val, max_db_val,
+                                    color, draw_style_val,
+                                );
+                            }
+                        }
                     }
                 }
                 crate::DisplayMode::Sum => {
@@ -563,16 +573,20 @@ impl PopeScopeWindow {
                     if max_len > 0 {
                         let mut sum = vec![0.0f32; max_len];
                         for snap in &visible {
-                            let samples = if mix_to_mono && !snap.mono_mix.is_empty() {
-                                &snap.mono_mix
-                            } else if !snap.audio_data.is_empty() {
-                                &snap.audio_data[0]
+                            if mix_to_mono && !snap.mono_mix.is_empty() {
+                                for (i, &s_val) in snap.mono_mix.iter().enumerate() {
+                                    if i < max_len {
+                                        sum[i] += s_val;
+                                    }
+                                }
                             } else {
-                                continue;
-                            };
-                            for (i, &s_val) in samples.iter().enumerate() {
-                                if i < max_len {
-                                    sum[i] += s_val;
+                                // Sum all channels from this track
+                                for ch_data in &snap.audio_data {
+                                    for (i, &s_val) in ch_data.iter().enumerate() {
+                                        if i < max_len {
+                                            sum[i] += s_val;
+                                        }
+                                    }
                                 }
                             }
                         }
