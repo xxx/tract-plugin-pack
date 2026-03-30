@@ -610,8 +610,9 @@ impl PopeScopeWindow {
         let gap = 6.0 * s;
 
         // Each row: label baseline at row_y (text body extends up by ~label_font),
-        // control top at row_y + label_font, height row_h.
-        let row_total = label_font + label_font + row_h;
+        // control top at row_y + label_gap, height row_h.
+        let label_gap = (label_font * 2.0 / 3.0).round();
+        let row_total = label_font + label_gap + row_h;
         let row1_y = control_y + gap + label_font; // baseline of row 1 label
         let row2_y = row1_y + row_total + gap;     // baseline of row 2 label
 
@@ -640,7 +641,7 @@ impl PopeScopeWindow {
             &mut self.surface.pixmap,
             tr,
             cx,
-            row1_y + label_font,
+            row1_y + label_gap,
             display_w,
             row_h,
             &["Vert", "Over", "Sum"],
@@ -648,7 +649,7 @@ impl PopeScopeWindow {
         );
         self.hit_regions.push(HitRegion {
             x: cx,
-            y: row1_y + label_font,
+            y: row1_y + label_gap,
             w: display_w,
             h: row_h,
             action: HitAction::Button(ButtonAction::CycleDisplayMode),
@@ -676,7 +677,7 @@ impl PopeScopeWindow {
             &mut self.surface.pixmap,
             tr,
             cx,
-            row1_y + label_font,
+            row1_y + label_gap,
             style_w,
             row_h,
             &["Line", "Fill", "Both"],
@@ -684,7 +685,7 @@ impl PopeScopeWindow {
         );
         self.hit_regions.push(HitRegion {
             x: cx,
-            y: row1_y + label_font,
+            y: row1_y + label_gap,
             w: style_w,
             h: row_h,
             action: HitAction::Button(ButtonAction::CycleDrawStyle),
@@ -711,7 +712,7 @@ impl PopeScopeWindow {
             &mut self.surface.pixmap,
             tr,
             cx,
-            row1_y + label_font,
+            row1_y + label_gap,
             sync_w,
             row_h,
             &["Free", "Beat"],
@@ -719,7 +720,7 @@ impl PopeScopeWindow {
         );
         self.hit_regions.push(HitRegion {
             x: cx,
-            y: row1_y + label_font,
+            y: row1_y + label_gap,
             w: sync_w,
             h: row_h,
             action: HitAction::Button(ButtonAction::CycleSyncMode),
@@ -750,7 +751,7 @@ impl PopeScopeWindow {
                 &mut self.surface.pixmap,
                 tr,
                 cx,
-                row1_y + label_font,
+                row1_y + label_gap,
                 unit_w,
                 row_h,
                 &["1/4", "1/2", "1", "2", "4"],
@@ -758,7 +759,7 @@ impl PopeScopeWindow {
             );
             self.hit_regions.push(HitRegion {
                 x: cx,
-                y: row1_y + label_font,
+                y: row1_y + label_gap,
                 w: unit_w,
                 h: row_h,
                 action: HitAction::Button(ButtonAction::CycleSyncUnit),
@@ -782,7 +783,7 @@ impl PopeScopeWindow {
             &mut self.surface.pixmap,
             tr,
             cx,
-            row1_y + label_font,
+            row1_y + label_gap,
             freeze_w,
             row_h,
             if freeze { "ON" } else { "OFF" },
@@ -791,7 +792,7 @@ impl PopeScopeWindow {
         );
         self.hit_regions.push(HitRegion {
             x: cx,
-            y: row1_y + label_font,
+            y: row1_y + label_gap,
             w: freeze_w,
             h: row_h,
             action: HitAction::Button(ButtonAction::ToggleFreeze),
@@ -814,7 +815,7 @@ impl PopeScopeWindow {
             &mut self.surface.pixmap,
             tr,
             cx,
-            row1_y + label_font,
+            row1_y + label_gap,
             mono_w,
             row_h,
             if mono { "ON" } else { "OFF" },
@@ -823,7 +824,7 @@ impl PopeScopeWindow {
         );
         self.hit_regions.push(HitRegion {
             x: cx,
-            y: row1_y + label_font,
+            y: row1_y + label_gap,
             w: mono_w,
             h: row_h,
             action: HitAction::Button(ButtonAction::ToggleMono),
@@ -855,7 +856,7 @@ impl PopeScopeWindow {
                 &mut self.surface.pixmap,
                 tr,
                 cx2,
-                row2_y + label_font,
+                row2_y + label_gap,
                 slider_w,
                 row_h,
                 "",
@@ -864,7 +865,7 @@ impl PopeScopeWindow {
             );
             self.hit_regions.push(HitRegion {
                 x: cx2,
-                y: row2_y + label_font,
+                y: row2_y + label_gap,
                 w: slider_w,
                 h: row_h,
                 action: HitAction::Dial(ParamId::Timebase),
@@ -889,7 +890,7 @@ impl PopeScopeWindow {
             &mut self.surface.pixmap,
             tr,
             cx2,
-            row2_y + label_font,
+            row2_y + label_gap,
             slider_w,
             row_h,
             "",
@@ -898,7 +899,7 @@ impl PopeScopeWindow {
         );
         self.hit_regions.push(HitRegion {
             x: cx2,
-            y: row2_y + label_font,
+            y: row2_y + label_gap,
             w: slider_w,
             h: row_h,
             action: HitAction::Dial(ParamId::MinDb),
@@ -922,7 +923,7 @@ impl PopeScopeWindow {
             &mut self.surface.pixmap,
             tr,
             cx2,
-            row2_y + label_font,
+            row2_y + label_gap,
             slider_w,
             row_h,
             "",
@@ -931,7 +932,7 @@ impl PopeScopeWindow {
         );
         self.hit_regions.push(HitRegion {
             x: cx2,
-            y: row2_y + label_font,
+            y: row2_y + label_gap,
             w: slider_w,
             h: row_h,
             action: HitAction::Dial(ParamId::MaxDb),
