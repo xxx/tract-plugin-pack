@@ -8,6 +8,7 @@
 //! - `read_most_recent_l1/l2()` takes `&self` (shared access, behind RwLock read guard)
 //! - The RwLock on the store provides memory synchronization between writer and readers.
 
+use std::simd::{f32x16, num::SimdFloat};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Level 1 mipmap: min/max per 64-sample block.
@@ -21,6 +22,25 @@ pub const SUPER_BLOCK_SIZE: usize = BLOCK_SIZE * BLOCKS_PER_SUPER; // 256
 pub struct MinMax {
     pub min: f32,
     pub max: f32,
+}
+
+/// Compute min/max of a slice using SIMD (f32x16).
+fn minmax_slice(s: &[f32]) -> MinMax {
+    let mut vmin = f32x16::splat(f32::MAX);
+    let mut vmax = f32x16::splat(f32::MIN);
+    let mut chunks = s.chunks_exact(16);
+    for chunk in chunks.by_ref() {
+        let v = f32x16::from_slice(chunk);
+        vmin = vmin.simd_min(v);
+        vmax = vmax.simd_max(v);
+    }
+    let mut min = vmin.reduce_min();
+    let mut max = vmax.reduce_max();
+    for &x in chunks.remainder() {
+        min = min.min(x);
+        max = max.max(x);
+    }
+    MinMax { min, max }
 }
 
 /// A fixed-size circular buffer for audio samples.
@@ -89,22 +109,59 @@ impl RingBuffer {
 
     /// Push a slice of samples into the ring buffer.
     /// Called from the audio thread only (single writer).
+    ///
+    /// Two-pass approach:
+    /// 1. Bulk memcpy into the circular buffer (no per-sample arithmetic).
+    /// 2. Block-aligned mipmap reduction with SIMD min/max.
     pub fn push(&mut self, samples: &[f32]) {
-        let pos = self.write_pos.load(Ordering::Relaxed);
-        let mut idx = pos % self.capacity;
-        for &sample in samples {
-            self.buffer[idx] = sample;
-            idx += 1;
-            if idx == self.capacity {
-                idx = 0;
-            }
+        if samples.is_empty() {
+            return;
+        }
 
-            // Update L1 accumulator
-            self.l1_accum.min = self.l1_accum.min.min(sample);
-            self.l1_accum.max = self.l1_accum.max.max(sample);
-            self.l1_accum_count += 1;
+        let pos = self.write_pos.load(Ordering::Relaxed);
+        let cap = self.capacity;
+        let start = pos % cap;
+
+        // ── Pass 1: bulk memcpy ──────────────────────────────────────────
+        let end = start + samples.len();
+        if end <= cap {
+            self.buffer[start..end].copy_from_slice(samples);
+        } else {
+            let first = cap - start;
+            self.buffer[start..cap].copy_from_slice(&samples[..first]);
+            self.buffer[..end - cap].copy_from_slice(&samples[first..]);
+        }
+
+        // ── Pass 2: block-aligned mipmap reduction ───────────────────────
+        let mut remaining = BLOCK_SIZE - self.l1_accum_count;
+        let mut offset = 0;
+        let mut left = samples.len();
+
+        while left > 0 {
+            let chunk = left.min(remaining);
+
+            // Read from the buffer (cache-hot after memcpy)
+            let buf_start = (start + offset) % cap;
+            let mm = if buf_start + chunk <= cap {
+                minmax_slice(&self.buffer[buf_start..buf_start + chunk])
+            } else {
+                let first_len = cap - buf_start;
+                let a = minmax_slice(&self.buffer[buf_start..cap]);
+                let b = minmax_slice(&self.buffer[..chunk - first_len]);
+                MinMax {
+                    min: a.min.min(b.min),
+                    max: a.max.max(b.max),
+                }
+            };
+
+            self.l1_accum.min = self.l1_accum.min.min(mm.min);
+            self.l1_accum.max = self.l1_accum.max.max(mm.max);
+            self.l1_accum_count += chunk;
+            offset += chunk;
+            left -= chunk;
 
             if self.l1_accum_count >= BLOCK_SIZE {
+                // Flush L1 block
                 let l1_idx = self.level1_pos % self.level1_capacity;
                 self.level1[l1_idx] = self.l1_accum;
                 self.level1_pos += 1;
@@ -130,8 +187,12 @@ impl RingBuffer {
                     max: f32::MIN,
                 };
                 self.l1_accum_count = 0;
+                remaining = BLOCK_SIZE;
+            } else {
+                remaining -= chunk;
             }
         }
+
         self.write_pos
             .store(pos + samples.len(), Ordering::Relaxed);
     }
