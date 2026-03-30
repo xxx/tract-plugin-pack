@@ -144,11 +144,13 @@ pub fn beat_aligned_window(
     sync_bars: f64,
     beats_per_bar: u32,
 ) -> Option<(usize, usize, f64)> {
-    if snap.samples_per_beat <= 0.0 {
+    if snap.samples_per_beat <= 0.0 || !snap.samples_per_beat.is_finite() {
         return None;
     }
     let beats_in_window = sync_bars * beats_per_bar as f64;
-    let window_len = (beats_in_window * snap.samples_per_beat).round() as usize;
+    // Cap window_len to 1_536_000 (32s @ 48kHz) to match ring buffer capacity.
+    let window_len =
+        (beats_in_window * snap.samples_per_beat).round().min(1_536_000.0) as usize;
     let ppq_per_bar = beats_per_bar as f64;
     let window_ppq = sync_bars * ppq_per_bar;
 
@@ -265,6 +267,33 @@ mod tests {
             discontinuity_counter: 0,
         };
         assert!(beat_aligned_window(&snap, 1.0, 4).is_none());
+    }
+
+    #[test]
+    fn test_beat_aligned_window_infinite_spb() {
+        let snap = TimeMappingSnapshot {
+            current_ppq: 0.0,
+            current_sample_pos: 0,
+            ring_buffer_pos: 0,
+            samples_per_beat: f64::INFINITY,
+            discontinuity_counter: 0,
+        };
+        assert!(beat_aligned_window(&snap, 1.0, 4).is_none());
+    }
+
+    #[test]
+    fn test_beat_aligned_window_caps_length() {
+        // Very slow tempo that would exceed ring buffer capacity.
+        let snap = TimeMappingSnapshot {
+            current_ppq: 0.0,
+            current_sample_pos: 0,
+            ring_buffer_pos: 2_000_000,
+            samples_per_beat: 480_000.0, // 6 BPM @ 48kHz
+            discontinuity_counter: 0,
+        };
+        // 4 bars * 4 beats * 480000 = 7_680_000, but capped to 1_536_000
+        let (_, len, _) = beat_aligned_window(&snap, 4.0, 4).unwrap();
+        assert_eq!(len, 1_536_000);
     }
 
     #[test]

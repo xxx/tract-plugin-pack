@@ -2,6 +2,15 @@ use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
+/// Debug-only logging. Compiles to nothing in release builds, avoiding
+/// format!() heap allocations and stderr writes on the audio thread.
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        nih_log!($($arg)*);
+    };
+}
+
 mod controls;
 pub mod editor;
 mod renderer;
@@ -212,7 +221,7 @@ impl Default for PopeScope {
     fn default() -> Self {
         let hash = INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-        nih_log!("pope-scope: Default::default() instance_hash={hash}");
+        debug_log!("pope-scope: Default::default() instance_hash={hash}");
 
         Self {
             params: Arc::new(PopeScopeParams::new()),
@@ -265,7 +274,7 @@ impl Plugin for PopeScope {
         // Release any previously held slot (nih-plug may call initialize()
         // again without a preceding deactivate(), e.g. on sample rate change).
         if let Some(old_idx) = self.slot_index.take() {
-            nih_log!(
+            debug_log!(
                 "pope-scope: initialize() releasing old slot {old_idx} (hash={})",
                 self.instance_hash
             );
@@ -285,7 +294,7 @@ impl Plugin for PopeScope {
                     .group
                     .store(self.params.group.value() as u32, Ordering::Relaxed);
                 self.slot_index = Some(idx);
-                nih_log!(
+                debug_log!(
                     "pope-scope: initialize() acquired slot {idx} (hash={}, channels={num_channels}, sr={})",
                     self.instance_hash, self.sample_rate
                 );
@@ -293,7 +302,7 @@ impl Plugin for PopeScope {
             }
             None => {
                 // All 16 slots are full
-                nih_log!(
+                debug_log!(
                     "pope-scope: initialize() FAILED to acquire slot (hash={}, all 16 full)",
                     self.instance_hash
                 );
@@ -305,7 +314,7 @@ impl Plugin for PopeScope {
 
     fn deactivate(&mut self) {
         if let Some(idx) = self.slot_index.take() {
-            nih_log!(
+            debug_log!(
                 "pope-scope: deactivate() releasing slot {idx} (hash={})",
                 self.instance_hash
             );
@@ -354,9 +363,11 @@ impl Plugin for PopeScope {
 
         // Get ring buffer write position (before pushing audio) for
         // DAW-transport-to-ring-buffer coordinate mapping in beat sync.
+        // Use try_read() to avoid blocking the audio thread — fall back to 0
+        // if the GUI holds the lock (slight time mapping staleness is acceptable).
         let ring_buf_pos = slot
             .buffers
-            .read()
+            .try_read()
             .ok()
             .and_then(|g| g.as_ref().and_then(|bufs| bufs.first().map(|b| b.total_written())))
             .unwrap_or(0) as u64;
@@ -389,14 +400,9 @@ impl Plugin for PopeScope {
             }
         }
 
-        // Update heartbeat
-        slot.heartbeat.store(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
-            Ordering::Relaxed,
-        );
+        // Update heartbeat (monotonic frame counter — GUI detects staleness
+        // by checking whether the value changed between polls).
+        slot.heartbeat.fetch_add(1, Ordering::Relaxed);
 
         // Audio is pass-through (input = output), nih-plug does this by default
         // since we read from buffer and don't modify it

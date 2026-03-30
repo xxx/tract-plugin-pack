@@ -138,8 +138,12 @@ pub fn build_snapshots_free(
         let bar_start = f64::from_bits(s.playhead.bar_start_ppq.load(Ordering::Relaxed));
         let ppq_in_bar = ppq - bar_start;
 
-        // Read audio data
-        let guard = s.buffers.read().unwrap();
+        // Read audio data — use try_read() to avoid blocking the GUI thread
+        // if the audio thread holds the write lock. Skip this slot if contended.
+        let guard = match s.buffers.try_read() {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
         let mut audio_data = Vec::new();
         let mut data_version = 0u64;
         let mut data_points = 0;
@@ -283,7 +287,11 @@ pub fn build_snapshots_beat_sync(
             None
         };
 
-        let guard = s.buffers.read().unwrap();
+        // Use try_read() to avoid blocking — skip slot if contended.
+        let guard = match s.buffers.try_read() {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
         let mut audio_data = Vec::new();
         let mut data_version = 0u64;
         let mut data_points = 0;

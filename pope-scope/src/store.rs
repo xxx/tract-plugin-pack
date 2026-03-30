@@ -98,7 +98,10 @@ static STORE: [Slot; MAX_SLOTS] = {
 /// Acquire a slot using atomic CAS. Returns the slot index (0-15) or None.
 #[allow(clippy::needless_range_loop)]
 pub fn acquire_slot(instance_hash: u64) -> Option<usize> {
-    assert!(instance_hash != 0, "instance hash must be non-zero");
+    debug_assert!(instance_hash != 0, "instance hash must be non-zero");
+    if instance_hash == 0 {
+        return None;
+    }
     for i in 0..MAX_SLOTS {
         let result = STORE[i].owner.compare_exchange(
             0,
@@ -123,10 +126,12 @@ pub fn release_slot(index: usize, instance_hash: u64) {
         Ordering::Relaxed,
     );
     if result.is_ok() {
-        // Deallocate buffers
-        if let Ok(mut guard) = STORE[index].buffers.write() {
-            *guard = None;
-        }
+        // Deallocate buffers — recover from poisoned lock to ensure cleanup.
+        let mut guard = STORE[index]
+            .buffers
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = None;
         // Reset metadata
         STORE[index].metadata.solo.store(false, Ordering::Relaxed);
         STORE[index].metadata.mute.store(false, Ordering::Relaxed);
@@ -142,8 +147,11 @@ pub fn release_slot(index: usize, instance_hash: u64) {
 
 /// Initialize buffers for a slot. Called from `initialize()`.
 pub fn init_buffers(index: usize, num_channels: usize, sample_rate: f32) {
-    assert!(index < MAX_SLOTS);
-    assert!(num_channels <= MAX_CHANNELS);
+    debug_assert!(index < MAX_SLOTS);
+    debug_assert!(num_channels <= MAX_CHANNELS);
+    if index >= MAX_SLOTS || num_channels > MAX_CHANNELS {
+        return;
+    }
     let capacity = (sample_rate as usize) * BUFFER_SECONDS;
     let mut bufs = Vec::with_capacity(num_channels);
     for _ in 0..num_channels {
@@ -314,9 +322,16 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "instance hash must be non-zero")]
     fn test_acquire_zero_hash_panics() {
         // Note: no TEST_LOCK here — should_panic tests poison the mutex
         acquire_slot(0);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_acquire_zero_hash_returns_none() {
+        assert!(acquire_slot(0).is_none());
     }
 }
