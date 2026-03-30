@@ -65,6 +65,8 @@ pub fn time_grid_divisions(timebase_ms: f32) -> (f32, usize) {
 
 /// Draw amplitude grid lines on a pixmap.
 /// Draws horizontal lines at dB divisions within the given area.
+/// If `track_color` is provided, grid lines and labels use dimmed
+/// versions of that color instead of the default amber theme.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_amplitude_grid(
     pixmap: &mut tiny_skia::Pixmap,
@@ -76,11 +78,25 @@ pub fn draw_amplitude_grid(
     max_db: f32,
     text_renderer: &mut tiny_skia_widgets::TextRenderer,
     scale: f32,
+    track_color: Option<u32>,
 ) {
     let division = db_grid_division(min_db, max_db);
     let centre_y = y + h / 2.0;
     let half_height = h / 2.0;
     let font_size = 8.0 * scale;
+
+    let grid_c = match track_color {
+        Some(c) => theme::to_color_alpha(c, 0.15),
+        None => theme::to_color(theme::GRID),
+    };
+    let grid_bright_c = match track_color {
+        Some(c) => theme::to_color_alpha(c, 0.25),
+        None => theme::to_color(theme::GRID_BRIGHT),
+    };
+    let label_c = match track_color {
+        Some(c) => theme::to_color_alpha(c, 0.5),
+        None => theme::to_color(theme::PRIMARY_DIM),
+    };
 
     // Center line (silence)
     tiny_skia_widgets::draw_rect(
@@ -89,7 +105,7 @@ pub fn draw_amplitude_grid(
         centre_y - 0.5,
         w,
         1.0,
-        theme::to_color(theme::GRID_BRIGHT),
+        grid_bright_c,
     );
 
     // dB grid lines above and below center
@@ -108,7 +124,7 @@ pub fn draw_amplitude_grid(
                 y_above - 0.5,
                 w,
                 1.0,
-                theme::to_color(theme::GRID),
+                grid_c,
             );
             // dB label on right
             let label = format!("{}", (min_db + db) as i32);
@@ -118,7 +134,7 @@ pub fn draw_amplitude_grid(
                 y_above - font_size / 2.0,
                 &label,
                 font_size,
-                theme::to_color(theme::PRIMARY_DIM),
+                label_c,
             );
         }
 
@@ -131,7 +147,7 @@ pub fn draw_amplitude_grid(
                 y_below - 0.5,
                 w,
                 1.0,
-                theme::to_color(theme::GRID),
+                grid_c,
             );
         }
 
@@ -737,7 +753,7 @@ mod tests {
         let mut pm = make_test_pixmap(200, 100);
         let font_data = include_bytes!("fonts/DejaVuSans.ttf");
         let mut tr = tiny_skia_widgets::TextRenderer::new(font_data);
-        draw_amplitude_grid(&mut pm, 0.0, 0.0, 200.0, 100.0, -48.0, 0.0, &mut tr, 1.0);
+        draw_amplitude_grid(&mut pm, 0.0, 0.0, 200.0, 100.0, -48.0, 0.0, &mut tr, 1.0, None);
         assert!(pixmap_has_nonzero(&pm));
     }
 

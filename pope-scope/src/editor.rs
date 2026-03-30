@@ -383,7 +383,7 @@ impl PopeScopeWindow {
                             });
                         }
 
-                        // Draw amplitude grid
+                        // Draw amplitude grid in track color
                         renderer::draw_amplitude_grid(
                             &mut self.surface.pixmap,
                             wave_x,
@@ -394,6 +394,7 @@ impl PopeScopeWindow {
                             max_db_val,
                             tr,
                             s,
+                            Some(snap.display_color),
                         );
                         // Draw time/beat grid
                         match sync_mode_val {
@@ -509,6 +510,7 @@ impl PopeScopeWindow {
                         max_db_val,
                         tr,
                         s,
+                        None,
                     );
                     match sync_mode_val {
                         crate::SyncMode::Free => {
@@ -586,6 +588,7 @@ impl PopeScopeWindow {
                         max_db_val,
                         tr,
                         s,
+                        None,
                     );
                     match sync_mode_val {
                         crate::SyncMode::Free => {
