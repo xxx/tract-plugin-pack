@@ -150,22 +150,17 @@ impl RingBuffer {
     }
 
     /// Read samples from an absolute position range [start_pos, start_pos + count).
-    /// Positions that haven't been written yet or have been overwritten return 0.0.
-    /// Returns the number of valid samples copied.
+    /// Reads whatever is in the circular buffer at each index. Positions older
+    /// than `capacity` contain audio from a previous wrap — valid for looping
+    /// content. Pre-filled zeros cover positions never written.
+    /// Returns the number of samples copied (always == out.len()).
     pub fn read_range(&self, start_pos: usize, out: &mut [f32]) -> usize {
-        let pos = self.write_pos.load(Ordering::Relaxed);
         let count = out.len();
-        let mut valid = 0;
         for (i, slot) in out.iter_mut().enumerate().take(count) {
             let abs = start_pos + i;
-            if abs >= pos || (pos > self.capacity && abs < pos - self.capacity) {
-                *slot = 0.0;
-            } else {
-                *slot = self.buffer[abs % self.capacity];
-                valid += 1;
-            }
+            *slot = self.buffer[abs % self.capacity];
         }
-        valid
+        count
     }
 
     /// Read the most recent `count` blocks from Level 1 mipmap.
@@ -293,27 +288,30 @@ mod tests {
     }
 
     #[test]
-    fn test_read_range_beyond_written() {
+    fn test_read_range_beyond_written_returns_prefill() {
         let mut rb = RingBuffer::new(1024);
         rb.push(&[1.0, 2.0, 3.0]);
 
         let mut out = [0.0f32; 3];
         let n = rb.read_range(2, &mut out);
-        // pos 2 is valid (3.0), pos 3 and 4 are beyond written
-        assert_eq!(n, 1);
+        // pos 2 is valid (3.0), pos 3 and 4 are pre-filled zeros
+        assert_eq!(n, 3);
         assert_eq!(out[0], 3.0);
-        assert_eq!(out[1], 0.0);
-        assert_eq!(out[2], 0.0);
+        assert_eq!(out[1], 0.0); // pre-fill zero
+        assert_eq!(out[2], 0.0); // pre-fill zero
     }
 
     #[test]
-    fn test_read_range_overwritten() {
+    fn test_read_range_overwritten_returns_current_data() {
         let mut rb = RingBuffer::new(4);
-        rb.push(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]); // 1,2 overwritten
+        rb.push(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]); // 1,2 overwritten by 5,6
 
         let mut out = [0.0f32; 2];
         let n = rb.read_range(0, &mut out);
-        assert_eq!(n, 0); // positions 0,1 have been overwritten
+        assert_eq!(n, 2);
+        // Positions 0,1 in the circular buffer now contain 5.0, 6.0
+        assert_eq!(out[0], 5.0);
+        assert_eq!(out[1], 6.0);
     }
 
     #[test]

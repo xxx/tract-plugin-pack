@@ -126,34 +126,46 @@ impl TimeMapping {
     }
 }
 
-/// Compute the sample range for a beat-aligned window.
+/// Compute a beat-aligned window using PPQ deltas relative to ring_buffer_pos.
 ///
-/// - `snap`: time mapping snapshot
-/// - `sync_bars`: number of bars to display (e.g. 0.25, 0.5, 1.0, 2.0, 4.0)
-/// - `beats_per_bar`: from time signature numerator
+/// Uses only the PPQ *offset* within the current window (0..window_ppq),
+/// anchored to the monotonic ring buffer write position. This is correct
+/// across DAW loops because:
+/// - PPQ may wrap, but the delta (current_ppq − window_start_ppq) is always
+///   small (0..window_ppq) regardless of transport jumps.
+/// - ring_buffer_pos is monotonic and never resets on loop.
 ///
-/// Returns `(start_sample_pos, window_length_samples)` or `None` if
-/// samples_per_beat is zero.
+/// Returns `(rb_start, window_len, playhead_fraction)` where `rb_start` is
+/// the ring buffer position of the window start, `window_len` is the window
+/// size in samples, and `playhead_fraction` (0.0..1.0) is how far through
+/// the window the playhead is. Returns `None` if samples_per_beat is zero.
 pub fn beat_aligned_window(
     snap: &TimeMappingSnapshot,
     sync_bars: f64,
     beats_per_bar: u32,
-) -> Option<(i64, usize)> {
+) -> Option<(usize, usize, f64)> {
     if snap.samples_per_beat <= 0.0 {
         return None;
     }
     let beats_in_window = sync_bars * beats_per_bar as f64;
-    let window_samples = (beats_in_window * snap.samples_per_beat).round() as usize;
+    let window_len = (beats_in_window * snap.samples_per_beat).round() as usize;
     let ppq_per_bar = beats_per_bar as f64;
     let window_ppq = sync_bars * ppq_per_bar;
 
-    // Snap current PPQ to the nearest window boundary
-    let window_start_ppq = (snap.current_ppq / window_ppq).floor() * window_ppq;
-    let ppq_offset = window_start_ppq - snap.current_ppq;
-    let sample_offset = (ppq_offset * snap.samples_per_beat).round() as i64;
-    let start_sample = snap.current_sample_pos + sample_offset;
+    // How far into the current window are we (in PPQ)?
+    // Use rem_euclid to handle negative PPQ values correctly.
+    let ppq_offset = snap.current_ppq.rem_euclid(window_ppq);
 
-    Some((start_sample, window_samples))
+    // Playhead fraction: 0.0 at window start, ~1.0 at window end.
+    let playhead_fraction = ppq_offset / window_ppq;
+
+    // Convert to samples
+    let sample_offset = (ppq_offset * snap.samples_per_beat).round() as usize;
+
+    // Window start in ring buffer space: walk back from current write position
+    let rb_start = snap.ring_buffer_pos.saturating_sub(sample_offset as u64) as usize;
+
+    Some((rb_start, window_len, playhead_fraction))
 }
 
 #[cfg(test)]
@@ -232,12 +244,15 @@ mod tests {
             samples_per_beat: 24000.0, // 120 BPM @ 48kHz
             discontinuity_counter: 0,
         };
-        let (start, len) = beat_aligned_window(&snap, 1.0, 4).unwrap();
+        let (rb_start, len, frac) = beat_aligned_window(&snap, 1.0, 4).unwrap();
         // 1 bar = 4 beats = 96000 samples
         assert_eq!(len, 96000);
-        // Window should start at PPQ 4.0 (floor of 6.5 to nearest 4.0 boundary)
-        // PPQ offset = 4.0 - 6.5 = -2.5, sample offset = -2.5 * 24000 = -60000
-        assert_eq!(start, 156000 - 60000);
+        // PPQ offset into window = 6.5 % 4.0 = 2.5
+        // sample_offset = 2.5 * 24000 = 60000
+        // rb_start = 156000 - 60000 = 96000
+        assert_eq!(rb_start, 96000);
+        // playhead_fraction = 2.5 / 4.0 = 0.625
+        assert!((frac - 0.625).abs() < 0.001);
     }
 
     #[test]
@@ -250,5 +265,43 @@ mod tests {
             discontinuity_counter: 0,
         };
         assert!(beat_aligned_window(&snap, 1.0, 4).is_none());
+    }
+
+    #[test]
+    fn test_beat_aligned_window_at_bar_boundary() {
+        // Exactly at a bar boundary: offset should be 0, rb_start == ring_buffer_pos
+        let snap = TimeMappingSnapshot {
+            current_ppq: 8.0,
+            current_sample_pos: 192000,
+            ring_buffer_pos: 192000,
+            samples_per_beat: 24000.0,
+            discontinuity_counter: 0,
+        };
+        let (rb_start, len, frac) = beat_aligned_window(&snap, 1.0, 4).unwrap();
+        assert_eq!(len, 96000);
+        // PPQ 8.0 % 4.0 = 0.0, so rb_start == ring_buffer_pos
+        assert_eq!(rb_start, 192000);
+        // At bar boundary, playhead_fraction should be 0.0
+        assert!((frac - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_beat_aligned_window_loop_scenario() {
+        // After a DAW loop: PPQ wraps back to 0.5 but ring_buffer_pos
+        // keeps advancing. The delta approach should still work.
+        let snap = TimeMappingSnapshot {
+            current_ppq: 0.5, // PPQ wrapped back after loop
+            current_sample_pos: 12000,
+            ring_buffer_pos: 500000, // Monotonic, much larger
+            samples_per_beat: 24000.0,
+            discontinuity_counter: 2,
+        };
+        let (rb_start, len, frac) = beat_aligned_window(&snap, 1.0, 4).unwrap();
+        assert_eq!(len, 96000);
+        // PPQ offset = 0.5 % 4.0 = 0.5, sample_offset = 0.5 * 24000 = 12000
+        // rb_start = 500000 - 12000 = 488000
+        assert_eq!(rb_start, 488000);
+        // playhead_fraction = 0.5 / 4.0 = 0.125
+        assert!((frac - 0.125).abs() < 0.001);
     }
 }

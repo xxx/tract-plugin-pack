@@ -5,7 +5,6 @@
 
 use crate::ring_buffer::MinMax;
 use crate::store;
-use crate::time_mapping;
 use std::sync::atomic::Ordering;
 
 /// Immutable snapshot of one track's state for rendering.
@@ -225,6 +224,12 @@ pub fn build_snapshots_free(
 
 /// Build snapshots for beat-sync mode.
 ///
+/// Uses PPQ deltas relative to ring_buffer_pos for beat-aligned windows.
+/// This works correctly across DAW loops because:
+/// - We only use the PPQ *delta* (current_ppq − window_start_ppq),
+///   which is always 0..window_ppq regardless of transport wraps.
+/// - We anchor to ring_buffer_pos, which is monotonic and never resets.
+///
 /// - `group`: which group to filter for
 /// - `sync_bars`: number of bars to display (0.25, 0.5, 1.0, 2.0, 4.0)
 /// - `sample_rate`: current sample rate
@@ -269,9 +274,11 @@ pub fn build_snapshots_beat_sync(
 
         let tm_snap = s.time_mapping.snapshot();
 
-        // Compute beat-aligned window
+        // Compute beat-aligned window using PPQ delta approach.
+        // beat_aligned_window returns (rb_start, window_len, playhead_fraction)
+        // in ring buffer space.
         let window = if is_playing {
-            time_mapping::beat_aligned_window(&tm_snap, sync_bars, beats_per_bar)
+            crate::time_mapping::beat_aligned_window(&tm_snap, sync_bars, beats_per_bar)
         } else {
             None
         };
@@ -281,43 +288,35 @@ pub fn build_snapshots_beat_sync(
         let mut data_version = 0u64;
         let mut data_points = 0;
 
-        if let (Some(bufs), Some((start_sample, window_len))) = (guard.as_ref(), window) {
-            let read_count = window_len;
+        if let (Some(bufs), Some((rb_start, window_len, playhead_fraction))) =
+            (guard.as_ref(), window)
+        {
+            // How many samples are valid (already played).
+            let end_valid = (playhead_fraction * window_len as f64).round() as usize;
+            let end_valid = end_valid.min(window_len);
+            // 16-sample linear fade at the boundary to avoid clicks.
+            let fade_len = 16.min(window_len.saturating_sub(end_valid));
 
-            // Convert DAW transport positions to ring buffer positions.
-            // The time mapping stores the ring buffer write_pos that corresponds
-            // to the DAW's current_sample_pos. We use this anchor to translate.
-            let rb_pos = tm_snap.ring_buffer_pos as i64;
-            let transport_pos = tm_snap.current_sample_pos;
-            let rb_start = rb_pos - (transport_pos - start_sample);
-
-            // For beat sync, always read raw samples and decimate on the draw side
-            if rb_start >= 0 {
-                for (ch, buf) in bufs.iter().enumerate().take(num_channels) {
-                    if ch == 0 {
-                        data_version = buf.total_written() as u64;
-                    }
-                    let mut out = vec![0.0f32; read_count];
-                    buf.read_range(rb_start as usize, &mut out);
-
-                    // Mask stale data beyond current playhead with 16-sample fade.
-                    // end_valid = how many samples from window start to current playhead.
-                    let end_valid =
-                        ((transport_pos - start_sample) as usize).min(read_count);
-                    let fade_len = 16.min(read_count - end_valid);
-                    for i in 0..fade_len {
-                        let idx = end_valid + i;
-                        if idx < read_count {
-                            let fade = 1.0 - (i as f32 / fade_len as f32);
-                            out[idx] *= fade;
-                        }
-                    }
-                    for slot in out.iter_mut().take(read_count).skip(end_valid + fade_len) {
-                        *slot = 0.0;
-                    }
-                    data_points = read_count;
-                    audio_data.push(out);
+            for (ch, buf) in bufs.iter().enumerate().take(num_channels) {
+                if ch == 0 {
+                    data_version = buf.total_written() as u64;
                 }
+                let mut out = vec![0.0f32; window_len];
+                buf.read_range(rb_start, &mut out);
+
+                // Mask stale data ahead of the playhead (sweep effect).
+                for i in 0..fade_len {
+                    let idx = end_valid + i;
+                    if idx < window_len {
+                        out[idx] *= 1.0 - (i as f32 + 1.0) / (fade_len as f32 + 1.0);
+                    }
+                }
+                for slot in out.iter_mut().take(window_len).skip(end_valid + fade_len) {
+                    *slot = 0.0;
+                }
+
+                data_points = window_len;
+                audio_data.push(out);
             }
         }
         drop(guard);
