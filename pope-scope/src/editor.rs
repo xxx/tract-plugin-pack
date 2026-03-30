@@ -780,7 +780,7 @@ impl PopeScopeWindow {
                 &mut self.surface.pixmap,
                 cx,
                 row1_y,
-                "Unit",
+                "Bars",
                 label_font,
                 theme::to_color(theme::PRIMARY_DIM),
             );
