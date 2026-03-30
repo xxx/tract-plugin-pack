@@ -105,6 +105,10 @@ pub struct PopeScope {
     sample_rate: f32,
     /// Shared sample rate atomic (written by audio thread, read by editor).
     shared_sample_rate: Arc<AtomicU32>,
+    /// Cached ring buffer write position. Incremented after each successful
+    /// push, avoiding a `try_read()` lock acquisition on the audio thread
+    /// just to read `total_written()` for time mapping.
+    cached_ring_buf_pos: u64,
 }
 
 // ── Params ────────────────────────────────────────────────────────────────────
@@ -235,6 +239,7 @@ impl Default for PopeScope {
             instance_hash: hash,
             sample_rate: 48000.0,
             shared_sample_rate: Arc::new(AtomicU32::new(48000)),
+            cached_ring_buf_pos: 0,
         }
     }
 }
@@ -276,6 +281,9 @@ impl Plugin for PopeScope {
             .main_input_channels
             .map(|c| c.get() as usize)
             .unwrap_or(2);
+
+        // Reset cached position (new buffers will be allocated below).
+        self.cached_ring_buf_pos = 0;
 
         // Release any previously held slot (nih-plug may call initialize()
         // again without a preceding deactivate(), e.g. on sample rate change).
@@ -382,22 +390,13 @@ impl Plugin for PopeScope {
             .bar_start_ppq
             .store(bar_start_ppq.to_bits(), Ordering::Relaxed);
 
-        // Get ring buffer write position (before pushing audio) for
-        // DAW-transport-to-ring-buffer coordinate mapping in beat sync.
-        // Use try_read() to avoid blocking the audio thread — fall back to 0
-        // if the GUI holds the lock (slight time mapping staleness is acceptable).
-        let ring_buf_pos = slot
-            .buffers
-            .try_read()
-            .ok()
-            .and_then(|g| g.as_ref().and_then(|bufs| bufs.first().map(|b| b.total_written())))
-            .unwrap_or(0) as u64;
-
-        // Update time mapping (before pushing audio)
+        // Update time mapping (before pushing audio).
+        // Uses cached_ring_buf_pos instead of acquiring a read lock on the
+        // ring buffer — eliminates a lock acquisition per audio callback.
         slot.time_mapping.update(
             ppq,
             sample_pos,
-            ring_buf_pos,
+            self.cached_ring_buf_pos,
             bpm,
             self.sample_rate as f64,
             buffer.samples(),
@@ -419,6 +418,8 @@ impl Plugin for PopeScope {
                     }
                 }
             }
+            // Update cached position after successful push
+            self.cached_ring_buf_pos += buffer.samples() as u64;
         }
 
         // Update heartbeat (monotonic frame counter — GUI detects staleness

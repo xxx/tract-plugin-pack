@@ -2,6 +2,11 @@
 //!
 //! Single-writer (audio thread), non-consuming reader (GUI thread).
 //! The reader copies data out — it never modifies write_pos.
+//!
+//! `level1_pos` and `level2_pos` are plain `usize` (not atomic) because:
+//! - `push()` takes `&mut self` (exclusive access, behind RwLock write guard)
+//! - `read_most_recent_l1/l2()` takes `&self` (shared access, behind RwLock read guard)
+//! - The RwLock on the store provides memory synchronization between writer and readers.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -29,14 +34,14 @@ pub struct RingBuffer {
     capacity: usize,
     // Mipmap Level 1: min/max per BLOCK_SIZE samples
     level1: Vec<MinMax>,
-    level1_pos: AtomicUsize,
+    level1_pos: usize,
     level1_capacity: usize,
     // Accumulator for current L1 block being built
     l1_accum: MinMax,
     l1_accum_count: usize,
     // Mipmap Level 2: min/max per SUPER_BLOCK_SIZE samples
     level2: Vec<MinMax>,
-    level2_pos: AtomicUsize,
+    level2_pos: usize,
     level2_capacity: usize,
     // Accumulator for current L2 block
     l2_block_count: usize,
@@ -54,7 +59,7 @@ impl RingBuffer {
             write_pos: AtomicUsize::new(0),
             capacity,
             level1: vec![MinMax::default(); l1_cap],
-            level1_pos: AtomicUsize::new(0),
+            level1_pos: 0,
             level1_capacity: l1_cap,
             l1_accum: MinMax {
                 min: f32::MAX,
@@ -62,7 +67,7 @@ impl RingBuffer {
             },
             l1_accum_count: 0,
             level2: vec![MinMax::default(); l2_cap],
-            level2_pos: AtomicUsize::new(0),
+            level2_pos: 0,
             level2_capacity: l2_cap,
             l2_block_count: 0,
             l2_accum: MinMax {
@@ -100,10 +105,9 @@ impl RingBuffer {
             self.l1_accum_count += 1;
 
             if self.l1_accum_count >= BLOCK_SIZE {
-                let l1_pos = self.level1_pos.load(Ordering::Relaxed);
-                let l1_idx = l1_pos % self.level1_capacity;
+                let l1_idx = self.level1_pos % self.level1_capacity;
                 self.level1[l1_idx] = self.l1_accum;
-                self.level1_pos.store(l1_pos + 1, Ordering::Relaxed);
+                self.level1_pos += 1;
 
                 // Update L2 accumulator
                 self.l2_accum.min = self.l2_accum.min.min(self.l1_accum.min);
@@ -111,10 +115,9 @@ impl RingBuffer {
                 self.l2_block_count += 1;
 
                 if self.l2_block_count >= BLOCKS_PER_SUPER {
-                    let l2_pos = self.level2_pos.load(Ordering::Relaxed);
-                    let l2_idx = l2_pos % self.level2_capacity;
+                    let l2_idx = self.level2_pos % self.level2_capacity;
                     self.level2[l2_idx] = self.l2_accum;
-                    self.level2_pos.store(l2_pos + 1, Ordering::Relaxed);
+                    self.level2_pos += 1;
                     self.l2_accum = MinMax {
                         min: f32::MAX,
                         max: f32::MIN,
@@ -177,7 +180,7 @@ impl RingBuffer {
 
     /// Read the most recent `count` blocks from Level 1 mipmap.
     pub fn read_most_recent_l1(&self, out: &mut [MinMax]) -> usize {
-        let pos = self.level1_pos.load(Ordering::Relaxed);
+        let pos = self.level1_pos;
         let count = out.len();
         let available = pos.min(self.level1_capacity);
         let to_read = count.min(available);
@@ -198,7 +201,7 @@ impl RingBuffer {
 
     /// Read the most recent `count` blocks from Level 2 mipmap.
     pub fn read_most_recent_l2(&self, out: &mut [MinMax]) -> usize {
-        let pos = self.level2_pos.load(Ordering::Relaxed);
+        let pos = self.level2_pos;
         let count = out.len();
         let available = pos.min(self.level2_capacity);
         let to_read = count.min(available);
