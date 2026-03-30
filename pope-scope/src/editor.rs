@@ -57,6 +57,7 @@ enum ButtonAction {
     CycleDrawStyle,
     CycleSyncMode,
     CycleSyncUnit,
+    ToggleHoldMode,
 }
 
 // ── Peak hold state ─────────────────────────────────────────────────────
@@ -265,11 +266,13 @@ impl PopeScopeWindow {
                 }
                 crate::SyncMode::BeatSync => {
                     let sync_bars = self.params.sync_unit.value().to_bars();
+                    let hold = self.params.hold_mode.value();
                     snapshot::build_snapshots_beat_sync(
                         group,
                         sync_bars,
                         self.sample_rate,
                         mix_to_mono,
+                        hold,
                     )
                 }
             };
@@ -919,6 +922,43 @@ impl PopeScopeWindow {
             });
 
             cx += unit_w + gap;
+
+            // Hold mode toggle (Sweep / Hold)
+            let hold_mode = self.params.hold_mode.value();
+            let hold_idx = if hold_mode { 1 } else { 0 };
+            let hold_w = 90.0 * s;
+            tr.draw_text(
+                &mut self.surface.pixmap,
+                cx,
+                row1_y,
+                "Mode",
+                label_font,
+                theme::to_color(theme::PRIMARY_DIM),
+            );
+            widgets::draw_outline_stepped_selector(
+                &mut self.surface.pixmap,
+                tr,
+                cx,
+                row1_y + label_gap,
+                hold_w,
+                row_h,
+                &["Swp", "Hold"],
+                hold_idx,
+                border_c,
+                text_c,
+                active_border_c,
+                active_text_c,
+                active_fill_c,
+            );
+            self.hit_regions.push(HitRegion {
+                x: cx,
+                y: row1_y + label_gap,
+                w: hold_w,
+                h: row_h,
+                action: HitAction::Button(ButtonAction::ToggleHoldMode),
+            });
+
+            cx += hold_w + gap;
         }
 
         // Freeze toggle
@@ -1306,6 +1346,15 @@ impl baseview::WindowHandler for PopeScopeWindow {
                                 setter.begin_set_parameter(&self.params.sync_unit);
                                 setter.set_parameter(&self.params.sync_unit, unit);
                                 setter.end_set_parameter(&self.params.sync_unit);
+                            }
+                            ButtonAction::ToggleHoldMode => {
+                                let rel_x = mx - region.x;
+                                let seg_w = region.w / 2.0;
+                                let clicked_idx = (rel_x / seg_w) as usize;
+                                let hold = clicked_idx >= 1;
+                                setter.begin_set_parameter(&self.params.hold_mode);
+                                setter.set_parameter(&self.params.hold_mode, hold);
+                                setter.end_set_parameter(&self.params.hold_mode);
                             }
                         },
                         HitAction::Control(action) => match action {

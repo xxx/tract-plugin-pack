@@ -5,7 +5,8 @@
 
 use crate::ring_buffer::MinMax;
 use crate::store;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 // ── Per-slot bar latch for stable rb_start ──────────────────────────────────
 //
@@ -50,6 +51,70 @@ static BAR_LATCHES: [BarLatch; store::MAX_SLOTS] = {
     #[allow(clippy::declare_interior_mutable_const)]
     const LATCH_INIT: BarLatch = BarLatch::new();
     [LATCH_INIT; store::MAX_SLOTS]
+};
+
+// ── Per-slot hold buffer for Hold display mode ────────────────────────────
+//
+// In Hold mode, the renderer shows the last *complete* bar. During the
+// current bar, audio is accumulated in the back buffer (current sweep read).
+// At each bar boundary (frac wraps), the back buffer data becomes the front
+// buffer. The renderer always displays the front buffer.
+
+struct HoldBuffer {
+    /// Front buffer: last complete bar (what the renderer displays).
+    /// `front[channel][sample]`
+    front: Mutex<Vec<Vec<f32>>>,
+    /// Whether front has valid data (at least one bar has completed).
+    front_valid: AtomicBool,
+    /// Last observed frac for bar-boundary detection.
+    /// Packed as fixed-point * 1_000_000.
+    last_frac: AtomicUsize,
+}
+
+impl HoldBuffer {
+    const fn new() -> Self {
+        Self {
+            front: Mutex::new(Vec::new()),
+            front_valid: AtomicBool::new(false),
+            last_frac: AtomicUsize::new(0),
+        }
+    }
+
+    /// Check for bar boundary and potentially swap buffers.
+    /// Returns the data to display (either front buffer or current partial data).
+    ///
+    /// - `current_data`: the full beat-aligned window read (the "back buffer")
+    /// - `frac`: playhead fraction within the bar (0.0 - 1.0)
+    fn update(&self, current_data: &[Vec<f32>], frac: f64) -> Option<Vec<Vec<f32>>> {
+        let frac_u = (frac * 1_000_000.0) as usize;
+        let prev_frac = self.last_frac.load(Ordering::Relaxed);
+
+        if frac_u < prev_frac || prev_frac == 0 {
+            // Bar boundary crossed (frac wrapped) or first frame —
+            // promote current data to front buffer.
+            if let Ok(mut front) = self.front.lock() {
+                *front = current_data.to_vec();
+                self.front_valid.store(true, Ordering::Relaxed);
+            }
+            self.last_frac.store(frac_u, Ordering::Relaxed);
+            // Return the newly promoted front (which is current_data)
+            Some(current_data.to_vec())
+        } else {
+            self.last_frac.store(frac_u, Ordering::Relaxed);
+            // Return front buffer if valid, otherwise None
+            if self.front_valid.load(Ordering::Relaxed) {
+                self.front.lock().ok().map(|f| f.clone())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+static HOLD_BUFFERS: [HoldBuffer; store::MAX_SLOTS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const HOLD_INIT: HoldBuffer = HoldBuffer::new();
+    [HOLD_INIT; store::MAX_SLOTS]
 };
 
 /// Immutable snapshot of one track's state for rendering.
@@ -283,11 +348,13 @@ pub fn build_snapshots_free(
 /// - `sync_bars`: number of bars to display (0.25, 0.5, 1.0, 2.0, 4.0)
 /// - `sample_rate`: current sample rate
 /// - `mix_to_mono`: whether to compute mono mix
+/// - `hold_mode`: if true, display the last complete bar instead of sweep
 pub fn build_snapshots_beat_sync(
     group: u32,
     sync_bars: f64,
     sample_rate: f32,
     mix_to_mono: bool,
+    hold_mode: bool,
 ) -> Vec<WaveSnapshot> {
     let slots = store::active_slots_in_group(group);
     let mut snapshots = Vec::with_capacity(slots.len());
@@ -346,32 +413,63 @@ pub fn build_snapshots_beat_sync(
         {
             // Latch rb_start at bar boundaries to eliminate per-buffer PPQ jitter
             let rb_start = BAR_LATCHES[idx].update(computed_rb_start, playhead_fraction);
-            // How many samples are valid (already played).
-            let end_valid = (playhead_fraction * window_len as f64).round() as usize;
-            let end_valid = end_valid.min(window_len);
-            // 16-sample linear fade at the boundary to avoid clicks.
-            let fade_len = 16.min(window_len.saturating_sub(end_valid));
 
+            // Read the full beat-aligned window from the ring buffer
+            let mut raw_data = Vec::with_capacity(num_channels);
             for (ch, buf) in bufs.iter().enumerate().take(num_channels) {
                 if ch == 0 {
                     data_version = buf.total_written() as u64;
                 }
                 let mut out = vec![0.0f32; window_len];
                 buf.read_range(rb_start, &mut out);
+                raw_data.push(out);
+            }
 
-                // Mask stale data ahead of the playhead (sweep effect).
-                for i in 0..fade_len {
-                    let idx = end_valid + i;
-                    if idx < window_len {
-                        out[idx] *= 1.0 - (i as f32 + 1.0) / (fade_len as f32 + 1.0);
+            if hold_mode {
+                // Hold mode: use the double buffer to show the last complete bar
+                if let Some(front_data) = HOLD_BUFFERS[idx].update(&raw_data, playhead_fraction) {
+                    data_points = front_data.first().map_or(0, |ch| ch.len());
+                    audio_data = front_data;
+                } else {
+                    // No complete bar yet — show partial data with sweep mask
+                    // so user sees something while waiting for first bar
+                    let end_valid =
+                        (playhead_fraction * window_len as f64).round() as usize;
+                    let end_valid = end_valid.min(window_len);
+                    let fade_len = 16.min(window_len.saturating_sub(end_valid));
+                    for out in &mut raw_data {
+                        for i in 0..fade_len {
+                            let fi = end_valid + i;
+                            if fi < window_len {
+                                out[fi] *= 1.0 - (i as f32 + 1.0) / (fade_len as f32 + 1.0);
+                            }
+                        }
+                        for slot in out.iter_mut().take(window_len).skip(end_valid + fade_len) {
+                            *slot = 0.0;
+                        }
+                    }
+                    data_points = window_len;
+                    audio_data = raw_data;
+                }
+            } else {
+                // Sweep mode (original behavior): mask stale data ahead of playhead
+                let end_valid =
+                    (playhead_fraction * window_len as f64).round() as usize;
+                let end_valid = end_valid.min(window_len);
+                let fade_len = 16.min(window_len.saturating_sub(end_valid));
+                for out in &mut raw_data {
+                    for i in 0..fade_len {
+                        let fi = end_valid + i;
+                        if fi < window_len {
+                            out[fi] *= 1.0 - (i as f32 + 1.0) / (fade_len as f32 + 1.0);
+                        }
+                    }
+                    for slot in out.iter_mut().take(window_len).skip(end_valid + fade_len) {
+                        *slot = 0.0;
                     }
                 }
-                for slot in out.iter_mut().take(window_len).skip(end_valid + fade_len) {
-                    *slot = 0.0;
-                }
-
                 data_points = window_len;
-                audio_data.push(out);
+                audio_data = raw_data;
             }
         }
         drop(guard);

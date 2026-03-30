@@ -157,6 +157,10 @@ pub struct PopeScopeParams {
     /// Sync unit (BeatSync mode only).
     #[id = "sync_unit"]
     pub sync_unit: EnumParam<SyncUnit>,
+
+    /// Hold mode: show last complete bar instead of sweep (BeatSync mode only).
+    #[id = "hold_mode"]
+    pub hold_mode: BoolParam,
 }
 
 impl PopeScopeParams {
@@ -213,6 +217,8 @@ impl PopeScopeParams {
             sync_mode: EnumParam::new("Sync", SyncMode::BeatSync),
 
             sync_unit: EnumParam::new("Unit", SyncUnit::One),
+
+            hold_mode: BoolParam::new("Hold", false),
         }
     }
 }
