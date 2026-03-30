@@ -118,7 +118,7 @@ pub fn draw_amplitude_grid(
                 y_above - font_size / 2.0,
                 &label,
                 font_size,
-                theme::to_color(theme::GRID),
+                theme::to_color(theme::PRIMARY_DIM),
             );
         }
 
@@ -166,7 +166,7 @@ pub fn decimate_to_columns(samples: &[f32], num_columns: usize) -> (Vec<f32>, Ve
 }
 
 /// Draw a waveform as a connected line stroke using tiny-skia paths.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 pub fn draw_waveform_line(
     pixmap: &mut tiny_skia::Pixmap,
     samples: &[f32],
@@ -264,7 +264,7 @@ pub fn draw_waveform_line(
 }
 
 /// Draw a waveform as a filled region from center line using tiny-skia paths.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 pub fn draw_waveform_filled(
     pixmap: &mut tiny_skia::Pixmap,
     samples: &[f32],

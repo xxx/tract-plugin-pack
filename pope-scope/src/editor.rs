@@ -14,8 +14,7 @@ use tiny_skia_widgets as widgets;
 
 const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 500;
-const CONTROL_BAR_HEIGHT: f32 = 80.0;
-const TITLE_BAR_HEIGHT: f32 = 28.0;
+const CONTROL_BAR_HEIGHT: f32 = 110.0;
 
 pub use widgets::EditorState;
 
@@ -49,8 +48,6 @@ enum ParamId {
 
 #[derive(Clone, Copy, PartialEq)]
 enum ButtonAction {
-    ScaleDown,
-    ScaleUp,
     ToggleFreeze,
     ToggleMono,
     CycleDisplayMode,
@@ -206,19 +203,18 @@ impl PopeScopeWindow {
     /// Returns (x, y, w, h) for the waveform display area.
     pub fn waveform_rect(&self) -> (f32, f32, f32, f32) {
         let s = self.scale_factor;
-        let title_h = TITLE_BAR_HEIGHT * s;
         let control_h = CONTROL_BAR_HEIGHT * s;
         let w = self.physical_width as f32;
         let h = self.physical_height as f32;
-        (0.0, title_h, w, (h - title_h - control_h).max(1.0))
+        (0.0, 0.0, w, (h - control_h).max(1.0))
     }
 
     // ── Drawing ─────────────────────────────────────────────────────────
 
     fn draw(&mut self) {
         let s = self.scale_factor;
-        let pw = self.physical_width as f32;
         let ph = self.physical_height as f32;
+        let pad = 8.0 * s;
 
         self.hit_regions.clear();
 
@@ -229,88 +225,6 @@ impl PopeScopeWindow {
         self.surface.pixmap.fill(theme::to_color(theme::BG));
 
         let tr = &mut self.text_renderer;
-
-        // ── Title bar ───────────────────────────────────────────────────
-        let title_h = TITLE_BAR_HEIGHT * s;
-        let pad = 8.0 * s;
-        let title_size = 14.0 * s;
-        let small_font = 11.0 * s;
-
-        tr.draw_text(
-            &mut self.surface.pixmap,
-            pad,
-            pad + title_size,
-            "Pope Scope",
-            title_size,
-            theme::to_color(theme::FG),
-        );
-
-        // Scale buttons (top right)
-        let btn_size = 20.0 * s;
-        let scale_label_w = 40.0 * s;
-
-        let plus_x = pw - pad - btn_size;
-        let plus_y = pad;
-        widgets::draw_button(
-            &mut self.surface.pixmap,
-            tr,
-            plus_x,
-            plus_y,
-            btn_size,
-            btn_size,
-            "+",
-            false,
-            false,
-        );
-        self.hit_regions.push(HitRegion {
-            x: plus_x,
-            y: plus_y,
-            w: btn_size,
-            h: btn_size,
-            action: HitAction::Button(ButtonAction::ScaleUp),
-        });
-
-        let pct_text = format!("{}%", (self.scale_factor * 100.0).round() as u32);
-        let pct_x = plus_x - scale_label_w;
-        let pct_text_w = tr.text_width(&pct_text, small_font);
-        tr.draw_text(
-            &mut self.surface.pixmap,
-            pct_x + (scale_label_w - pct_text_w) / 2.0,
-            plus_y + small_font + 3.0 * s,
-            &pct_text,
-            small_font,
-            theme::to_color(theme::PRIMARY_DIM),
-        );
-
-        let minus_x = pct_x - btn_size;
-        widgets::draw_button(
-            &mut self.surface.pixmap,
-            tr,
-            minus_x,
-            plus_y,
-            btn_size,
-            btn_size,
-            "-",
-            false,
-            false,
-        );
-        self.hit_regions.push(HitRegion {
-            x: minus_x,
-            y: plus_y,
-            w: btn_size,
-            h: btn_size,
-            action: HitAction::Button(ButtonAction::ScaleDown),
-        });
-
-        // Title bar bottom border
-        widgets::draw_rect(
-            &mut self.surface.pixmap,
-            0.0,
-            title_h - 1.0,
-            pw,
-            1.0,
-            theme::to_color(theme::BORDER),
-        );
 
         // ── Waveform area ────────────────────────────────────────────────
         // Draw border below waveform area
@@ -695,9 +609,11 @@ impl PopeScopeWindow {
         let label_font = 10.0 * s;
         let gap = 6.0 * s;
 
-        // Two rows of controls
-        let row1_y = control_y + gap;
-        let row2_y = row1_y + row_h + gap;
+        // Each row: label baseline at row_y (text body extends up by ~label_font),
+        // control top at row_y + label_font, height row_h.
+        let row_total = label_font + label_font + row_h;
+        let row1_y = control_y + gap + label_font; // baseline of row 1 label
+        let row2_y = row1_y + row_total + gap;     // baseline of row 2 label
 
         let mut cx = pad;
 
@@ -715,7 +631,7 @@ impl PopeScopeWindow {
         tr.draw_text(
             &mut self.surface.pixmap,
             cx,
-            row1_y - 1.0,
+            row1_y,
             display_label,
             label_font,
             theme::to_color(theme::PRIMARY_DIM),
@@ -751,7 +667,7 @@ impl PopeScopeWindow {
         tr.draw_text(
             &mut self.surface.pixmap,
             cx,
-            row1_y - 1.0,
+            row1_y,
             "Style",
             label_font,
             theme::to_color(theme::PRIMARY_DIM),
@@ -786,7 +702,7 @@ impl PopeScopeWindow {
         tr.draw_text(
             &mut self.surface.pixmap,
             cx,
-            row1_y - 1.0,
+            row1_y,
             "Sync",
             label_font,
             theme::to_color(theme::PRIMARY_DIM),
@@ -825,7 +741,7 @@ impl PopeScopeWindow {
             tr.draw_text(
                 &mut self.surface.pixmap,
                 cx,
-                row1_y - 1.0,
+                row1_y,
                 "Unit",
                 label_font,
                 theme::to_color(theme::PRIMARY_DIM),
@@ -857,7 +773,7 @@ impl PopeScopeWindow {
         tr.draw_text(
             &mut self.surface.pixmap,
             cx,
-            row1_y - 1.0,
+            row1_y,
             "Freeze",
             label_font,
             theme::to_color(theme::PRIMARY_DIM),
@@ -889,7 +805,7 @@ impl PopeScopeWindow {
         tr.draw_text(
             &mut self.surface.pixmap,
             cx,
-            row1_y - 1.0,
+            row1_y,
             "Mono",
             label_font,
             theme::to_color(theme::PRIMARY_DIM),
@@ -1156,12 +1072,6 @@ impl baseview::WindowHandler for PopeScopeWindow {
                             }
                         }
                         HitAction::Button(btn) => match btn {
-                            ButtonAction::ScaleDown => {
-                                self.apply_scale_change(-0.25, window);
-                            }
-                            ButtonAction::ScaleUp => {
-                                self.apply_scale_change(0.25, window);
-                            }
                             ButtonAction::ToggleFreeze => {
                                 let current = self.params.freeze.value();
                                 setter.begin_set_parameter(&self.params.freeze);
