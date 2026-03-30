@@ -156,13 +156,17 @@ pub fn draw_amplitude_grid(
 }
 
 /// Decimate samples to pixel columns, computing min/max per column.
-/// Returns (min_values, max_values) arrays of length `num_columns`.
-pub fn decimate_to_columns(samples: &[f32], num_columns: usize) -> (Vec<f32>, Vec<f32>) {
+/// Writes into caller-provided `mins` and `maxs` slices (must be same length = num_columns).
+pub fn decimate_to_columns_into(samples: &[f32], mins: &mut [f32], maxs: &mut [f32]) {
+    let num_columns = mins.len();
+    debug_assert_eq!(mins.len(), maxs.len());
     if samples.is_empty() || num_columns == 0 {
-        return (vec![0.0; num_columns], vec![0.0; num_columns]);
+        mins.fill(0.0);
+        maxs.fill(0.0);
+        return;
     }
-    let mut mins = vec![f32::MAX; num_columns];
-    let mut maxs = vec![f32::MIN; num_columns];
+    mins.fill(f32::MAX);
+    maxs.fill(f32::MIN);
     let samples_per_col = samples.len() as f32 / num_columns as f32;
 
     for (i, &s) in samples.iter().enumerate() {
@@ -178,6 +182,14 @@ pub fn decimate_to_columns(samples: &[f32], num_columns: usize) -> (Vec<f32>, Ve
             maxs[i] = 0.0;
         }
     }
+}
+
+/// Decimate samples to pixel columns, computing min/max per column.
+/// Returns (min_values, max_values) arrays of length `num_columns`.
+pub fn decimate_to_columns(samples: &[f32], num_columns: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut mins = vec![0.0f32; num_columns];
+    let mut maxs = vec![0.0f32; num_columns];
+    decimate_to_columns_into(samples, &mut mins, &mut maxs);
     (mins, maxs)
 }
 

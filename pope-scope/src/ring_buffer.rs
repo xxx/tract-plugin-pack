@@ -86,9 +86,13 @@ impl RingBuffer {
     /// Called from the audio thread only (single writer).
     pub fn push(&mut self, samples: &[f32]) {
         let pos = self.write_pos.load(Ordering::Relaxed);
-        for (i, &sample) in samples.iter().enumerate() {
-            let idx = (pos + i) % self.capacity;
+        let mut idx = pos % self.capacity;
+        for &sample in samples {
             self.buffer[idx] = sample;
+            idx += 1;
+            if idx == self.capacity {
+                idx = 0;
+            }
 
             // Update L1 accumulator
             self.l1_accum.min = self.l1_accum.min.min(sample);
@@ -142,9 +146,13 @@ impl RingBuffer {
             return 0;
         }
         let start = pos.saturating_sub(to_read);
-        for (i, slot) in out.iter_mut().enumerate().take(to_read) {
-            let idx = (start + i) % self.capacity;
+        let mut idx = start % self.capacity;
+        for slot in out.iter_mut().take(to_read) {
             *slot = self.buffer[idx];
+            idx += 1;
+            if idx == self.capacity {
+                idx = 0;
+            }
         }
         to_read
     }
@@ -156,9 +164,13 @@ impl RingBuffer {
     /// Returns the number of samples copied (always == out.len()).
     pub fn read_range(&self, start_pos: usize, out: &mut [f32]) -> usize {
         let count = out.len();
-        for (i, slot) in out.iter_mut().enumerate().take(count) {
-            let abs = start_pos + i;
-            *slot = self.buffer[abs % self.capacity];
+        let mut idx = start_pos % self.capacity;
+        for slot in out.iter_mut().take(count) {
+            *slot = self.buffer[idx];
+            idx += 1;
+            if idx == self.capacity {
+                idx = 0;
+            }
         }
         count
     }
@@ -173,9 +185,13 @@ impl RingBuffer {
             return 0;
         }
         let start = pos - to_read;
-        for (i, slot) in out.iter_mut().enumerate().take(to_read) {
-            let idx = (start + i) % self.level1_capacity;
+        let mut idx = start % self.level1_capacity;
+        for slot in out.iter_mut().take(to_read) {
             *slot = self.level1[idx];
+            idx += 1;
+            if idx == self.level1_capacity {
+                idx = 0;
+            }
         }
         to_read
     }
@@ -190,9 +206,13 @@ impl RingBuffer {
             return 0;
         }
         let start = pos - to_read;
-        for (i, slot) in out.iter_mut().enumerate().take(to_read) {
-            let idx = (start + i) % self.level2_capacity;
+        let mut idx = start % self.level2_capacity;
+        for slot in out.iter_mut().take(to_read) {
             *slot = self.level2[idx];
+            idx += 1;
+            if idx == self.level2_capacity {
+                idx = 0;
+            }
         }
         to_read
     }

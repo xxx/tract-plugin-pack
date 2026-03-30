@@ -65,6 +65,7 @@ struct HoldBuffer {
     front: Mutex<Vec<Vec<f32>>>,
     /// Back buffer: accumulates the current bar's most recent read.
     /// At bar boundary, back is promoted to front.
+    /// Pre-allocated; data is copied in via copy_from_slice.
     back: Mutex<Vec<Vec<f32>>>,
     /// Whether front has valid data (at least one bar has completed).
     front_valid: AtomicBool,
@@ -91,20 +92,31 @@ impl HoldBuffer {
         let frac_u = (frac * 1_000_000.0) as usize;
         let prev_frac = self.last_frac.load(Ordering::Relaxed);
 
-        if frac_u < prev_frac && prev_frac > 0 {
-            // Bar boundary crossed (frac wrapped) —
-            // promote the BACK buffer (previous bar's last read) to front.
-            if let (Ok(back), Ok(mut front)) = (self.back.lock(), self.front.lock()) {
+        // Lock back buffer once for both the bar-boundary promotion and the current write
+        if let Ok(mut back) = self.back.lock() {
+            if frac_u < prev_frac && prev_frac > 0 {
+                // Bar boundary crossed (frac wrapped) —
+                // promote the BACK buffer (previous bar's last read) to front.
                 if !back.is_empty() {
-                    *front = back.clone();
-                    self.front_valid.store(true, Ordering::Relaxed);
+                    if let Ok(mut front) = self.front.lock() {
+                        // Swap back into front to avoid deep clone: front gets
+                        // the back's data, back is left empty and will be re-filled.
+                        std::mem::swap(&mut *front, &mut *back);
+                        self.front_valid.store(true, Ordering::Relaxed);
+                    }
                 }
             }
-        }
 
-        // Always store current data in the back buffer (latest read of current bar)
-        if let Ok(mut back) = self.back.lock() {
-            *back = current_data.to_vec();
+            // Copy current data into the back buffer, reusing allocations
+            if back.len() != current_data.len() {
+                back.resize_with(current_data.len(), Vec::new);
+            }
+            for (dst, src) in back.iter_mut().zip(current_data.iter()) {
+                if dst.len() != src.len() {
+                    dst.resize(src.len(), 0.0);
+                }
+                dst.copy_from_slice(src);
+            }
         }
         self.last_frac.store(frac_u, Ordering::Relaxed);
 
@@ -213,7 +225,7 @@ pub fn build_snapshots_free(
     decimation: usize,
     mix_to_mono: bool,
 ) -> Vec<WaveSnapshot> {
-    let slots = store::active_slots_in_group(group);
+    let (slots, slot_count) = store::active_slots_in_group(group);
     let total_samples = ((timebase_ms / 1000.0) * sample_rate).round() as usize;
     let level = crate::ring_buffer::RingBuffer::select_level(if total_samples > decimation {
         total_samples / decimation
@@ -221,9 +233,9 @@ pub fn build_snapshots_free(
         1
     });
 
-    let mut snapshots = Vec::with_capacity(slots.len());
+    let mut snapshots = Vec::with_capacity(slot_count);
 
-    for &idx in &slots {
+    for &idx in &slots[..slot_count] {
         let s = store::slot(idx);
 
         // Read metadata
@@ -362,10 +374,10 @@ pub fn build_snapshots_beat_sync(
     mix_to_mono: bool,
     hold_mode: bool,
 ) -> Vec<WaveSnapshot> {
-    let slots = store::active_slots_in_group(group);
-    let mut snapshots = Vec::with_capacity(slots.len());
+    let (slots, slot_count) = store::active_slots_in_group(group);
+    let mut snapshots = Vec::with_capacity(slot_count);
 
-    for &idx in &slots {
+    for &idx in &slots[..slot_count] {
         let s = store::slot(idx);
 
         // Read metadata (same as free mode)

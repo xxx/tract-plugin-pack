@@ -350,15 +350,8 @@ impl PopeScopeWindow {
                     for (i, snap) in all_tracks.iter().enumerate() {
                         let ty = wy + i as f32 * track_h;
 
-                        // Draw control strip
-                        let track_name = {
-                            let slot = store::slot(snap.slot_index);
-                            slot.metadata
-                                .track_name
-                                .lock()
-                                .map(|n| n.clone())
-                                .unwrap_or_default()
-                        };
+                        // Draw control strip — use track_name from snapshot
+                        // (already read from the store during snapshot building)
                         let ctrl_regions = controls::draw_control_strip(
                             &mut self.surface.pixmap,
                             tr,
@@ -367,7 +360,7 @@ impl PopeScopeWindow {
                             strip_w,
                             track_h,
                             snap.slot_index,
-                            &track_name,
+                            &snap.track_name,
                             snap.display_color,
                             snap.solo,
                             snap.mute,

@@ -176,18 +176,19 @@ pub fn is_active(index: usize) -> bool {
     STORE[index].owner.load(Ordering::Relaxed) != 0
 }
 
-/// Get all active slot indices.
-pub fn active_slots() -> Vec<usize> {
-    (0..MAX_SLOTS).filter(|&i| is_active(i)).collect()
-}
-
 /// Get active slot indices filtered by group.
-pub fn active_slots_in_group(group: u32) -> Vec<usize> {
-    (0..MAX_SLOTS)
-        .filter(|&i| {
-            is_active(i) && STORE[i].metadata.group.load(Ordering::Relaxed) == group
-        })
-        .collect()
+/// Returns a fixed-size array and the count of valid entries (no heap allocation).
+#[allow(clippy::needless_range_loop)]
+pub fn active_slots_in_group(group: u32) -> ([usize; MAX_SLOTS], usize) {
+    let mut result = [0usize; MAX_SLOTS];
+    let mut count = 0;
+    for i in 0..MAX_SLOTS {
+        if is_active(i) && STORE[i].metadata.group.load(Ordering::Relaxed) == group {
+            result[count] = i;
+            count += 1;
+        }
+    }
+    (result, count)
 }
 
 #[cfg(test)]
@@ -311,14 +312,14 @@ pub(crate) mod tests {
         slot(b).metadata.group.store(1, Ordering::Relaxed);
         slot(c).metadata.group.store(0, Ordering::Relaxed);
 
-        let group0 = active_slots_in_group(0);
-        assert_eq!(group0.len(), 2);
-        assert!(group0.contains(&a));
-        assert!(group0.contains(&c));
+        let (group0, group0_count) = active_slots_in_group(0);
+        assert_eq!(group0_count, 2);
+        assert!(group0[..group0_count].contains(&a));
+        assert!(group0[..group0_count].contains(&c));
 
-        let group1 = active_slots_in_group(1);
-        assert_eq!(group1.len(), 1);
-        assert!(group1.contains(&b));
+        let (group1, group1_count) = active_slots_in_group(1);
+        assert_eq!(group1_count, 1);
+        assert!(group1[..group1_count].contains(&b));
     }
 
     #[test]
