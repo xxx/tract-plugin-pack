@@ -86,15 +86,15 @@ pub fn draw_amplitude_grid(
     let font_size = 8.0 * scale;
 
     let grid_c = match track_color {
-        Some(c) => theme::to_color_alpha(c, 0.15),
+        Some(c) => theme::to_color_alpha(c, 0.25),
         None => theme::to_color(theme::GRID),
     };
     let grid_bright_c = match track_color {
-        Some(c) => theme::to_color_alpha(c, 0.25),
+        Some(c) => theme::to_color_alpha(c, 0.4),
         None => theme::to_color(theme::GRID_BRIGHT),
     };
     let label_c = match track_color {
-        Some(c) => theme::to_color_alpha(c, 0.5),
+        Some(c) => theme::to_color_alpha(c, 0.6),
         None => theme::to_color(theme::PRIMARY_DIM),
     };
 
