@@ -6,8 +6,10 @@ use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use crate::controls;
 use crate::renderer;
 use crate::snapshot::{self, WaveSnapshot};
+use crate::store;
 use crate::theme;
 use crate::PopeScopeParams;
 use tiny_skia_widgets as widgets;
@@ -37,6 +39,7 @@ struct HitRegion {
 enum HitAction {
     Dial(ParamId),
     Button(ButtonAction),
+    Control(controls::ControlAction),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -272,16 +275,27 @@ impl PopeScopeWindow {
             };
         }
 
-        // Apply solo/mute filtering
+        // Solo/mute filtering. In vertical mode, all tracks get a lane
+        // (for control strips), but muted/non-soloed tracks skip waveform drawing.
+        // In overlay/sum modes, muted/non-soloed tracks are excluded entirely.
         let snapshots = &self.cached_snapshots;
         let any_solo = snapshots.iter().any(|s| s.solo);
+        let all_muted = !snapshots.is_empty() && snapshots.iter().all(|s| s.mute);
         let visible: Vec<&WaveSnapshot> = snapshots
             .iter()
             .filter(|s| {
+                // Solo overrides mute
+                if s.solo {
+                    return true;
+                }
+                // If all muted, keep tracks in layout (but waveforms still blank)
+                if all_muted {
+                    return true;
+                }
                 if s.mute {
                     return false;
                 }
-                if any_solo && !s.solo {
+                if any_solo {
                     return false;
                 }
                 true
@@ -319,17 +333,59 @@ impl PopeScopeWindow {
         } else {
             match display_mode_val {
                 crate::DisplayMode::Vertical => {
-                    // Each track gets a vertical strip
-                    let num_tracks = visible.len();
+                    // Control strip on the left of each track lane
+                    const CONTROL_STRIP_WIDTH: f32 = 90.0;
+                    let strip_w = CONTROL_STRIP_WIDTH * s;
+                    let wave_x = wx + strip_w;
+                    let wave_w = ww - strip_w;
+
+                    // Each track gets a horizontal lane — use ALL snapshots
+                    // (not just visible) so muted tracks keep their lane and control strip.
+                    let all_tracks = &self.cached_snapshots;
+                    let num_tracks = all_tracks.len().max(1);
                     let track_h = wh / num_tracks as f32;
-                    for (i, snap) in visible.iter().enumerate() {
+                    for (i, snap) in all_tracks.iter().enumerate() {
                         let ty = wy + i as f32 * track_h;
+
+                        // Draw control strip
+                        let track_name = {
+                            let slot = store::slot(snap.slot_index);
+                            slot.metadata
+                                .track_name
+                                .lock()
+                                .map(|n| n.clone())
+                                .unwrap_or_default()
+                        };
+                        let ctrl_regions = controls::draw_control_strip(
+                            &mut self.surface.pixmap,
+                            tr,
+                            wx,
+                            ty,
+                            strip_w,
+                            track_h,
+                            snap.slot_index,
+                            &track_name,
+                            snap.display_color,
+                            snap.solo,
+                            snap.mute,
+                            s,
+                        );
+                        for cr in ctrl_regions {
+                            self.hit_regions.push(HitRegion {
+                                x: cr.x,
+                                y: cr.y,
+                                w: cr.w,
+                                h: cr.h,
+                                action: HitAction::Control(cr.action),
+                            });
+                        }
+
                         // Draw amplitude grid
                         renderer::draw_amplitude_grid(
                             &mut self.surface.pixmap,
-                            wx,
+                            wave_x,
                             ty,
-                            ww,
+                            wave_w,
                             track_h,
                             min_db_val,
                             max_db_val,
@@ -341,9 +397,9 @@ impl PopeScopeWindow {
                             crate::SyncMode::Free => {
                                 renderer::draw_time_grid(
                                     &mut self.surface.pixmap,
-                                    wx,
+                                    wave_x,
                                     ty,
-                                    ww,
+                                    wave_w,
                                     track_h,
                                     self.params.timebase.value(),
                                     tr,
@@ -356,9 +412,9 @@ impl PopeScopeWindow {
                                     * snap.beats_per_bar as f64;
                                 renderer::draw_beat_grid(
                                     &mut self.surface.pixmap,
-                                    wx,
+                                    wave_x,
                                     ty,
-                                    ww,
+                                    wave_w,
                                     track_h,
                                     snap.beats_per_bar,
                                     total_beats,
@@ -368,16 +424,17 @@ impl PopeScopeWindow {
                                 );
                             }
                         }
-                        // Draw waveform(s)
-                        if mix_to_mono && !snap.mono_mix.is_empty() {
+                        // Draw waveform(s) — skip if muted or non-soloed
+                        let track_visible = snap.solo || (!snap.mute && !any_solo);
+                        if track_visible && mix_to_mono && !snap.mono_mix.is_empty() {
                             renderer::draw_waveform(
                                 &mut self.surface.pixmap,
                                 &snap.mono_mix,
-                                wx, ty, ww, track_h,
+                                wave_x, ty, wave_w, track_h,
                                 min_db_val, max_db_val,
                                 snap.display_color, draw_style_val,
                             );
-                        } else if !snap.audio_data.is_empty() {
+                        } else if track_visible && !snap.audio_data.is_empty() {
                             for (ch, ch_data) in snap.audio_data.iter().enumerate() {
                                 let color = if snap.audio_data.len() == 1 || ch == 0 {
                                     snap.display_color
@@ -387,14 +444,14 @@ impl PopeScopeWindow {
                                 renderer::draw_waveform(
                                     &mut self.surface.pixmap,
                                     ch_data,
-                                    wx, ty, ww, track_h,
+                                    wave_x, ty, wave_w, track_h,
                                     min_db_val, max_db_val,
                                     color, draw_style_val,
                                 );
                             }
                         }
-                        // Draw peak hold line
-                        if snap.slot_index < self.peak_holds.len() {
+                        // Draw peak hold line (only for visible tracks)
+                        if track_visible && snap.slot_index < self.peak_holds.len() {
                             let peak_db = self.peak_holds[snap.slot_index].peak_db;
                             if peak_db > min_db_val {
                                 let centre_y = ty + track_h / 2.0;
@@ -409,9 +466,9 @@ impl PopeScopeWindow {
                                     );
                                 // Dashed line
                                 let dash_len = 4.0 * s;
-                                let mut dx = wx;
-                                while dx < wx + ww {
-                                    let seg = (dx + dash_len).min(wx + ww) - dx;
+                                let mut dx = wave_x;
+                                while dx < wave_x + wave_w {
+                                    let seg = (dx + dash_len).min(wave_x + wave_w) - dx;
                                     widgets::draw_rect(
                                         &mut self.surface.pixmap,
                                         dx,
@@ -484,6 +541,10 @@ impl PopeScopeWindow {
                         }
                     }
                     for snap in &visible {
+                        // Skip waveform for muted tracks (unless soloed)
+                        if snap.mute && !snap.solo {
+                            continue;
+                        }
                         if mix_to_mono && !snap.mono_mix.is_empty() {
                             renderer::draw_waveform(
                                 &mut self.surface.pixmap,
@@ -573,6 +634,10 @@ impl PopeScopeWindow {
                     if max_len > 0 {
                         let mut sum = vec![0.0f32; max_len];
                         for snap in &visible {
+                            // Skip muted tracks from sum (unless soloed)
+                            if snap.mute && !snap.solo {
+                                continue;
+                            }
                             if mix_to_mono && !snap.mono_mix.is_empty() {
                                 for (i, &s_val) in snap.mono_mix.iter().enumerate() {
                                     if i < max_len {
@@ -1195,6 +1260,32 @@ impl baseview::WindowHandler for PopeScopeWindow {
                                 setter.begin_set_parameter(&self.params.sync_unit);
                                 setter.set_parameter(&self.params.sync_unit, unit);
                                 setter.end_set_parameter(&self.params.sync_unit);
+                            }
+                        },
+                        HitAction::Control(action) => match action {
+                            controls::ControlAction::ToggleSolo(slot_idx) => {
+                                let slot = store::slot(slot_idx);
+                                let current = slot.metadata.solo.load(Ordering::Relaxed);
+                                slot.metadata.solo.store(!current, Ordering::Relaxed);
+                            }
+                            controls::ControlAction::ToggleMute(slot_idx) => {
+                                let slot = store::slot(slot_idx);
+                                let current = slot.metadata.mute.load(Ordering::Relaxed);
+                                slot.metadata.mute.store(!current, Ordering::Relaxed);
+                            }
+                            controls::ControlAction::CycleColor(slot_idx) => {
+                                let slot = store::slot(slot_idx);
+                                let current = slot.metadata.display_color.load(Ordering::Relaxed);
+                                let mut next_idx = 0;
+                                for i in 0..16 {
+                                    if theme::channel_color(i) == current {
+                                        next_idx = (i + 1) % 16;
+                                        break;
+                                    }
+                                }
+                                slot.metadata
+                                    .display_color
+                                    .store(theme::channel_color(next_idx), Ordering::Relaxed);
                             }
                         },
                     }

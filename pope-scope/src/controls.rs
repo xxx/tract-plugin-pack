@@ -3,9 +3,8 @@
 //! Renders track name, color swatch, solo/mute buttons.
 //! Returns hit regions for the editor to handle clicks.
 
-#![allow(dead_code)]
-
 use crate::theme;
+use tiny_skia_widgets as widgets;
 
 /// Hit region action from a control strip.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -109,12 +108,21 @@ pub fn draw_control_strip(
     });
     cy += swatch_size + pad;
 
+    // Outline button theme colors (amber, matching editor control bar)
+    let border_c = theme::to_color(theme::GRID_BRIGHT);
+    let text_c = theme::to_color(theme::PRIMARY_DIM);
+    let active_border_c = theme::to_color(theme::FG);
+    let active_fill_c = theme::to_color_alpha(theme::FG, 0.15);
+
     // Solo / Mute buttons side by side
     let total_btn_w = btn_w * 2.0 + 4.0 * scale;
     let btn_x = x + (w - total_btn_w) / 2.0;
 
     // Solo button
-    tiny_skia_widgets::draw_button(pixmap, tr, btn_x, cy, btn_w, btn_h, "S", solo, false);
+    widgets::draw_outline_button(
+        pixmap, tr, btn_x, cy, btn_w, btn_h, "S", solo,
+        border_c, text_c, active_border_c, active_fill_c,
+    );
     regions.push(ControlHitRegion {
         x: btn_x,
         y: cy,
@@ -125,7 +133,10 @@ pub fn draw_control_strip(
 
     // Mute button
     let mute_x = btn_x + btn_w + 4.0 * scale;
-    tiny_skia_widgets::draw_button(pixmap, tr, mute_x, cy, btn_w, btn_h, "M", mute, false);
+    widgets::draw_outline_button(
+        pixmap, tr, mute_x, cy, btn_w, btn_h, "M", mute,
+        border_c, text_c, active_border_c, active_fill_c,
+    );
     regions.push(ControlHitRegion {
         x: mute_x,
         y: cy,
