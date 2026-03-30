@@ -61,6 +61,19 @@ A detail-preserving spectral saturator. Uses FFT-based spectral analysis to pres
 - ~0.82 MB RSS and 0.14% CPU per instance (100 instances @ 13.7% CPU, 82 MB total)
 - Inspired by [Newfangled Audio Saturate](https://www.newfangledaudio.com/saturate)
 
+### Pope Scope
+
+A multichannel real-time oscilloscope with beat sync. Multiple instances share audio data through a global store, allowing one window to display waveforms from up to 16 tracks simultaneously.
+
+- Three display modes: Vertical (stacked), Overlay (superimposed), Sum (mixed)
+- Three draw styles: Line, Filled, Both
+- Beat sync mode with bar/beat grid alignment (1/4, 1/2, 1, 2, 4 bars)
+- Free-running mode with adjustable timebase (1ms - 10s)
+- dB-scaled amplitude mapping with configurable range
+- 16 track groups with per-track solo/mute and color assignment
+- Peak hold with 2-second hold and 20 dB/s decay
+- CPU-rendered GUI with amber phosphor terminal theme (tiny-skia + softbuffer)
+
 ## Build Requirements
 
 - Rust nightly toolchain (automatically configured via `rust-toolchain.toml`)
@@ -85,6 +98,7 @@ cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle gain-brain --release
 cargo nih-plug bundle tinylimit --release
 cargo nih-plug bundle satch --release
+cargo nih-plug bundle pope-scope --release
 
 # Standalone binaries
 cargo build --bin wavetable-filter --release
@@ -92,6 +106,7 @@ cargo build --bin gs-meter --release
 cargo build --bin gain-brain --release
 cargo build --bin tinylimit --release
 cargo build --bin satch --release
+cargo build --bin pope-scope --release
 ```
 
 The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` file (you only need one -- use whichever your DAW supports) to your plugin directory:
@@ -109,6 +124,7 @@ tract-plugin-pack/
 ├── gain-brain/             # Gain utility with group linking
 ├── tinylimit/              # Wideband peak limiter
 ├── satch/                  # Spectral saturator with detail preservation
+├── pope-scope/             # Multichannel real-time oscilloscope
 ├── nih-plug-widgets/       # Shared vizia widgets (ParamDial, CSS theme)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets, editor base scaffolding
 ├── docs/                   # Plugin manuals
@@ -123,7 +139,7 @@ tract-plugin-pack/
 ## Testing
 
 ```bash
-cargo test --workspace       # All tests (218+)
+cargo test --workspace       # All tests (300+)
 cargo clippy --workspace     # Lint check
 ```
 
@@ -134,6 +150,7 @@ cargo clippy --workspace     # Lint check
 - [Gain Brain Manual](docs/gain-brain/gain-brain-manual.md)
 - [tinylimit Manual](docs/tinylimit/tinylimit-manual.md)
 - [satch Manual](docs/satch/satch-manual.md)
+- [Pope Scope Manual](docs/pope-scope/pope-scope-manual.md)
 
 ## What is Clip-to-Zero?
 

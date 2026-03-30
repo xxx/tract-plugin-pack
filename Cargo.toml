@@ -1,5 +1,5 @@
 [workspace]
-members = ["nih-plug-widgets", "wavetable-filter", "gs-meter", "gain-brain", "tinylimit", "satch", "tiny-skia-widgets", "xtask"]
+members = ["nih-plug-widgets", "wavetable-filter", "gs-meter", "gain-brain", "tinylimit", "satch", "pope-scope", "tiny-skia-widgets", "xtask"]
 exclude = ["nih-plug"]
 resolver = "2"
 

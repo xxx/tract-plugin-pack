@@ -16,6 +16,10 @@ Tract Plugin Pack is a Cargo workspace containing multiple audio effect plugins 
 
 **tinylimit** — low-latency wideband peak limiter for track-level use. Feed-forward with lookahead, dual-stage transient/dynamics envelope, soft knee (Giannoulis 2012), optional ISP (ITU-1770 true peak). 7 built-in character presets. GUI uses softbuffer + tiny-skia (CPU rendering). 50 instances @ 6.2% CPU, 50 MB RSS (~1.0 MB, 0.12% CPU per instance). Inspired by DMG Audio TrackLimit.
 
+**satch** — detail-preserving spectral saturator. FFT-based spectral analysis preserves quiet frequency components through clipping. Independent gain, threshold, knee, detail, and mix controls. CPU rendering via softbuffer + tiny-skia.
+
+**Pope Scope** — multichannel real-time oscilloscope with beat sync. Static global store shares audio across up to 16 instances. Three display modes (Vertical/Overlay/Sum), three draw styles (Line/Filled/Both), beat-aligned grid, dB-scaled amplitude mapping. Ring buffer with hierarchical mipmap (L0 raw, L1 per-64, L2 per-256). CPU rendering via softbuffer + tiny-skia.
+
 ## Workspace Structure
 
 ```
@@ -24,6 +28,8 @@ tract-plugin-pack/
 ├── gs-meter/               # Loudness meter + gain utility (softbuffer GUI)
 ├── gain-brain/             # Gain utility with group linking (softbuffer GUI)
 ├── tinylimit/              # Wideband peak limiter (softbuffer GUI)
+├── satch/                  # Spectral saturator with detail preservation (softbuffer GUI)
+├── pope-scope/             # Multichannel oscilloscope with beat sync (softbuffer GUI)
 ├── nih-plug-widgets/       # Shared vizia widgets (ParamDial, CSS theme)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets (dial, slider, button)
 ├── docs/                   # Plugin manuals (markdown + PDF)
@@ -40,17 +46,23 @@ cargo nih-plug bundle wavetable-filter --release
 cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle gain-brain --release
 cargo nih-plug bundle tinylimit --release
+cargo nih-plug bundle satch --release
+cargo nih-plug bundle pope-scope --release
 
 # Standalone binaries
 cargo build --bin wavetable-filter --release
 cargo build --bin gs-meter --release
 cargo build --bin gain-brain --release
 cargo build --bin tinylimit --release
+cargo build --bin satch --release
+cargo build --bin pope-scope --release
 
 # Debug standalone (for GUI testing without DAW)
 cargo build --bin gs-meter
 cargo build --bin gain-brain
 cargo build --bin tinylimit
+cargo build --bin satch
+cargo build --bin pope-scope
 ```
 
 ## Testing & Linting

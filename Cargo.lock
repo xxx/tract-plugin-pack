@@ -3104,6 +3104,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
 
 [[package]]
+name = "pope-scope"
+version = "0.1.0"
+dependencies = [
+ "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=9a0b42c09d712777b2edb4c5e0cb6baf21e988f0)",
+ "crossbeam",
+ "keyboard-types",
+ "nih_plug",
+ "raw-window-handle 0.5.2",
+ "raw-window-handle 0.6.2",
+ "softbuffer",
+ "tiny-skia",
+ "tiny-skia-widgets",
+]
+
+[[package]]
 name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
