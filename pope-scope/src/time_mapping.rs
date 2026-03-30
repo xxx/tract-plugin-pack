@@ -7,7 +7,16 @@
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 /// Atomic time mapping state. Written by audio thread, read by GUI thread.
+///
+/// Uses a seqlock pattern to ensure the GUI reads a consistent snapshot
+/// of (current_ppq, ring_buffer_pos, samples_per_beat) — all from the
+/// same audio callback. Without this, torn reads cause the beat-aligned
+/// window to jitter by ~1-2 audio buffers.
 pub struct TimeMapping {
+    /// Seqlock sequence counter. Odd = write in progress, even = stable.
+    /// Writer increments before and after updating fields (Release).
+    /// Reader checks before and after reading fields (Acquire).
+    sequence: AtomicU64,
     /// Current PPQ position (f64 bit-cast to u64).
     current_ppq: AtomicU64,
     /// Absolute sample position corresponding to `current_ppq` (DAW transport coordinates).
@@ -40,6 +49,7 @@ pub struct TimeMappingSnapshot {
 impl TimeMapping {
     pub const fn new() -> Self {
         Self {
+            sequence: AtomicU64::new(0),
             current_ppq: AtomicU64::new(0),
             current_sample_pos: AtomicI64::new(0),
             ring_buffer_pos: AtomicU64::new(0),
@@ -91,19 +101,49 @@ impl TimeMapping {
                 }
             }
 
+            // Seqlock: increment to odd (write in progress)
+            self.sequence.fetch_add(1, Ordering::Release);
+
             self.current_ppq.store(ppq.to_bits(), Ordering::Relaxed);
             self.current_sample_pos.store(sample_pos, Ordering::Relaxed);
             self.ring_buffer_pos
                 .store(ring_buf_pos, Ordering::Relaxed);
             self.last_ppq.store(ppq.to_bits(), Ordering::Relaxed);
+
+            // Seqlock: increment to even (write complete)
+            self.sequence.fetch_add(1, Ordering::Release);
         }
 
         self.was_playing
             .store(if is_playing { 1 } else { 0 }, Ordering::Relaxed);
     }
 
-    /// Read a snapshot (GUI thread).
+    /// Read a consistent snapshot (GUI thread).
+    ///
+    /// Uses seqlock: retries if the audio thread was mid-write. Bounded to
+    /// 4 retries to avoid spinning if the audio thread is very busy; falls
+    /// back to the last read (which may be slightly torn but is still usable).
     pub fn snapshot(&self) -> TimeMappingSnapshot {
+        for _ in 0..4 {
+            let seq1 = self.sequence.load(Ordering::Acquire);
+            if seq1 & 1 != 0 {
+                // Writer in progress — retry
+                continue;
+            }
+            let snap = TimeMappingSnapshot {
+                current_ppq: f64::from_bits(self.current_ppq.load(Ordering::Relaxed)),
+                current_sample_pos: self.current_sample_pos.load(Ordering::Relaxed),
+                ring_buffer_pos: self.ring_buffer_pos.load(Ordering::Relaxed),
+                samples_per_beat: f64::from_bits(self.samples_per_beat.load(Ordering::Relaxed)),
+                discontinuity_counter: self.discontinuity_counter.load(Ordering::Relaxed),
+            };
+            let seq2 = self.sequence.load(Ordering::Acquire);
+            if seq1 == seq2 {
+                return snap;
+            }
+            // Sequence changed — writer updated mid-read, retry
+        }
+        // Fallback: return whatever we can read (very rare)
         TimeMappingSnapshot {
             current_ppq: f64::from_bits(self.current_ppq.load(Ordering::Relaxed)),
             current_sample_pos: self.current_sample_pos.load(Ordering::Relaxed),
@@ -116,6 +156,7 @@ impl TimeMapping {
     /// Reset all fields (used in tests).
     #[cfg(test)]
     pub fn reset(&self) {
+        self.sequence.store(0, Ordering::Relaxed);
         self.current_ppq.store(0, Ordering::Relaxed);
         self.current_sample_pos.store(0, Ordering::Relaxed);
         self.ring_buffer_pos.store(0, Ordering::Relaxed);

@@ -5,7 +5,52 @@
 
 use crate::ring_buffer::MinMax;
 use crate::store;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+// ── Per-slot bar latch for stable rb_start ──────────────────────────────────
+//
+// The DAW's PPQ and sample clocks have per-buffer jitter, causing rb_start
+// to shift by ±1 audio buffer within a bar. We latch rb_start at each bar
+// boundary and hold it for the bar's duration, eliminating the jitter.
+
+struct BarLatch {
+    /// Latched rb_start for the current bar.
+    rb_start: AtomicUsize,
+    /// Last observed playhead fraction (0.0-1.0 packed as u32 fixed-point).
+    /// When frac < last_frac, a new bar has started.
+    last_frac_u32: AtomicUsize,
+}
+
+impl BarLatch {
+    const fn new() -> Self {
+        Self {
+            rb_start: AtomicUsize::new(0),
+            last_frac_u32: AtomicUsize::new(0),
+        }
+    }
+
+    /// Update the latch. Returns the stable rb_start to use.
+    fn update(&self, computed_rb_start: usize, frac: f64) -> usize {
+        let frac_u32 = (frac * 1_000_000.0) as usize;
+        let prev_frac = self.last_frac_u32.load(Ordering::Relaxed);
+
+        if frac_u32 < prev_frac || prev_frac == 0 {
+            // New bar boundary (frac wrapped) or first frame — latch the new rb_start
+            self.rb_start.store(computed_rb_start, Ordering::Relaxed);
+            self.last_frac_u32.store(frac_u32, Ordering::Relaxed);
+            computed_rb_start
+        } else {
+            self.last_frac_u32.store(frac_u32, Ordering::Relaxed);
+            self.rb_start.load(Ordering::Relaxed)
+        }
+    }
+}
+
+static BAR_LATCHES: [BarLatch; store::MAX_SLOTS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const LATCH_INIT: BarLatch = BarLatch::new();
+    [LATCH_INIT; store::MAX_SLOTS]
+};
 
 /// Immutable snapshot of one track's state for rendering.
 #[derive(Clone)]
@@ -296,9 +341,11 @@ pub fn build_snapshots_beat_sync(
         let mut data_version = 0u64;
         let mut data_points = 0;
 
-        if let (Some(bufs), Some((rb_start, window_len, playhead_fraction))) =
+        if let (Some(bufs), Some((computed_rb_start, window_len, playhead_fraction))) =
             (guard.as_ref(), window)
         {
+            // Latch rb_start at bar boundaries to eliminate per-buffer PPQ jitter
+            let rb_start = BAR_LATCHES[idx].update(computed_rb_start, playhead_fraction);
             // How many samples are valid (already played).
             let end_valid = (playhead_fraction * window_len as f64).round() as usize;
             let end_valid = end_valid.min(window_len);
