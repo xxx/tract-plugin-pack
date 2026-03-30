@@ -136,11 +136,11 @@ pub fn draw_control_strip(
     });
     cy += swatch_size + pad;
 
-    // Outline button theme colors (amber, matching editor control bar)
-    let border_c = theme::to_color(theme::GRID_BRIGHT);
-    let text_c = theme::to_color(theme::PRIMARY_DIM);
-    let active_border_c = theme::to_color(theme::FG);
-    let active_fill_c = theme::to_color_alpha(theme::FG, 0.15);
+    // Outline button colors derived from track color
+    let border_c = theme::to_color_alpha(color, 0.4);
+    let text_c = theme::to_color_alpha(color, 0.5);
+    let active_border_c = theme::to_color(color);
+    let active_fill_c = theme::to_color_alpha(color, 0.15);
 
     // Solo / Mute buttons side by side
     let total_btn_w = btn_w * 2.0 + 4.0 * scale;
