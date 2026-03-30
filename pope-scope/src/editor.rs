@@ -681,6 +681,52 @@ impl PopeScopeWindow {
             renderer::draw_cursor(&mut self.surface.pixmap, self.mouse_x, wy, wh);
         }
 
+        // ── Name tooltip (drawn over everything else) ──────────────────
+        let mx = self.mouse_x;
+        let my = self.mouse_y;
+        for region in &self.hit_regions {
+            if let HitAction::Control(controls::ControlAction::HoverName(slot_idx)) = region.action {
+                if mx >= region.x && mx < region.x + region.w
+                    && my >= region.y && my < region.y + region.h
+                {
+                    // Read full name from the store
+                    let slot = store::slot(slot_idx);
+                    let full_name = slot.metadata.track_name.lock()
+                        .map(|n| n.clone())
+                        .unwrap_or_default();
+                    if !full_name.is_empty() {
+                        let tip_font = 12.0 * s;
+                        let tip_pad = 4.0 * s;
+                        let tip_w = tr.text_width(&full_name, tip_font) + tip_pad * 2.0;
+                        let tip_h = tip_font + tip_pad * 2.0;
+                        let tip_x = (mx - tip_w / 2.0).max(0.0);
+                        let tip_y = region.y + region.h + 2.0 * s;
+                        // Background
+                        tiny_skia_widgets::draw_rect(
+                            &mut self.surface.pixmap,
+                            tip_x, tip_y, tip_w, tip_h,
+                            theme::to_color(theme::BORDER),
+                        );
+                        tiny_skia_widgets::draw_rect_outline(
+                            &mut self.surface.pixmap,
+                            tip_x, tip_y, tip_w, tip_h,
+                            theme::to_color(theme::FG),
+                            1.0,
+                        );
+                        tr.draw_text(
+                            &mut self.surface.pixmap,
+                            tip_x + tip_pad,
+                            tip_y + tip_pad + tip_font,
+                            &full_name,
+                            tip_font,
+                            theme::to_color(theme::FG),
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+
         // ── Control bar ─────────────────────────────────────────────────
         let control_h = CONTROL_BAR_HEIGHT * s;
         let control_y = ph - control_h;
@@ -1286,6 +1332,9 @@ impl baseview::WindowHandler for PopeScopeWindow {
                                 slot.metadata
                                     .display_color
                                     .store(theme::channel_color(next_idx), Ordering::Relaxed);
+                            }
+                            controls::ControlAction::HoverName(_) => {
+                                // Click on name does nothing — hover handled in draw
                             }
                         },
                     }

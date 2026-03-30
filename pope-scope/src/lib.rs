@@ -312,6 +312,21 @@ impl Plugin for PopeScope {
         }
     }
 
+    fn update_track_info(&mut self, info: TrackInfo) {
+        if let Some(idx) = self.slot_index {
+            let slot = store::slot(idx);
+            if let Some(name) = &info.name {
+                if let Ok(mut guard) = slot.metadata.track_name.lock() {
+                    *guard = name.clone();
+                }
+            }
+            if let Some((r, g, b, _a)) = info.color {
+                let argb = 0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                slot.metadata.display_color.store(argb, Ordering::Relaxed);
+            }
+        }
+    }
+
     fn deactivate(&mut self) {
         if let Some(idx) = self.slot_index.take() {
             debug_log!(

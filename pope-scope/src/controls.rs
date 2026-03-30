@@ -9,9 +9,10 @@ use tiny_skia_widgets as widgets;
 /// Hit region action from a control strip.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ControlAction {
-    CycleColor(usize),  // slot index
-    ToggleSolo(usize),  // slot index
-    ToggleMute(usize),  // slot index
+    CycleColor(usize),   // slot index
+    ToggleSolo(usize),   // slot index
+    ToggleMute(usize),   // slot index
+    HoverName(usize),    // slot index — for tooltip on truncated names
 }
 
 /// A rectangular hit region with an action.
@@ -72,21 +73,48 @@ pub fn draw_control_strip(
 
     let mut cy = y + pad;
 
-    // Track name (centered)
-    let name = if track_name.is_empty() {
+    // Track name (centered, truncated with ellipsis if too wide)
+    let full_name = if track_name.is_empty() {
         format!("Track {}", slot_index + 1)
     } else {
         track_name.to_string()
     };
-    let text_w = tr.text_width(&name, font_size);
+    let max_text_w = w - 2.0 * pad;
+    let full_w = tr.text_width(&full_name, font_size);
+    let (display_name, truncated) = if full_w <= max_text_w {
+        (full_name.clone(), false)
+    } else {
+        // Truncate character by character until it fits with ellipsis
+        let ellipsis = "...";
+        let ellipsis_w = tr.text_width(ellipsis, font_size);
+        let target_w = max_text_w - ellipsis_w;
+        let mut trunc = full_name.clone();
+        while !trunc.is_empty() && tr.text_width(&trunc, font_size) > target_w {
+            trunc.pop();
+        }
+        trunc.push_str(ellipsis);
+        (trunc, true)
+    };
+    let text_w = tr.text_width(&display_name, font_size);
+    let name_y = cy;
     tr.draw_text(
         pixmap,
         x + (w - text_w) / 2.0,
         cy + font_size,
-        &name,
+        &display_name,
         font_size,
         theme::to_color(color),
     );
+    // Hit region for name hover (tooltip for truncated names)
+    if truncated {
+        regions.push(ControlHitRegion {
+            x,
+            y: name_y,
+            w,
+            h: font_size + pad,
+            action: ControlAction::HoverName(slot_index),
+        });
+    }
     cy += font_size + pad;
 
     // Color swatch (clickable)
