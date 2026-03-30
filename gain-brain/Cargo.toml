@@ -21,7 +21,6 @@ tiny-skia = "0.11"
 tiny-skia-widgets = { path = "../tiny-skia-widgets" }
 keyboard-types = "0.6"
 crossbeam = "0.8"
-serde = { version = "1.0", features = ["derive"] }
 
 [package.metadata.bundler]
 name = "Gain Brain"

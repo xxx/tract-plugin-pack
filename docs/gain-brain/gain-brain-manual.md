@@ -104,17 +104,17 @@ Gain Brain uses an in-process static global for cross-instance communication. Al
 
 - **No audio-thread allocations** -- the process() callback never allocates heap memory in release builds
 - **CPU rendering** -- uses tiny-skia (software rasterizer) + fontdue (glyph cache) + softbuffer (pixel buffer). No OpenGL context, no GPU drivers loaded
-- **In-process shared state** -- lock-free atomic slots, zero overhead. Per-instance memory: ~0.24 MB
+- **In-process shared state** -- lock-free atomic slots, zero overhead. Per-instance memory: ~0.62 MB
 - **Cumulative canonical delta sync** -- the shared group slot stores a running sum of deltas in canonical (non-inverted) space via atomic fetch_add. Writers transform local deltas to canonical space before adding. Readers compute the difference from their last-seen cumulative and transform back to local space. Invert is handled at the boundaries -- the shared slot is coordinate-space-neutral
 - **KeepAlive processing** -- when in a group, the plugin requests the host keep calling process() even on silent tracks, ensuring group sync runs continuously
 - **Zero latency** -- no lookahead or convolution, just a gain multiplier with 50ms linear smoothing
 - **Embedded font** -- DejaVu Sans, compiled into the binary. No runtime font loading
 
-Benchmarks (Bitwig, 48 kHz / 1024 samples, GUI closed):
+Benchmarks (Bitwig, 48 kHz / 1024 samples, GUI closed, all grouped):
 
 | Instances | CPU | RSS | Per Instance |
 |---|---|---|---|
-| 200 | 3.8% | 107 MB | ~0.24 MB, 0.02% CPU |
+| 200 | 6.3% | 123 MB | ~0.62 MB, 0.03% CPU |
 
 ## Formats
 

@@ -5,6 +5,15 @@ use std::sync::Arc;
 mod editor;
 pub mod groups;
 
+/// Debug-only logging. Compiles to nothing in release builds, avoiding
+/// format!() heap allocations and stderr writes on the audio thread.
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        nih_log!($($arg)*);
+    };
+}
+
 // ── Background task for host-param sync ──────────────────────────────────────
 
 /// Tasks dispatched from the audio thread to the main/GUI thread via
@@ -62,10 +71,12 @@ const NO_OVERRIDE: i32 = i32::MIN;
 // ── Plugin struct ──────────────────────────────────────────────────────────────
 
 /// Global counter for assigning unique instance IDs (for debug logging).
+#[cfg(debug_assertions)]
 static INSTANCE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 pub struct GainBrain {
     /// Unique ID for this instance, used in debug log lines.
+    #[cfg(debug_assertions)]
     instance_id: u32,
     params: Arc<GainBrainParams>,
     /// Last cumulative_delta value we observed. Used for self-echo suppression
@@ -150,9 +161,11 @@ pub struct GainBrainParams {
 
 impl Default for GainBrain {
     fn default() -> Self {
+        #[cfg(debug_assertions)]
         let instance_id = INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        nih_log!("gain-brain[{instance_id}]: Default::default()");
+        debug_log!("gain-brain[{instance_id}]: Default::default()");
         Self {
+            #[cfg(debug_assertions)]
             instance_id,
             params: Arc::new(GainBrainParams::new()),
             last_seen_cumulative: 0,
@@ -319,6 +332,7 @@ impl Plugin for GainBrain {
         // Join the group via handle_transition so the slot gets properly
         // baselined (stale reset or live baseline). Set last_group to 0
         // first so the transition logic treats this as a fresh join.
+        #[cfg(debug_assertions)]
         let prev_last_group = self.last_group;
         self.last_group = 0;
         if (1..=16).contains(&group) {
@@ -332,7 +346,7 @@ impl Plugin for GainBrain {
             Ordering::Relaxed,
         );
 
-        nih_log!(
+        debug_log!(
             "gain-brain[{}]: initialize() gain={:.2}dB group={} mode={:?} invert={} \
              effective={:.2}dB persisted={}mb prev_last_group={}",
             self.instance_id, gain_db, group, link_mode, invert,
@@ -362,7 +376,7 @@ impl Plugin for GainBrain {
         if override_mb != NO_OVERRIDE {
             let target_db = clamp_db(millibels_to_db(override_mb));
             let target_gain = util::db_to_gain(target_db);
-            nih_log!(
+            debug_log!(
                 "gain-brain[{}]: APPLY OVERRIDE {}mb -> {:.2}dB (param was {:.2}dB)",
                 self.instance_id, override_mb, target_db,
                 util::gain_to_db(self.params.gain.value())
@@ -429,7 +443,7 @@ impl Plugin for GainBrain {
         if (1..=16).contains(&self.last_group) {
             groups::decrement_active(self.last_group as u8);
         }
-        nih_log!(
+        debug_log!(
             "gain-brain[{}]: deactivate() last_group={}",
             self.instance_id, self.last_group
         );
@@ -450,7 +464,7 @@ impl GainBrain {
         let group_changed = group != self.last_group;
         let mode_changed = link_mode != self.last_link_mode;
         if group_changed || mode_changed {
-            nih_log!(
+            debug_log!(
                 "gain-brain[{}]: TRANSITION group {}→{} mode {:?}→{:?} effective={:.2}dB",
                 self.instance_id, self.last_group, group,
                 self.last_link_mode, link_mode, self.effective_gain_db
@@ -466,7 +480,7 @@ impl GainBrain {
 
         // ── Invert toggle → local rebaseline (no epoch bump) ──
         if invert != self.last_invert {
-            nih_log!(
+            debug_log!(
                 "gain-brain[{}]: INVERT TOGGLE {}→{} effective={:.2}dB",
                 self.instance_id, self.last_invert, invert, self.effective_gain_db
             );
@@ -483,7 +497,7 @@ impl GainBrain {
 
         // Epoch change → rebaseline (don't apply delta)
         if snap.epoch != self.last_seen_epoch {
-            nih_log!(
+            debug_log!(
                 "gain-brain[{}]: READ REBASELINE epoch {}→{} cum={}",
                 self.instance_id, self.last_seen_epoch, snap.epoch, snap.cumulative_delta
             );
@@ -507,7 +521,7 @@ impl GainBrain {
                         let canonical = snap.absolute_gain;
                         let local = if invert { -canonical } else { canonical };
                         let local = local.clamp(-6000, 6000);
-                        nih_log!(
+                        debug_log!(
                             "gain-brain[{}]: READ ABS canonical={}mb local={}mb gen={}",
                             self.instance_id, canonical, local, snap.generation
                         );
@@ -527,7 +541,7 @@ impl GainBrain {
                         let new_mb = current_mb + local_delta;
                         let clamped_db = clamp_db(millibels_to_db(new_mb));
                         let clamped_mb = db_to_millibels(clamped_db);
-                        nih_log!(
+                        debug_log!(
                             "gain-brain[{}]: READ REL canonical_delta={}mb local_delta={}mb eff={:.2}->{:.2}dB",
                             self.instance_id, canonical_delta, local_delta,
                             self.effective_gain_db, clamped_db
@@ -563,16 +577,16 @@ impl GainBrain {
                     user_override_mb
                 };
 
-                nih_log!(
+                debug_log!(
                     "gain-brain[{}]: USER WRITE local_delta={}mb canonical_delta={}mb canonical_abs={}mb",
                     self.instance_id, local_delta, canonical_delta, canonical_absolute
                 );
 
-                let old_cumulative = groups::add_delta(group as u8, canonical_delta);
+                let (old_cumulative, new_gen) = groups::add_delta(group as u8, canonical_delta);
                 groups::set_absolute(group as u8, canonical_absolute);
 
                 self.last_seen_cumulative = old_cumulative + canonical_delta;
-                self.last_seen_generation = groups::read_slot(group as u8).generation;
+                self.last_seen_generation = new_gen;
 
                 self.effective_gain_db = clamp_db(millibels_to_db(user_override_mb));
             }
@@ -602,7 +616,7 @@ impl GainBrain {
                     self.param_sync_target_mb = None;
                     true
                 } else {
-                    nih_log!(
+                    debug_log!(
                         "gain-brain[{}]: USER OVERRIDE via param: param={}mb stale={}mb target={}mb",
                         self.instance_id, current_mb, self.stale_param_mb, target
                     );
@@ -621,16 +635,16 @@ impl GainBrain {
                 let canonical_delta = if invert { -local_delta } else { local_delta };
                 let canonical_absolute = if invert { -current_mb } else { current_mb };
 
-                nih_log!(
+                debug_log!(
                     "gain-brain[{}]: WRITE local_delta={}mb canonical_delta={}mb canonical_abs={}mb",
                     self.instance_id, local_delta, canonical_delta, canonical_absolute
                 );
 
-                let old_cumulative = groups::add_delta(group as u8, canonical_delta);
+                let (old_cumulative, new_gen) = groups::add_delta(group as u8, canonical_delta);
                 groups::set_absolute(group as u8, canonical_absolute);
 
                 self.last_seen_cumulative = old_cumulative + canonical_delta;
-                self.last_seen_generation = groups::read_slot(group as u8).generation;
+                self.last_seen_generation = new_gen;
 
                 self.effective_gain_db = millibels_to_db(current_mb);
             }
@@ -664,7 +678,7 @@ impl GainBrain {
 
         if count <= 1 {
             // First instance (stale slot) — reset
-            nih_log!(
+            debug_log!(
                 "gain-brain[{}]: TRANSITION STALE RESET group={} effective={:.2}dB",
                 self.instance_id, new_group, self.effective_gain_db
             );
@@ -679,15 +693,15 @@ impl GainBrain {
                 let effective_mb = db_to_millibels(self.effective_gain_db);
                 let invert = self.params.invert.value();
                 let canonical = if invert { -effective_mb } else { effective_mb };
-                let old_cum = groups::add_delta(new_group as u8, canonical);
+                let (old_cum, new_gen) = groups::add_delta(new_group as u8, canonical);
                 groups::set_absolute(new_group as u8, canonical);
                 self.last_seen_cumulative = old_cum + canonical;
-                self.last_seen_generation = groups::read_slot(new_group as u8).generation;
+                self.last_seen_generation = new_gen;
             }
         } else {
             // Joining a live group — baseline to current state
             let snap = groups::read_slot(new_group as u8);
-            nih_log!(
+            debug_log!(
                 "gain-brain[{}]: TRANSITION JOIN LIVE group={} cum={} abs={} epoch={} gen={} effective={:.2}dB",
                 self.instance_id, new_group, snap.cumulative_delta, snap.absolute_gain,
                 snap.epoch, snap.generation, self.effective_gain_db

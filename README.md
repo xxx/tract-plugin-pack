@@ -34,7 +34,7 @@ A lightweight gain utility with cross-instance group linking. Multiple instances
 - Invert toggle for mirrored gain movement (ducking, sidechain-style workflows)
 - In-process shared state with cumulative canonical delta sync (lock-free atomics, zero overhead)
 - CPU-rendered GUI with rotary dial (tiny-skia + softbuffer)
-- ~0.24 MB RSS and 0.02% CPU per instance (200 instances @ 3.8% CPU, 107 MB total)
+- ~0.62 MB RSS and 0.03% CPU per instance (200 instances grouped @ 6.3% CPU, 123 MB total)
 - Inspired by [BlueCat's Gain Suite](https://www.bluecataudio.com/Products/Product_GainSuite/)
 
 ### tinylimit

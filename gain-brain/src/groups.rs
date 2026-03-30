@@ -47,7 +47,7 @@ pub struct SlotSnapshot {
 // ── Public API ──────────────────────────────────────────────────────────────
 
 fn assert_group(group: u8) {
-    assert!(
+    debug_assert!(
         group >= 1 && group <= NUM_GROUPS as u8,
         "group must be 1-16, got {group}"
     );
@@ -70,16 +70,17 @@ pub fn read_slot(group: u8) -> SlotSnapshot {
 }
 
 /// Atomically add a canonical delta to the cumulative sum.
-/// Returns the OLD cumulative value (before the add) for self-echo suppression.
-/// Also increments generation.
-pub fn add_delta(group: u8, canonical_delta_mb: i32) -> i32 {
+/// Returns `(old_cumulative, new_generation)` — the cumulative value before
+/// the add (for self-echo suppression) and the generation after the increment
+/// (so callers don't need an extra `read_slot()`).
+pub fn add_delta(group: u8, canonical_delta_mb: i32) -> (i32, u32) {
     assert_group(group);
     let i = idx(group);
     let old = GROUPS[i]
         .cumulative_delta
         .fetch_add(canonical_delta_mb, Ordering::Relaxed);
-    GROUPS[i].generation.fetch_add(1, Ordering::Relaxed);
-    old
+    let old_gen = GROUPS[i].generation.fetch_add(1, Ordering::Relaxed);
+    (old, old_gen + 1)
 }
 
 /// Store the absolute gain value (canonical space) for absolute mode readers.
@@ -166,12 +167,14 @@ mod tests {
     }
 
     #[test]
-    fn test_add_delta_returns_old_cumulative() {
+    fn test_add_delta_returns_old_cumulative_and_new_generation() {
         reset_slots(&[3]);
-        let old = add_delta(3, 300);
+        let (old, gen) = add_delta(3, 300);
         assert_eq!(old, 0);
-        let old2 = add_delta(3, 200);
+        assert_eq!(gen, 1);
+        let (old2, gen2) = add_delta(3, 200);
         assert_eq!(old2, 300);
+        assert_eq!(gen2, 2);
     }
 
     #[test]
