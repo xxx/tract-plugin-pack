@@ -59,6 +59,7 @@ impl TimeMapping {
     /// - `sample_rate`: current sample rate
     /// - `buffer_size`: number of samples in this buffer
     /// - `is_playing`: whether transport is playing
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &self,
         ppq: f64,

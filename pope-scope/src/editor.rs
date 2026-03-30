@@ -348,7 +348,6 @@ impl PopeScopeWindow {
                         group,
                         sync_bars,
                         self.sample_rate,
-                        decimation,
                         mix_to_mono,
                     )
                 }

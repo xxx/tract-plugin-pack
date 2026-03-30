@@ -152,7 +152,7 @@ pub fn build_snapshots_free(
                 }
                 match level {
                     0 => {
-                        let mut out = vec![0.0f32; total_samples.min(decimation)];
+                        let mut out = vec![0.0f32; total_samples];
                         let n = buf.read_most_recent(&mut out);
                         out.truncate(n);
                         data_points = n;
@@ -160,7 +160,7 @@ pub fn build_snapshots_free(
                     }
                     1 => {
                         let num_blocks =
-                            (total_samples / crate::ring_buffer::BLOCK_SIZE).min(decimation);
+                            total_samples / crate::ring_buffer::BLOCK_SIZE;
                         let mut blocks = vec![MinMax::default(); num_blocks];
                         let n = buf.read_most_recent_l1(&mut blocks);
                         let mut flat = Vec::with_capacity(n * 2);
@@ -173,7 +173,7 @@ pub fn build_snapshots_free(
                     }
                     _ => {
                         let num_blocks =
-                            (total_samples / crate::ring_buffer::SUPER_BLOCK_SIZE).min(decimation);
+                            total_samples / crate::ring_buffer::SUPER_BLOCK_SIZE;
                         let mut blocks = vec![MinMax::default(); num_blocks];
                         let n = buf.read_most_recent_l2(&mut blocks);
                         let mut flat = Vec::with_capacity(n * 2);
@@ -228,13 +228,11 @@ pub fn build_snapshots_free(
 /// - `group`: which group to filter for
 /// - `sync_bars`: number of bars to display (0.25, 0.5, 1.0, 2.0, 4.0)
 /// - `sample_rate`: current sample rate
-/// - `decimation`: max output data points
 /// - `mix_to_mono`: whether to compute mono mix
 pub fn build_snapshots_beat_sync(
     group: u32,
     sync_bars: f64,
     sample_rate: f32,
-    decimation: usize,
     mix_to_mono: bool,
 ) -> Vec<WaveSnapshot> {
     let slots = store::active_slots_in_group(group);
@@ -284,7 +282,7 @@ pub fn build_snapshots_beat_sync(
         let mut data_points = 0;
 
         if let (Some(bufs), Some((start_sample, window_len))) = (guard.as_ref(), window) {
-            let read_count = window_len.min(decimation);
+            let read_count = window_len;
 
             // Convert DAW transport positions to ring buffer positions.
             // The time mapping stores the ring buffer write_pos that corresponds

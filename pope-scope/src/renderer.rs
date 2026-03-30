@@ -165,7 +165,7 @@ pub fn decimate_to_columns(samples: &[f32], num_columns: usize) -> (Vec<f32>, Ve
     (mins, maxs)
 }
 
-/// Draw a waveform as a line stroke.
+/// Draw a waveform as a connected line stroke using tiny-skia paths.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_waveform_line(
     pixmap: &mut tiny_skia::Pixmap,
@@ -184,30 +184,86 @@ pub fn draw_waveform_line(
 
     let centre_y = y + h / 2.0;
     let half_height = h / 2.0;
-    let num_cols = w as usize;
+    let num_cols = w.floor() as usize;
+
+    let mut pb = tiny_skia::PathBuilder::new();
 
     if samples.len() <= num_cols {
-        // Fewer samples than pixels: plot each sample
+        // Fewer samples than pixels: connect each sample with a line
         let step = w / samples.len().max(1) as f32;
-        for (i, &s) in samples.iter().enumerate() {
+        let py0 = sample_to_y(samples[0], min_db, max_db, centre_y, half_height);
+        pb.move_to(x, py0);
+        for (i, &s) in samples.iter().enumerate().skip(1) {
             let px = x + i as f32 * step;
             let py = sample_to_y(s, min_db, max_db, centre_y, half_height);
-            tiny_skia_widgets::draw_rect(pixmap, px, py, 1.0, 1.0, color);
+            pb.line_to(px, py);
         }
     } else {
-        // More samples than pixels: min/max per column
+        // More samples than pixels: draw two connected envelope paths
+        // (max envelope and min envelope) with consistent stroke width.
         let (mins, maxs) = decimate_to_columns(samples, num_cols);
+
+        // Max envelope path (positive peaks)
+        let y0_top = sample_to_y(maxs[0], min_db, max_db, centre_y, half_height);
+        pb.move_to(x, y0_top);
+        for i in 1..num_cols {
+            let px = x + i as f32;
+            let y_top = sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
+            pb.line_to(px, y_top);
+        }
+
+        // Min envelope path (negative peaks)
+        let mut pb2 = tiny_skia::PathBuilder::new();
+        let y0_bot = sample_to_y(mins[0], min_db, max_db, centre_y, half_height);
+        pb2.move_to(x, y0_bot);
+        for i in 1..num_cols {
+            let px = x + i as f32;
+            let y_bot = sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
+            pb2.line_to(px, y_bot);
+        }
+
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color(color);
+        paint.anti_alias = true;
+        let stroke = tiny_skia::Stroke {
+            width: 1.0,
+            ..Default::default()
+        };
+        if let Some(path2) = pb2.finish() {
+            pixmap.stroke_path(&path2, &paint, &stroke, tiny_skia::Transform::identity(), None);
+        }
+        // Also draw vertical segments connecting the two envelopes at each column
+        // to fill the gap between min and max.
         for i in 0..num_cols {
             let px = x + i as f32;
-            let y_min = sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
-            let y_max = sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
-            let seg_h = (y_max - y_min).max(1.0);
-            tiny_skia_widgets::draw_rect(pixmap, px, y_min, 1.0, seg_h, color);
+            let y_top = sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
+            let y_bot = sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
+            let seg_h = (y_bot - y_top).max(0.0);
+            if seg_h > 1.0 {
+                tiny_skia_widgets::draw_rect(pixmap, px, y_top, 1.0, seg_h, color);
+            }
         }
+    }
+
+    if let Some(path) = pb.finish() {
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color(color);
+        paint.anti_alias = true;
+        let stroke = tiny_skia::Stroke {
+            width: 1.0,
+            ..Default::default()
+        };
+        pixmap.stroke_path(
+            &path,
+            &paint,
+            &stroke,
+            tiny_skia::Transform::identity(),
+            None,
+        );
     }
 }
 
-/// Draw a waveform as a filled region from center line.
+/// Draw a waveform as a filled region from center line using tiny-skia paths.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_waveform_filled(
     pixmap: &mut tiny_skia::Pixmap,
@@ -235,27 +291,72 @@ pub fn draw_waveform_filled(
 
     let centre_y = y + h / 2.0;
     let half_height = h / 2.0;
-    let num_cols = w as usize;
+    let num_cols = w.floor() as usize;
+
+    let mut pb = tiny_skia::PathBuilder::new();
 
     if samples.len() <= num_cols {
+        // Forward pass: sample values
         let step = w / samples.len().max(1) as f32;
+        pb.move_to(x, centre_y);
         for (i, &s) in samples.iter().enumerate() {
             let px = x + i as f32 * step;
             let py = sample_to_y(s, min_db, max_db, centre_y, half_height);
-            let top = py.min(centre_y);
-            let bot = py.max(centre_y);
-            tiny_skia_widgets::draw_rect(pixmap, px, top, step.max(1.0), (bot - top).max(1.0), fill_color);
+            pb.line_to(px, py);
         }
+        // Close back to center line
+        pb.line_to(x + (samples.len() - 1) as f32 * step, centre_y);
+        pb.close();
     } else {
+        // Envelope fill: max values forward, min values backward
         let (mins, maxs) = decimate_to_columns(samples, num_cols);
+        // Forward along max envelope (above center = peaks)
+        pb.move_to(x, centre_y);
         for i in 0..num_cols {
             let px = x + i as f32;
             let y_top = sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
-            let y_bot = sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
-            let top = y_top.min(centre_y);
-            let bot = y_bot.max(centre_y);
-            tiny_skia_widgets::draw_rect(pixmap, px, top, 1.0, (bot - top).max(1.0), fill_color);
+            pb.line_to(px, y_top);
         }
+        // Connect to center at far end
+        pb.line_to(x + (num_cols - 1) as f32, centre_y);
+        pb.close();
+
+        // Second path for negative half (below center)
+        let mut pb2 = tiny_skia::PathBuilder::new();
+        pb2.move_to(x, centre_y);
+        for i in 0..num_cols {
+            let px = x + i as f32;
+            let y_bot = sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
+            pb2.line_to(px, y_bot);
+        }
+        pb2.line_to(x + (num_cols - 1) as f32, centre_y);
+        pb2.close();
+
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color(fill_color);
+        paint.anti_alias = true;
+        if let Some(path2) = pb2.finish() {
+            pixmap.fill_path(
+                &path2,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                tiny_skia::Transform::identity(),
+                None,
+            );
+        }
+    }
+
+    if let Some(path) = pb.finish() {
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color(fill_color);
+        paint.anti_alias = true;
+        pixmap.fill_path(
+            &path,
+            &paint,
+            tiny_skia::FillRule::Winding,
+            tiny_skia::Transform::identity(),
+            None,
+        );
     }
 }
 
