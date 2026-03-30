@@ -15,7 +15,13 @@ pub enum GainBrainTask {
     /// Fired when group sync changes `effective_gain_db` without updating
     /// `params.gain`. The task executor calls `ParamSetter` on the main
     /// thread where it is safe for both CLAP and VST3.
-    SyncGainParam { normalized: f32 },
+    SyncGainParam {
+        normalized: f32,
+        /// The param's normalized value at the time this task was dispatched.
+        /// If the param has changed from this value by the time the task
+        /// executes, the user has interacted and we should skip the update.
+        stale_normalized: f32,
+    },
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -62,12 +68,13 @@ pub struct GainBrain {
     /// Unique ID for this instance, used in debug log lines.
     instance_id: u32,
     params: Arc<GainBrainParams>,
-    /// Last generation we observed from the group slot (to detect external writes).
+    /// Last cumulative_delta value we observed. Used for self-echo suppression
+    /// and relative delta computation.
+    last_seen_cumulative: i32,
+    /// Last epoch we observed. Used for rebaseline detection.
+    last_seen_epoch: u32,
+    /// Last generation we observed (for absolute mode change detection).
     last_seen_generation: u32,
-    /// Last baseline_generation we observed (to detect rebaseline events).
-    last_baseline_generation: u32,
-    /// Last gain value (millibels) we wrote/received to/from the group slot.
-    last_sent_gain_millibels: i32,
     /// The param value (millibels) from the previous buffer. Used to detect
     /// user-initiated gain changes (as opposed to stale param values after
     /// a group override that can't update the param directly).
@@ -84,26 +91,34 @@ pub struct GainBrain {
     /// each buffer. When a group update arrives we write the target gain in
     /// millibels here and retarget the smoother. NO_OVERRIDE means nothing pending.
     pub group_gain_override: Arc<AtomicI32>,
-    /// Baseline gain (millibels) for relative-mode delta calculations.
-    /// Set when joining a group in Relative mode.
-    relative_baseline_mb: i32,
     /// The effective gain in dB that we are currently applying.
     effective_gain_db: f32,
     /// Shared with the editor so it can display the effective gain (which may
     /// differ from the parameter value when group sync overrides are active).
     pub display_gain_millibels: Arc<AtomicI32>,
-    /// Counter for throttling per-buffer debug logs. Only logs the first
-    /// N calls to sync_group after startup to avoid flooding.
-    sync_call_count: u32,
     /// Shared holder for the GuiContext, populated when the editor is first
     /// spawned. Used by `task_executor` (on the main thread) to update the
     /// host-visible gain parameter when group sync changes the effective gain.
     /// Stays populated even after the editor window is closed since the
     /// GuiContext Arc remains valid for the plugin's lifetime.
     pub gui_context: Arc<std::sync::Mutex<Option<Arc<dyn GuiContext>>>>,
-    /// Whether a `SyncGainParam` task is already in flight. Prevents flooding
-    /// the task queue with duplicate sync requests every buffer.
-    param_sync_pending: bool,
+    /// When a SyncGainParam task is in flight, stores the target millibel
+    /// value that the task will set the param to. `None` = no pending sync.
+    /// Used to distinguish "SyncGainParam arrived" (param moves to this
+    /// target) from "user changed the knob" (param moves elsewhere).
+    param_sync_target_mb: Option<i32>,
+    /// The param's millibel value at the time param_sync_target_mb was set.
+    /// While sync is pending, if the param still equals this value, the user
+    /// hasn't touched it → block writes. If the param changes away from this
+    /// value (and isn't the sync target), the user moved the knob → fire write.
+    stale_param_mb: i32,
+    /// User gain override from the GUI. Written by the editor when the user
+    /// drags or double-clicks the gain knob while a group is active. The
+    /// audio thread reads and clears this each buffer. This provides a
+    /// reliable user-intent signal that survives the SyncGainParam race:
+    /// even if SyncGainParam overwrites the param, this override ensures
+    /// the user's intended value is applied.
+    pub user_gain_override: Arc<AtomicI32>,
 }
 
 // ── Params ─────────────────────────────────────────────────────────────────────
@@ -140,21 +155,21 @@ impl Default for GainBrain {
         Self {
             instance_id,
             params: Arc::new(GainBrainParams::new()),
+            last_seen_cumulative: 0,
+            last_seen_epoch: 0,
             last_seen_generation: 0,
-            last_baseline_generation: 0,
-            last_sent_gain_millibels: 0,
             last_param_value_mb: 0,
             last_group: 0,
             last_link_mode: LinkMode::Relative,
             last_invert: false,
             sample_rate: 44100.0,
             group_gain_override: Arc::new(AtomicI32::new(NO_OVERRIDE)),
-            relative_baseline_mb: 0,
             effective_gain_db: 0.0,
             display_gain_millibels: Arc::new(AtomicI32::new(0)),
-            sync_call_count: 0,
             gui_context: Arc::new(std::sync::Mutex::new(None)),
-            param_sync_pending: false,
+            param_sync_target_mb: None,
+            stale_param_mb: 0,
+            user_gain_override: Arc::new(AtomicI32::new(NO_OVERRIDE)),
         }
     }
 }
@@ -214,9 +229,23 @@ impl Plugin for GainBrain {
         let gui_context = self.gui_context.clone();
         let params = self.params.clone();
         Box::new(move |task| match task {
-            GainBrainTask::SyncGainParam { normalized } => {
+            GainBrainTask::SyncGainParam {
+                normalized,
+                stale_normalized,
+            } => {
                 // This closure runs on the main/GUI thread (via execute_gui),
                 // where ParamSetter operations are safe for both CLAP and VST3.
+                //
+                // Only apply if the param's current value matches the stale
+                // value we recorded when dispatching. If the user has
+                // interacted (double-click, drag), the param will have
+                // changed and we skip the update to avoid overwriting
+                // the user's input.
+                let current = params.gain.preview_normalized(params.gain.value());
+                if (current - stale_normalized).abs() > 0.001 {
+                    // Param has been modified since dispatch — skip.
+                    return;
+                }
                 if let Ok(guard) = gui_context.lock() {
                     if let Some(ctx) = guard.as_ref() {
                         let setter = ParamSetter::new(ctx.as_ref());
@@ -240,8 +269,8 @@ impl Plugin for GainBrain {
         editor::create(
             self.params.clone(),
             self.display_gain_millibels.clone(),
-            self.group_gain_override.clone(),
             self.gui_context.clone(),
+            self.user_gain_override.clone(),
         )
     }
 
@@ -264,12 +293,8 @@ impl Plugin for GainBrain {
         let persisted_mb = self.params.effective_gain_mb.load(Ordering::Relaxed);
         let persisted_db = millibels_to_db(persisted_mb);
         if persisted_mb != 0 || gain_db.abs() < 0.01 {
-            // Only restore from persisted field if it's non-zero (real data)
-            // or the param is also at zero (consistent).
             self.effective_gain_db = persisted_db;
         } else {
-            // Persisted field is 0 but param is non-zero: this is likely a
-            // legacy state without the persisted field. Use the param value.
             self.effective_gain_db = gain_db;
         }
 
@@ -280,14 +305,26 @@ impl Plugin for GainBrain {
 
         // Sync tracking fields to the current param state so the write path
         // in sync_group() doesn't misfire on the first process() call.
-        // Without this, last_param_value_mb=0 (from Default) would differ
-        // from the host-restored param value, causing the write path to
-        // overwrite the group slot with a stale value.
         self.last_param_value_mb = db_to_millibels(gain_db);
-        self.last_group = group;
+
+        // Update active counts for the group refcount.
+        if (1..=16).contains(&self.last_group) {
+            groups::decrement_active(self.last_group as u8);
+        }
+
         self.last_link_mode = link_mode;
         self.last_invert = invert;
-        self.param_sync_pending = false;
+        self.param_sync_target_mb = None;
+
+        // Join the group via handle_transition so the slot gets properly
+        // baselined (stale reset or live baseline). Set last_group to 0
+        // first so the transition logic treats this as a fresh join.
+        let prev_last_group = self.last_group;
+        self.last_group = 0;
+        if (1..=16).contains(&group) {
+            self.handle_transition(group, link_mode);
+        }
+        self.last_group = group;
 
         // Sync display gain for the editor.
         self.display_gain_millibels.store(
@@ -297,10 +334,9 @@ impl Plugin for GainBrain {
 
         nih_log!(
             "gain-brain[{}]: initialize() gain={:.2}dB group={} mode={:?} invert={} \
-             last_group={} last_param_mb={} last_sent_mb={} effective={:.2}dB persisted={}mb",
+             effective={:.2}dB persisted={}mb prev_last_group={}",
             self.instance_id, gain_db, group, link_mode, invert,
-            self.last_group, self.last_param_value_mb,
-            self.last_sent_gain_millibels, self.effective_gain_db, persisted_mb
+            self.effective_gain_db, persisted_mb, prev_last_group
         );
         true
     }
@@ -340,8 +376,6 @@ impl Plugin for GainBrain {
             // No group active — effective gain simply tracks the parameter
             self.effective_gain_db = util::gain_to_db(self.params.gain.value());
         }
-        // else: in a group with no new override — keep effective_gain_db as-is.
-        // It was set by sync_group (from param change or prior override).
 
         // ── Apply gain ─────────────────────────────────────────────────
         let num_samples = buffer.samples();
@@ -359,401 +393,324 @@ impl Plugin for GainBrain {
         self.display_gain_millibels
             .store(effective_mb, Ordering::Relaxed);
 
-        // Persist the effective gain so the host saves the correct value,
-        // even when group sync has overridden the smoother without updating
-        // the gain parameter's internal value.
+        // Persist the effective gain so the host saves the correct value.
         self.params.effective_gain_mb.store(effective_mb, Ordering::Relaxed);
 
         // ── Sync host-visible param via main-thread task ──────────────
-        // When group sync changes effective_gain_db, the host's parameter
-        // value stays stale (nih-plug has no audio-thread param setter).
-        // We dispatch a task to the main thread which uses ParamSetter via
-        // the stored GuiContext. This works regardless of whether the GUI
-        // is open — the GuiContext remains valid once created.
         let param_db = util::gain_to_db(self.params.gain.value());
-        if (self.effective_gain_db - param_db).abs() > 0.05 && !self.param_sync_pending {
+        if (self.effective_gain_db - param_db).abs() > 0.05 && self.param_sync_target_mb.is_none() {
+            let target_mb = effective_mb;
             let target_linear = util::db_to_gain(self.effective_gain_db);
             let normalized = self.params.gain.preview_normalized(target_linear);
-            context.execute_gui(GainBrainTask::SyncGainParam { normalized });
-            self.param_sync_pending = true;
-        } else if (self.effective_gain_db - param_db).abs() <= 0.05 {
-            // The param has caught up (task was processed), clear the flag.
-            self.param_sync_pending = false;
+            let stale_normalized = self.params.gain.preview_normalized(self.params.gain.value());
+            context.execute_gui(GainBrainTask::SyncGainParam {
+                normalized,
+                stale_normalized,
+            });
+            self.param_sync_target_mb = Some(target_mb);
+            self.stale_param_mb = db_to_millibels(param_db);
         }
+        // Don't clear param_sync_target_mb here — it gets cleared by
+        // the sync_blocked check inside sync_group() when the SyncGainParam
+        // actually arrives (param matches target).
 
-        ProcessStatus::Normal
+        // When in a group, request the host to keep calling process() even
+        // when the track is silent. This is critical: sync_group() runs inside
+        // process(), so without it, user knob changes are never written to
+        // the shared slot, and reads from other instances are never applied.
+        if (1..=16).contains(&self.params.group.value()) {
+            ProcessStatus::KeepAlive
+        } else {
+            ProcessStatus::Normal
+        }
+    }
+
+    fn deactivate(&mut self) {
+        if (1..=16).contains(&self.last_group) {
+            groups::decrement_active(self.last_group as u8);
+        }
+        nih_log!(
+            "gain-brain[{}]: deactivate() last_group={}",
+            self.instance_id, self.last_group
+        );
+        self.last_group = 0;
     }
 }
 
 // ── Group sync logic ───────────────────────────────────────────────────────────
 
-/// State fields needed by transition/sync logic, borrowed separately to
-/// satisfy the borrow checker.
-struct SyncState<'a> {
-    instance_id: u32,
-    params: &'a GainBrainParams,
-    last_seen_generation: &'a mut u32,
-    last_baseline_generation: &'a mut u32,
-    last_sent_gain_millibels: &'a mut i32,
-    last_param_value_mb: &'a mut i32,
-    last_group: &'a mut i32,
-    last_link_mode: &'a mut LinkMode,
-    last_invert: &'a mut bool,
-    group_gain_override: &'a AtomicI32,
-    relative_baseline_mb: &'a mut i32,
-    effective_gain_db: &'a mut f32,
-    sync_call_count: &'a mut u32,
-}
-
 impl GainBrain {
     /// Run once per buffer to synchronize gain with the shared group state.
     fn sync_group(&mut self) {
-        let mut state = SyncState {
-            instance_id: self.instance_id,
-            params: &self.params,
-            last_seen_generation: &mut self.last_seen_generation,
-            last_baseline_generation: &mut self.last_baseline_generation,
-            last_sent_gain_millibels: &mut self.last_sent_gain_millibels,
-            last_param_value_mb: &mut self.last_param_value_mb,
-            last_group: &mut self.last_group,
-            last_link_mode: &mut self.last_link_mode,
-            last_invert: &mut self.last_invert,
-            group_gain_override: &self.group_gain_override,
-            relative_baseline_mb: &mut self.relative_baseline_mb,
-            effective_gain_db: &mut self.effective_gain_db,
-            sync_call_count: &mut self.sync_call_count,
-        };
+        let group = self.params.group.value();
+        let link_mode = self.params.link_mode.value();
+        let invert = self.params.invert.value();
 
-        let group = state.params.group.value();
-        let link_mode = state.params.link_mode.value();
-        let call_num = *state.sync_call_count;
-        *state.sync_call_count = call_num.saturating_add(1);
-        // Only log the first 20 sync_group calls per instance to avoid flooding.
-        if call_num < 20 {
-            let param_gain_db = util::gain_to_db(state.params.gain.value());
-            let param_mb = db_to_millibels(param_gain_db);
-            nih_log!(
-                "gain-brain[{}]: sync_group #{} param={:.2}dB({}mb) last_param_mb={} \
-                 last_sent_mb={} effective={:.2}dB group={} last_group={} mode={:?}",
-                state.instance_id, call_num, param_gain_db, param_mb,
-                *state.last_param_value_mb, *state.last_sent_gain_millibels,
-                *state.effective_gain_db, group, *state.last_group, link_mode
-            );
-        }
-
-        // Detect parameter transitions.
-        let group_changed = group != *state.last_group;
-        let mode_changed = link_mode != *state.last_link_mode;
-
+        // ── Transitions (group/mode changes) ──
+        let group_changed = group != self.last_group;
+        let mode_changed = link_mode != self.last_link_mode;
         if group_changed || mode_changed {
             nih_log!(
-                "gain-brain[{}]: TRANSITION group {}→{} mode {:?}→{:?} effective={:.2}dB param={:.2}dB",
-                state.instance_id,
-                *state.last_group,
-                group,
-                *state.last_link_mode,
-                link_mode,
-                *state.effective_gain_db,
-                util::gain_to_db(state.params.gain.value())
+                "gain-brain[{}]: TRANSITION group {}→{} mode {:?}→{:?} effective={:.2}dB",
+                self.instance_id, self.last_group, group,
+                self.last_link_mode, link_mode, self.effective_gain_db
             );
-            Self::handle_transition(&mut state, group, link_mode);
-            nih_log!(
-                "gain-brain[{}]: AFTER TRANSITION baseline={} last_sent={} effective={:.2}dB override={}",
-                state.instance_id,
-                *state.relative_baseline_mb,
-                *state.last_sent_gain_millibels,
-                *state.effective_gain_db,
-                state.group_gain_override.load(Ordering::Relaxed)
-            );
-            *state.last_group = group;
-            *state.last_link_mode = link_mode;
+            self.handle_transition(group, link_mode);
+            self.last_group = group;
+            self.last_link_mode = link_mode;
         }
 
-        // Active sync only when group is 1-16.
         if !(1..=16).contains(&group) {
             return;
         }
 
-        let invert = state.params.invert.value();
-
-        // ── INVERT TOGGLE: re-write slot to prevent discontinuity ────
-        if invert != *state.last_invert {
-            let effective_mb = db_to_millibels(*state.effective_gain_db);
-            let write_mb = if invert { -effective_mb } else { effective_mb };
+        // ── Invert toggle → local rebaseline (no epoch bump) ──
+        if invert != self.last_invert {
             nih_log!(
-                "gain-brain[{}]: INVERT TOGGLE {}→{} effective={}mb write={}mb (rebaseline)",
-                state.instance_id,
-                *state.last_invert,
-                invert,
-                effective_mb,
-                write_mb
+                "gain-brain[{}]: INVERT TOGGLE {}→{} effective={:.2}dB",
+                self.instance_id, self.last_invert, invert, self.effective_gain_db
             );
-            groups::write_slot_rebaseline(group as u8, write_mb);
-            *state.last_sent_gain_millibels = write_mb;
-            let updated_slot = groups::read_slot(group as u8);
-            *state.last_seen_generation = updated_slot.generation;
-            *state.last_baseline_generation = updated_slot.baseline_generation;
-            *state.last_invert = invert;
+            let snap = groups::read_slot(group as u8);
+            self.last_seen_cumulative = snap.cumulative_delta;
+            self.last_seen_generation = snap.generation;
+            self.last_invert = invert;
         }
 
-        let slot = groups::read_slot(group as u8);
+        let snap = groups::read_slot(group as u8);
 
-        // ── READ PATH: check for external changes ──────────────────────
-        // Track whether a read fired this buffer so the write path doesn't
-        // overwrite effective_gain_db with the stale param value.
+        // ── READ PATH ──
         let mut read_fired = false;
 
-        // If baseline_generation changed, another instance toggled invert
-        // or performed a rebaseline write. Re-baseline without applying a delta.
-        if slot.baseline_generation != *state.last_baseline_generation {
+        // Epoch change → rebaseline (don't apply delta)
+        if snap.epoch != self.last_seen_epoch {
             nih_log!(
-                "gain-brain[{}]: READ REBASELINE baseline_gen {}→{} slot={}mb",
-                state.instance_id,
-                *state.last_baseline_generation,
-                slot.baseline_generation,
-                slot.gain_millibels
+                "gain-brain[{}]: READ REBASELINE epoch {}→{} cum={}",
+                self.instance_id, self.last_seen_epoch, snap.epoch, snap.cumulative_delta
             );
-            *state.relative_baseline_mb = slot.gain_millibels;
-            *state.last_sent_gain_millibels = slot.gain_millibels;
-            *state.last_seen_generation = slot.generation;
-            *state.last_baseline_generation = slot.baseline_generation;
+            self.last_seen_cumulative = snap.cumulative_delta;
+            self.last_seen_epoch = snap.epoch;
+            self.last_seen_generation = snap.generation;
+            // For absolute mode, also adopt the absolute gain
             if link_mode == LinkMode::Absolute {
-                let applied_mb = if invert {
-                    (-slot.gain_millibels).clamp(-6000, 6000)
-                } else {
-                    slot.gain_millibels
-                };
-                state
-                    .group_gain_override
-                    .store(applied_mb, Ordering::Relaxed);
-                *state.effective_gain_db = millibels_to_db(applied_mb);
+                let canonical = snap.absolute_gain;
+                let local = if invert { -canonical } else { canonical };
+                let local = local.clamp(-6000, 6000);
+                self.group_gain_override.store(local, Ordering::Relaxed);
+                self.effective_gain_db = millibels_to_db(local);
+                self.last_param_value_mb = local;
             }
             read_fired = true;
-        } else if slot.generation != *state.last_seen_generation
-            && slot.gain_millibels != *state.last_sent_gain_millibels
-        {
+        } else {
             match link_mode {
                 LinkMode::Absolute => {
-                    let applied_mb = if invert {
-                        (-slot.gain_millibels).clamp(-6000, 6000)
-                    } else {
-                        slot.gain_millibels
-                    };
-                    nih_log!(
-                        "gain-brain[{}]: READ ABS slot={}mb gen={} last_sent={}mb invert={} -> override={}mb",
-                        state.instance_id,
-                        slot.gain_millibels,
-                        slot.generation,
-                        *state.last_sent_gain_millibels,
-                        invert,
-                        applied_mb
-                    );
-                    state
-                        .group_gain_override
-                        .store(applied_mb, Ordering::Relaxed);
-                    *state.last_sent_gain_millibels = slot.gain_millibels;
-                    *state.effective_gain_db = millibels_to_db(applied_mb);
-                }
-                LinkMode::Relative => {
-                    let raw_delta = slot.gain_millibels - *state.relative_baseline_mb;
-                    let delta_mb = if invert { -raw_delta } else { raw_delta };
-                    let current_mb = db_to_millibels(*state.effective_gain_db);
-                    let new_mb = current_mb + delta_mb;
-                    let clamped_db = clamp_db(millibels_to_db(new_mb));
-                    let clamped_mb = db_to_millibels(clamped_db);
-                    nih_log!(
-                        "gain-brain[{}]: READ REL slot={}mb baseline={}mb delta={}mb invert={} eff={:.2}->{:.2}dB",
-                        state.instance_id, slot.gain_millibels, *state.relative_baseline_mb,
-                        delta_mb, invert, millibels_to_db(current_mb), millibels_to_db(clamped_mb)
-                    );
-                    state
-                        .group_gain_override
-                        .store(clamped_mb, Ordering::Relaxed);
-                    *state.relative_baseline_mb = slot.gain_millibels;
-                    *state.last_sent_gain_millibels = clamped_mb;
-                    *state.effective_gain_db = clamped_db;
-                }
-            }
-            *state.last_seen_generation = slot.generation;
-            read_fired = true;
-        }
-
-        // ── WRITE PATH: detect user-initiated gain changes ─────────────
-        let current_gain_db = util::gain_to_db(state.params.gain.value());
-        let current_mb = db_to_millibels(current_gain_db);
-
-        if current_mb != *state.last_param_value_mb {
-            let write_mb = if invert { -current_mb } else { current_mb };
-            nih_log!(
-                "gain-brain[{}]: WRITE param_mb {}→{} write={}mb invert={} effective_was={:.2}dB read_fired={}",
-                state.instance_id,
-                *state.last_param_value_mb,
-                current_mb,
-                write_mb,
-                invert,
-                *state.effective_gain_db,
-                read_fired
-            );
-            // Only update effective_gain_db from the param if the read path
-            // didn't fire this buffer — otherwise we'd overwrite the remote
-            // delta with the stale param value.
-            if !read_fired {
-                *state.effective_gain_db = current_gain_db;
-            }
-            // All normal writes use write_slot (not rebaseline).
-            // write_slot_rebaseline is reserved for the invert TOGGLE event
-            // only — using it for every inverted write would cause relative
-            // readers to silently drop all deltas from inverted writers.
-            groups::write_slot(group as u8, write_mb);
-            let updated_slot = groups::read_slot(group as u8);
-            *state.last_seen_generation = updated_slot.generation;
-            *state.last_sent_gain_millibels = write_mb;
-            *state.relative_baseline_mb = write_mb;
-        }
-        *state.last_param_value_mb = current_mb;
-    }
-
-    /// Handle transitions when group or link_mode parameters change.
-    fn handle_transition(
-        state: &mut SyncState<'_>,
-        new_group: i32,
-        new_link_mode: LinkMode,
-    ) {
-        let old_group = *state.last_group;
-        let old_link_mode = *state.last_link_mode;
-
-        // Leaving a group (group -> 0): keep current gain, stop syncing.
-        if new_group == 0 {
-            // Nothing to do -- we just stop syncing.
-            // Reset tracking state.
-            *state.last_seen_generation = 0;
-            *state.last_sent_gain_millibels = 0;
-            *state.relative_baseline_mb = 0;
-            return;
-        }
-
-        // Joining or changing to group 1-16 with link active.
-        let slot = groups::read_slot(new_group as u8);
-        // Use effective_gain_db (what the instance is actually outputting),
-        // NOT params.gain.value() which may be stale after group overrides.
-        let effective_mb = db_to_millibels(*state.effective_gain_db);
-
-        let was_active = (1..=16).contains(&old_group);
-
-        let invert = state.params.invert.value();
-
-        nih_log!(
-            "gain-brain[{}]: handle_transition was_active={} slot=[gain={}mb gen={} bgen={}] \
-             effective={}mb param={:.2}dB invert={}",
-            state.instance_id, was_active, slot.gain_millibels, slot.generation,
-            slot.baseline_generation, effective_mb,
-            util::gain_to_db(state.params.gain.value()), invert
-        );
-
-        if !was_active {
-            // Newly joining a group (old group was 0).
-            match new_link_mode {
-                LinkMode::Absolute => {
-                    if slot.generation == 0 {
-                        // Empty slot (no other instances, or fresh restart).
-                        // Write our effective gain to the slot so other
-                        // instances joining later adopt our restored value
-                        // instead of the slot's default 0.
-                        let write_mb = if invert { -effective_mb } else { effective_mb };
+                    if snap.generation != self.last_seen_generation {
+                        let canonical = snap.absolute_gain;
+                        let local = if invert { -canonical } else { canonical };
+                        let local = local.clamp(-6000, 6000);
                         nih_log!(
-                            "gain-brain[{}]: JOIN ABS EMPTY SLOT -> write={}mb effective={}mb",
-                            state.instance_id, write_mb, effective_mb
+                            "gain-brain[{}]: READ ABS canonical={}mb local={}mb gen={}",
+                            self.instance_id, canonical, local, snap.generation
                         );
-                        groups::write_slot(new_group as u8, write_mb);
-                        *state.last_sent_gain_millibels = write_mb;
-                    } else {
-                        // Slot has data from other instances -- adopt their gain.
-                        let applied_mb = if invert {
-                            (-slot.gain_millibels).clamp(-6000, 6000)
-                        } else {
-                            slot.gain_millibels
-                        };
-                        nih_log!(
-                            "gain-brain[{}]: JOIN ABS -> override={}mb (slot={}mb)",
-                            state.instance_id, applied_mb, slot.gain_millibels
-                        );
-                        state
-                            .group_gain_override
-                            .store(applied_mb, Ordering::Relaxed);
-                        *state.last_sent_gain_millibels = slot.gain_millibels;
+                        self.group_gain_override.store(local, Ordering::Relaxed);
+                        self.effective_gain_db = millibels_to_db(local);
+                        self.last_seen_generation = snap.generation;
+                        self.last_seen_cumulative = snap.cumulative_delta;
+                        self.last_param_value_mb = local;
+                        read_fired = true;
                     }
                 }
                 LinkMode::Relative => {
-                    // Initialize effective gain from the restored parameter value.
-                    // On startup, Default::default() sets effective_gain_db=0.0,
-                    // but the host may have already restored the param to a
-                    // non-zero value. Use the param as the source of truth.
-                    let param_db = util::gain_to_db(state.params.gain.value());
-                    *state.effective_gain_db = clamp_db(param_db);
-                    let restored_mb = db_to_millibels(*state.effective_gain_db);
-                    // Keep current gain, baseline to group's value (tracks slot, not inverted).
-                    nih_log!(
-                        "gain-brain[{}]: JOIN REL -> baseline={}mb last_sent={}mb effective={:.2}dB (from param)",
-                        state.instance_id, slot.gain_millibels, restored_mb,
-                        *state.effective_gain_db
-                    );
-                    *state.relative_baseline_mb = slot.gain_millibels;
-                    *state.last_sent_gain_millibels = restored_mb;
+                    if snap.cumulative_delta != self.last_seen_cumulative {
+                        let canonical_delta = snap.cumulative_delta - self.last_seen_cumulative;
+                        let local_delta = if invert { -canonical_delta } else { canonical_delta };
+                        let current_mb = db_to_millibels(self.effective_gain_db);
+                        let new_mb = current_mb + local_delta;
+                        let clamped_db = clamp_db(millibels_to_db(new_mb));
+                        let clamped_mb = db_to_millibels(clamped_db);
+                        nih_log!(
+                            "gain-brain[{}]: READ REL canonical_delta={}mb local_delta={}mb eff={:.2}->{:.2}dB",
+                            self.instance_id, canonical_delta, local_delta,
+                            self.effective_gain_db, clamped_db
+                        );
+                        self.group_gain_override.store(clamped_mb, Ordering::Relaxed);
+                        self.effective_gain_db = clamped_db;
+                        self.last_seen_cumulative = snap.cumulative_delta;
+                        self.last_seen_generation = snap.generation;
+                        self.last_param_value_mb = clamped_mb;
+                        read_fired = true;
+                    }
                 }
+            }
+        }
+
+        // ── WRITE PATH ──
+        //
+        // Check for explicit user gain override first. This is written by
+        // the GUI when the user drags or double-clicks the gain knob. It
+        // provides a reliable user-intent signal that survives the
+        // SyncGainParam race condition.
+        let user_override_mb = self
+            .user_gain_override
+            .swap(NO_OVERRIDE, Ordering::Relaxed);
+        if user_override_mb != NO_OVERRIDE && !read_fired {
+            let effective_mb = db_to_millibels(self.effective_gain_db);
+            let local_delta = user_override_mb - effective_mb;
+            if local_delta.abs() > 1 {
+                let canonical_delta = if invert { -local_delta } else { local_delta };
+                let canonical_absolute = if invert {
+                    -user_override_mb
+                } else {
+                    user_override_mb
+                };
+
+                nih_log!(
+                    "gain-brain[{}]: USER WRITE local_delta={}mb canonical_delta={}mb canonical_abs={}mb",
+                    self.instance_id, local_delta, canonical_delta, canonical_absolute
+                );
+
+                let old_cumulative = groups::add_delta(group as u8, canonical_delta);
+                groups::set_absolute(group as u8, canonical_absolute);
+
+                self.last_seen_cumulative = old_cumulative + canonical_delta;
+                self.last_seen_generation = groups::read_slot(group as u8).generation;
+
+                self.effective_gain_db = clamp_db(millibels_to_db(user_override_mb));
+            }
+            // Update param tracking to the user's value. Keep
+            // param_sync_target_mb intact — the stale SyncGainParam is
+            // still in flight and we need the sync_blocked check to
+            // absorb it when it arrives (case b: param changes to target).
+            // Update stale_param_mb so the "unchanged stale" check (case a)
+            // doesn't misidentify the user's new param value as stale.
+            self.last_param_value_mb = user_override_mb;
+            let current_gain_db = util::gain_to_db(self.params.gain.value());
+            self.stale_param_mb = db_to_millibels(current_gain_db);
+        } else {
+            // Fall back to param-based change detection.
+            let current_gain_db = util::gain_to_db(self.params.gain.value());
+            let current_mb = db_to_millibels(current_gain_db);
+
+            // When sync is pending, the param may be:
+            //   (a) still at the stale value → not user input, block write
+            //   (b) at the sync target → SyncGainParam arrived, update tracking
+            //   (c) at some other value → user changed the knob, fire write
+            let sync_blocked = if let Some(target) = self.param_sync_target_mb {
+                if (current_mb - self.stale_param_mb).abs() <= 1 {
+                    true
+                } else if (current_mb - target).abs() <= 1 {
+                    self.last_param_value_mb = current_mb;
+                    self.param_sync_target_mb = None;
+                    true
+                } else {
+                    nih_log!(
+                        "gain-brain[{}]: USER OVERRIDE via param: param={}mb stale={}mb target={}mb",
+                        self.instance_id, current_mb, self.stale_param_mb, target
+                    );
+                    self.param_sync_target_mb = None;
+                    false
+                }
+            } else {
+                false
+            };
+
+            if (current_mb - self.last_param_value_mb).abs() > 1
+                && !read_fired
+                && !sync_blocked
+            {
+                let local_delta = current_mb - self.last_param_value_mb;
+                let canonical_delta = if invert { -local_delta } else { local_delta };
+                let canonical_absolute = if invert { -current_mb } else { current_mb };
+
+                nih_log!(
+                    "gain-brain[{}]: WRITE local_delta={}mb canonical_delta={}mb canonical_abs={}mb",
+                    self.instance_id, local_delta, canonical_delta, canonical_absolute
+                );
+
+                let old_cumulative = groups::add_delta(group as u8, canonical_delta);
+                groups::set_absolute(group as u8, canonical_absolute);
+
+                self.last_seen_cumulative = old_cumulative + canonical_delta;
+                self.last_seen_generation = groups::read_slot(group as u8).generation;
+
+                self.effective_gain_db = millibels_to_db(current_mb);
+            }
+
+            if !read_fired {
+                self.last_param_value_mb = current_mb;
+            }
+        }
+    }
+
+    /// Handle transitions when group or link_mode parameters change.
+    fn handle_transition(&mut self, new_group: i32, new_link_mode: LinkMode) {
+        let old_group = self.last_group;
+
+        // Leaving a group
+        if (1..=16).contains(&old_group) {
+            groups::decrement_active(old_group as u8);
+        }
+
+        // Not joining any group
+        if !(1..=16).contains(&new_group) {
+            self.last_seen_cumulative = 0;
+            self.last_seen_epoch = 0;
+            self.last_seen_generation = 0;
+            return;
+        }
+
+        // Joining a group
+        groups::increment_active(new_group as u8);
+        let count = groups::active_count(new_group as u8);
+
+        if count <= 1 {
+            // First instance (stale slot) — reset
+            nih_log!(
+                "gain-brain[{}]: TRANSITION STALE RESET group={} effective={:.2}dB",
+                self.instance_id, new_group, self.effective_gain_db
+            );
+            groups::reset_cumulative(new_group as u8);
+            self.last_seen_cumulative = 0;
+            self.last_seen_epoch = groups::read_slot(new_group as u8).epoch;
+            self.last_seen_generation = 0;
+
+            // For absolute mode, seed the slot with our effective gain so
+            // the next instance to join can adopt it.
+            if new_link_mode == LinkMode::Absolute {
+                let effective_mb = db_to_millibels(self.effective_gain_db);
+                let invert = self.params.invert.value();
+                let canonical = if invert { -effective_mb } else { effective_mb };
+                let old_cum = groups::add_delta(new_group as u8, canonical);
+                groups::set_absolute(new_group as u8, canonical);
+                self.last_seen_cumulative = old_cum + canonical;
+                self.last_seen_generation = groups::read_slot(new_group as u8).generation;
             }
         } else {
-            match (old_link_mode, new_link_mode) {
-                // Absolute -> Absolute (group changed): adopt new group's gain.
-                (LinkMode::Absolute, LinkMode::Absolute) => {
-                    let applied_mb = if invert {
-                        (-slot.gain_millibels).clamp(-6000, 6000)
-                    } else {
-                        slot.gain_millibels
-                    };
-                    state
-                        .group_gain_override
-                        .store(applied_mb, Ordering::Relaxed);
-                    *state.last_sent_gain_millibels = slot.gain_millibels;
-                }
-                // Absolute -> Relative: keep current gain, baseline to it.
-                (LinkMode::Absolute, LinkMode::Relative) => {
-                    *state.relative_baseline_mb = effective_mb;
-                    *state.last_sent_gain_millibels = effective_mb;
-                }
-                // Relative -> Absolute: snap to group's current gain.
-                (LinkMode::Relative, LinkMode::Absolute) => {
-                    let applied_mb = if invert {
-                        (-slot.gain_millibels).clamp(-6000, 6000)
-                    } else {
-                        slot.gain_millibels
-                    };
-                    state
-                        .group_gain_override
-                        .store(applied_mb, Ordering::Relaxed);
-                    *state.last_sent_gain_millibels = slot.gain_millibels;
-                }
-                // Relative -> Relative (group changed): keep gain, baseline to new group.
-                (LinkMode::Relative, LinkMode::Relative) => {
-                    *state.relative_baseline_mb = slot.gain_millibels;
-                    *state.last_sent_gain_millibels = effective_mb;
-                }
+            // Joining a live group — baseline to current state
+            let snap = groups::read_slot(new_group as u8);
+            nih_log!(
+                "gain-brain[{}]: TRANSITION JOIN LIVE group={} cum={} abs={} epoch={} gen={} effective={:.2}dB",
+                self.instance_id, new_group, snap.cumulative_delta, snap.absolute_gain,
+                snap.epoch, snap.generation, self.effective_gain_db
+            );
+            self.last_seen_cumulative = snap.cumulative_delta;
+            self.last_seen_epoch = snap.epoch;
+            self.last_seen_generation = snap.generation;
+
+            if new_link_mode == LinkMode::Absolute {
+                let canonical = snap.absolute_gain;
+                let invert = self.params.invert.value();
+                let local = if invert { -canonical } else { canonical };
+                let local = local.clamp(-6000, 6000);
+                self.group_gain_override.store(local, Ordering::Relaxed);
+                self.effective_gain_db = millibels_to_db(local);
             }
+            // Relative: keep own effective gain, just baseline cumulative
         }
 
-        // Sync last_param_value_mb to the current param so the write path
-        // doesn't misfire on this buffer (the param may have changed while
-        // ungrouped, but that's not a "new" change to propagate).
-        // Exception: when freshly joining in Relative mode (!was_active),
-        // leave last_param_value_mb at its previous value (0 from Default)
-        // so the write path fires on this buffer and propagates the restored
-        // param value to the slot.
-        if was_active || new_link_mode == LinkMode::Absolute {
-            let current_param_db = util::gain_to_db(state.params.gain.value());
-            *state.last_param_value_mb = db_to_millibels(current_param_db);
-        }
-
-        *state.last_seen_generation = slot.generation;
-        *state.last_baseline_generation = slot.baseline_generation;
+        // Sync param tracking
+        let param_db = util::gain_to_db(self.params.gain.value());
+        self.last_param_value_mb = db_to_millibels(param_db);
+        self.last_invert = self.params.invert.value();
     }
 }
 
@@ -841,10 +798,9 @@ mod tests {
 
     #[test]
     fn test_roundtrip_fractional() {
-        // 0.005 dB -> 0 or 1 millibels depending on rounding
         let db = 0.005_f32;
         let mb = db_to_millibels(db);
-        assert_eq!(mb, 1); // 0.5 rounds to 1
+        assert_eq!(mb, 1);
         let back = millibels_to_db(mb);
         assert!((back - 0.01).abs() < f32::EPSILON);
     }
@@ -870,9 +826,7 @@ mod tests {
 
     #[test]
     fn test_no_override_sentinel() {
-        // Verify the sentinel is a value that cannot represent a valid gain.
-        // -60 dB = -6000 mb, +60 dB = 6000 mb, so i32::MIN is far outside range.
-        assert!(NO_OVERRIDE < -6000);
+        const { assert!(NO_OVERRIDE < -6000) };
     }
 
     #[test]
@@ -889,10 +843,6 @@ mod tests {
 
     // ── Integration test helpers ──────────────────────────────────────────
 
-    /// Build a `GainBrainParams` with specific initial values for gain, group,
-    /// link_mode, and invert. This simulates what a host does after restoring
-    /// plugin state: the params are constructed with the restored values so
-    /// that `param.value()` returns the correct initial value.
     fn make_params(
         gain_db: f32,
         group: i32,
@@ -923,38 +873,33 @@ mod tests {
         })
     }
 
-    /// Create a `GainBrain` instance using pre-built params.
-    /// The instance starts with default internal state (last_group=0, etc.),
-    /// simulating a freshly-created plugin whose params have been restored
-    /// by the host before the first process() call.
     fn make_instance(params: Arc<GainBrainParams>) -> GainBrain {
         let instance_id = INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
         GainBrain {
             instance_id,
             params,
+            last_seen_cumulative: 0,
+            last_seen_epoch: 0,
             last_seen_generation: 0,
-            last_baseline_generation: 0,
-            last_sent_gain_millibels: 0,
             last_param_value_mb: 0,
             last_group: 0,
             last_link_mode: LinkMode::Relative,
             last_invert: false,
             sample_rate: 48000.0,
             group_gain_override: Arc::new(AtomicI32::new(NO_OVERRIDE)),
-            relative_baseline_mb: 0,
             effective_gain_db: 0.0,
             display_gain_millibels: Arc::new(AtomicI32::new(0)),
-            sync_call_count: 0,
             gui_context: Arc::new(std::sync::Mutex::new(None)),
-            param_sync_pending: false,
+            param_sync_target_mb: None,
+            stale_param_mb: 0,
+            user_gain_override: Arc::new(AtomicI32::new(NO_OVERRIDE)),
         }
     }
 
-    /// Simulate initialize() for tests. Restores effective gain from the
-    /// persisted field and resets the smoother. Must be called after
-    /// make_instance() and before tick() to match the real plugin lifecycle.
     fn init(inst: &mut GainBrain) {
         let gain_db = util::gain_to_db(inst.params.gain.value());
+        let group = inst.params.group.value();
+        let link_mode = inst.params.link_mode.value();
         let persisted_mb = inst.params.effective_gain_mb.load(Ordering::Relaxed);
         let persisted_db = millibels_to_db(persisted_mb);
         if persisted_mb != 0 || gain_db.abs() < 0.01 {
@@ -964,21 +909,34 @@ mod tests {
         }
         let target_gain = util::db_to_gain(inst.effective_gain_db);
         inst.params.gain.smoothed.reset(target_gain);
-        // Sync tracking fields to prevent write-path misfire (matches real
-        // initialize() behavior).
         inst.last_param_value_mb = db_to_millibels(gain_db);
-        inst.last_group = inst.params.group.value();
-        inst.last_link_mode = inst.params.link_mode.value();
+        // Update active counts (mirrors real initialize()).
+        if (1..=16).contains(&inst.last_group) {
+            groups::decrement_active(inst.last_group as u8);
+        }
+        inst.last_link_mode = link_mode;
         inst.last_invert = inst.params.invert.value();
-        inst.param_sync_pending = false;
+        inst.param_sync_target_mb = None;
+        // Join the group via handle_transition (mirrors real initialize()).
+        inst.last_group = 0;
+        if (1..=16).contains(&group) {
+            inst.handle_transition(group, link_mode);
+        }
+        inst.last_group = group;
         inst.display_gain_millibels.store(
             db_to_millibels(inst.effective_gain_db),
             Ordering::Relaxed,
         );
     }
 
-    /// Run sync_group + drain any pending override (simulates one buffer of
-    /// process() without needing a real audio Buffer).
+    #[allow(dead_code)]
+    fn deinit(inst: &mut GainBrain) {
+        if (1..=16).contains(&inst.last_group) {
+            groups::decrement_active(inst.last_group as u8);
+        }
+        inst.last_group = 0;
+    }
+
     fn tick(inst: &mut GainBrain) {
         inst.sync_group();
         let override_mb = inst
@@ -995,467 +953,354 @@ mod tests {
         } else if !(1..=16).contains(&inst.params.group.value()) {
             inst.effective_gain_db = util::gain_to_db(inst.params.gain.value());
         }
-        // Mirror what process() does: persist effective gain for save/restore.
+        // Mirror process()'s param_sync_target_mb logic so the write path
+        // doesn't misinterpret stale param values as user knob changes.
+        // Only SET a new sync target when none exists. Don't clear it here
+        // — it gets cleared by the sync_blocked check inside sync_group()
+        // when the SyncGainParam actually arrives (param matches target).
+        let param_db = util::gain_to_db(inst.params.gain.value());
+        if (inst.effective_gain_db - param_db).abs() > 0.05 && inst.param_sync_target_mb.is_none() {
+            let target_mb = db_to_millibels(inst.effective_gain_db);
+            inst.param_sync_target_mb = Some(target_mb);
+            inst.stale_param_mb = db_to_millibels(param_db);
+        }
         inst.params
             .effective_gain_mb
             .store(db_to_millibels(inst.effective_gain_db), Ordering::Relaxed);
     }
 
-    // ── Integration tests: Bitwig restart scenario ────────────────────────
+    // ── Integration tests ────────────────────────────────────────────────
 
-    /// Simulates the Bitwig restart bug:
-    /// 1. Two instances in group 1, relative mode
-    /// 2. Instance 0: -7.40 dB, Instance 1: -1.00 dB (inverted)
-    /// 3. Both sync and establish their gains
-    /// 4. "Restart": drop both, reset group slots, recreate with restored params
-    /// 5. Verify gains are restored correctly (not 0.0 dB)
     #[test]
-    fn test_bitwig_restart_relative_mode() {
-        // Use group 14 to avoid interference with other tests.
-        let test_group: i32 = 14;
-        groups::reset_slot(test_group as u8);
+    fn test_relative_no_invert() {
+        groups::reset_slot(1);
+        let mut a = make_instance(make_params(0.0, 1, LinkMode::Relative, false));
+        let mut b = make_instance(make_params(0.0, 1, LinkMode::Relative, false));
+        init(&mut a); init(&mut b);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
 
-        // ── Phase 1: Create two instances and sync them ───────────────
-        let params0 = make_params(-7.40, test_group, LinkMode::Relative, false);
-        let mut inst0 = make_instance(params0.clone());
+        // A drags to +3dB
+        a.params = make_params(3.0, 1, LinkMode::Relative, false);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
 
-        let params1 = make_params(-1.00, test_group, LinkMode::Relative, true);
-        let mut inst1 = make_instance(params1.clone());
+        assert!((b.effective_gain_db - 3.0).abs() < 0.5, "B should follow A: got {}", b.effective_gain_db);
+    }
 
-        // Verify param values were set correctly.
-        let inst0_gain_db = util::gain_to_db(inst0.params.gain.value());
-        let inst1_gain_db = util::gain_to_db(inst1.params.gain.value());
-        eprintln!(
-            "Phase 1: inst0 param={:.2}dB, inst1 param={:.2}dB",
-            inst0_gain_db, inst1_gain_db
-        );
-        assert!(
-            (inst0_gain_db - (-7.40)).abs() < 0.1,
-            "inst0 param should be ~-7.40 dB, got {:.2}",
-            inst0_gain_db
-        );
-        assert!(
-            (inst1_gain_db - (-1.00)).abs() < 0.1,
-            "inst1 param should be ~-1.00 dB, got {:.2}",
-            inst1_gain_db
-        );
+    #[test]
+    fn test_relative_b_inverted() {
+        groups::reset_slot(2);
+        let mut a = make_instance(make_params(0.0, 2, LinkMode::Relative, false));
+        let mut b = make_instance(make_params(0.0, 2, LinkMode::Relative, true));
+        init(&mut a); init(&mut b);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
 
-        // Run several sync cycles to let both instances stabilize.
-        for _ in 0..5 {
-            tick(&mut inst0);
-            tick(&mut inst1);
+        // A drags to +3dB
+        a.params = make_params(3.0, 2, LinkMode::Relative, false);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+
+        assert!((b.effective_gain_db - (-3.0)).abs() < 0.5, "B inverted should go -3dB: got {}", b.effective_gain_db);
+    }
+
+    #[test]
+    fn test_invert_toggle_no_jump() {
+        groups::reset_slot(3);
+        let mut a = make_instance(make_params(5.0, 3, LinkMode::Relative, false));
+        let mut b = make_instance(make_params(5.0, 3, LinkMode::Relative, false));
+        init(&mut a); init(&mut b);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+
+        let b_before = b.effective_gain_db;
+        // B toggles invert
+        b.params = make_params(5.0, 3, LinkMode::Relative, true);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+
+        // B's effective should not jump
+        assert!((b.effective_gain_db - b_before).abs() < 0.5, "B should not jump on invert toggle: got {} (was {})", b.effective_gain_db, b_before);
+        // A's effective should not jump
+        assert!((a.effective_gain_db - 5.0).abs() < 0.5, "A should not jump on B's invert toggle: got {}", a.effective_gain_db);
+    }
+
+    #[test]
+    fn test_rapid_writes_delayed_read() {
+        groups::reset_slot(4);
+        let mut a = make_instance(make_params(0.0, 4, LinkMode::Relative, false));
+        let mut b = make_instance(make_params(0.0, 4, LinkMode::Relative, false));
+        init(&mut a); init(&mut b);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+
+        // A writes 5 times without B reading
+        for gain in [1.0, 2.0, 3.0, 4.0, 5.0] {
+            a.params = make_params(gain, 4, LinkMode::Relative, false);
+            tick(&mut a);
         }
 
-        // After sync, instance 0 should have effective gain ~-7.40 dB.
-        eprintln!(
-            "Phase 1 after sync: inst0 effective={:.2}dB, inst1 effective={:.2}dB",
-            inst0.effective_gain_db, inst1.effective_gain_db
-        );
+        // B reads once — should get the full +5dB delta
+        for _ in 0..3 { tick(&mut b); }
+        assert!((b.effective_gain_db - 5.0).abs() < 0.5, "B should get cumulative delta: got {}", b.effective_gain_db);
+    }
+
+    #[test]
+    fn test_self_echo_suppression() {
+        groups::reset_slot(5);
+        let mut a = make_instance(make_params(0.0, 5, LinkMode::Relative, false));
+        init(&mut a);
+        for _ in 0..3 { tick(&mut a); }
+
+        a.params = make_params(3.0, 5, LinkMode::Relative, false);
+        tick(&mut a);
+
+        // A should be at 3dB (from its own write), not 6dB (from reading its own delta)
+        assert!((a.effective_gain_db - 3.0).abs() < 0.5, "A should not read its own delta: got {}", a.effective_gain_db);
+    }
+
+    #[test]
+    fn test_stale_slot_cleared_on_join() {
+        groups::reset_slot(6);
+        // Simulate stale data
+        groups::add_delta(6, 1000);
+        // No active instances
+
+        let mut a = make_instance(make_params(0.0, 6, LinkMode::Relative, false));
+        init(&mut a);
+        for _ in 0..3 { tick(&mut a); }
+
+        // A should be at 0dB, not affected by stale 1000mb
+        assert!(a.effective_gain_db.abs() < 0.5, "A should not be affected by stale data: got {}", a.effective_gain_db);
+    }
+
+    #[test]
+    fn test_late_joiner_doesnt_clobber() {
+        groups::reset_slot(7);
+        let mut a = make_instance(make_params(6.0, 7, LinkMode::Relative, false));
+        init(&mut a);
+        for _ in 0..3 { tick(&mut a); }
+
+        let mut b = make_instance(make_params(0.0, 7, LinkMode::Relative, false));
+        init(&mut b);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+
+        // A should still be at ~6dB
+        assert!((a.effective_gain_db - 6.0).abs() < 0.5, "A should not be clobbered: got {}", a.effective_gain_db);
+    }
+
+    #[test]
+    fn test_absolute_mode() {
+        groups::reset_slot(8);
+        let mut a = make_instance(make_params(5.0, 8, LinkMode::Absolute, false));
+        let mut b = make_instance(make_params(0.0, 8, LinkMode::Absolute, false));
+        init(&mut a); init(&mut b);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+
+        // B should adopt A's value
+        assert!((b.effective_gain_db - 5.0).abs() < 0.5, "B should adopt A's gain: got {}", b.effective_gain_db);
+    }
+
+    #[test]
+    fn test_absolute_mode_inverted() {
+        groups::reset_slot(9);
+        let mut a = make_instance(make_params(5.0, 9, LinkMode::Absolute, false));
+        let mut b = make_instance(make_params(0.0, 9, LinkMode::Absolute, true));
+        init(&mut a); init(&mut b);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+
+        // B inverted should adopt -5dB
+        assert!((b.effective_gain_db - (-5.0)).abs() < 0.5, "B inverted should adopt -5dB: got {}", b.effective_gain_db);
+    }
+
+    /// Regression: toggling invert on/off without moving gain must not break
+    /// group sync. Previously, each invert toggle bumped the shared epoch,
+    /// causing other instances to rebaseline and lose their cumulative delta
+    /// tracking. After the toggle cycle, subsequent writes from A would not
+    /// propagate to B because B's rebaselined cumulative matched the slot.
+    #[test]
+    fn test_invert_toggle_cycle_does_not_break_sync() {
+        groups::reset_slot(10);
+        let mut a = make_instance(make_params(0.0, 10, LinkMode::Relative, false));
+        let mut b = make_instance(make_params(0.0, 10, LinkMode::Relative, false));
+        init(&mut a); init(&mut b);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+
+        // B toggles invert ON then OFF without moving gain
+        b.params = make_params(0.0, 10, LinkMode::Relative, true);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        b.params = make_params(0.0, 10, LinkMode::Relative, false);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+
+        // Now A moves to +4dB — B must follow
+        a.params = make_params(4.0, 10, LinkMode::Relative, false);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+
         assert!(
-            (inst0.effective_gain_db - (-7.40)).abs() < 0.2,
-            "inst0 effective should be ~-7.40 dB, got {:.2}",
-            inst0.effective_gain_db
-        );
-        // Instance 1 has its own gain of -1.00 dB; it should remain close.
-        // (Relative mode: inst1 keeps its own gain, only moves by deltas.)
-        assert!(
-            (inst1.effective_gain_db - (-1.00)).abs() < 0.2,
-            "inst1 effective should be ~-1.00 dB, got {:.2}",
-            inst1.effective_gain_db
-        );
-
-        // Capture pre-restart values for comparison.
-        let pre_restart_inst0_db = inst0.effective_gain_db;
-        let pre_restart_inst1_db = inst1.effective_gain_db;
-
-        // ── Phase 2: Simulate project close ───────────────────────────
-        drop(inst0);
-        drop(inst1);
-        // In a real restart, the process dies and all static state is lost.
-        groups::reset_slot(test_group as u8);
-
-        // ── Phase 3: Recreate with restored params (simulating host restore) ──
-        let restored_params0 = make_params(-7.40, test_group, LinkMode::Relative, false);
-        let mut new_inst0 = make_instance(restored_params0.clone());
-        init(&mut new_inst0);
-
-        let restored_params1 = make_params(-1.00, test_group, LinkMode::Relative, true);
-        let mut new_inst1 = make_instance(restored_params1.clone());
-        init(&mut new_inst1);
-
-        // Run several sync cycles (simulating process() buffers).
-        for _ in 0..5 {
-            tick(&mut new_inst0);
-            tick(&mut new_inst1);
-        }
-
-        // ── Phase 4: Verify restored gains ────────────────────────────
-        eprintln!(
-            "Phase 3 after sync: inst0 effective={:.2}dB, inst1 effective={:.2}dB",
-            new_inst0.effective_gain_db, new_inst1.effective_gain_db
-        );
-
-        // THE KEY ASSERTION: gains must match pre-restart values, NOT 0.0 dB.
-        assert!(
-            (new_inst0.effective_gain_db - pre_restart_inst0_db).abs() < 0.2,
-            "RESTART BUG: inst0 effective={:.2}dB, expected ~{:.2}dB (pre-restart)",
-            new_inst0.effective_gain_db,
-            pre_restart_inst0_db
-        );
-        assert!(
-            (new_inst1.effective_gain_db - pre_restart_inst1_db).abs() < 0.2,
-            "RESTART BUG: inst1 effective={:.2}dB, expected ~{:.2}dB (pre-restart)",
-            new_inst1.effective_gain_db,
-            pre_restart_inst1_db
-        );
-
-        // Verify neither effective gain collapsed to 0.0 dB (the default).
-        assert!(
-            new_inst0.effective_gain_db.abs() > 1.0,
-            "inst0 effective gain collapsed to ~0 dB: {:.2}",
-            new_inst0.effective_gain_db
-        );
-        assert!(
-            new_inst1.effective_gain_db.abs() > 0.5,
-            "inst1 effective gain collapsed to ~0 dB: {:.2}",
-            new_inst1.effective_gain_db
+            (b.effective_gain_db - 4.0).abs() < 0.5,
+            "B must follow A after invert toggle cycle: got {}",
+            b.effective_gain_db
         );
     }
 
-    /// Tests the absolute mode variant of the restart scenario.
-    /// Two instances in absolute mode, same group. In absolute mode, when
-    /// joining an empty slot (generation=0, gain=0), the instance adopts 0 dB.
-    /// The real scenario: on restart, the first instance to join writes its
-    /// restored param value to the slot, and the second instance adopts it.
-    /// Both should end up at the saved gain, not 0 dB.
+    /// Regression: exact bug-report scenario. A toggles invert on/off while B
+    /// is not ticking (host not calling process). Then A moves gain. When B
+    /// finally wakes up it must see the full delta — not swallow it due to a
+    /// stale epoch-driven rebaseline.
     #[test]
-    fn test_bitwig_restart_absolute_mode() {
-        let test_group: i32 = 15;
-        groups::reset_slot(test_group as u8);
+    fn test_invert_toggle_cycle_delayed_detection() {
+        groups::reset_slot(11);
+        let mut a = make_instance(make_params(5.0, 11, LinkMode::Relative, false));
+        let mut b = make_instance(make_params(5.0, 11, LinkMode::Relative, false));
+        init(&mut a); init(&mut b);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
 
-        // ── Phase 1: Establish pre-restart state ──────────────────────
-        // In absolute mode, all instances converge on the same gain.
-        // Pre-populate the slot as if the group was already at -4.50 dB,
-        // then create instances that were saved at -4.50 dB.
-        groups::write_slot(test_group as u8, -450);
+        // A toggles invert on then off — ONLY A ticks, B sleeps
+        a.params = make_params(5.0, 11, LinkMode::Relative, true);
+        tick(&mut a);  // A detects toggle
+        a.params = make_params(5.0, 11, LinkMode::Relative, false);
+        tick(&mut a);  // A detects toggle back
 
-        let params0 = make_params(-4.50, test_group, LinkMode::Absolute, false);
-        let mut inst0 = make_instance(params0);
+        // A moves to 8dB — ONLY A ticks, B still sleeping
+        a.params = make_params(8.0, 11, LinkMode::Relative, false);
+        for _ in 0..3 { tick(&mut a); }
 
-        let params1 = make_params(-4.50, test_group, LinkMode::Absolute, false);
-        let mut inst1 = make_instance(params1);
-
-        for _ in 0..5 {
-            tick(&mut inst0);
-            tick(&mut inst1);
-        }
-
-        let pre_restart_db = inst0.effective_gain_db;
-        eprintln!(
-            "Absolute pre-restart: inst0={:.2}dB, inst1={:.2}dB",
-            inst0.effective_gain_db, inst1.effective_gain_db
-        );
-
-        // Both should be at -4.50 dB.
-        assert!(
-            (inst0.effective_gain_db - (-4.50)).abs() < 0.2,
-            "pre-restart: inst0 should be ~-4.50 dB, got {:.2}",
-            inst0.effective_gain_db
-        );
-        assert!(
-            (inst1.effective_gain_db - (-4.50)).abs() < 0.2,
-            "pre-restart: inst1 should be ~-4.50 dB, got {:.2}",
-            inst1.effective_gain_db
-        );
-
-        // ── Phase 2: Restart ──────────────────────────────────────────
-        drop(inst0);
-        drop(inst1);
-        groups::reset_slot(test_group as u8);
-
-        // After restart, slots are zeroed. The first instance to join
-        // should write its restored value; the second should adopt it.
-        let restored_params0 = make_params(-4.50, test_group, LinkMode::Absolute, false);
-        let mut new_inst0 = make_instance(restored_params0);
-        init(&mut new_inst0);
-
-        let restored_params1 = make_params(-4.50, test_group, LinkMode::Absolute, false);
-        let mut new_inst1 = make_instance(restored_params1);
-        init(&mut new_inst1);
-
-        for _ in 0..5 {
-            tick(&mut new_inst0);
-            tick(&mut new_inst1);
-        }
-
-        // ── Phase 3: Verify ───────────────────────────────────────────
-        eprintln!(
-            "Absolute post-restart: inst0={:.2}dB, inst1={:.2}dB",
-            new_inst0.effective_gain_db, new_inst1.effective_gain_db
-        );
-
-        // When joining an empty slot (generation=0), the instance writes its
-        // effective gain to the slot rather than adopting 0. This means on
-        // restart, the first instance populates the slot with its restored
-        // value, and subsequent instances adopt it. Both should end up at
-        // the pre-restart gain.
-        assert!(
-            (new_inst0.effective_gain_db - pre_restart_db).abs() < 0.2,
-            "RESTART (abs): inst0 effective={:.2}dB, expected ~{:.2}dB",
-            new_inst0.effective_gain_db,
-            pre_restart_db
-        );
-        assert!(
-            (new_inst1.effective_gain_db - pre_restart_db).abs() < 0.2,
-            "RESTART (abs): inst1 effective={:.2}dB, expected ~{:.2}dB",
-            new_inst1.effective_gain_db,
-            pre_restart_db
-        );
+        // B finally wakes up — must see the +3dB delta
+        for _ in 0..3 { tick(&mut b); }
+        assert!((b.effective_gain_db - 8.0).abs() < 0.5,
+            "B must follow A after delayed toggle detection: got {}", b.effective_gain_db);
     }
 
-    /// Tests that group_gain_override is set when a remote instance changes
-    /// gain, which is the mechanism the host would use to observe param updates.
-    /// Bug: "they also don't seem to report their values to the daw correctly.
-    /// bitwig's device wrapper in the device chain does not see updates when
-    /// another group member changes the value."
+    // ── Regression tests: SyncGainParam feedback ────────────────────────
+    //
+    // These tests simulate the real-world race condition where the async
+    // SyncGainParam task (dispatched via execute_gui, runs on the GUI
+    // thread) arrives AFTER the user has already made another param
+    // change, overwriting that change with a stale value.
+    //
+    // The fix: the GUI writes to `user_gain_override` whenever the user
+    // interacts with the gain knob. The audio thread reads this override
+    // and applies it with priority over the (possibly stale) param value.
+    // This provides a reliable user-intent signal that survives the
+    // SyncGainParam race.
+    //
+    // In these tests, writing to `user_gain_override` simulates the
+    // GUI's user-intent signal. The param (`make_params(...)`) may be
+    // overwritten by a stale SyncGainParam, but the override ensures
+    // the user's intended value is applied.
+
+    /// Regression 1: Double-click reset eaten by stale SyncGainParam.
     ///
-    /// Scenario: inst0 is already established in a group at -3.00 dB.
-    /// inst1 joins the same group in Absolute mode. inst1 should receive
-    /// an override so the host sees the param update.
+    /// The user double-clicks B to reset to 0dB. The GUI writes 0mb to
+    /// user_gain_override. Even if SyncGainParam overwrites the param
+    /// back to -5dB, the override ensures the reset is applied.
     #[test]
-    fn test_group_override_reports_to_host() {
-        let test_group: i32 = 13;
-        groups::reset_slot(test_group as u8);
+    fn test_regression_double_click_reset_propagates() {
+        groups::reset_slot(12);
+        let mut a = make_instance(make_params(0.0, 12, LinkMode::Relative, false));
+        let mut b = make_instance(make_params(0.0, 12, LinkMode::Relative, false));
+        init(&mut a); init(&mut b);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
 
-        // Pre-populate the slot as if inst0 had already written -3.00 dB.
-        groups::write_slot(test_group as u8, -300);
+        // A moves to -5dB
+        a.params = make_params(-5.0, 12, LinkMode::Relative, false);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
 
-        // Instance 1 joins the group in Absolute mode, starting at 0.0 dB.
-        // It should see the slot's -300mb and set a group_gain_override.
-        let params1 = make_params(0.0, test_group, LinkMode::Absolute, false);
-        let mut inst1 = make_instance(params1);
+        // B should have followed A to -5dB
+        assert!((b.effective_gain_db - (-5.0)).abs() < 0.5,
+            "B should follow A to -5dB, got {:.2}", b.effective_gain_db);
 
-        // Call sync_group directly to check the override BEFORE tick() consumes it.
-        inst1.sync_group();
+        // User double-clicks B to reset to 0dB.
+        // The GUI writes user_gain_override AND sets the param.
+        b.user_gain_override.store(0, Ordering::Relaxed);
+        b.params = make_params(0.0, 12, LinkMode::Relative, false);
+        for _ in 0..2 { tick(&mut b); }
 
-        let override_val = inst1.group_gain_override.load(Ordering::Relaxed);
-        let slot = groups::read_slot(test_group as u8);
-        eprintln!(
-            "Override check: inst1 group_gain_override={}mb (NO_OVERRIDE={})",
-            override_val, NO_OVERRIDE
-        );
-        eprintln!(
-            "Slot state: gain={}mb, gen={}, bgen={}",
-            slot.gain_millibels, slot.generation, slot.baseline_generation
-        );
+        // Stale SyncGainParam arrives — overwrites B's param to -5dB.
+        // But user_gain_override already fired on the previous tick.
+        b.params = make_params(-5.0, 12, LinkMode::Relative, false);
+        tick(&mut b);
 
-        // After handle_transition fires for inst1 (JOIN ABS), an override
-        // should be pending. The override is the mechanism by which the
-        // process() loop retargets the smoother. For the host to see the
-        // update, the override must propagate (currently it only changes the
-        // smoother, not the param's stored value — this is the bug).
-        assert_ne!(
-            override_val, NO_OVERRIDE,
-            "group_gain_override was not set — host would not see the param update"
-        );
+        // Let everything settle.
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
 
-        // The override should reflect the slot's -3.00 dB.
-        assert!(
-            (millibels_to_db(override_val) - (-3.00)).abs() < 0.2,
-            "override should be ~-3.00 dB, got {:.2} dB",
-            millibels_to_db(override_val)
-        );
-
-        // Now verify the second part of the bug: after a group member changes
-        // the slot value, the receiving instance gets an override for each
-        // change. Simulate inst0 changing gain to -6.00 dB.
-        groups::write_slot(test_group as u8, -600);
-
-        // Consume the pending override first (as process() would).
-        tick(&mut inst1);
-
-        // Now another remote write arrives.
-        groups::write_slot(test_group as u8, -900);
-        inst1.sync_group();
-
-        let override_val2 = inst1.group_gain_override.load(Ordering::Relaxed);
-        eprintln!(
-            "Second override: inst1 group_gain_override={}mb",
-            override_val2
-        );
-        assert_ne!(
-            override_val2, NO_OVERRIDE,
-            "second override was not set — host misses subsequent group changes"
-        );
-        assert!(
-            (millibels_to_db(override_val2) - (-9.00)).abs() < 0.2,
-            "second override should be ~-9.00 dB, got {:.2} dB",
-            millibels_to_db(override_val2)
-        );
+        assert!((b.effective_gain_db).abs() < 0.5,
+            "B should be at 0dB after double-click reset, got {:.2}",
+            b.effective_gain_db);
+        assert!((a.effective_gain_db).abs() < 0.5,
+            "A should follow B to 0dB, got {:.2}", a.effective_gain_db);
     }
 
-    /// Tests that after restart, the display_gain_millibels atomic reflects
-    /// the correct effective gain (not 0), which is what the editor reads.
+    /// Regression 2: Same race with inverted B. The reset to 0dB
+    /// must propagate correctly through inversion.
     #[test]
-    fn test_restart_display_gain_updates() {
-        let test_group: i32 = 12;
-        groups::reset_slot(test_group as u8);
+    fn test_regression_post_reset_sync_works() {
+        groups::reset_slot(13);
+        let mut a = make_instance(make_params(0.0, 13, LinkMode::Relative, false));
+        let mut b = make_instance(make_params(0.0, 13, LinkMode::Relative, true));
+        init(&mut a); init(&mut b);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
 
-        let params0 = make_params(-5.00, test_group, LinkMode::Relative, false);
-        let mut inst0 = make_instance(params0);
-        init(&mut inst0);
+        // A moves to -5dB (B inverted follows to +5dB)
+        a.params = make_params(-5.0, 13, LinkMode::Relative, false);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
 
-        // Run several ticks.
-        for _ in 0..5 {
-            tick(&mut inst0);
-            // Simulate what process() does after the override is consumed:
-            inst0.display_gain_millibels.store(
-                db_to_millibels(inst0.effective_gain_db),
-                Ordering::Relaxed,
-            );
-        }
+        assert!((b.effective_gain_db - 5.0).abs() < 0.5,
+            "B inverted should follow to +5dB, got {:.2}", b.effective_gain_db);
 
-        let display_mb = inst0.display_gain_millibels.load(Ordering::Relaxed);
-        let display_db = millibels_to_db(display_mb);
-        eprintln!(
-            "Display gain after restart: {}mb ({:.2}dB), effective={:.2}dB",
-            display_mb, display_db, inst0.effective_gain_db
-        );
+        // User double-clicks B to 0dB.
+        b.user_gain_override.store(0, Ordering::Relaxed);
+        b.params = make_params(0.0, 13, LinkMode::Relative, true);
+        for _ in 0..2 { tick(&mut b); }
 
-        assert!(
-            (display_db - (-5.00)).abs() < 0.2,
-            "display gain should be ~-5.00 dB, got {:.2} dB",
-            display_db
-        );
+        // Stale SyncGainParam arrives — overwrites B's param to +5dB.
+        b.params = make_params(5.0, 13, LinkMode::Relative, true);
+        tick(&mut b);
+
+        // Let settle.
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+
+        // SyncGainParam on A (param catches up)
+        a.params = make_params(a.effective_gain_db, 13, LinkMode::Relative, false);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+
+        assert!((b.effective_gain_db).abs() < 0.5,
+            "B should be at 0dB after double-click reset, got {:.2}",
+            b.effective_gain_db);
+        assert!((a.effective_gain_db).abs() < 0.5,
+            "A should follow B's reset to 0dB, got {:.2}",
+            a.effective_gain_db);
     }
 
-    /// Verifies that effective_gain_mb is persisted and correctly restored.
-    ///
-    /// Scenario: Instance in a group receives a remote gain override that
-    /// changes the effective gain to -8.00 dB while the param stays at 0 dB.
-    /// After "restart" (simulated by recreating the instance with the
-    /// persisted effective_gain_mb), the effective gain should restore to
-    /// -8.00 dB, not fall back to the param's 0 dB.
+    /// Regression 3: User move eaten by stale SyncGainParam.
+    /// The GUI writes user_gain_override when the user drags,
+    /// ensuring the move is applied even if SyncGainParam overwrites.
     #[test]
-    fn test_persist_effective_gain_saves_and_restores() {
-        let test_group: i32 = 11;
-        groups::reset_slot(test_group as u8);
+    fn test_regression_value_does_not_revert_after_sync() {
+        groups::reset_slot(14);
+        let mut a = make_instance(make_params(0.0, 14, LinkMode::Relative, false));
+        let mut b = make_instance(make_params(0.0, 14, LinkMode::Relative, false));
+        init(&mut a); init(&mut b);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
 
-        // ── Phase 1: Instance receives a remote override ─────────────
-        // Pre-populate the slot with -8.00 dB so when inst0 joins in
-        // absolute mode, it adopts -8.00 dB from the slot.
-        groups::write_slot(test_group as u8, -800);
+        // A moves to -5dB
+        a.params = make_params(-5.0, 14, LinkMode::Relative, false);
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
 
-        let params0 = make_params(0.0, test_group, LinkMode::Absolute, false);
-        let mut inst0 = make_instance(params0.clone());
+        assert!((b.effective_gain_db - (-5.0)).abs() < 0.5,
+            "B should follow A to -5dB, got {:.2}", b.effective_gain_db);
 
-        // Run ticks to let the override fire.
-        for _ in 0..5 {
-            tick(&mut inst0);
-        }
+        // User moves B to -2dB before SyncGainParam arrives.
+        b.user_gain_override
+            .store(db_to_millibels(-2.0), Ordering::Relaxed);
+        b.params = make_params(-2.0, 14, LinkMode::Relative, false);
+        for _ in 0..2 { tick(&mut b); }
 
-        // The effective gain should be -8.00 dB (from the slot).
-        assert!(
-            (inst0.effective_gain_db - (-8.00)).abs() < 0.2,
-            "effective gain should be ~-8.00 dB, got {:.2}",
-            inst0.effective_gain_db
-        );
+        // Stale SyncGainParam arrives — overwrites B's param to -5dB.
+        b.params = make_params(-5.0, 14, LinkMode::Relative, false);
+        tick(&mut b);
 
-        // The param is still 0 dB (the bug: host sees this stale value).
-        let param_db = util::gain_to_db(inst0.params.gain.value());
-        eprintln!(
-            "Phase 1: param={:.2}dB effective={:.2}dB persist={}mb",
-            param_db,
-            inst0.effective_gain_db,
-            inst0.params.effective_gain_mb.load(Ordering::Relaxed)
-        );
+        // Let settle.
+        for _ in 0..3 { tick(&mut a); tick(&mut b); }
 
-        // But the persisted field has the correct value.
-        let persisted_mb = inst0.params.effective_gain_mb.load(Ordering::Relaxed);
-        assert!(
-            (millibels_to_db(persisted_mb) - (-8.00)).abs() < 0.2,
-            "effective_gain_mb should persist ~-8.00 dB, got {:.2} dB",
-            millibels_to_db(persisted_mb)
-        );
-
-        // ── Phase 2: Simulate restart ────────────────────────────────
-        let saved_mb = inst0.params.effective_gain_mb.load(Ordering::Relaxed);
-        drop(inst0);
-        groups::reset_slot(test_group as u8);
-
-        // Recreate with restored params. The param stays at 0 dB (what
-        // the host saved from the stale param value), but the persisted
-        // effective_gain_mb has the correct value.
-        let restored_params = make_params(0.0, test_group, LinkMode::Absolute, false);
-        // Simulate host restoring the persist field (overwrite the default).
-        restored_params
-            .effective_gain_mb
-            .store(saved_mb, Ordering::Relaxed);
-
-        let mut new_inst = make_instance(restored_params.clone());
-
-        // Simulate initialize(): restore effective gain from persist field.
-        new_inst.sample_rate = 48000.0;
-        let persisted_mb = new_inst.params.effective_gain_mb.load(Ordering::Relaxed);
-        let persisted_db = millibels_to_db(persisted_mb);
-        new_inst.effective_gain_db = persisted_db;
-        new_inst
-            .params
-            .gain
-            .smoothed
-            .reset(util::db_to_gain(persisted_db));
-
-        // Run ticks.
-        for _ in 0..5 {
-            tick(&mut new_inst);
-        }
-
-        // ── Phase 3: Verify restored gain ────────────────────────────
-        eprintln!(
-            "Phase 2 after restore: effective={:.2}dB persist={}mb",
-            new_inst.effective_gain_db,
-            new_inst.params.effective_gain_mb.load(Ordering::Relaxed)
-        );
-
-        assert!(
-            (new_inst.effective_gain_db - (-8.00)).abs() < 0.2,
-            "PERSIST BUG: effective={:.2}dB, expected ~-8.00dB",
-            new_inst.effective_gain_db
-        );
-    }
-
-    /// Verifies that effective_gain_mb is updated on every tick/process
-    /// cycle, so the host always has the latest value to persist.
-    #[test]
-    fn test_effective_gain_mb_tracks_group_overrides() {
-        let test_group: i32 = 10;
-        groups::reset_slot(test_group as u8);
-
-        groups::write_slot(test_group as u8, -300);
-
-        let params0 = make_params(0.0, test_group, LinkMode::Absolute, false);
-        let mut inst0 = make_instance(params0.clone());
-
-        tick(&mut inst0);
-
-        // After tick, the override should have fired and effective_gain_mb
-        // should match the slot's -3.00 dB.
-        let mb = inst0.params.effective_gain_mb.load(Ordering::Relaxed);
-        assert!(
-            (millibels_to_db(mb) - (-3.00)).abs() < 0.2,
-            "effective_gain_mb should track -3.00 dB, got {:.2} dB",
-            millibels_to_db(mb)
-        );
-
-        // Now a remote write changes to -12.00 dB.
-        groups::write_slot(test_group as u8, -1200);
-        tick(&mut inst0);
-
-        let mb2 = inst0.params.effective_gain_mb.load(Ordering::Relaxed);
-        assert!(
-            (millibels_to_db(mb2) - (-12.00)).abs() < 0.2,
-            "effective_gain_mb should track -12.00 dB, got {:.2} dB",
-            millibels_to_db(mb2)
-        );
+        assert!((b.effective_gain_db - (-2.0)).abs() < 0.5,
+            "B should be at -2dB (user's move), not reverted to -5dB, got {:.2}",
+            b.effective_gain_db);
+        assert!((a.effective_gain_db - (-2.0)).abs() < 0.5,
+            "A should follow B to -2dB, got {:.2}", a.effective_gain_db);
     }
 }

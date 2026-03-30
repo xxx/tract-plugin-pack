@@ -62,16 +62,19 @@ struct GainBrainWindow {
     shared_scale: Arc<AtomicCell<f32>>,
 
     params: Arc<GainBrainParams>,
-    /// Effective gain in millibels, written by the audio thread.
+    /// Effective gain in millibels. Written by the audio thread (group sync)
+    /// and by the editor (user drag). Read by draw() for dial arc + text.
     display_gain_millibels: Arc<std::sync::atomic::AtomicI32>,
-    /// Write here to force the audio thread to retarget the gain smoother.
-    group_gain_override: Arc<std::sync::atomic::AtomicI32>,
     /// Shared holder for the GuiContext — populated on spawn so the audio
     /// thread's task_executor can update the host param even after the
     /// editor window closes. Stored here to keep the Arc alive; the actual
     /// usage is in `task_executor()` via the shared Mutex.
     #[allow(dead_code)]
     gui_context_holder: Arc<std::sync::Mutex<Option<Arc<dyn GuiContext>>>>,
+    /// User gain override for the audio thread. Written here when the user
+    /// drags or double-clicks the gain knob. The audio thread reads this
+    /// to reliably detect user intent, bypassing the SyncGainParam race.
+    user_gain_override: Arc<std::sync::atomic::AtomicI32>,
     text_renderer: widgets::TextRenderer,
 
     /// Hit regions rebuilt each frame during draw().
@@ -103,8 +106,8 @@ impl GainBrainWindow {
         gui_context: Arc<dyn GuiContext>,
         params: Arc<GainBrainParams>,
         display_gain_millibels: Arc<std::sync::atomic::AtomicI32>,
-        group_gain_override: Arc<std::sync::atomic::AtomicI32>,
         gui_context_holder: Arc<std::sync::Mutex<Option<Arc<dyn GuiContext>>>>,
+        user_gain_override: Arc<std::sync::atomic::AtomicI32>,
         shared_scale: Arc<AtomicCell<f32>>,
         scale_factor: f32,
     ) -> Self {
@@ -126,8 +129,8 @@ impl GainBrainWindow {
             shared_scale,
             params,
             display_gain_millibels,
-            group_gain_override,
             gui_context_holder,
+            user_gain_override,
             text_renderer,
             hit_regions: Vec::new(),
             drag_active: None,
@@ -391,8 +394,10 @@ impl GainBrainWindow {
         }
 
         // ── Gain dial ──
-        let display_mb = self.display_gain_millibels.load(Ordering::Relaxed);
-        let gain_db = display_mb as f32 / 100.0;
+        // Read the effective gain from the shared atomic. This is written by
+        // process() (group sync) and by the editor drag handler, so it always
+        // reflects the true effective gain without the async SyncGainParam lag.
+        let gain_db = self.display_gain_millibels.load(Ordering::Relaxed) as f32 / 100.0;
         let gain_text = format!("{:+.1} dB", gain_db);
         // Map dB linearly to 0-1 for the dial arc so the visual position
         // matches the dB scale (not the skewed linear-gain parameter range).
@@ -431,7 +436,16 @@ impl GainBrainWindow {
 
     fn set_param_normalized(&self, setter: &ParamSetter, id: ParamId, normalized: f32) {
         match id {
-            ParamId::Gain => setter.set_parameter_normalized(&self.params.gain, normalized),
+            ParamId::Gain => {
+                setter.set_parameter_normalized(&self.params.gain, normalized);
+                // Signal user intent to the audio thread so group sync
+                // reliably detects this as a user change, even if a stale
+                // SyncGainParam overwrites the param later.
+                let gain = self.params.gain.preview_plain(normalized);
+                let db = nih_plug::util::gain_to_db(gain);
+                let mb = (db * 100.0).round() as i32;
+                self.user_gain_override.store(mb, Ordering::Relaxed);
+            }
             ParamId::LinkMode => {
                 setter.set_parameter_normalized(&self.params.link_mode, normalized)
             }
@@ -463,6 +477,12 @@ impl GainBrainWindow {
                     self.params.gain.default_normalized_value(),
                 );
                 setter.end_set_parameter(&self.params.gain);
+                // Update display atomic so draw() reflects the reset immediately.
+                let default_db = nih_plug::util::gain_to_db(self.params.gain.default_plain_value());
+                let default_mb = (default_db * 100.0).round() as i32;
+                self.display_gain_millibels.store(default_mb, Ordering::Relaxed);
+                // Signal user intent to the audio thread.
+                self.user_gain_override.store(default_mb, Ordering::Relaxed);
             }
             ParamId::LinkMode => {
                 setter.begin_set_parameter(&self.params.link_mode);
@@ -535,8 +555,8 @@ impl baseview::WindowHandler for GainBrainWindow {
 
                     // drag_start_value stores dB, not normalized.
                     // Detect shift transitions to re-anchor drag origin.
-                    let current_display_mb = self.display_gain_millibels.load(Ordering::Relaxed);
-                    let current_display_db = current_display_mb as f32 / 100.0;
+                    let current_display_db =
+                        self.display_gain_millibels.load(Ordering::Relaxed) as f32 / 100.0;
                     if shift_now && !self.last_shift_state {
                         self.granular_drag_start_y = self.mouse_y;
                         self.granular_drag_start_value = current_display_db;
@@ -560,6 +580,12 @@ impl baseview::WindowHandler for GainBrainWindow {
                     let normalized = self.params.gain.preview_normalized(target_linear);
                     let setter = ParamSetter::new(self.gui_context.as_ref());
                     self.set_param_normalized(&setter, param_id, normalized);
+                    // Keep the display atomic in sync so draw() shows the
+                    // dragged value immediately, even before process() runs.
+                    self.display_gain_millibels.store(
+                        (target_db * 100.0).round() as i32,
+                        Ordering::Relaxed,
+                    );
 
                     self.last_shift_state = shift_now;
                 }
@@ -596,17 +622,13 @@ impl baseview::WindowHandler for GainBrainWindow {
                         HitAction::Dial(param_id) => {
                             if is_double_click {
                                 self.reset_param_to_default(&setter, param_id);
-                                // Force the audio thread to retarget the smoother
-                                // in case the param was already at default but the
-                                // effective gain differs (group override was active).
-                                self.group_gain_override.store(0, Ordering::Relaxed);
                             } else {
-                                // Use the displayed (effective) gain in dB for the drag
-                                // start, not the param value — they differ when a group
-                                // override is active and the param hasn't been updated.
-                                let display_mb =
-                                    self.display_gain_millibels.load(Ordering::Relaxed);
-                                let display_db = display_mb as f32 / 100.0;
+                                // Read the display atomic for the drag start value.
+                                // This matches what draw() displays, so the drag
+                                // starts from the visually shown position.
+                                let display_db =
+                                    self.display_gain_millibels.load(Ordering::Relaxed) as f32
+                                        / 100.0;
                                 self.drag_start_y = my;
                                 self.drag_start_value = display_db;
                                 self.granular_drag_start_y = my;
@@ -709,10 +731,10 @@ impl baseview::WindowHandler for GainBrainWindow {
 pub(crate) struct GainBrainEditor {
     params: Arc<GainBrainParams>,
     display_gain_millibels: Arc<std::sync::atomic::AtomicI32>,
-    group_gain_override: Arc<std::sync::atomic::AtomicI32>,
     /// Shared holder for the GuiContext so the audio thread's task_executor
     /// can use ParamSetter even when the editor window is closed.
     gui_context_holder: Arc<std::sync::Mutex<Option<Arc<dyn GuiContext>>>>,
+    user_gain_override: Arc<std::sync::atomic::AtomicI32>,
     /// Shared with GainBrainWindow so Editor::size() reflects runtime changes.
     scaling_factor: Arc<AtomicCell<f32>>,
 }
@@ -720,16 +742,16 @@ pub(crate) struct GainBrainEditor {
 pub(crate) fn create(
     params: Arc<GainBrainParams>,
     display_gain_millibels: Arc<std::sync::atomic::AtomicI32>,
-    group_gain_override: Arc<std::sync::atomic::AtomicI32>,
     gui_context_holder: Arc<std::sync::Mutex<Option<Arc<dyn GuiContext>>>>,
+    user_gain_override: Arc<std::sync::atomic::AtomicI32>,
 ) -> Option<Box<dyn Editor>> {
     // NOTE: persisted state may not be restored yet (host calls create() before set()).
     // Scale factor is derived from persisted size in spawn() instead.
     Some(Box::new(GainBrainEditor {
         params,
         display_gain_millibels,
-        group_gain_override,
         gui_context_holder,
+        user_gain_override,
         scaling_factor: Arc::new(AtomicCell::new(1.0)),
     }))
 }
@@ -755,8 +777,8 @@ impl Editor for GainBrainEditor {
         let gui_context = Arc::clone(&context);
         let params = Arc::clone(&self.params);
         let display_gain = Arc::clone(&self.display_gain_millibels);
-        let gain_override = Arc::clone(&self.group_gain_override);
         let gui_ctx_holder = Arc::clone(&self.gui_context_holder);
+        let user_gain_ovr = Arc::clone(&self.user_gain_override);
         let shared_scale = Arc::clone(&self.scaling_factor);
 
         let scaled_w = persisted_w;
@@ -776,8 +798,8 @@ impl Editor for GainBrainEditor {
                     gui_context,
                     params,
                     display_gain,
-                    gain_override,
                     gui_ctx_holder,
+                    user_gain_ovr,
                     shared_scale,
                     sf,
                 )
@@ -806,7 +828,21 @@ impl Editor for GainBrainEditor {
         true
     }
 
-    fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
+    fn param_value_changed(&self, id: &str, _normalized_value: f32) {
+        if id == "gain" {
+            let gain_db = nih_plug::util::gain_to_db(self.params.gain.value());
+            self.display_gain_millibels.store(
+                (gain_db * 100.0).round() as i32,
+                Ordering::Relaxed,
+            );
+        }
+    }
     fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
-    fn param_values_changed(&self) {}
+    fn param_values_changed(&self) {
+        let gain_db = nih_plug::util::gain_to_db(self.params.gain.value());
+        self.display_gain_millibels.store(
+            (gain_db * 100.0).round() as i32,
+            Ordering::Relaxed,
+        );
+    }
 }
