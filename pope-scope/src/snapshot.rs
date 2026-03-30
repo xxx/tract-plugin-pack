@@ -62,12 +62,13 @@ static BAR_LATCHES: [BarLatch; store::MAX_SLOTS] = {
 
 struct HoldBuffer {
     /// Front buffer: last complete bar (what the renderer displays).
-    /// `front[channel][sample]`
     front: Mutex<Vec<Vec<f32>>>,
+    /// Back buffer: accumulates the current bar's most recent read.
+    /// At bar boundary, back is promoted to front.
+    back: Mutex<Vec<Vec<f32>>>,
     /// Whether front has valid data (at least one bar has completed).
     front_valid: AtomicBool,
     /// Last observed frac for bar-boundary detection.
-    /// Packed as fixed-point * 1_000_000.
     last_frac: AtomicUsize,
 }
 
@@ -75,38 +76,43 @@ impl HoldBuffer {
     const fn new() -> Self {
         Self {
             front: Mutex::new(Vec::new()),
+            back: Mutex::new(Vec::new()),
             front_valid: AtomicBool::new(false),
             last_frac: AtomicUsize::new(0),
         }
     }
 
-    /// Check for bar boundary and potentially swap buffers.
-    /// Returns the data to display (either front buffer or current partial data).
+    /// Update the hold buffer with the current frame's data.
+    /// Returns the data to display.
     ///
-    /// - `current_data`: the full beat-aligned window read (the "back buffer")
+    /// - `current_data`: the full beat-aligned window read for this frame
     /// - `frac`: playhead fraction within the bar (0.0 - 1.0)
     fn update(&self, current_data: &[Vec<f32>], frac: f64) -> Option<Vec<Vec<f32>>> {
         let frac_u = (frac * 1_000_000.0) as usize;
         let prev_frac = self.last_frac.load(Ordering::Relaxed);
 
-        if frac_u < prev_frac || prev_frac == 0 {
-            // Bar boundary crossed (frac wrapped) or first frame —
-            // promote current data to front buffer.
-            if let Ok(mut front) = self.front.lock() {
-                *front = current_data.to_vec();
-                self.front_valid.store(true, Ordering::Relaxed);
+        if frac_u < prev_frac && prev_frac > 0 {
+            // Bar boundary crossed (frac wrapped) —
+            // promote the BACK buffer (previous bar's last read) to front.
+            if let (Ok(back), Ok(mut front)) = (self.back.lock(), self.front.lock()) {
+                if !back.is_empty() {
+                    *front = back.clone();
+                    self.front_valid.store(true, Ordering::Relaxed);
+                }
             }
-            self.last_frac.store(frac_u, Ordering::Relaxed);
-            // Return the newly promoted front (which is current_data)
-            Some(current_data.to_vec())
+        }
+
+        // Always store current data in the back buffer (latest read of current bar)
+        if let Ok(mut back) = self.back.lock() {
+            *back = current_data.to_vec();
+        }
+        self.last_frac.store(frac_u, Ordering::Relaxed);
+
+        // Return front buffer if valid, otherwise None
+        if self.front_valid.load(Ordering::Relaxed) {
+            self.front.lock().ok().map(|f| f.clone())
         } else {
-            self.last_frac.store(frac_u, Ordering::Relaxed);
-            // Return front buffer if valid, otherwise None
-            if self.front_valid.load(Ordering::Relaxed) {
-                self.front.lock().ok().map(|f| f.clone())
-            } else {
-                None
-            }
+            None
         }
     }
 }
@@ -511,6 +517,75 @@ pub fn build_snapshots_beat_sync(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── HoldBuffer tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_hold_buffer_no_data_until_bar_completes() {
+        let hb = HoldBuffer::new();
+        let bar_data = vec![vec![1.0, 2.0, 3.0]];
+        // First frame at frac=0.5 — no previous bar yet
+        let result = hb.update(&bar_data, 0.5);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_hold_buffer_promotes_back_at_bar_boundary() {
+        let hb = HoldBuffer::new();
+        let bar1 = vec![vec![1.0, 2.0, 3.0]];
+        let bar2 = vec![vec![4.0, 5.0, 6.0]];
+
+        // Simulate bar 1 playing through
+        hb.update(&bar1, 0.1);
+        hb.update(&bar1, 0.5);
+        hb.update(&bar1, 0.9); // back buffer now has bar1
+
+        // Bar boundary: frac wraps to 0.05
+        let result = hb.update(&bar2, 0.05);
+        // Should return bar1 (the PREVIOUS bar), not bar2
+        assert!(result.is_some());
+        let front = result.unwrap();
+        assert_eq!(front[0], vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_hold_buffer_front_stable_within_bar() {
+        let hb = HoldBuffer::new();
+        let bar1 = vec![vec![1.0, 2.0]];
+        let bar2_early = vec![vec![3.0, 4.0]];
+        let bar2_mid = vec![vec![5.0, 6.0]];
+
+        // Complete bar 1
+        hb.update(&bar1, 0.1);
+        hb.update(&bar1, 0.9);
+        hb.update(&bar2_early, 0.05); // boundary → bar1 promoted to front
+
+        // Mid-bar reads should return stable front (bar1)
+        let r1 = hb.update(&bar2_mid, 0.3).unwrap();
+        let r2 = hb.update(&bar2_mid, 0.7).unwrap();
+        assert_eq!(r1[0], vec![1.0, 2.0]);
+        assert_eq!(r2[0], vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_hold_buffer_uses_last_read_before_boundary() {
+        let hb = HoldBuffer::new();
+        let early = vec![vec![0.1]];
+        let mid = vec![vec![0.5]];
+        let late = vec![vec![0.9]]; // this should be promoted — it's the last read
+        let new_bar = vec![vec![1.0]];
+
+        hb.update(&early, 0.1);
+        hb.update(&mid, 0.5);
+        hb.update(&late, 0.95); // back buffer = late
+
+        let result = hb.update(&new_bar, 0.02); // boundary
+        let front = result.unwrap();
+        // Front should be the LATE data (last back before swap), not new_bar
+        assert_eq!(front[0], vec![0.9]);
+    }
+
+    // ── Existing tests ────────────────────────────────────────────────
 
     #[test]
     fn test_compute_mono_mix_stereo() {
