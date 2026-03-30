@@ -140,6 +140,122 @@ pub fn draw_stepped_selector(
 }
 
 // ---------------------------------------------------------------------------
+// Outline variants — transparent background with colored border
+// ---------------------------------------------------------------------------
+
+/// Draw an outline button: transparent background, colored border, centered label.
+/// Active state uses a brighter border and subtle fill.
+/// `border_color` and `text_color` are caller-supplied (theme-dependent).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_outline_button(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    label: &str,
+    active: bool,
+    border_color: Color,
+    text_color: Color,
+    active_border_color: Color,
+    active_fill_color: Color,
+) {
+    let border = if active { active_border_color } else { border_color };
+    if active {
+        draw_rect(pixmap, x, y, w, h, active_fill_color);
+    }
+    draw_rect_outline(pixmap, x, y, w, h, border, 1.0);
+
+    let text_size = (h * 0.5).max(10.0);
+    let tw = text_renderer.text_width(label, text_size);
+    let tx = x + (w - tw) * 0.5;
+    let ty = y + (h + text_size) * 0.5 - 2.0;
+    let fg = if active { active_border_color } else { text_color };
+    text_renderer.draw_text(pixmap, tx, ty, label, text_size, fg);
+}
+
+/// Draw an outline stepped selector: transparent segments with colored borders.
+/// Active segment gets a brighter border and subtle fill.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_outline_stepped_selector(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    options: &[&str],
+    active_index: usize,
+    border_color: Color,
+    text_color: Color,
+    active_border_color: Color,
+    active_text_color: Color,
+    active_fill_color: Color,
+) {
+    if options.is_empty() {
+        return;
+    }
+
+    let seg_w = w / options.len() as f32;
+    let text_size = (h * 0.5).max(10.0);
+    let text_y = y + (h + text_size) * 0.5 - 2.0;
+
+    for (i, &opt) in options.iter().enumerate() {
+        let sx = x + i as f32 * seg_w;
+        let is_active = i == active_index;
+
+        let border = if is_active { active_border_color } else { border_color };
+        let fg = if is_active { active_text_color } else { text_color };
+
+        if is_active {
+            draw_rect(pixmap, sx, y, seg_w, h, active_fill_color);
+        }
+        draw_rect_outline(pixmap, sx, y, seg_w, h, border, 1.0);
+
+        let tw = text_renderer.text_width(opt, text_size);
+        let tx = sx + (seg_w - tw) * 0.5;
+        text_renderer.draw_text(pixmap, tx, text_y, opt, text_size, fg);
+    }
+}
+
+/// Draw an outline slider: transparent track with colored border and fill bar.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_outline_slider(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    label: &str,
+    value_text: &str,
+    normalized_value: f32,
+    border_color: Color,
+    text_color: Color,
+    fill_color: Color,
+) {
+    let nv = normalized_value.clamp(0.0, 1.0);
+
+    // Outline track
+    draw_rect_outline(pixmap, x, y, w, h, border_color, 1.0);
+
+    // Fill bar
+    let fill_w = (w - 2.0) * nv;
+    if fill_w > 0.0 {
+        draw_rect(pixmap, x + 1.0, y + 1.0, fill_w, h - 2.0, fill_color);
+    }
+
+    // Label (left) and value (right)
+    let text_size = (h * 0.5).max(10.0);
+    let text_y = y + (h + text_size) * 0.5 - 2.0;
+    let pad = 6.0;
+    text_renderer.draw_text(pixmap, x + pad, text_y, label, text_size, text_color);
+    let vw = text_renderer.text_width(value_text, text_size);
+    text_renderer.draw_text(pixmap, x + w - vw - pad, text_y, value_text, text_size, text_color);
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

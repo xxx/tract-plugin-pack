@@ -632,6 +632,14 @@ impl PopeScopeWindow {
 
         let mut cx = pad;
 
+        // Outline widget theme colors
+        let border_c = theme::to_color(theme::GRID_BRIGHT);
+        let text_c = theme::to_color(theme::PRIMARY_DIM);
+        let active_border_c = theme::to_color(theme::FG);
+        let active_text_c = theme::to_color(theme::FG);
+        let active_fill_c = theme::to_color_alpha(theme::FG, 0.15);
+        let slider_fill_c = theme::to_color_alpha(theme::FG, 0.3);
+
         // ── Row 1: Display | Style | Sync | Unit | Freeze | Mono ────────
 
         // Display mode
@@ -651,7 +659,7 @@ impl PopeScopeWindow {
             label_font,
             theme::to_color(theme::PRIMARY_DIM),
         );
-        widgets::draw_stepped_selector(
+        widgets::draw_outline_stepped_selector(
             &mut self.surface.pixmap,
             tr,
             cx,
@@ -660,6 +668,11 @@ impl PopeScopeWindow {
             row_h,
             &["Vert", "Over", "Sum"],
             display_idx,
+            border_c,
+            text_c,
+            active_border_c,
+            active_text_c,
+            active_fill_c,
         );
         self.hit_regions.push(HitRegion {
             x: cx,
@@ -687,7 +700,7 @@ impl PopeScopeWindow {
             label_font,
             theme::to_color(theme::PRIMARY_DIM),
         );
-        widgets::draw_stepped_selector(
+        widgets::draw_outline_stepped_selector(
             &mut self.surface.pixmap,
             tr,
             cx,
@@ -696,6 +709,11 @@ impl PopeScopeWindow {
             row_h,
             &["Line", "Fill", "Both"],
             style_idx,
+            border_c,
+            text_c,
+            active_border_c,
+            active_text_c,
+            active_fill_c,
         );
         self.hit_regions.push(HitRegion {
             x: cx,
@@ -722,7 +740,7 @@ impl PopeScopeWindow {
             label_font,
             theme::to_color(theme::PRIMARY_DIM),
         );
-        widgets::draw_stepped_selector(
+        widgets::draw_outline_stepped_selector(
             &mut self.surface.pixmap,
             tr,
             cx,
@@ -731,6 +749,11 @@ impl PopeScopeWindow {
             row_h,
             &["Free", "Beat"],
             sync_idx,
+            border_c,
+            text_c,
+            active_border_c,
+            active_text_c,
+            active_fill_c,
         );
         self.hit_regions.push(HitRegion {
             x: cx,
@@ -761,7 +784,7 @@ impl PopeScopeWindow {
                 label_font,
                 theme::to_color(theme::PRIMARY_DIM),
             );
-            widgets::draw_stepped_selector(
+            widgets::draw_outline_stepped_selector(
                 &mut self.surface.pixmap,
                 tr,
                 cx,
@@ -770,6 +793,11 @@ impl PopeScopeWindow {
                 row_h,
                 &["1/4", "1/2", "1", "2", "4"],
                 unit_idx,
+                border_c,
+                text_c,
+                active_border_c,
+                active_text_c,
+                active_fill_c,
             );
             self.hit_regions.push(HitRegion {
                 x: cx,
@@ -793,7 +821,7 @@ impl PopeScopeWindow {
             label_font,
             theme::to_color(theme::PRIMARY_DIM),
         );
-        widgets::draw_button(
+        widgets::draw_outline_button(
             &mut self.surface.pixmap,
             tr,
             cx,
@@ -802,7 +830,10 @@ impl PopeScopeWindow {
             row_h,
             if freeze { "ON" } else { "OFF" },
             freeze,
-            false,
+            border_c,
+            text_c,
+            active_border_c,
+            active_fill_c,
         );
         self.hit_regions.push(HitRegion {
             x: cx,
@@ -825,7 +856,7 @@ impl PopeScopeWindow {
             label_font,
             theme::to_color(theme::PRIMARY_DIM),
         );
-        widgets::draw_button(
+        widgets::draw_outline_button(
             &mut self.surface.pixmap,
             tr,
             cx,
@@ -834,7 +865,10 @@ impl PopeScopeWindow {
             row_h,
             if mono { "ON" } else { "OFF" },
             mono,
-            false,
+            border_c,
+            text_c,
+            active_border_c,
+            active_fill_c,
         );
         self.hit_regions.push(HitRegion {
             x: cx,
@@ -866,7 +900,7 @@ impl PopeScopeWindow {
                 theme::to_color(theme::PRIMARY_DIM),
             );
             let tb_normalized = self.params.timebase.modulated_normalized_value();
-            widgets::draw_slider(
+            widgets::draw_outline_slider(
                 &mut self.surface.pixmap,
                 tr,
                 cx2,
@@ -876,6 +910,9 @@ impl PopeScopeWindow {
                 "",
                 &timebase_text,
                 tb_normalized,
+                border_c,
+                active_text_c,
+                slider_fill_c,
             );
             self.hit_regions.push(HitRegion {
                 x: cx2,
@@ -900,7 +937,7 @@ impl PopeScopeWindow {
             theme::to_color(theme::PRIMARY_DIM),
         );
         let min_normalized = self.params.min_db.modulated_normalized_value();
-        widgets::draw_slider(
+        widgets::draw_outline_slider(
             &mut self.surface.pixmap,
             tr,
             cx2,
@@ -910,6 +947,9 @@ impl PopeScopeWindow {
             "",
             &min_db_text,
             min_normalized,
+            border_c,
+            active_text_c,
+            slider_fill_c,
         );
         self.hit_regions.push(HitRegion {
             x: cx2,
@@ -933,7 +973,7 @@ impl PopeScopeWindow {
             theme::to_color(theme::PRIMARY_DIM),
         );
         let max_normalized = self.params.max_db.modulated_normalized_value();
-        widgets::draw_slider(
+        widgets::draw_outline_slider(
             &mut self.surface.pixmap,
             tr,
             cx2,
@@ -943,6 +983,9 @@ impl PopeScopeWindow {
             "",
             &max_db_text,
             max_normalized,
+            border_c,
+            active_text_c,
+            slider_fill_c,
         );
         self.hit_regions.push(HitRegion {
             x: cx2,
