@@ -5,8 +5,8 @@
 
 use crate::ring_buffer::MinMax;
 use crate::store;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 // ── Per-slot bar latch for stable rb_start ──────────────────────────────────
 //
@@ -61,14 +61,12 @@ static BAR_LATCHES: [BarLatch; store::MAX_SLOTS] = {
 // buffer. The renderer always displays the front buffer.
 
 struct HoldBuffer {
-    /// Front buffer: last complete bar (what the renderer displays).
-    front: Mutex<Vec<Vec<f32>>>,
+    /// Front buffer: last complete bar, wrapped in Arc for cheap cloning.
+    /// `None` until the first bar completes.
+    front: Mutex<Option<Arc<Vec<Vec<f32>>>>>,
     /// Back buffer: accumulates the current bar's most recent read.
-    /// At bar boundary, back is promoted to front.
-    /// Pre-allocated; data is copied in via copy_from_slice.
+    /// At bar boundary, back is wrapped in Arc and moved to front.
     back: Mutex<Vec<Vec<f32>>>,
-    /// Whether front has valid data (at least one bar has completed).
-    front_valid: AtomicBool,
     /// Last observed frac for bar-boundary detection.
     last_frac: AtomicUsize,
 }
@@ -76,33 +74,26 @@ struct HoldBuffer {
 impl HoldBuffer {
     const fn new() -> Self {
         Self {
-            front: Mutex::new(Vec::new()),
+            front: Mutex::new(None),
             back: Mutex::new(Vec::new()),
-            front_valid: AtomicBool::new(false),
             last_frac: AtomicUsize::new(0),
         }
     }
 
     /// Update the hold buffer with the current frame's data.
-    /// Returns the data to display.
-    ///
-    /// - `current_data`: the full beat-aligned window read for this frame
-    /// - `frac`: playhead fraction within the bar (0.0 - 1.0)
-    fn update(&self, current_data: &[Vec<f32>], frac: f64) -> Option<Vec<Vec<f32>>> {
+    /// Returns an Arc to the front buffer (pointer-sized clone), or None.
+    fn update(&self, current_data: &[Vec<f32>], frac: f64) -> Option<Arc<Vec<Vec<f32>>>> {
         let frac_u = (frac * 1_000_000.0) as usize;
         let prev_frac = self.last_frac.load(Ordering::Relaxed);
 
         // Lock back buffer once for both the bar-boundary promotion and the current write
         if let Ok(mut back) = self.back.lock() {
             if frac_u < prev_frac && prev_frac > 0 {
-                // Bar boundary crossed (frac wrapped) —
-                // promote the BACK buffer (previous bar's last read) to front.
+                // Bar boundary crossed — wrap back in Arc and promote to front.
                 if !back.is_empty() {
+                    let completed = std::mem::take(&mut *back);
                     if let Ok(mut front) = self.front.lock() {
-                        // Swap back into front to avoid deep clone: front gets
-                        // the back's data, back is left empty and will be re-filled.
-                        std::mem::swap(&mut *front, &mut *back);
-                        self.front_valid.store(true, Ordering::Relaxed);
+                        *front = Some(Arc::new(completed));
                     }
                 }
             }
@@ -120,12 +111,8 @@ impl HoldBuffer {
         }
         self.last_frac.store(frac_u, Ordering::Relaxed);
 
-        // Return front buffer if valid, otherwise None
-        if self.front_valid.load(Ordering::Relaxed) {
-            self.front.lock().ok().map(|f| f.clone())
-        } else {
-            None
-        }
+        // Return Arc clone of front (pointer-sized, no data copy)
+        self.front.lock().ok().and_then(|f| f.as_ref().map(Arc::clone))
     }
 }
 
@@ -445,9 +432,10 @@ pub fn build_snapshots_beat_sync(
 
             if hold_mode {
                 // Hold mode: use the double buffer to show the last complete bar
-                if let Some(front_data) = HOLD_BUFFERS[idx].update(&raw_data, playhead_fraction) {
-                    data_points = front_data.first().map_or(0, |ch| ch.len());
-                    audio_data = front_data;
+                if let Some(front_arc) = HOLD_BUFFERS[idx].update(&raw_data, playhead_fraction) {
+                    data_points = front_arc.first().map_or(0, |ch| ch.len());
+                    // Unwrap the Arc if we're the only holder, otherwise clone
+                    audio_data = Arc::try_unwrap(front_arc).unwrap_or_else(|arc| (*arc).clone());
                 } else {
                     // No complete bar yet — show partial data with sweep mask
                     // so user sees something while waiting for first bar
