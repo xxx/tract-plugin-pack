@@ -99,6 +99,8 @@ struct PopeScopeWindow {
     physical_height: u32,
     scale_factor: f32,
     shared_scale: Arc<AtomicCell<f32>>,
+    /// Pending host-initiated resize (shared with Editor trait impl).
+    pending_resize: Arc<std::sync::atomic::AtomicU64>,
 
     params: Arc<PopeScopeParams>,
     sample_rate: f32,
@@ -130,6 +132,7 @@ impl PopeScopeWindow {
         params: Arc<PopeScopeParams>,
         sample_rate: f32,
         shared_scale: Arc<AtomicCell<f32>>,
+        pending_resize: Arc<std::sync::atomic::AtomicU64>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -147,6 +150,7 @@ impl PopeScopeWindow {
             physical_height: ph,
             scale_factor,
             shared_scale,
+            pending_resize,
             params,
             sample_rate,
             text_renderer,
@@ -1041,7 +1045,16 @@ impl PopeScopeWindow {
 }
 
 impl baseview::WindowHandler for PopeScopeWindow {
-    fn on_frame(&mut self, _window: &mut baseview::Window) {
+    fn on_frame(&mut self, window: &mut baseview::Window) {
+        // Check for pending host-initiated resize
+        let packed = self.pending_resize.swap(0, Ordering::Relaxed);
+        if packed != 0 {
+            let new_w = (packed >> 32) as u32;
+            let new_h = (packed & 0xFFFF_FFFF) as u32;
+            if new_w > 0 && new_h > 0 && (new_w != self.physical_width || new_h != self.physical_height) {
+                window.resize(baseview::Size::new(new_w as f64, new_h as f64));
+            }
+        }
         self.draw();
         self.surface.present();
     }
@@ -1055,6 +1068,10 @@ impl baseview::WindowHandler for PopeScopeWindow {
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
+                // Derive scale factor from the new size
+                let sf = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.75, 3.0);
+                self.scale_factor = sf;
+                self.shared_scale.store(sf);
                 self.resize_buffers();
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorMoved {
@@ -1253,6 +1270,10 @@ pub(crate) struct PopeScopeEditor {
     params: Arc<PopeScopeParams>,
     shared_sample_rate: Arc<AtomicU32>,
     scaling_factor: Arc<AtomicCell<f32>>,
+    /// Pending host-initiated resize. Packed as (width << 32 | height).
+    /// 0 = no pending resize. Written by the host thread (via set_size),
+    /// read and cleared by the editor's on_frame.
+    pending_resize: Arc<std::sync::atomic::AtomicU64>,
 }
 
 pub(crate) fn create(
@@ -1263,6 +1284,7 @@ pub(crate) fn create(
         params,
         shared_sample_rate,
         scaling_factor: Arc::new(AtomicCell::new(1.0)),
+        pending_resize: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     }))
 }
 
@@ -1279,6 +1301,7 @@ impl Editor for PopeScopeEditor {
         let gui_context = Arc::clone(&context);
         let params = Arc::clone(&self.params);
         let shared_scale = Arc::clone(&self.scaling_factor);
+        let pending_resize = Arc::clone(&self.pending_resize);
         let sample_rate = self.shared_sample_rate.load(Ordering::Relaxed) as f32;
 
         let window = baseview::Window::open_parented(
@@ -1290,7 +1313,7 @@ impl Editor for PopeScopeEditor {
                 gl_config: None,
             },
             move |window| {
-                PopeScopeWindow::new(window, gui_context, params, sample_rate, shared_scale, sf)
+                PopeScopeWindow::new(window, gui_context, params, sample_rate, shared_scale, pending_resize, sf)
             },
         );
 
@@ -1319,6 +1342,16 @@ impl Editor for PopeScopeEditor {
     fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
     fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
     fn param_values_changed(&self) {}
+
+    fn set_size(&self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+        // Pack (width, height) into a u64 for the editor's on_frame to pick up
+        let packed = ((width as u64) << 32) | (height as u64);
+        self.pending_resize.store(packed, Ordering::Relaxed);
+        true
+    }
 }
 
 #[cfg(test)]
