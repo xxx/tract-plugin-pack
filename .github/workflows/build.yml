@@ -42,7 +42,7 @@ jobs:
           key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install cargo-nih-plug
-        run: cargo install --force --git https://github.com/davemollen/nih-plug.git --branch finish-vst3-pr cargo-nih-plug
+        run: cargo install --force --git https://github.com/xxx/nih-plug.git --branch finish-vst3-pr cargo-nih-plug
 
       - name: Build wavetable-filter
         run: cargo nih-plug bundle wavetable-filter --release
@@ -59,6 +59,9 @@ jobs:
       - name: Build satch
         run: cargo nih-plug bundle satch --release
 
+      - name: Build pope-scope
+        run: cargo nih-plug bundle pope-scope --release
+
       - name: Build standalones
         run: |
           cargo build --bin wavetable-filter --release
@@ -66,6 +69,7 @@ jobs:
           cargo build --bin gain-brain --release
           cargo build --bin tinylimit --release
           cargo build --bin satch --release
+          cargo build --bin pope-scope --release
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
