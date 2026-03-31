@@ -111,6 +111,9 @@ pub struct PopeScope {
     /// push, avoiding a `try_read()` lock acquisition on the audio thread
     /// just to read `total_written()` for time mapping.
     cached_ring_buf_pos: u64,
+    /// Buffered samples from failed try_write() attempts. Flushed on
+    /// next successful push to avoid holes in the ring buffer.
+    pending_push: Vec<Vec<f32>>,
 }
 
 // ── Params ────────────────────────────────────────────────────────────────────
@@ -242,6 +245,7 @@ impl Default for PopeScope {
             sample_rate: 48000.0,
             shared_sample_rate: Arc::new(AtomicU32::new(48000)),
             cached_ring_buf_pos: 0,
+            pending_push: Vec::new(),
         }
     }
 }
@@ -410,18 +414,40 @@ impl Plugin for PopeScope {
             .group
             .store(self.params.group.value() as u32, Ordering::Relaxed);
 
-        // Push audio to ring buffers (try_lock to avoid blocking if GUI is reading)
+        // Push audio to ring buffers. If try_write fails (GUI reading),
+        // buffer the samples and push them on the next successful lock.
         if let Ok(mut guard) = slot.buffers.try_write() {
             if let Some(bufs) = guard.as_mut() {
                 let num_channels = buffer.channels();
+                // Flush any previously buffered samples first
+                let mut pending_samples = 0u64;
+                for (ch, pending) in self.pending_push.iter_mut().enumerate() {
+                    if !pending.is_empty() && ch < bufs.len() {
+                        if ch == 0 { pending_samples = pending.len() as u64; }
+                        bufs[ch].push(pending);
+                        pending.clear();
+                    }
+                }
+                self.cached_ring_buf_pos += pending_samples;
+                // Push current buffer
                 for (ch, channel_samples) in buffer.as_slice().iter().enumerate() {
                     if ch < bufs.len() && ch < num_channels {
                         bufs[ch].push(channel_samples);
                     }
                 }
             }
-            // Update cached position after successful push
             self.cached_ring_buf_pos += buffer.samples() as u64;
+        } else {
+            // Buffer the samples for next successful push
+            let num_channels = buffer.channels();
+            while self.pending_push.len() < num_channels {
+                self.pending_push.push(Vec::with_capacity(4096));
+            }
+            for (ch, channel_samples) in buffer.as_slice().iter().enumerate() {
+                if ch < num_channels {
+                    self.pending_push[ch].extend_from_slice(channel_samples);
+                }
+            }
         }
 
         // Update heartbeat (monotonic frame counter — GUI detects staleness

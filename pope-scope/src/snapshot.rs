@@ -35,14 +35,35 @@ impl BarLatch {
         let frac_u32 = (frac * 1_000_000.0) as usize;
         let prev_frac = self.last_frac_u32.load(Ordering::Relaxed);
 
-        if frac_u32 < prev_frac || prev_frac == 0 {
-            // New bar boundary (frac wrapped) or first frame — latch the new rb_start
+        // A real bar boundary has frac dropping from >0.5 to <0.5.
+        // Reject small backward jumps caused by torn atomic reads
+        // (ppq and rb_pos from different audio callbacks).
+        let is_real_wrap = frac_u32 < prev_frac && prev_frac > 500_000;
+        let latched = self.rb_start.load(Ordering::Relaxed);
+
+        if is_real_wrap || prev_frac == 0 {
+            // New bar boundary or first frame — latch the new rb_start
+            if latched != 0 && computed_rb_start != latched {
+                nih_plug::nih_log!(
+                    "LATCH CHANGE old={} new={} frac={:.4} prev_frac={:.4} diff={}",
+                    latched, computed_rb_start, frac, prev_frac as f64 / 1_000_000.0,
+                    computed_rb_start as i64 - latched as i64
+                );
+            }
             self.rb_start.store(computed_rb_start, Ordering::Relaxed);
             self.last_frac_u32.store(frac_u32, Ordering::Relaxed);
             computed_rb_start
         } else {
+            // Log if computed drifted from latched (the jitter we're suppressing)
+            if latched != 0 && (computed_rb_start as i64 - latched as i64).unsigned_abs() > 2048 {
+                nih_plug::nih_log!(
+                    "DRIFT computed={} latched={} frac={:.4} diff={}",
+                    computed_rb_start, latched, frac,
+                    computed_rb_start as i64 - latched as i64
+                );
+            }
             self.last_frac_u32.store(frac_u32, Ordering::Relaxed);
-            self.rb_start.load(Ordering::Relaxed)
+            latched
         }
     }
 }
@@ -124,8 +145,9 @@ impl HoldBuffer {
 
         // Lock back buffer once for both the bar-boundary promotion and the current write
         if let Ok(mut back) = self.back.lock() {
-            if frac_u < prev_frac && prev_frac > 0 {
-                // Bar boundary crossed — wrap back in Arc and promote to front.
+            if frac_u < prev_frac && prev_frac > 500_000 {
+                // Bar boundary crossed (frac dropped from >0.5 to <0.5) —
+                // wrap back in Arc and promote to front.
                 if !back.is_empty() {
                     let completed = std::mem::take(&mut *back);
                     if let Ok(mut front) = self.front.lock() {
@@ -405,15 +427,46 @@ pub fn build_snapshots_beat_sync(
     let (slots, slot_count) = store::active_slots_in_group(group);
     let mut snapshots = Vec::with_capacity(slot_count);
 
+    // Compute staleness ONCE per slot per frame. is_slot_stale() has a
+    // destructive side effect (swap) — calling it twice would cause the
+    // second call to always see stale, incorrectly skipping active slots.
+    let mut slot_stale = [false; store::MAX_SLOTS];
     for &idx in &slots[..slot_count] {
-        // Skip stale slots (plugin no longer calling process())
-        if is_slot_stale(idx) {
+        slot_stale[idx] = is_slot_stale(idx);
+    }
+
+    // Read transport info from the FIRST active slot and use it for ALL slots.
+    let first_active = slots[..slot_count].iter().copied().find(|&i| !slot_stale[i]);
+    let (global_is_playing, global_bpm, global_beats_per_bar, global_ppq, global_bar_start, global_spb) =
+        if let Some(fi) = first_active {
+            let fs = store::slot(fi);
+            let playing = fs.playhead.is_playing.load(Ordering::Relaxed);
+            let bpm = f64::from_bits(fs.playhead.bpm.load(Ordering::Relaxed));
+            let bpb = fs.playhead.time_sig_num.load(Ordering::Relaxed);
+            let ppq = f64::from_bits(fs.playhead.ppq_position.load(Ordering::Relaxed));
+            let bar_start = f64::from_bits(fs.playhead.bar_start_ppq.load(Ordering::Relaxed));
+            let spb = if bpm > 0.0 { (60.0 / bpm) * sample_rate as f64 } else { 0.0 };
+            (playing, bpm, bpb, ppq, bar_start, spb)
+        } else {
+            (false, 120.0, 4, 0.0, 0.0, 0.0)
+        };
+    let global_samples_per_bar = global_spb * global_beats_per_bar as f64;
+
+    // Compute the global playhead fraction ONCE for consistent bar latch/hold
+    // triggering across all slots.
+    let global_window_ppq = sync_bars * global_beats_per_bar as f64;
+    let global_ppq_offset = global_ppq.rem_euclid(global_window_ppq);
+    let global_frac = if global_window_ppq > 0.0 { global_ppq_offset / global_window_ppq } else { 0.0 };
+
+    for &idx in &slots[..slot_count] {
+        // Skip stale slots (using cached result — never call is_slot_stale twice)
+        if slot_stale[idx] {
             continue;
         }
 
         let s = store::slot(idx);
 
-        // Read metadata (same as free mode)
+        // Read metadata
         let track_name = s
             .metadata
             .track_name
@@ -426,26 +479,27 @@ pub fn build_snapshots_beat_sync(
         let solo = s.metadata.solo.load(Ordering::Relaxed);
         let mute = s.metadata.mute.load(Ordering::Relaxed);
 
-        let is_playing = s.playhead.is_playing.load(Ordering::Relaxed);
-        let bpm = f64::from_bits(s.playhead.bpm.load(Ordering::Relaxed));
-        let beats_per_bar = s.playhead.time_sig_num.load(Ordering::Relaxed);
-        let ppq = f64::from_bits(s.playhead.ppq_position.load(Ordering::Relaxed));
-        let bar_start = f64::from_bits(s.playhead.bar_start_ppq.load(Ordering::Relaxed));
-        let ppq_in_bar = ppq - bar_start;
-        let spb = if bpm > 0.0 {
-            (60.0 / bpm) * sample_rate as f64
-        } else {
-            0.0
-        };
-        let samples_per_bar = spb * beats_per_bar as f64;
+        // Use global transport values (consistent across slots)
+        let is_playing = global_is_playing;
+        let bpm = global_bpm;
+        let beats_per_bar = global_beats_per_bar;
+        let ppq_in_bar = global_ppq - global_bar_start;
+        let samples_per_bar = global_samples_per_bar;
 
+        // Per-slot: read ring_buffer_pos for this slot's ring buffer position
         let tm_snap = s.time_mapping.snapshot();
 
-        // Compute beat-aligned window using PPQ delta approach.
-        // beat_aligned_window returns (rb_start, window_len, playhead_fraction)
-        // in ring buffer space.
+        // Compute beat-aligned window: use global PPQ but per-slot ring_buffer_pos.
+        // Override the time mapping's PPQ with global values for consistent alignment.
+        let global_tm = crate::time_mapping::TimeMappingSnapshot {
+            current_ppq: global_ppq,
+            current_sample_pos: tm_snap.current_sample_pos,
+            ring_buffer_pos: tm_snap.ring_buffer_pos,
+            samples_per_beat: global_spb,
+            discontinuity_counter: tm_snap.discontinuity_counter,
+        };
         let window = if is_playing {
-            crate::time_mapping::beat_aligned_window(&tm_snap, sync_bars, beats_per_bar)
+            crate::time_mapping::beat_aligned_window(&global_tm, sync_bars, beats_per_bar)
         } else {
             None
         };
@@ -459,9 +513,12 @@ pub fn build_snapshots_beat_sync(
         let mut data_version = 0u64;
         let mut data_points = 0;
 
-        if let (Some(bufs), Some((computed_rb_start, window_len, playhead_fraction))) =
+        if let (Some(bufs), Some((computed_rb_start, window_len, _per_slot_frac))) =
             (guard.as_ref(), window)
         {
+            // Use global_frac for bar latch and hold buffer to ensure all
+            // slots trigger bar boundaries on the same frame.
+            let playhead_fraction = global_frac;
             // Latch rb_start at bar boundaries to eliminate per-buffer PPQ jitter
             let rb_start = BAR_LATCHES[idx].update(computed_rb_start, playhead_fraction);
 
