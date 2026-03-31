@@ -77,6 +77,7 @@ A multichannel real-time oscilloscope with beat sync. Multiple instances share a
 - CPU-rendered GUI with amber phosphor terminal theme (tiny-skia + softbuffer)
 - 16 instances @ 2% CPU headless (0.13% per instance)
 - Per-track solo/mute/color controls with DAW track name via CLAP track-info
+- Inspired by [PsyScope](https://fx23.net/free-vsts/) and [RusovDmitriy/oscilloscope](https://github.com/RusovDmitriy/oscilloscope)
 
 ## Build Requirements
 
