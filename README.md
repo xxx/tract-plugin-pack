@@ -75,7 +75,7 @@ A multichannel real-time oscilloscope with beat sync. Multiple instances share a
 - Hold mode for phase alignment (shows last complete bar, swaps at boundary)
 - SIMD-optimized ring buffer with f32x16 mipmap reduction
 - CPU-rendered GUI with amber phosphor terminal theme (tiny-skia + softbuffer)
-- ~0.21% CPU per instance headless; 14.4% total with GUI open showing 16 tracks
+- 16 instances @ 2% CPU headless (0.13% per instance)
 - Per-track solo/mute/color controls with DAW track name via CLAP track-info
 
 ## Build Requirements

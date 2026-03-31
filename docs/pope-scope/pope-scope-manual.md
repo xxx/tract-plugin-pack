@@ -14,6 +14,8 @@ Pope Scope is a multichannel real-time oscilloscope with beat sync. Multiple ins
 
 Features an amber phosphor terminal theme with CPU rendering.
 
+![Pope Scope](popescope.png)
+
 ## Installation
 
 Build from source (requires nightly Rust):
@@ -209,12 +211,14 @@ Use the **-** / **+** buttons in the upper right corner. Range: 75% to 300%. Sca
 - **DAW track names** -- receives track name/color from host via CLAP track-info extension
 - **Embedded font** -- DejaVu Sans, compiled into the binary. No runtime font loading
 
-Benchmarks (Bitwig, 48 kHz / 1024 samples):
+Benchmarks (Bitwig, 48 kHz / 1024 samples, 16 instances, audio playing):
 
 | Condition | CPU | RSS | Per Instance |
 |---|---|---|---|
-| 16 instances, GUI closed | 3.3% | 218 MB | 0.21% CPU, 13.6 MB |
-| 16 instances, GUI open (large window) | 14.4% | 299 MB | 0.9% CPU, 18.7 MB |
+| GUI closed | 2% | 247 MB | 0.13% CPU, 15.4 MB |
+| GUI open (large window) | 80% | 249 MB | 5% CPU, 15.6 MB |
+
+GUI rendering cost is dominated by tiny-skia path rasterization and scales with window size × visible tracks × draw style. Audio thread overhead is minimal (~2% for 16 instances).
 
 ## Formats
 
