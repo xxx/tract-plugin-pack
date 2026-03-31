@@ -71,9 +71,9 @@ Sync mode selector. Two options:
 
 Default: Beat Sync.
 
-#### Unit
+#### Bars
 
-Sync unit selector (only visible when Sync is set to Beat). Five options:
+Bar length selector (only visible when Sync is set to Beat). Five options:
 
 - **1/4** -- quarter bar
 - **1/2** -- half bar
@@ -83,6 +83,15 @@ Sync unit selector (only visible when Sync is set to Beat). Five options:
 
 Default: 1 bar.
 
+#### Mode
+
+Display mode for beat sync (only visible when Sync is set to Beat). Two options:
+
+- **Swp** (Sweep) -- waveform fills left to right as the bar plays, resets at bar boundary. Shows real-time playback position.
+- **Hold** -- shows the last complete bar. Updates atomically at each bar boundary. Best for phase alignment and comparing waveform shapes across tracks.
+
+Default: Sweep.
+
 #### Freeze
 
 Toggle button. When ON, the waveform display stops updating and holds the current frame. Useful for inspecting a specific moment in time.
@@ -91,7 +100,7 @@ Default: OFF.
 
 #### Mono
 
-Toggle button. When ON, stereo channels are mixed to mono for display. When OFF, the first channel (left) is displayed.
+Toggle button. When ON, stereo channels are mixed to mono for display. When OFF, all channels are drawn individually with hue-shifted colors (e.g., L in the track's base color, R shifted +30 degrees).
 
 Default: ON.
 
@@ -117,7 +126,7 @@ Drag horizontally to adjust. Hold **Shift** while dragging for fine control. **D
 
 Horizontal slider. Sets the top of the visible amplitude range.
 
-Range: -48 to 0 dB. Default: 0 dB. Lowering Max dB zooms in on quieter signals by excluding the loudest peaks.
+Range: -48 to +12 dB. Default: 0 dB. Lowering Max dB zooms in on quieter signals by excluding the loudest peaks. Values above 0 dB show clipping headroom.
 
 Drag horizontally to adjust. Hold **Shift** while dragging for fine control. **Double-click** to reset to default.
 
@@ -178,13 +187,17 @@ Each instance is assigned to a group (0-15) via the Group parameter. All instanc
 Each track has Solo (S) and Mute (M) buttons in the Vertical display mode's control strip:
 
 - **Solo** -- when any track is soloed, only soloed tracks are visible. Multiple tracks can be soloed simultaneously.
-- **Mute** -- muted tracks are hidden from the display. Mute takes priority over solo (a muted+soloed track is hidden).
+- **Mute** -- muted tracks have their waveform hidden but keep their lane and control strip visible (so you can unmute). Solo overrides mute — a soloed track is always visible.
 
 Solo and mute are display-only -- they do not affect the audio signal.
 
+### Track Names
+
+Track names are received from the host via the CLAP track-info extension. Long names are truncated with an ellipsis — hover over a truncated name to see the full text in a tooltip. If the host doesn't provide a name, "Track N" is shown.
+
 ### Color
 
-Each track is assigned a color from a 16-color palette (amber, cyan, rose, yellow, orange, purple, red, blue, and their lighter variants). Colors are assigned automatically by slot index. Click the color swatch in the control strip to cycle to the next color.
+Each track is assigned a color from a 16-color palette (amber, cyan, rose, yellow, orange, purple, red, blue, and their lighter variants). Colors are assigned automatically by slot index. The host can also provide a track color via CLAP track-info. Click the color swatch in the control strip to cycle to the next color. Grid lines and dB labels in each track's lane match the track color.
 
 ## Mouse Cursor
 
@@ -194,9 +207,9 @@ When the mouse hovers over the waveform display area, a vertical cursor line is 
 
 In Vertical display mode, a dashed horizontal line shows the peak amplitude for each track. The peak level holds for 2 seconds, then decays at 20 dB/s until it reaches -96 dB.
 
-## Scaling
+## Window Resizing
 
-Use the **-** / **+** buttons in the upper right corner. Range: 75% to 300%. Scale is persisted across host restarts.
+Drag the window edges to resize (host-initiated resize via CLAP/VST3). The display scales proportionally. Window size is persisted across host restarts. Keyboard shortcuts **Ctrl+=** and **Ctrl+-** also work.
 
 ## Technical Notes
 
