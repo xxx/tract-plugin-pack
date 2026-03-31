@@ -14,7 +14,7 @@ Pope Scope is a multichannel real-time oscilloscope with beat sync. Multiple ins
 
 Features an amber phosphor terminal theme with CPU rendering.
 
-![Pope Scope](popescope.png)
+![Pope Scope](screenshot.png)
 
 ## Installation
 
