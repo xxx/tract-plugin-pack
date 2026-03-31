@@ -17,6 +17,8 @@ use std::sync::{Arc, Mutex};
 struct BarLatch {
     /// Latched rb_start for the current bar.
     rb_start: AtomicUsize,
+    /// rb_start from the previous bar (saved at each bar boundary).
+    prev_rb_start: AtomicUsize,
     /// Last observed playhead fraction (0.0-1.0 packed as u32 fixed-point).
     /// When frac < last_frac, a new bar has started.
     last_frac_u32: AtomicUsize,
@@ -26,12 +28,13 @@ impl BarLatch {
     const fn new() -> Self {
         Self {
             rb_start: AtomicUsize::new(0),
+            prev_rb_start: AtomicUsize::new(0),
             last_frac_u32: AtomicUsize::new(0),
         }
     }
 
-    /// Update the latch. Returns the stable rb_start to use.
-    fn update(&self, computed_rb_start: usize, frac: f64) -> usize {
+    /// Update the latch. Returns `(stable_rb_start, bar_boundary_occurred)`.
+    fn update(&self, computed_rb_start: usize, frac: f64) -> (usize, bool) {
         let frac_u32 = (frac * 1_000_000.0) as usize;
         let prev_frac = self.last_frac_u32.load(Ordering::Relaxed);
 
@@ -42,29 +45,20 @@ impl BarLatch {
         let latched = self.rb_start.load(Ordering::Relaxed);
 
         if is_real_wrap || prev_frac == 0 {
-            // New bar boundary or first frame — latch the new rb_start
-            if latched != 0 && computed_rb_start != latched {
-                nih_plug::nih_log!(
-                    "LATCH CHANGE old={} new={} frac={:.4} prev_frac={:.4} diff={}",
-                    latched, computed_rb_start, frac, prev_frac as f64 / 1_000_000.0,
-                    computed_rb_start as i64 - latched as i64
-                );
-            }
+            // New bar boundary or first frame — save old rb_start, latch the new one
+            self.prev_rb_start.store(latched, Ordering::Relaxed);
             self.rb_start.store(computed_rb_start, Ordering::Relaxed);
             self.last_frac_u32.store(frac_u32, Ordering::Relaxed);
-            computed_rb_start
+            (computed_rb_start, is_real_wrap)
         } else {
-            // Log if computed drifted from latched (the jitter we're suppressing)
-            if latched != 0 && (computed_rb_start as i64 - latched as i64).unsigned_abs() > 2048 {
-                nih_plug::nih_log!(
-                    "DRIFT computed={} latched={} frac={:.4} diff={}",
-                    computed_rb_start, latched, frac,
-                    computed_rb_start as i64 - latched as i64
-                );
-            }
             self.last_frac_u32.store(frac_u32, Ordering::Relaxed);
-            latched
+            (latched, false)
         }
+    }
+
+    /// Get the rb_start from the previous bar (set at the last bar boundary).
+    fn prev_rb_start(&self) -> usize {
+        self.prev_rb_start.load(Ordering::Relaxed)
     }
 }
 
@@ -137,9 +131,15 @@ impl HoldBuffer {
         }
     }
 
-    /// Update the hold buffer with the current frame's data.
+    /// Update the hold buffer with only the valid portion of the current frame's data.
+    ///
+    /// `valid_count` is the number of samples from the start of `current_data` that
+    /// are behind the ring buffer write head (i.e., real audio, not stale/unwritten).
+    /// Only `[0..valid_count]` is copied into the back buffer each frame; the rest
+    /// accumulates from previous frames as the playhead advances through the bar.
+    ///
     /// Returns an Arc to the front buffer (pointer-sized clone), or None.
-    fn update(&self, current_data: &[Vec<f32>], frac: f64) -> Option<Arc<Vec<Vec<f32>>>> {
+    fn update(&self, current_data: &[Vec<f32>], frac: f64, valid_count: usize) -> Option<Arc<Vec<Vec<f32>>>> {
         let frac_u = (frac * 1_000_000.0) as usize;
         let prev_frac = self.last_frac.load(Ordering::Relaxed);
 
@@ -154,9 +154,17 @@ impl HoldBuffer {
                         *front = Some(Arc::new(completed));
                     }
                 }
+                // Clear new back buffer to zeros so old bar data doesn't
+                // persist into the next bar's accumulation.
+                let window_len = current_data.first().map_or(0, |ch| ch.len());
+                back.resize_with(current_data.len(), Vec::new);
+                for dst in back.iter_mut() {
+                    dst.resize(window_len, 0.0);
+                    dst.fill(0.0);
+                }
             }
 
-            // Copy current data into the back buffer, reusing allocations
+            // Copy only the valid portion into the back buffer
             if back.len() != current_data.len() {
                 back.resize_with(current_data.len(), Vec::new);
             }
@@ -164,13 +172,37 @@ impl HoldBuffer {
                 if dst.len() != src.len() {
                     dst.resize(src.len(), 0.0);
                 }
-                dst.copy_from_slice(src);
+                let n = valid_count.min(src.len()).min(dst.len());
+                dst[..n].copy_from_slice(&src[..n]);
             }
         }
         self.last_frac.store(frac_u, Ordering::Relaxed);
 
         // Return Arc clone of front (pointer-sized, no data copy)
         self.front.lock().ok().and_then(|f| f.as_ref().map(Arc::clone))
+    }
+
+    /// Promote a complete bar directly to the front buffer.
+    ///
+    /// Called at bar boundary when we have a fresh, complete read of the
+    /// previous bar from the ring buffer. Bypasses the incremental
+    /// accumulation — overwrites front immediately.
+    ///
+    /// Also resets `last_frac` to 0 so the next `update()` call doesn't
+    /// re-detect the bar boundary and overwrite front with the (incomplete)
+    /// back buffer.
+    fn promote_complete(&self, complete_bar: Vec<Vec<f32>>) {
+        if let Ok(mut front) = self.front.lock() {
+            *front = Some(Arc::new(complete_bar));
+        }
+        // Clear back buffer so update() starts fresh for the new bar
+        if let Ok(mut back) = self.back.lock() {
+            for dst in back.iter_mut() {
+                dst.fill(0.0);
+            }
+        }
+        // Reset last_frac to 0 so update() doesn't see a bar boundary
+        self.last_frac.store(0, Ordering::Relaxed);
     }
 }
 
@@ -520,7 +552,7 @@ pub fn build_snapshots_beat_sync(
             // slots trigger bar boundaries on the same frame.
             let playhead_fraction = global_frac;
             // Latch rb_start at bar boundaries to eliminate per-buffer PPQ jitter
-            let rb_start = BAR_LATCHES[idx].update(computed_rb_start, playhead_fraction);
+            let (rb_start, bar_boundary) = BAR_LATCHES[idx].update(computed_rb_start, playhead_fraction);
 
             // Read the full beat-aligned window from the ring buffer
             let mut raw_data = Vec::with_capacity(num_channels);
@@ -534,8 +566,34 @@ pub fn build_snapshots_beat_sync(
             }
 
             if hold_mode {
-                // Hold mode: use the double buffer to show the last complete bar
-                if let Some(front_arc) = HOLD_BUFFERS[idx].update(&raw_data, playhead_fraction) {
+                // At bar boundary, the previous bar is now fully written in the
+                // ring buffer. Re-read it completely and promote directly to
+                // the front buffer, bypassing the incremental accumulation
+                // (which may be 5-20% incomplete due to GUI frame timing).
+                if bar_boundary {
+                    let prev_start = BAR_LATCHES[idx].prev_rb_start();
+                    if prev_start > 0 {
+                        let mut complete_bar = Vec::with_capacity(num_channels);
+                        for (ch, buf) in bufs.iter().enumerate().take(num_channels) {
+                            if ch == 0 {
+                                data_version = buf.total_written() as u64;
+                            }
+                            let mut out = vec![0.0f32; window_len];
+                            buf.read_range(prev_start, &mut out);
+                            complete_bar.push(out);
+                        }
+                        HOLD_BUFFERS[idx].promote_complete(complete_bar);
+                    }
+                }
+
+                // How many samples in the window are behind the write head (valid data).
+                let write_pos = bufs.first().map_or(0, |b| b.total_written());
+                let valid_count = write_pos.saturating_sub(rb_start).min(window_len);
+
+                // Hold mode: use the double buffer to show the last complete bar.
+                // Only the valid portion is copied into the back buffer each frame;
+                // samples accumulate across frames as the playhead advances.
+                if let Some(front_arc) = HOLD_BUFFERS[idx].update(&raw_data, playhead_fraction, valid_count) {
                     data_points = front_arc.first().map_or(0, |ch| ch.len());
                     // Unwrap the Arc if we're the only holder, otherwise clone
                     audio_data = Arc::try_unwrap(front_arc).unwrap_or_else(|arc| (*arc).clone());
@@ -627,8 +685,8 @@ mod tests {
     fn test_hold_buffer_no_data_until_bar_completes() {
         let hb = HoldBuffer::new();
         let bar_data = vec![vec![1.0, 2.0, 3.0]];
-        // First frame at frac=0.5 — no previous bar yet
-        let result = hb.update(&bar_data, 0.5);
+        // First frame at frac=0.5, all 3 samples valid
+        let result = hb.update(&bar_data, 0.5, 3);
         assert!(result.is_none());
     }
 
@@ -638,13 +696,13 @@ mod tests {
         let bar1 = vec![vec![1.0, 2.0, 3.0]];
         let bar2 = vec![vec![4.0, 5.0, 6.0]];
 
-        // Simulate bar 1 playing through
-        hb.update(&bar1, 0.1);
-        hb.update(&bar1, 0.5);
-        hb.update(&bar1, 0.9); // back buffer now has bar1
+        // Simulate bar 1 playing through (all samples valid)
+        hb.update(&bar1, 0.1, 3);
+        hb.update(&bar1, 0.5, 3);
+        hb.update(&bar1, 0.9, 3);
 
         // Bar boundary: frac wraps to 0.05
-        let result = hb.update(&bar2, 0.05);
+        let result = hb.update(&bar2, 0.05, 3);
         // Should return bar1 (the PREVIOUS bar), not bar2
         assert!(result.is_some());
         let front = result.unwrap();
@@ -659,13 +717,13 @@ mod tests {
         let bar2_mid = vec![vec![5.0, 6.0]];
 
         // Complete bar 1
-        hb.update(&bar1, 0.1);
-        hb.update(&bar1, 0.9);
-        hb.update(&bar2_early, 0.05); // boundary → bar1 promoted to front
+        hb.update(&bar1, 0.1, 2);
+        hb.update(&bar1, 0.9, 2);
+        hb.update(&bar2_early, 0.05, 2); // boundary → bar1 promoted to front
 
         // Mid-bar reads should return stable front (bar1)
-        let r1 = hb.update(&bar2_mid, 0.3).unwrap();
-        let r2 = hb.update(&bar2_mid, 0.7).unwrap();
+        let r1 = hb.update(&bar2_mid, 0.3, 2).unwrap();
+        let r2 = hb.update(&bar2_mid, 0.7, 2).unwrap();
         assert_eq!(r1[0], vec![1.0, 2.0]);
         assert_eq!(r2[0], vec![1.0, 2.0]);
     }
@@ -675,17 +733,60 @@ mod tests {
         let hb = HoldBuffer::new();
         let early = vec![vec![0.1]];
         let mid = vec![vec![0.5]];
-        let late = vec![vec![0.9]]; // this should be promoted — it's the last read
+        let late = vec![vec![0.9]];
         let new_bar = vec![vec![1.0]];
 
-        hb.update(&early, 0.1);
-        hb.update(&mid, 0.5);
-        hb.update(&late, 0.95); // back buffer = late
+        hb.update(&early, 0.1, 1);
+        hb.update(&mid, 0.5, 1);
+        hb.update(&late, 0.95, 1);
 
-        let result = hb.update(&new_bar, 0.02); // boundary
+        let result = hb.update(&new_bar, 0.02, 1); // boundary
         let front = result.unwrap();
         // Front should be the LATE data (last back before swap), not new_bar
         assert_eq!(front[0], vec![0.9]);
+    }
+
+    #[test]
+    fn test_hold_buffer_accumulates_valid_portion_only() {
+        let hb = HoldBuffer::new();
+        // Simulate a 4-sample window where valid_count grows over time.
+        // Frame 1: frac=0.25, valid=1 → only sample[0] is written
+        let data1 = vec![vec![1.0, 0.0, 0.0, 0.0]];
+        hb.update(&data1, 0.25, 1);
+        // Frame 2: frac=0.5, valid=2 → samples[0..2] are written
+        let data2 = vec![vec![1.0, 2.0, 0.0, 0.0]];
+        hb.update(&data2, 0.5, 2);
+        // Frame 3: frac=0.75, valid=3
+        let data3 = vec![vec![1.0, 2.0, 3.0, 0.0]];
+        hb.update(&data3, 0.75, 3);
+        // Frame 4: frac=0.95, valid=4 (full bar almost complete)
+        let data4 = vec![vec![1.0, 2.0, 3.0, 4.0]];
+        hb.update(&data4, 0.95, 4);
+
+        // Bar boundary: promote back to front
+        let new_bar = vec![vec![5.0, 0.0, 0.0, 0.0]];
+        let front = hb.update(&new_bar, 0.05, 1).unwrap();
+        // Front should have the full accumulated bar: [1, 2, 3, 4]
+        assert_eq!(front[0], vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_hold_buffer_clears_back_after_promotion() {
+        let hb = HoldBuffer::new();
+        // Bar 1: fill with [1.0, 2.0, 3.0]
+        hb.update(&vec![vec![1.0, 2.0, 3.0]], 0.5, 3);
+        hb.update(&vec![vec![1.0, 2.0, 3.0]], 0.9, 3);
+        // Promote bar 1 to front
+        hb.update(&vec![vec![9.0, 0.0, 0.0]], 0.05, 1);
+
+        // Bar 2: only write first sample (valid_count=1).
+        // Back buffer should be zeros for [1..3], NOT leftover bar 1 data.
+        hb.update(&vec![vec![9.0, 0.0, 0.0]], 0.5, 1);
+        hb.update(&vec![vec![9.0, 0.0, 0.0]], 0.9, 1);
+        // Promote bar 2
+        let front = hb.update(&vec![vec![0.0, 0.0, 0.0]], 0.05, 0).unwrap();
+        // Only sample[0] was ever written as valid; rest should be zeros
+        assert_eq!(front[0], vec![9.0, 0.0, 0.0]);
     }
 
     // ── Existing tests ────────────────────────────────────────────────
