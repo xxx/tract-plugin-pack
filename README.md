@@ -72,7 +72,11 @@ A multichannel real-time oscilloscope with beat sync. Multiple instances share a
 - dB-scaled amplitude mapping with configurable range
 - 16 track groups with per-track solo/mute and color assignment
 - Peak hold with 2-second hold and 20 dB/s decay
+- Hold mode for phase alignment (shows last complete bar, swaps at boundary)
+- SIMD-optimized ring buffer with f32x16 mipmap reduction
 - CPU-rendered GUI with amber phosphor terminal theme (tiny-skia + softbuffer)
+- ~0.21% CPU per instance headless; 14.4% total with GUI open showing 16 tracks
+- Per-track solo/mute/color controls with DAW track name via CLAP track-info
 
 ## Build Requirements
 

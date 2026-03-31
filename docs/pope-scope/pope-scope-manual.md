@@ -201,11 +201,20 @@ Use the **-** / **+** buttons in the upper right corner. Range: 75% to 300%. Sca
 - **Pass-through audio** -- Pope Scope does not modify the audio signal. Input is passed directly to output.
 - **No audio-thread allocations** -- the process() callback pushes samples into pre-allocated ring buffers using `try_lock()` to avoid blocking
 - **CPU rendering** -- uses tiny-skia (software rasterizer) + fontdue (glyph cache) + softbuffer (pixel buffer). No OpenGL context, no GPU drivers loaded
-- **Hierarchical ring buffer** -- 3-level mipmap (L0: raw samples, L1: 4x decimation, L2: 16x decimation) for efficient rendering at any zoom level. The renderer selects the appropriate level based on the ratio of samples to display pixels
-- **Atomic time mapping** -- PPQ/sample position mapping uses lock-free atomics with discontinuity detection for loop/seek/play-start events
+- **SIMD ring buffer** -- two-pass push: bulk memcpy + f32x16 SIMD mipmap reduction. 3-level hierarchy (raw, 64-sample blocks, 256-sample blocks) for efficient rendering at any zoom
+- **Atomic time mapping** -- PPQ/sample position mapping uses lock-free atomics with discontinuity detection for loop/seek/play-start events. Bar latch eliminates per-buffer PPQ jitter
 - **Static global store** -- 16 slots with atomic CAS ownership. Ring buffers are allocated on demand when an instance joins and deallocated on leave
 - **32-second ring buffer** -- each channel stores 32 seconds of audio at the current sample rate
+- **Hold mode** -- double-buffered bar display with Arc front buffer for zero-copy reads. Shows last complete bar for phase alignment
+- **DAW track names** -- receives track name/color from host via CLAP track-info extension
 - **Embedded font** -- DejaVu Sans, compiled into the binary. No runtime font loading
+
+Benchmarks (Bitwig, 48 kHz / 1024 samples):
+
+| Condition | CPU | RSS | Per Instance |
+|---|---|---|---|
+| 16 instances, GUI closed | 3.3% | 218 MB | 0.21% CPU, 13.6 MB |
+| 16 instances, GUI open (large window) | 14.4% | 299 MB | 0.9% CPU, 18.7 MB |
 
 ## Formats
 
