@@ -314,6 +314,12 @@ impl Plugin for PopeScope {
                     .group
                     .store(self.params.group.value() as u32, Ordering::Relaxed);
                 self.slot_index = Some(idx);
+                // Pre-allocate pending_push so try_write failure doesn't
+                // allocate on the audio thread.
+                self.pending_push.clear();
+                for _ in 0..num_channels {
+                    self.pending_push.push(Vec::with_capacity(4096));
+                }
                 debug_log!(
                     "pope-scope: initialize() acquired slot {idx} (hash={}, channels={num_channels}, sr={})",
                     self.instance_hash, self.sample_rate
