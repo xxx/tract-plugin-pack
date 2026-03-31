@@ -53,6 +53,42 @@ static BAR_LATCHES: [BarLatch; store::MAX_SLOTS] = {
     [LATCH_INIT; store::MAX_SLOTS]
 };
 
+// ── Per-slot stale detection ─────────────────────────────────────────────
+//
+// Each slot has a heartbeat counter incremented by process() every buffer.
+// If the heartbeat hasn't changed between GUI frames, the slot's plugin
+// is no longer running (track deleted, plugin removed, etc). Skip it.
+
+static LAST_HEARTBEATS: [AtomicUsize; store::MAX_SLOTS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const HB_INIT: AtomicUsize = AtomicUsize::new(0);
+    [HB_INIT; store::MAX_SLOTS]
+};
+
+/// Consecutive stale frame count per slot.
+static STALE_COUNTS: [AtomicUsize; store::MAX_SLOTS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const SC_INIT: AtomicUsize = AtomicUsize::new(0);
+    [SC_INIT; store::MAX_SLOTS]
+};
+
+/// Number of consecutive stale frames before a slot is considered dead.
+/// At 60fps, 30 frames = 0.5 seconds of silence.
+const STALE_THRESHOLD: usize = 30;
+
+/// Check if a slot is stale (heartbeat hasn't changed for STALE_THRESHOLD frames).
+fn is_slot_stale(idx: usize) -> bool {
+    let current = store::slot(idx).heartbeat.load(Ordering::Relaxed) as usize;
+    let prev = LAST_HEARTBEATS[idx].swap(current, Ordering::Relaxed);
+    if current == prev && current != 0 {
+        let count = STALE_COUNTS[idx].fetch_add(1, Ordering::Relaxed);
+        count >= STALE_THRESHOLD
+    } else {
+        STALE_COUNTS[idx].store(0, Ordering::Relaxed);
+        false
+    }
+}
+
 // ── Per-slot hold buffer for Hold display mode ────────────────────────────
 //
 // In Hold mode, the renderer shows the last *complete* bar. During the
@@ -223,6 +259,11 @@ pub fn build_snapshots_free(
     let mut snapshots = Vec::with_capacity(slot_count);
 
     for &idx in &slots[..slot_count] {
+        // Skip stale slots (plugin no longer calling process())
+        if is_slot_stale(idx) {
+            continue;
+        }
+
         let s = store::slot(idx);
 
         // Read metadata
@@ -365,6 +406,11 @@ pub fn build_snapshots_beat_sync(
     let mut snapshots = Vec::with_capacity(slot_count);
 
     for &idx in &slots[..slot_count] {
+        // Skip stale slots (plugin no longer calling process())
+        if is_slot_stale(idx) {
+            continue;
+        }
+
         let s = store::slot(idx);
 
         // Read metadata (same as free mode)
