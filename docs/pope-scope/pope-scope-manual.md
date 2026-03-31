@@ -112,7 +112,7 @@ Horizontal slider (only visible when Sync is set to Free). Controls the visible 
 
 Range: 1 ms to 10,000 ms (10 seconds). Default: 2,000 ms. The scale is logarithmic -- fine control at short timebases, coarser at long ones.
 
-Drag horizontally to adjust. Hold **Shift** while dragging for fine control (10x slower). **Double-click** to reset to default.
+Drag vertically to adjust. Hold **Shift** while dragging for fine control (10x slower). **Double-click** to reset to default.
 
 #### Min dB
 
@@ -120,7 +120,7 @@ Horizontal slider. Sets the bottom of the visible amplitude range.
 
 Range: -96 to -6 dB. Default: -48 dB. Signals below this level are not visible. Raising Min dB zooms in on louder signals; lowering it reveals quieter detail.
 
-Drag horizontally to adjust. Hold **Shift** while dragging for fine control. **Double-click** to reset to default.
+Drag vertically to adjust. Hold **Shift** while dragging for fine control. **Double-click** to reset to default.
 
 #### Max dB
 
@@ -128,7 +128,7 @@ Horizontal slider. Sets the top of the visible amplitude range.
 
 Range: -48 to +12 dB. Default: 0 dB. Lowering Max dB zooms in on quieter signals by excluding the loudest peaks. Values above 0 dB show clipping headroom.
 
-Drag horizontally to adjust. Hold **Shift** while dragging for fine control. **Double-click** to reset to default.
+Drag vertically to adjust. Hold **Shift** while dragging for fine control. **Double-click** to reset to default.
 
 ## Display Modes
 
