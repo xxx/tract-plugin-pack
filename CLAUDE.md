@@ -12,7 +12,7 @@ Tract Plugin Pack is a Cargo workspace containing multiple audio effect plugins 
 
 **GS Meter** — lightweight loudness meter with gain utility for clip-to-zero workflows. dB mode: peak, true peak (ITU-R BS.1770-4), RMS integrated/momentary, crest factor. LUFS mode: EBU R128 integrated/short-term/momentary loudness, LRA, true peak. Per-mode gain and reference with gain-match buttons. GUI uses softbuffer + tiny-skia (CPU rendering, no GPU). Designed for 100+ instances per project.
 
-**Gain Brain** — lightweight gain utility with cross-instance group linking via mmap IPC. 16 groups, Absolute/Relative link modes, Invert toggle for mirrored gain movement. GUI uses softbuffer + tiny-skia (CPU rendering). ~8 KB per instance headless. Inspired by BlueCat's Gain Suite.
+**Gain Brain** — lightweight gain utility with cross-instance group linking via in-process static atomics. 16 groups, Absolute/Relative link modes, Invert toggle for mirrored gain movement. GUI uses softbuffer + tiny-skia (CPU rendering). ~0.62 MB RSS per instance. Inspired by BlueCat's Gain Suite.
 
 **tinylimit** — low-latency wideband peak limiter for track-level use. Feed-forward with lookahead, dual-stage transient/dynamics envelope, soft knee (Giannoulis 2012), optional ISP (ITU-1770 true peak). 7 built-in character presets. GUI uses softbuffer + tiny-skia (CPU rendering). 50 instances @ 6.2% CPU, 50 MB RSS (~1.0 MB, 0.12% CPU per instance). Inspired by DMG Audio TrackLimit.
 
@@ -68,17 +68,18 @@ cargo build --bin pope-scope
 ## Testing & Linting
 
 ```bash
-cargo test --workspace                            # all tests (170+)
+cargo test --workspace                            # all tests (300+)
 cargo clippy --workspace -- -D warnings           # lint (CI uses -D warnings)
 cargo fmt --check
 ```
 
 Tests are inline `#[cfg(test)]` modules:
 - `wavetable-filter/src/lib.rs` and `wavetable-filter/src/wavetable.rs` — 30 DSP tests
-- `gs-meter/src/meter.rs` — 50 meter tests (RMS, peak, true peak, SIMD, stereo)
-- `gain-brain/src/groups.rs` — 11 mmap IPC tests
-- `gain-brain/src/lib.rs` — 16 sync/conversion tests
+- `gs-meter/src/meter.rs` — 62 meter tests (RMS, peak, true peak, SIMD, stereo)
+- `gain-brain/src/groups.rs` and `gain-brain/src/lib.rs` — 42 group sync tests
 - `tinylimit/src/limiter.rs` — 33 limiter tests (gain computer, envelope, lookahead, integration)
+- `satch/src/lib.rs` and `satch/src/spectral.rs` — 46 spectral saturator tests
+- `pope-scope/` — 85 tests (ring buffer, snapshot, time mapping, renderer, store, theme)
 - `tiny-skia-widgets/` — 20 widget rendering tests (dial, slider, button, text)
 - Test fixtures: `wavetable-filter/tests/fixtures/`
 
@@ -87,7 +88,7 @@ Tests are inline `#[cfg(test)]` modules:
 - **Prefer TDD**: Write tests before or alongside implementation. New DSP functions and data structures should have tests covering normal operation, edge cases, and error paths.
 - **Never commit unless asked**: Do not create git commits unless the user explicitly requests it. This is a hard rule with zero exceptions.
 - **No allocations on the audio thread**: `process()` must never allocate. Use pre-allocated buffers, `try_lock()` for shared data, and avoid `Vec::new()`, `clone()` of collections, or `String` operations in the hot path.
-- **No unsafe code**: Do not use `unsafe` blocks. Find safe alternatives or restructure the code to avoid needing unsafe. Exceptions: FFI windowing glue (raw-window-handle trait impls, `Send` for window handles) where the underlying API requires it; `memmap2` constructors (`MmapMut::map_mut`) for cross-instance shared memory in gain-brain.
+- **No unsafe code**: Do not use `unsafe` blocks. Find safe alternatives or restructure the code to avoid needing unsafe. Exceptions: FFI windowing glue (raw-window-handle trait impls, `Send` for window handles) where the underlying API requires it.
 - **Don't guess at fixes**: Write tests to verify, add debug logging to diagnose, dispatch agents to review. Never claim a fix works without evidence.
 - **Use the LSP tool**: Prefer the LSP tool over grep for code navigation. Fall back to grep only when LSP is unavailable.
 
@@ -116,8 +117,8 @@ Tests are inline `#[cfg(test)]` modules:
 
 | File | Role |
 |------|------|
-| `gain-brain/src/lib.rs` | Plugin struct, params, process(), group sync logic |
-| `gain-brain/src/groups.rs` | Mmap IPC: GroupFile, shared memory layout, read/write slots |
+| `gain-brain/src/lib.rs` | Plugin struct, params, process(), group sync logic (cumulative delta + absolute mode) |
+| `gain-brain/src/groups.rs` | In-process static atomics: 16 group slots with cumulative_delta, absolute_gain, epoch, generation |
 | `gain-brain/src/editor.rs` | Softbuffer + baseview editor with rotary dial |
 | `gain-brain/src/fonts/DejaVuSans.ttf` | Embedded font for CPU text rendering |
 
@@ -131,14 +132,37 @@ Tests are inline `#[cfg(test)]` modules:
 | `tinylimit/src/editor.rs` | Softbuffer + baseview editor with meters, dials, presets |
 | `tinylimit/src/fonts/DejaVuSans.ttf` | Embedded font for CPU text rendering |
 
+### satch
+
+| File | Role |
+|------|------|
+| `satch/src/lib.rs` | Plugin struct, params, process(), clip detection |
+| `satch/src/spectral.rs` | FFT spectral analysis, per-bin magnitude saturation, detail preservation |
+| `satch/src/editor.rs` | Softbuffer + baseview editor with dials and meters |
+
+### Pope Scope
+
+| File | Role |
+|------|------|
+| `pope-scope/src/lib.rs` | Plugin struct, params, process() with ring buffer push, time mapping, pending_push buffer |
+| `pope-scope/src/ring_buffer.rs` | RingBuffer with atomic write_pos, two-pass push (memcpy + SIMD f32x16 mipmap), 3-level hierarchy |
+| `pope-scope/src/store.rs` | Static global store: 16 slots with CAS ownership, RwLock<Option<Vec<RingBuffer>>> |
+| `pope-scope/src/snapshot.rs` | Snapshot building (free + beat sync), bar latch, hold buffer, stale detection |
+| `pope-scope/src/time_mapping.rs` | PPQ/sample/rb_pos atomic mapping, beat-aligned window, discontinuity detection |
+| `pope-scope/src/renderer.rs` | Waveform paths (line/filled), amplitude grid, beat grid with quarter-beat subdivisions |
+| `pope-scope/src/editor.rs` | Softbuffer + baseview editor, 60 FPS, hit regions, control strips, peak hold |
+| `pope-scope/src/controls.rs` | Track control strip: solo/mute/color buttons, name truncation |
+| `pope-scope/src/theme.rs` | Amber phosphor color palette, 16-color channel palette, hue shifting |
+
 ### Shared
 
 | File | Role |
 |------|------|
 | `tiny-skia-widgets/src/primitives.rs` | Color palette, draw_rect, draw_rect_outline |
 | `tiny-skia-widgets/src/text.rs` | TextRenderer with fontdue glyph cache |
-| `tiny-skia-widgets/src/controls.rs` | draw_button, draw_slider, draw_stepped_selector |
+| `tiny-skia-widgets/src/controls.rs` | draw_button, draw_slider, draw_stepped_selector + outline variants |
 | `tiny-skia-widgets/src/param_dial.rs` | Arc-based rotary dial widget (draw_dial) |
+| `tiny-skia-widgets/src/editor_base.rs` | Shared EditorState (size persistence), SurfaceState (pixmap + softbuffer) |
 | `nih-plug-widgets/src/lib.rs` | Re-exports vizia ParamDial, provides `load_style()` for vizia CSS |
 | `nih-plug-widgets/src/param_dial.rs` | Vizia rotary knob widget with modulation indicator |
 | `nih-plug-widgets/src/style.css` | Dark theme CSS for vizia plugins |
@@ -150,10 +174,10 @@ Tests are inline `#[cfg(test)]` modules:
 - **Stereo RMS uses sum-of-power** (matches dpMeter5 SUM mode): `sqrt(ms_L + ms_R)`.
 - **Crest factor uses dpMeter5's convention** (peak_stereo vs rms_stereo), not the mathematically correct max(crest_L, crest_R). Documented for future "correct mode" toggle.
 - **RMS momentary uses O(1) running sum** (f64 precision, incremental add/subtract) instead of O(N) ring scan per buffer.
-- **Gain Brain uses mmap IPC** (memmap2) for cross-instance group linking. 272-byte shared file with 16 group slots. The fd is closed after mapping — zero persistent file descriptors. ~8 KB per instance headless.
-- **Gain Brain inversion** is applied on both reads and writes. The slot stores the writer's coordinate-space value. `write_slot_rebaseline` (bumps `baseline_generation`) is used only for invert toggle events, not for normal writes. Relative readers re-baseline on `baseline_generation` changes without applying a delta.
+- **Gain Brain uses in-process static atomics** for cross-instance group linking. 16 group slots with cumulative_delta (fetch_add), absolute_gain, epoch, generation counters. Lock-free, zero overhead.
+- **Gain Brain inversion** is applied on both reads and writes. The slot stores the writer's coordinate-space value. Invert toggles trigger a local rebaseline (re-read cumulative without applying delta) rather than bumping a shared epoch. Relative readers track last_seen_cumulative for self-echo suppression.
 - **tinylimit uses feed-forward lookahead** with a backward-pass gain reduction ramp (DanielRudrich approach). Signal flow: gain computer → lookahead backward pass → dual-stage envelope → apply to delayed audio → safety clip. Hard knee fast path skips log/exp for sub-threshold samples. `exp()` instead of `powf()` for gain application (2x faster). Threshold/ceiling lerped per block (2 `exp` calls) instead of per-sample `powf`.
-- **nih-plug dependency** currently points to `davemollen/nih-plug` branch `finish-vst3-pr` for nightly SIMD compatibility and VST3 license fix.
+- **nih-plug dependency** currently points to `xxx/nih-plug` branch `finish-vst3-pr`. Fork adds: Editor::set_size() for host-initiated resize, Plugin::update_track_info() + TrackInfo struct for CLAP track-info, BYPASS_BUFFER_COPY const, nightly SIMD compatibility, VST3 license fix.
 
 ### Wavetable File Formats
 
