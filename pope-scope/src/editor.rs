@@ -376,19 +376,24 @@ impl PopeScopeWindow {
                             });
                         }
 
-                        // Draw amplitude grid in track color
-                        renderer::draw_amplitude_grid(
-                            &mut self.surface.pixmap,
-                            wave_x,
-                            ty,
-                            wave_w,
-                            track_h,
-                            min_db_val,
-                            max_db_val,
-                            tr,
-                            s,
-                            Some(snap.display_color),
-                        );
+                        // Draw amplitude grid — skip when tracks are too
+                        // narrow (many tracks) to avoid scan-line visual noise.
+                        // Threshold is absolute pixels (not scaled) since grid
+                        // density is a pixel-space concern.
+                        if track_h >= 60.0 {
+                            renderer::draw_amplitude_grid(
+                                &mut self.surface.pixmap,
+                                wave_x,
+                                ty,
+                                wave_w,
+                                track_h,
+                                min_db_val,
+                                max_db_val,
+                                tr,
+                                s,
+                                Some(snap.display_color),
+                            );
+                        }
                         // Draw time/beat grid
                         match sync_mode_val {
                             crate::SyncMode::Free => {
@@ -418,6 +423,7 @@ impl PopeScopeWindow {
                                     tr,
                                     s,
                                     i == num_tracks - 1,
+                                    Some(snap.display_color),
                                 );
                             }
                         }
@@ -534,6 +540,7 @@ impl PopeScopeWindow {
                                     tr,
                                     s,
                                     true,
+                                    None,
                                 );
                             }
                         }
@@ -612,6 +619,7 @@ impl PopeScopeWindow {
                                     tr,
                                     s,
                                     true,
+                                    None,
                                 );
                             }
                         }

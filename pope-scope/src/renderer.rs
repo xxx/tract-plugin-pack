@@ -465,6 +465,10 @@ pub fn draw_time_grid(
 }
 
 /// Draw beat grid lines for beat sync mode.
+/// Draws three levels: bar lines (brightest, 2px), beat lines (medium, 1px),
+/// and quarter-beat subdivision lines (dimmest, 1px).
+/// If `track_color` is provided, grid lines and labels use alpha-varied
+/// versions of that color instead of the default amber theme.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_beat_grid(
     pixmap: &mut tiny_skia::Pixmap,
@@ -477,38 +481,61 @@ pub fn draw_beat_grid(
     text_renderer: &mut tiny_skia_widgets::TextRenderer,
     scale: f32,
     show_labels: bool,
+    track_color: Option<u32>,
 ) {
     if total_beats <= 0.0 {
         return;
     }
     let font_size = 8.0 * scale;
-    let num_beats = total_beats.ceil() as usize;
 
-    for i in 0..=num_beats {
-        let frac = i as f32 / total_beats as f32;
+    let bar_c = match track_color {
+        Some(c) => theme::to_color_alpha(c, 0.5),
+        None => theme::to_color(theme::BAR_LINE),
+    };
+    let beat_c = match track_color {
+        Some(c) => theme::to_color_alpha(c, 0.3),
+        None => theme::to_color(theme::GRID),
+    };
+    let subdiv_c = match track_color {
+        Some(c) => theme::to_color_alpha(c, 0.15),
+        None => theme::to_color(theme::GRID_SUBDIV),
+    };
+    let label_c = match track_color {
+        Some(c) => theme::to_color_alpha(c, 0.6),
+        None => theme::to_color(theme::BAR_LINE),
+    };
+
+    // Iterate at quarter-beat intervals
+    let num_quarters = (total_beats * 4.0).ceil() as usize;
+
+    for i in 0..=num_quarters {
+        let frac = i as f32 / (total_beats as f32 * 4.0);
         let px = x + frac * w;
-        if px > x && px < x + w {
-            let is_bar = (i as u32).is_multiple_of(beats_per_bar);
-            let color = if is_bar {
-                theme::to_color(theme::BAR_LINE)
-            } else {
-                theme::to_color(theme::GRID)
-            };
-            let line_w = if is_bar { 2.0 } else { 1.0 };
-            tiny_skia_widgets::draw_rect(pixmap, px - line_w / 2.0, y, line_w, h, color);
+        if px <= x || px >= x + w {
+            continue;
+        }
+        let is_beat = i % 4 == 0;
+        let is_bar = is_beat && ((i / 4) as u32).is_multiple_of(beats_per_bar);
+        let (color, line_w) = if is_bar {
+            (bar_c, 2.0)
+        } else if is_beat {
+            (beat_c, 1.0)
+        } else {
+            (subdiv_c, 1.0)
+        };
+        tiny_skia_widgets::draw_rect(pixmap, px - line_w / 2.0, y, line_w, h, color);
 
-            if show_labels && is_bar {
-                let bar = i as u32 / beats_per_bar + 1;
-                let label = format!("{}", bar);
-                text_renderer.draw_text(
-                    pixmap,
-                    px + 2.0,
-                    y + h - 2.0,
-                    &label,
-                    font_size,
-                    theme::to_color(theme::BAR_LINE),
-                );
-            }
+        if show_labels && is_bar {
+            let bar = (i / 4) as u32 / beats_per_bar + 1;
+            let label = format!("{}", bar);
+            text_renderer.draw_text(
+                pixmap,
+                px + 2.0,
+                y + h - 2.0,
+                &label,
+                font_size,
+                label_c,
+            );
         }
     }
 }
@@ -746,7 +773,7 @@ mod tests {
         let mut pm = make_test_pixmap(200, 100);
         let font_data = include_bytes!("fonts/DejaVuSans.ttf");
         let mut tr = tiny_skia_widgets::TextRenderer::new(font_data);
-        draw_beat_grid(&mut pm, 0.0, 0.0, 200.0, 100.0, 4, 4.0, &mut tr, 1.0, true);
+        draw_beat_grid(&mut pm, 0.0, 0.0, 200.0, 100.0, 4, 4.0, &mut tr, 1.0, true, None);
         assert!(pixmap_has_nonzero(&pm));
     }
 
@@ -755,7 +782,7 @@ mod tests {
         let mut pm = make_test_pixmap(200, 100);
         let font_data = include_bytes!("fonts/DejaVuSans.ttf");
         let mut tr = tiny_skia_widgets::TextRenderer::new(font_data);
-        draw_beat_grid(&mut pm, 0.0, 0.0, 200.0, 100.0, 4, 0.0, &mut tr, 1.0, true);
+        draw_beat_grid(&mut pm, 0.0, 0.0, 200.0, 100.0, 4, 0.0, &mut tr, 1.0, true, None);
         // Should not panic and should not draw
         assert!(!pixmap_has_nonzero(&pm));
     }

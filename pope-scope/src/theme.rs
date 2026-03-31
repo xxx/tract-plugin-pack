@@ -7,6 +7,7 @@ pub const BG: u32 = 0xFF0A_0600;
 pub const FG: u32 = 0xFFFF_B833;
 pub const PRIMARY_DIM: u32 = 0xFFAA_7700;
 pub const GRID: u32 = 0xFF44_2E00;
+pub const GRID_SUBDIV: u32 = 0xFF2A_1C00;
 pub const GRID_BRIGHT: u32 = 0xFF66_4400;
 pub const BORDER: u32 = 0xFF1A_1400;
 pub const BAR_LINE: u32 = 0xFFCC_6600;
