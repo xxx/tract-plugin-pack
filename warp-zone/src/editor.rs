@@ -118,8 +118,6 @@ struct WarpZoneWindow {
     display: Arc<SpectralDisplay>,
     text_renderer: widgets::TextRenderer,
     color_lut: [[u8; 4]; COLOR_LUT_SIZE],
-    /// Last write_pos we drew — only redraw new columns.
-    last_draw_write_pos: usize,
 
     hit_regions: Vec<HitRegion>,
     drag_active: Option<HitAction>,
@@ -164,7 +162,6 @@ impl WarpZoneWindow {
             display,
             text_renderer,
             color_lut: build_color_lut(),
-            last_draw_write_pos: 0,
             hit_regions: Vec::new(),
             drag_active: None,
             drag_start_y: 0.0,
@@ -218,13 +215,15 @@ impl WarpZoneWindow {
         let s = self.scale_factor;
 
         self.hit_regions.clear();
-        self.surface.pixmap.fill(widgets::color_bg());
 
         let pad = 16.0 * s;
         let w = self.physical_width as f32;
         let h = self.physical_height as f32;
 
         let mut y = 10.0 * s;
+
+        // Clear the full pixmap each frame.
+        self.surface.pixmap.fill(widgets::color_bg());
 
         // Timbre controls grouped left, Mix isolated right
         let timbre_dials: [(ParamId, &str, f32, String); 3] = [
@@ -390,12 +389,11 @@ impl WarpZoneWindow {
         }
     }
 
-    /// Draw the spectral waterfall using direct pixel writes and dirty-column tracking.
-    /// Only redraws columns that have been updated since the last frame.
+    /// Draw the spectral waterfall using direct pixel writes with the color LUT.
+    /// Redraws all columns every frame — the LUT + direct writes make this fast enough.
     fn draw_waterfall(&mut self, x: f32, y: f32, w: f32, h: f32) {
         let wp = self.display.write_pos.load(Ordering::Relaxed);
         let pixmap_w = self.surface.pixmap.width() as usize;
-        let pixmap_h = self.surface.pixmap.height() as usize;
 
         let x_start = x as usize;
         let y_start = y as usize;
@@ -406,80 +404,13 @@ impl WarpZoneWindow {
             return;
         }
 
-        // How many new columns since last draw?
-        let new_cols = if wp >= self.last_draw_write_pos {
-            wp - self.last_draw_write_pos
-        } else {
-            DISPLAY_COLUMNS - self.last_draw_write_pos + wp
-        };
-
-        // If many new columns (or first frame), shift existing pixels left and draw new ones
-        let cols_to_draw = new_cols.min(DISPLAY_COLUMNS);
-
-        if cols_to_draw > 0 && cols_to_draw < DISPLAY_COLUMNS {
-            // Shift existing waterfall pixels left by (cols_to_draw * pixels_per_col)
-            let pixels_per_col = w_px / DISPLAY_COLUMNS;
-            let shift_px = cols_to_draw * pixels_per_col;
-
-            if shift_px > 0 && shift_px < w_px {
-                let data = self.surface.pixmap.data_mut();
-                for row in y_start..((y_start + h_px).min(pixmap_h)) {
-                    let row_start = row * pixmap_w * 4;
-                    let dst_start = row_start + x_start * 4;
-                    let src_start = dst_start + shift_px * 4;
-                    let copy_len = (w_px - shift_px) * 4;
-                    if src_start + copy_len <= data.len() && dst_start + copy_len <= data.len() {
-                        data.copy_within(src_start..src_start + copy_len, dst_start);
-                    }
-                }
-            }
-
-            // Draw only the new columns on the right edge
-            let draw_start_col = DISPLAY_COLUMNS - cols_to_draw;
-            let draw_start_x = x_start + draw_start_col * pixels_per_col;
-            self.draw_waterfall_columns(
-                draw_start_x, y_start, h_px, pixmap_w,
-                wp, draw_start_col, cols_to_draw,
-            );
-        } else {
-            // Full redraw (first frame or huge jump)
-            self.draw_waterfall_columns(
-                x_start, y_start, h_px, pixmap_w,
-                wp, 0, DISPLAY_COLUMNS,
-            );
-        }
-
-        self.last_draw_write_pos = wp;
-
-        // Border
-        widgets::draw_rect_outline(
-            &mut self.surface.pixmap,
-            x, y, w, h,
-            widgets::color_border(),
-            1.0,
-        );
-    }
-
-    /// Draw a range of waterfall columns using direct pixel writes.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_waterfall_columns(
-        &mut self,
-        start_x: usize,
-        start_y: usize,
-        total_h: usize,
-        pixmap_w: usize,
-        write_pos: usize,
-        col_offset_start: usize,
-        num_cols: usize,
-    ) {
-        let pixels_per_col = (self.physical_width as usize) / DISPLAY_COLUMNS;
+        let pixels_per_col = w_px / DISPLAY_COLUMNS;
         let data = self.surface.pixmap.data_mut();
         let pixmap_h = data.len() / (pixmap_w * 4);
 
-        for col_i in 0..num_cols {
-            let col_offset = col_offset_start + col_i;
-            let col_idx = (write_pos + col_offset) % DISPLAY_COLUMNS;
-            let px_x = start_x + col_i * pixels_per_col;
+        for col_i in 0..DISPLAY_COLUMNS {
+            let col_idx = (wp + col_i) % DISPLAY_COLUMNS;
+            let px_x = x_start + col_i * pixels_per_col;
 
             // Bulk-read all bins for this column into a local array
             let mut mags = [0u8; DISPLAY_BINS]; // LUT indices
@@ -492,8 +423,8 @@ impl WarpZoneWindow {
             for (bin, &lut_idx) in mags.iter().enumerate() {
                 let color = self.color_lut[lut_idx as usize];
                 // Low frequencies at bottom, high at top
-                let bin_y_start = start_y + total_h - (bin + 1) * total_h / DISPLAY_BINS;
-                let bin_y_end = start_y + total_h - bin * total_h / DISPLAY_BINS;
+                let bin_y_start = y_start + h_px - (bin + 1) * h_px / DISPLAY_BINS;
+                let bin_y_end = y_start + h_px - bin * h_px / DISPLAY_BINS;
 
                 for py in bin_y_start..bin_y_end.min(pixmap_h) {
                     let row_offset = py * pixmap_w * 4;
@@ -512,6 +443,14 @@ impl WarpZoneWindow {
                 }
             }
         }
+
+        // Border
+        widgets::draw_rect_outline(
+            &mut self.surface.pixmap,
+            x, y, w, h,
+            widgets::color_border(),
+            1.0,
+        );
     }
 
     fn format_value(&self, id: ParamId) -> String {
