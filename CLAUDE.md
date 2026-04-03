@@ -20,6 +20,8 @@ Tract Plugin Pack is a Cargo workspace containing multiple audio effect plugins 
 
 **Pope Scope** — multichannel real-time oscilloscope with beat sync. Static global store shares audio across up to 16 instances. Three display modes (Vertical/Overlay/Sum), three draw styles (Line/Filled/Both), beat-aligned grid, dB-scaled amplitude mapping. Ring buffer with hierarchical mipmap (L0 raw, L1 per-64, L2 per-256). CPU rendering via softbuffer + tiny-skia.
 
+**Warp Zone** — psychedelic spectral shifter/stretcher using a phase vocoder. Shift (-24 to +24 semitones) moves pitch, Stretch (0.5x to 2.0x) warps harmonic spacing for inharmonic textures. Freeze captures the current FFT frame as a sustained drone (transport-aware). Feedback feeds output back into input for compounding spectral effects. Low/High frequency range limits for selective processing. Scrolling spectral waterfall display with psychedelic color palette. 4096-point FFT, 1024 hop, ~85ms latency. CPU rendering via softbuffer + tiny-skia, freely resizable window.
+
 ## Workspace Structure
 
 ```
@@ -30,6 +32,7 @@ tract-plugin-pack/
 ├── tinylimit/              # Wideband peak limiter (softbuffer GUI)
 ├── satch/                  # Spectral saturator with detail preservation (softbuffer GUI)
 ├── pope-scope/             # Multichannel oscilloscope with beat sync (softbuffer GUI)
+├── warp-zone/              # Spectral shifter/stretcher with waterfall display (softbuffer GUI)
 ├── nih-plug-widgets/       # Shared vizia widgets (ParamDial, CSS theme)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets (dial, slider, button)
 ├── docs/                   # Plugin manuals (markdown + PDF)
@@ -48,6 +51,7 @@ cargo nih-plug bundle gain-brain --release
 cargo nih-plug bundle tinylimit --release
 cargo nih-plug bundle satch --release
 cargo nih-plug bundle pope-scope --release
+cargo nih-plug bundle warp-zone --release
 
 # Standalone binaries
 cargo build --bin wavetable-filter --release
@@ -56,6 +60,7 @@ cargo build --bin gain-brain --release
 cargo build --bin tinylimit --release
 cargo build --bin satch --release
 cargo build --bin pope-scope --release
+cargo build --bin warp-zone --release
 
 # Debug standalone (for GUI testing without DAW)
 cargo build --bin gs-meter
@@ -63,12 +68,13 @@ cargo build --bin gain-brain
 cargo build --bin tinylimit
 cargo build --bin satch
 cargo build --bin pope-scope
+cargo build --bin warp-zone
 ```
 
 ## Testing & Linting
 
 ```bash
-cargo test --workspace                            # all tests (300+)
+cargo test --workspace                            # all tests (335+)
 cargo clippy --workspace -- -D warnings           # lint (CI uses -D warnings)
 cargo fmt --check
 ```
@@ -80,6 +86,7 @@ Tests are inline `#[cfg(test)]` modules:
 - `tinylimit/src/limiter.rs` — 33 limiter tests (gain computer, envelope, lookahead, integration)
 - `satch/src/lib.rs` and `satch/src/spectral.rs` — 46 spectral saturator tests
 - `pope-scope/` — 85 tests (ring buffer, snapshot, time mapping, renderer, store, theme)
+- `warp-zone/src/spectral.rs` and `warp-zone/src/lib.rs` — 17 tests (phase vocoder, bin remapping, shift/stretch accuracy, spectral display, band downsampling)
 - `tiny-skia-widgets/` — 20 widget rendering tests (dial, slider, button, text)
 - Test fixtures: `wavetable-filter/tests/fixtures/`
 
@@ -154,6 +161,14 @@ Tests are inline `#[cfg(test)]` modules:
 | `pope-scope/src/controls.rs` | Track control strip: solo/mute/color buttons, name truncation |
 | `pope-scope/src/theme.rs` | Amber phosphor color palette, 16-color channel palette, hue shifting |
 
+### Warp Zone
+
+| File | Role |
+|------|------|
+| `warp-zone/src/lib.rs` | Plugin struct, params, process(), SpectralDisplay shared buffer, band downsampling |
+| `warp-zone/src/spectral.rs` | Phase vocoder: STFT analysis, bin remapping with linear interpolation, phase accumulation, freeze, frequency range |
+| `warp-zone/src/editor.rs` | Softbuffer + baseview editor with dials, freeze button, spectral waterfall display |
+
 ### Shared
 
 | File | Role |
@@ -177,6 +192,11 @@ Tests are inline `#[cfg(test)]` modules:
 - **Gain Brain uses in-process static atomics** for cross-instance group linking. 16 group slots with cumulative_delta (fetch_add), absolute_gain, epoch, generation counters. Lock-free, zero overhead.
 - **Gain Brain inversion** is applied on both reads and writes. The slot stores the writer's coordinate-space value. Invert toggles trigger a local rebaseline (re-read cumulative without applying delta) rather than bumping a shared epoch. Relative readers track last_seen_cumulative for self-echo suppression.
 - **tinylimit uses feed-forward lookahead** with a backward-pass gain reduction ramp (DanielRudrich approach). Signal flow: gain computer → lookahead backward pass → dual-stage envelope → apply to delayed audio → safety clip. Hard knee fast path skips log/exp for sub-threshold samples. `exp()` instead of `powf()` for gain application (2x faster). Threshold/ceiling lerped per block (2 `exp` calls) instead of per-sample `powf`.
+- **Warp Zone uses a phase vocoder** for spectral shifting/stretching. 4096-point FFT, 1024 hop (75% overlap, Hann window). Bin remapping uses linear interpolation between adjacent target bins with max-magnitude-wins collision resolution. Phase accumulation formula: `expected_target_increment + source_phase_deviation` (deviation NOT scaled by frequency ratio). Identity short-circuit (shift=0, stretch=1.0) copies bins directly without phase accumulation.
+- **Warp Zone freeze** stops writing to the input ring buffer; the STFT keeps re-analyzing the frozen content. Transport-aware: output is silenced when DAW transport is stopped and freeze is active.
+- **Warp Zone feedback** feeds clamped (±4.0) wet output back into the input on the next sample. Compounds spectral shifts for Shepard tone effects.
+- **Warp Zone spectral display** uses lock-free AtomicU32 storage (128 bins × 256 columns). Audio thread writes f32 magnitudes as bit patterns; GUI reads them. Magnitudes normalized by 2/fft_size before storage.
+- **Warp Zone frequency range** (Low/High params) controls which bins are remapped. Bins outside the range pass through with their original phase, maintaining phase tracking consistency.
 - **nih-plug dependency** currently points to `xxx/nih-plug` branch `finish-vst3-pr`. Fork adds: Editor::set_size() for host-initiated resize, Plugin::update_track_info() + TrackInfo struct for CLAP track-info, BYPASS_BUFFER_COPY const, nightly SIMD compatibility, VST3 license fix.
 
 ### Wavetable File Formats

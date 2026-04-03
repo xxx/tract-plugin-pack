@@ -1,0 +1,660 @@
+//! Softbuffer-based editor for Warp Zone. CPU rendering via tiny-skia.
+//!
+//! Layout (600x400, freely resizable):
+//! - Top strip (~60px): Title, bypass toggle, Shift/Stretch/Mix dials
+//! - Main area: Scrolling spectral waterfall
+
+use baseview::{WindowOpenOptions, WindowScalePolicy};
+use crossbeam::atomic::AtomicCell;
+use nih_plug::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tiny_skia::Color;
+
+use crate::{SpectralDisplay, WarpZoneParams, DISPLAY_BINS, DISPLAY_COLUMNS};
+use tiny_skia_widgets as widgets;
+
+const WINDOW_WIDTH: u32 = 600;
+const WINDOW_HEIGHT: u32 = 400;
+
+pub use widgets::EditorState;
+
+pub fn default_editor_state() -> Arc<EditorState> {
+    EditorState::from_size(WINDOW_WIDTH, WINDOW_HEIGHT)
+}
+
+// ── Hit testing ─────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct HitRegion {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    action: HitAction,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum HitAction {
+    Dial(ParamId),
+    Button(ButtonAction),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ParamId {
+    Shift,
+    Stretch,
+    Mix,
+    Feedback,
+    LowFreq,
+    HighFreq,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ButtonAction {
+    Freeze,
+}
+
+
+// ── Waterfall color palette ────────────────────────────────────────────
+
+fn lerp_u32(a: u32, b: u32, t: f32) -> u32 {
+    (a as f32 + (b as f32 - a as f32) * t).round() as u32
+}
+
+/// Map a magnitude value to a psychedelic color.
+/// Black -> deep purple -> indigo -> cyan -> magenta -> hot pink -> white.
+fn waterfall_color(magnitude: f32) -> Color {
+    let db = (20.0 * magnitude.max(1e-10).log10()).max(-80.0);
+    let t = ((db + 80.0) / 80.0).clamp(0.0, 1.0);
+
+    let (r, g, b) = if t < 0.15 {
+        let s = t / 0.15;
+        (lerp_u32(0, 48, s), 0, lerp_u32(0, 80, s))
+    } else if t < 0.3 {
+        let s = (t - 0.15) / 0.15;
+        (lerp_u32(48, 75, s), 0, lerp_u32(80, 160, s))
+    } else if t < 0.5 {
+        let s = (t - 0.3) / 0.2;
+        (lerp_u32(75, 0, s), lerp_u32(0, 220, s), lerp_u32(160, 255, s))
+    } else if t < 0.7 {
+        let s = (t - 0.5) / 0.2;
+        (lerp_u32(0, 255, s), lerp_u32(220, 0, s), 255)
+    } else if t < 0.85 {
+        let s = (t - 0.7) / 0.15;
+        (255, lerp_u32(0, 105, s), lerp_u32(255, 180, s))
+    } else {
+        let s = (t - 0.85) / 0.15;
+        (255, lerp_u32(105, 255, s), lerp_u32(180, 255, s))
+    };
+    Color::from_rgba8(r as u8, g as u8, b as u8, 255)
+}
+
+// ── Window handler ──────────────────────────────────────────────────────
+
+struct WarpZoneWindow {
+    gui_context: Arc<dyn GuiContext>,
+    surface: widgets::SoftbufferSurface,
+    physical_width: u32,
+    physical_height: u32,
+    scale_factor: f32,
+    shared_scale: Arc<AtomicCell<f32>>,
+    pending_resize: Arc<AtomicU64>,
+
+    params: Arc<WarpZoneParams>,
+    display: Arc<SpectralDisplay>,
+    text_renderer: widgets::TextRenderer,
+
+    hit_regions: Vec<HitRegion>,
+    drag_active: Option<HitAction>,
+    drag_start_y: f32,
+    drag_start_value: f32,
+    last_shift_state: bool,
+    granular_drag_start_y: f32,
+    granular_drag_start_value: f32,
+    mouse_x: f32,
+    mouse_y: f32,
+    last_click_time: std::time::Instant,
+    last_click_action: Option<HitAction>,
+}
+
+impl WarpZoneWindow {
+    fn new(
+        window: &mut baseview::Window<'_>,
+        gui_context: Arc<dyn GuiContext>,
+        params: Arc<WarpZoneParams>,
+        display: Arc<SpectralDisplay>,
+        shared_scale: Arc<AtomicCell<f32>>,
+        pending_resize: Arc<AtomicU64>,
+        scale_factor: f32,
+    ) -> Self {
+        let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
+        let ph = (WINDOW_HEIGHT as f32 * scale_factor).round() as u32;
+
+        let surface = widgets::SoftbufferSurface::new(window, pw, ph);
+
+        let font_data = include_bytes!("fonts/DejaVuSans.ttf");
+        let text_renderer = widgets::TextRenderer::new(font_data);
+
+        Self {
+            gui_context,
+            surface,
+            physical_width: pw,
+            physical_height: ph,
+            scale_factor,
+            shared_scale,
+            pending_resize,
+            params,
+            display,
+            text_renderer,
+            hit_regions: Vec::new(),
+            drag_active: None,
+            drag_start_y: 0.0,
+            drag_start_value: 0.0,
+            last_shift_state: false,
+            granular_drag_start_y: 0.0,
+            granular_drag_start_value: 0.0,
+            mouse_x: 0.0,
+            mouse_y: 0.0,
+            last_click_time: std::time::Instant::now(),
+            last_click_action: None,
+        }
+    }
+
+    // ── Param access helpers ────────────────────────────────────────────
+
+    fn float_param(&self, id: ParamId) -> &FloatParam {
+        match id {
+            ParamId::Shift => &self.params.shift,
+            ParamId::Stretch => &self.params.stretch,
+            ParamId::Mix => &self.params.mix,
+            ParamId::Feedback => &self.params.feedback,
+            ParamId::LowFreq => &self.params.low_freq,
+            ParamId::HighFreq => &self.params.high_freq,
+        }
+    }
+
+    fn begin_set_param(&self, setter: &ParamSetter, id: ParamId) {
+        setter.begin_set_parameter(self.float_param(id));
+    }
+
+    fn set_param_normalized(&self, setter: &ParamSetter, id: ParamId, normalized: f32) {
+        setter.set_parameter_normalized(self.float_param(id), normalized);
+    }
+
+    fn end_set_param(&self, setter: &ParamSetter, id: ParamId) {
+        setter.end_set_parameter(self.float_param(id));
+    }
+
+    fn reset_param_to_default(&self, setter: &ParamSetter, id: ParamId) {
+        use nih_plug::prelude::Param;
+        let p = self.float_param(id);
+        setter.begin_set_parameter(p);
+        setter.set_parameter_normalized(p, p.default_normalized_value());
+        setter.end_set_parameter(p);
+    }
+
+    // ── Drawing ─────────────────────────────────────────────────────────
+
+    fn draw(&mut self) {
+        let s = self.scale_factor;
+
+        self.hit_regions.clear();
+        self.surface.pixmap.fill(widgets::color_bg());
+
+        let pad = 16.0 * s;
+        let w = self.physical_width as f32;
+        let h = self.physical_height as f32;
+
+        let mut y = 10.0 * s;
+
+        // Timbre controls grouped left, Mix isolated right
+        let timbre_dials: [(ParamId, &str, f32, String); 3] = [
+            (
+                ParamId::Shift,
+                "Shift",
+                self.params.shift.unmodulated_normalized_value(),
+                self.format_value(ParamId::Shift),
+            ),
+            (
+                ParamId::Stretch,
+                "Stretch",
+                self.params.stretch.unmodulated_normalized_value(),
+                self.format_value(ParamId::Stretch),
+            ),
+            (
+                ParamId::Feedback,
+                "Feedback",
+                self.params.feedback.unmodulated_normalized_value(),
+                self.format_value(ParamId::Feedback),
+            ),
+        ];
+        let mix_dial = (
+            ParamId::Mix,
+            "Mix",
+            self.params.mix.unmodulated_normalized_value(),
+            self.format_value(ParamId::Mix),
+        );
+        let row2_dials: [(ParamId, &str, f32, String); 2] = [
+            (
+                ParamId::LowFreq,
+                "Low",
+                self.params.low_freq.unmodulated_normalized_value(),
+                self.format_value(ParamId::LowFreq),
+            ),
+            (
+                ParamId::HighFreq,
+                "High",
+                self.params.high_freq.unmodulated_normalized_value(),
+                self.format_value(ParamId::HighFreq),
+            ),
+        ];
+        let freeze_on = self.params.freeze.value();
+
+        let tr = &mut self.text_renderer;
+
+        // ── Row 1: Freeze button + Shift, Stretch, Mix, Feedback dials ──
+        let dial_row_h = 56.0 * s;
+        let dial_radius = 20.0 * s;
+
+        // Freeze toggle button
+        let freeze_btn_w = 44.0 * s;
+        let freeze_btn_h = 20.0 * s;
+        let freeze_x = pad;
+        let freeze_y = y + (dial_row_h - freeze_btn_h) * 0.5;
+        widgets::draw_button(
+            &mut self.surface.pixmap,
+            tr,
+            freeze_x,
+            freeze_y,
+            freeze_btn_w,
+            freeze_btn_h,
+            "Freeze",
+            freeze_on,
+            false,
+        );
+        self.hit_regions.push(HitRegion {
+            x: freeze_x,
+            y: freeze_y,
+            w: freeze_btn_w,
+            h: freeze_btn_h,
+            action: HitAction::Button(ButtonAction::Freeze),
+        });
+
+        let dial_area_start = freeze_x + freeze_btn_w + 8.0 * s;
+        let dial_cy = y + dial_row_h * 0.5;
+
+        // Timbre dials grouped left (Shift, Stretch, Feedback)
+        let timbre_area_w = (w - dial_area_start - pad) * 0.65;
+        let timbre_spacing = timbre_area_w / 3.0;
+
+        for (i, (param_id, label, normalized, value_text)) in timbre_dials.iter().enumerate() {
+            let cx = dial_area_start + timbre_spacing * (i as f32 + 0.5);
+            widgets::draw_dial(
+                &mut self.surface.pixmap,
+                tr,
+                cx,
+                dial_cy,
+                dial_radius,
+                label,
+                value_text,
+                *normalized,
+            );
+            self.hit_regions.push(HitRegion {
+                x: dial_area_start + timbre_spacing * i as f32,
+                y,
+                w: timbre_spacing,
+                h: dial_row_h,
+                action: HitAction::Dial(*param_id),
+            });
+        }
+
+        // Mix dial on the right
+        {
+            let (param_id, label, normalized, ref value_text) = mix_dial;
+            let mix_cx = w - pad - dial_radius - 10.0 * s;
+            widgets::draw_dial(
+                &mut self.surface.pixmap,
+                tr,
+                mix_cx,
+                dial_cy,
+                dial_radius,
+                label,
+                value_text,
+                normalized,
+            );
+            let mix_hit_w = (w - dial_area_start - timbre_area_w) * 0.8;
+            self.hit_regions.push(HitRegion {
+                x: mix_cx - mix_hit_w * 0.5,
+                y,
+                w: mix_hit_w,
+                h: dial_row_h,
+                action: HitAction::Dial(param_id),
+            });
+        }
+
+        y += dial_row_h;
+
+        // ── Row 2: Low Freq, High Freq dials (aligned with timbre group) ──
+        let row2_h = 52.0 * s;
+        let row2_radius = 18.0 * s;
+        let row2_spacing = timbre_area_w / 2.0;
+        let row2_cy = y + row2_h * 0.5;
+
+        for (i, (param_id, label, normalized, value_text)) in row2_dials.iter().enumerate() {
+            let cx = dial_area_start + row2_spacing * (i as f32 + 0.5);
+            widgets::draw_dial(
+                &mut self.surface.pixmap,
+                tr,
+                cx,
+                row2_cy,
+                row2_radius,
+                label,
+                value_text,
+                *normalized,
+            );
+            self.hit_regions.push(HitRegion {
+                x: dial_area_start + row2_spacing * i as f32,
+                y,
+                w: row2_spacing,
+                h: row2_h,
+                action: HitAction::Dial(*param_id),
+            });
+        }
+
+        y += row2_h;
+
+        // ── Waterfall spectrogram ──
+        let waterfall_y = y + 8.0 * s;
+        let waterfall_h = h - waterfall_y - pad;
+        if waterfall_h > 0.0 {
+            self.draw_waterfall(pad, waterfall_y, w - 2.0 * pad, waterfall_h);
+        }
+    }
+
+    fn draw_waterfall(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        let wp = self.display.write_pos.load(Ordering::Relaxed);
+        let col_width = w / DISPLAY_COLUMNS as f32;
+        let bin_height = h / DISPLAY_BINS as f32;
+
+        for col_offset in 0..DISPLAY_COLUMNS {
+            let col_idx = (wp + col_offset) % DISPLAY_COLUMNS;
+            let px = x + col_offset as f32 * col_width;
+
+            for bin in 0..DISPLAY_BINS {
+                let mag = self.display.read(col_idx, bin);
+                let color = waterfall_color(mag);
+                let py = y + h - (bin + 1) as f32 * bin_height;
+                widgets::draw_rect(
+                    &mut self.surface.pixmap,
+                    px,
+                    py,
+                    col_width.ceil(),
+                    bin_height.ceil(),
+                    color,
+                );
+            }
+        }
+
+        widgets::draw_rect_outline(
+            &mut self.surface.pixmap,
+            x,
+            y,
+            w,
+            h,
+            widgets::color_border(),
+            1.0,
+        );
+    }
+
+    fn format_value(&self, id: ParamId) -> String {
+        match id {
+            ParamId::Shift => format!("{:.1} st", self.params.shift.value()),
+            ParamId::Stretch => format!("{:.2}x", self.params.stretch.value()),
+            ParamId::Mix => format!("{:.0} %", self.params.mix.value()),
+            ParamId::Feedback => format!("{:.0} %", self.params.feedback.value()),
+            ParamId::LowFreq => format!("{:.0} Hz", self.params.low_freq.value()),
+            ParamId::HighFreq => format!("{:.0} Hz", self.params.high_freq.value()),
+        }
+    }
+
+    fn toggle_bool_param(&self, param: &BoolParam) {
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        let current = param.value();
+        setter.begin_set_parameter(param);
+        setter.set_parameter_normalized(param, if current { 0.0 } else { 1.0 });
+        setter.end_set_parameter(param);
+    }
+
+    fn resize_buffers(&mut self) {
+        let pw = self.physical_width.max(1);
+        let ph = self.physical_height.max(1);
+        self.surface.resize(pw, ph);
+        self.params.editor_state.store_size(pw, ph);
+    }
+
+}
+
+impl baseview::WindowHandler for WarpZoneWindow {
+    fn on_frame(&mut self, window: &mut baseview::Window) {
+        // Check for pending host-initiated resize
+        let packed = self.pending_resize.swap(0, Ordering::Relaxed);
+        if packed != 0 {
+            let new_w = (packed >> 32) as u32;
+            let new_h = (packed & 0xFFFF_FFFF) as u32;
+            if new_w > 0
+                && new_h > 0
+                && (new_w != self.physical_width || new_h != self.physical_height)
+            {
+                window.resize(baseview::Size::new(new_w as f64, new_h as f64));
+            }
+        }
+        self.draw();
+        self.surface.present();
+    }
+
+    fn on_event(
+        &mut self,
+        _window: &mut baseview::Window,
+        event: baseview::Event,
+    ) -> baseview::EventStatus {
+        match &event {
+            baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
+                self.physical_width = info.physical_size().width;
+                self.physical_height = info.physical_size().height;
+                // Derive scale factor from the new size
+                let sf = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+                self.scale_factor = sf;
+                self.shared_scale.store(sf);
+                self.resize_buffers();
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved {
+                position,
+                modifiers,
+            }) => {
+                self.mouse_x = position.x as f32;
+                self.mouse_y = position.y as f32;
+
+                if let Some(HitAction::Dial(param_id)) = self.drag_active {
+                    let shift_now = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+
+                    let current_norm = self.float_param(param_id).unmodulated_normalized_value();
+                    if shift_now && !self.last_shift_state {
+                        self.granular_drag_start_y = self.mouse_y;
+                        self.granular_drag_start_value = current_norm;
+                    } else if !shift_now && self.last_shift_state {
+                        self.drag_start_y = self.mouse_y;
+                        self.drag_start_value = current_norm;
+                    }
+
+                    let target_norm = if shift_now {
+                        let delta_y = self.granular_drag_start_y - self.mouse_y;
+                        (self.granular_drag_start_value + delta_y / 600.0 * 0.1).clamp(0.0, 1.0)
+                    } else {
+                        let delta_y = self.drag_start_y - self.mouse_y;
+                        (self.drag_start_value + delta_y / 600.0).clamp(0.0, 1.0)
+                    };
+
+                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                    self.set_param_normalized(&setter, param_id, target_norm);
+
+                    self.last_shift_state = shift_now;
+                }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Left,
+                modifiers,
+            }) => {
+                let mx = self.mouse_x;
+                let my = self.mouse_y;
+
+                let hit = self
+                    .hit_regions
+                    .iter()
+                    .find(|r| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h)
+                    .cloned();
+
+                if let Some(region) = hit {
+                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                    let now = std::time::Instant::now();
+                    let is_double_click = now.duration_since(self.last_click_time).as_millis()
+                        < 400
+                        && self.last_click_action.as_ref() == Some(&region.action);
+                    self.last_click_time = now;
+                    self.last_click_action = Some(region.action);
+
+                    if let Some(HitAction::Dial(id)) = self.drag_active.take() {
+                        self.end_set_param(&setter, id);
+                    }
+
+                    match region.action {
+                        HitAction::Dial(param_id) => {
+                            if is_double_click {
+                                self.reset_param_to_default(&setter, param_id);
+                            } else {
+                                let norm = self
+                                    .float_param(param_id)
+                                    .unmodulated_normalized_value();
+                                self.drag_start_y = my;
+                                self.drag_start_value = norm;
+                                self.granular_drag_start_y = my;
+                                self.granular_drag_start_value = norm;
+                                self.last_shift_state =
+                                    modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                                self.drag_active = Some(HitAction::Dial(param_id));
+                                self.begin_set_param(&setter, param_id);
+                            }
+                        }
+                        HitAction::Button(ButtonAction::Freeze) => {
+                            self.toggle_bool_param(&self.params.freeze);
+                        }
+                    }
+                }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                ..
+            }) => {
+                if let Some(HitAction::Dial(id)) = self.drag_active.take() {
+                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                    self.end_set_param(&setter, id);
+                }
+            }
+            _ => {}
+        }
+
+        baseview::EventStatus::Captured
+    }
+}
+
+// ── Editor trait implementation ──────────────────────────────────────────
+
+pub(crate) struct WarpZoneEditor {
+    params: Arc<WarpZoneParams>,
+    display: Arc<SpectralDisplay>,
+    scaling_factor: Arc<AtomicCell<f32>>,
+    /// Pending host-initiated resize. Packed as (width << 32 | height).
+    pending_resize: Arc<AtomicU64>,
+}
+
+pub fn create(
+    params: Arc<WarpZoneParams>,
+    display: Arc<SpectralDisplay>,
+) -> Option<Box<dyn Editor>> {
+    Some(Box::new(WarpZoneEditor {
+        params,
+        display,
+        scaling_factor: Arc::new(AtomicCell::new(1.0)),
+        pending_resize: Arc::new(AtomicU64::new(0)),
+    }))
+}
+
+impl Editor for WarpZoneEditor {
+    fn spawn(
+        &self,
+        parent: ParentWindowHandle,
+        context: Arc<dyn GuiContext>,
+    ) -> Box<dyn std::any::Any + Send> {
+        let (persisted_w, persisted_h) = self.params.editor_state.size();
+        let sf = (persisted_w as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+        self.scaling_factor.store(sf);
+
+        let gui_context = Arc::clone(&context);
+        let params = Arc::clone(&self.params);
+        let display = Arc::clone(&self.display);
+        let shared_scale = Arc::clone(&self.scaling_factor);
+        let pending_resize = Arc::clone(&self.pending_resize);
+
+        let window = baseview::Window::open_parented(
+            &widgets::ParentWindowHandleAdapter(parent),
+            WindowOpenOptions {
+                title: String::from("Warp Zone"),
+                size: baseview::Size::new(persisted_w as f64, persisted_h as f64),
+                scale: WindowScalePolicy::ScaleFactor(1.0),
+                gl_config: None,
+            },
+            move |window| {
+                WarpZoneWindow::new(
+                    window,
+                    gui_context,
+                    params,
+                    display,
+                    shared_scale,
+                    pending_resize,
+                    sf,
+                )
+            },
+        );
+
+        self.params.editor_state.set_open(true);
+        Box::new(widgets::EditorHandle::new(
+            self.params.editor_state.clone(),
+            window,
+        ))
+    }
+
+    fn size(&self) -> (u32, u32) {
+        self.params.editor_state.size()
+    }
+
+    fn set_scale_factor(&self, factor: f32) -> bool {
+        if self.params.editor_state.is_open() {
+            return false;
+        }
+        self.scaling_factor.store(factor);
+        true
+    }
+
+    fn set_size(&self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let packed = ((width as u64) << 32) | (height as u64);
+        self.pending_resize.store(packed, Ordering::Relaxed);
+        true
+    }
+
+    fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
+    fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
+    fn param_values_changed(&self) {}
+}

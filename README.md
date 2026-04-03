@@ -61,6 +61,19 @@ A detail-preserving spectral saturator. Uses FFT-based spectral analysis to pres
 - ~0.82 MB RSS and 0.14% CPU per instance (100 instances @ 13.7% CPU, 82 MB total)
 - Inspired by [Newfangled Audio Saturate](https://www.newfangledaudio.com/saturate)
 
+### Warp Zone
+
+A psychedelic spectral shifter/stretcher that transforms audio in the frequency domain using a phase vocoder. Makes familiar sounds alien -- voices from another dimension, instruments with impossible harmonic structures.
+
+- **Shift** (-24 to +24 semitones) for pitch shifting without time stretching
+- **Stretch** (0.5x to 2.0x) warps harmonic spacing for inharmonic/metallic textures
+- **Freeze** captures the current spectrum as a sustained drone
+- **Feedback** compounds spectral shifts for rising/falling Shepard tone effects
+- **Low/High** frequency range limits for selective processing
+- Scrolling spectral waterfall display with psychedelic color palette
+- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable
+- 4096-point FFT phase vocoder with linear interpolation and phase-coherent bin remapping
+
 ### Pope Scope
 
 A multichannel real-time oscilloscope with beat sync. Multiple instances share audio data through a global store, allowing one window to display waveforms from up to 16 tracks simultaneously.
@@ -104,6 +117,7 @@ cargo nih-plug bundle gain-brain --release
 cargo nih-plug bundle tinylimit --release
 cargo nih-plug bundle satch --release
 cargo nih-plug bundle pope-scope --release
+cargo nih-plug bundle warp-zone --release
 
 # Standalone binaries
 cargo build --bin wavetable-filter --release
@@ -112,6 +126,7 @@ cargo build --bin gain-brain --release
 cargo build --bin tinylimit --release
 cargo build --bin satch --release
 cargo build --bin pope-scope --release
+cargo build --bin warp-zone --release
 ```
 
 The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` file (you only need one -- use whichever your DAW supports) to your plugin directory:
@@ -130,6 +145,7 @@ tract-plugin-pack/
 ├── tinylimit/              # Wideband peak limiter
 ├── satch/                  # Spectral saturator with detail preservation
 ├── pope-scope/             # Multichannel real-time oscilloscope
+├── warp-zone/              # Spectral shifter/stretcher
 ├── nih-plug-widgets/       # Shared vizia widgets (ParamDial, CSS theme)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets, editor base scaffolding
 ├── docs/                   # Plugin manuals
@@ -137,7 +153,8 @@ tract-plugin-pack/
 │   ├── gs-meter/
 │   ├── gain-brain/
 │   ├── tinylimit/
-│   └── satch/
+│   ├── satch/
+│   └── warp-zone/
 └── xtask/                  # Build tooling
 ```
 
@@ -156,6 +173,7 @@ cargo clippy --workspace     # Lint check
 - [tinylimit Manual](docs/tinylimit/tinylimit-manual.md)
 - [satch Manual](docs/satch/satch-manual.md)
 - [Pope Scope Manual](docs/pope-scope/pope-scope-manual.md)
+- [Warp Zone Manual](docs/warp-zone/warp-zone-manual.md)
 
 ## What is Clip-to-Zero?
 
