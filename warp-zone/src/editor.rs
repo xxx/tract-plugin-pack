@@ -350,13 +350,15 @@ impl WarpZoneWindow {
             return;
         }
 
-        let pixels_per_col = w_px / DISPLAY_COLUMNS;
         let data = self.surface.pixmap.data_mut();
         let pixmap_h = data.len() / (pixmap_w * 4);
 
         for col_i in 0..DISPLAY_COLUMNS {
             let col_idx = (wp + col_i) % DISPLAY_COLUMNS;
-            let px_x = x_start + col_i * pixels_per_col;
+            // Evenly distribute pixels: each column spans from
+            // col_i * w_px / N  to  (col_i+1) * w_px / N
+            let col_x_start = x_start + col_i * w_px / DISPLAY_COLUMNS;
+            let col_x_end = x_start + (col_i + 1) * w_px / DISPLAY_COLUMNS;
 
             // Bulk-read all bins for this column into a local array
             let mut mags = [0u8; DISPLAY_BINS]; // LUT indices
@@ -374,8 +376,7 @@ impl WarpZoneWindow {
 
                 for py in bin_y_start..bin_y_end.min(pixmap_h) {
                     let row_offset = py * pixmap_w * 4;
-                    for dx in 0..pixels_per_col {
-                        let px = px_x + dx;
+                    for px in col_x_start..col_x_end {
                         if px < pixmap_w {
                             let idx = row_offset + px * 4;
                             if idx + 3 < data.len() {
