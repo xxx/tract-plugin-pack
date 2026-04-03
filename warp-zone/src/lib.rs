@@ -83,6 +83,8 @@ pub struct WarpZone {
     sample_rate: f32,
     // Counter for display column updates
     display_counter: usize,
+    // Pre-computed bin boundaries for downsample_magnitudes (avoids exp() per hop)
+    display_bin_ranges: [(usize, usize); DISPLAY_BINS],
 }
 
 // ── Params ─────────────────────────────────────────────────────────────────────
@@ -128,6 +130,7 @@ impl Default for WarpZone {
             dry_delay_pos: 0,
             sample_rate: 48000.0,
             display_counter: 0,
+            display_bin_ranges: compute_display_bin_ranges(FFT_SIZE / 2 + 1),
         }
     }
 }
@@ -215,20 +218,33 @@ impl WarpZoneParams {
 
 // ── Downsample helper ─────────────────────────────────────────────────────────
 
-/// Downsample FFT magnitudes to display resolution with logarithmic spacing.
-fn downsample_magnitudes(src: &[f32], dst: &mut [f32; DISPLAY_BINS]) {
-    let src_len = src.len(); // half_plus_one
-    if src_len <= 1 {
-        dst.fill(0.0);
-        return;
+/// Pre-compute logarithmically-spaced bin boundaries for display downsampling.
+/// Called once in initialize(), avoids 256 exp() calls per hop at runtime.
+fn compute_display_bin_ranges(half_plus_one: usize) -> [(usize, usize); DISPLAY_BINS] {
+    let mut ranges = [(0usize, 0usize); DISPLAY_BINS];
+    if half_plus_one <= 1 {
+        return ranges;
     }
-    let log_max = (src_len as f32).ln();
-    for (i, slot) in dst.iter_mut().enumerate() {
+    let log_max = (half_plus_one as f32).ln();
+    for (i, range) in ranges.iter_mut().enumerate() {
         let lo = ((log_max * i as f32 / DISPLAY_BINS as f32).exp()) as usize;
         let hi = ((log_max * (i + 1) as f32 / DISPLAY_BINS as f32).exp()) as usize;
-        let lo = lo.max(1).min(src_len - 1);
-        let hi = hi.max(lo + 1).min(src_len);
+        range.0 = lo.max(1).min(half_plus_one - 1);
+        range.1 = hi.max(range.0 + 1).min(half_plus_one);
+    }
+    ranges
+}
+
+/// Downsample FFT magnitudes using pre-computed bin boundaries.
+fn downsample_magnitudes(
+    src: &[f32],
+    dst: &mut [f32; DISPLAY_BINS],
+    ranges: &[(usize, usize); DISPLAY_BINS],
+) {
+    for (slot, &(lo, hi)) in dst.iter_mut().zip(ranges.iter()) {
         let mut peak = 0.0_f32;
+        let hi = hi.min(src.len());
+        let lo = lo.min(hi);
         for &val in &src[lo..hi] {
             peak = peak.max(val);
         }
@@ -331,9 +347,12 @@ impl Plugin for WarpZone {
         let low_bin = low_bin.max(1).min(half_plus_one);
         let high_bin = high_bin.max(low_bin).min(half_plus_one);
 
+        // Shift and stretch only take effect at hop boundaries (every 1024 samples),
+        // so read them once per block rather than advancing the smoother per-sample.
+        let final_shift = self.params.shift.value();
+        let final_stretch = self.params.stretch.value();
+
         for i in 0..num_samples {
-            let final_shift = self.params.shift.smoothed.next();
-            let final_stretch = self.params.stretch.smoothed.next();
             let fb_amount = self.params.feedback.smoothed.next() / 100.0;
 
             // Mix feedback from previous output into input
@@ -365,7 +384,7 @@ impl Plugin for WarpZone {
                 self.display_counter = 0;
                 let mags = self.shifter_l.output_magnitudes();
                 let mut display_col = [0.0_f32; DISPLAY_BINS];
-                downsample_magnitudes(mags, &mut display_col);
+                downsample_magnitudes(mags, &mut display_col, &self.display_bin_ranges);
                 self.display.push_column(&display_col);
             }
         }
@@ -458,8 +477,9 @@ mod tests {
             .map(|k| if k > 0 && k < 1000 { 0.5 } else { 0.0 })
             .collect();
 
+        let ranges = compute_display_bin_ranges(half);
         let mut display_col = [0.0_f32; DISPLAY_BINS];
-        downsample_magnitudes(&mags, &mut display_col);
+        downsample_magnitudes(&mags, &mut display_col, &ranges);
         let total: f32 = display_col.iter().sum();
         assert!(total > 0.0, "display magnitudes should be non-zero");
     }
@@ -490,21 +510,21 @@ mod tests {
 
     #[test]
     fn test_downsample_magnitudes_empty() {
+        let ranges = compute_display_bin_ranges(1);
         let src = [0.0_f32; 1];
         let mut dst = [0.0_f32; DISPLAY_BINS];
-        downsample_magnitudes(&src, &mut dst);
+        downsample_magnitudes(&src, &mut dst, &ranges);
         assert!(dst.iter().all(|&v| v == 0.0));
     }
 
     #[test]
     fn test_downsample_magnitudes_log_mapping() {
-        // Low bins should get more resolution than high bins
         let half = FFT_SIZE / 2 + 1;
+        let ranges = compute_display_bin_ranges(half);
         let mut mags = vec![0.0_f32; half];
-        // Put energy in a low bin
         mags[10] = 1.0;
         let mut dst = [0.0_f32; DISPLAY_BINS];
-        downsample_magnitudes(&mags, &mut dst);
+        downsample_magnitudes(&mags, &mut dst, &ranges);
         // At least one display bin should capture the low-frequency energy
         let total: f32 = dst.iter().sum();
         assert!(total > 0.0, "low-frequency energy should be captured");

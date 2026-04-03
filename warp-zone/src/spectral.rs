@@ -214,7 +214,7 @@ impl SpectralShifter {
             *bin = Complex::new(0.0, 0.0);
         }
 
-        let shift_ratio = (2.0_f32).powf(shift / 12.0);
+        let shift_ratio = (shift / 12.0).exp2();
         let lo = low_bin.max(1);
         let hi = high_bin.min(half_plus_one);
 
@@ -297,10 +297,8 @@ impl SpectralShifter {
                 self.accumulated_output_phase[k] += phase_inc;
                 let out_phase = self.accumulated_output_phase[k];
 
-                self.out_buf[k] = Complex::new(
-                    mag * out_phase.cos(),
-                    mag * out_phase.sin(),
-                );
+                let (sin_val, cos_val) = out_phase.sin_cos();
+                self.out_buf[k] = Complex::new(mag * cos_val, mag * sin_val);
 
                 // Mirror for negative frequencies
                 if k < n / 2 {

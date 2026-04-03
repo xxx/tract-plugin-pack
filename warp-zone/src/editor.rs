@@ -9,8 +9,6 @@ use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tiny_skia::Color;
-
 use crate::{SpectralDisplay, WarpZoneParams, DISPLAY_BINS, DISPLAY_COLUMNS};
 use tiny_skia_widgets as widgets;
 
@@ -56,38 +54,53 @@ enum ButtonAction {
 }
 
 
-// ── Waterfall color palette ────────────────────────────────────────────
+// ── Waterfall color LUT ────────────────────────────────────────────────
 
-fn lerp_u32(a: u32, b: u32, t: f32) -> u32 {
-    (a as f32 + (b as f32 - a as f32) * t).round() as u32
+const COLOR_LUT_SIZE: usize = 256;
+
+/// Pre-computed color lookup table: quantized magnitude → premultiplied RGBA bytes [R,G,B,A].
+/// Built once at init, eliminates log10/branching from the per-pixel hot path.
+fn build_color_lut() -> [[u8; 4]; COLOR_LUT_SIZE] {
+    let mut lut = [[0u8; 4]; COLOR_LUT_SIZE];
+
+    fn lerp(a: u8, b: u8, t: f32) -> u8 {
+        (a as f32 + (b as f32 - a as f32) * t).round() as u8
+    }
+
+    for (i, entry) in lut.iter_mut().enumerate() {
+        let t = i as f32 / (COLOR_LUT_SIZE - 1) as f32;
+
+        let (r, g, b) = if t < 0.15 {
+            let s = t / 0.15;
+            (lerp(0, 48, s), 0, lerp(0, 80, s))
+        } else if t < 0.3 {
+            let s = (t - 0.15) / 0.15;
+            (lerp(48, 75, s), 0, lerp(80, 160, s))
+        } else if t < 0.5 {
+            let s = (t - 0.3) / 0.2;
+            (lerp(75, 0, s), lerp(0, 220, s), lerp(160, 255, s))
+        } else if t < 0.7 {
+            let s = (t - 0.5) / 0.2;
+            (lerp(0, 255, s), lerp(220, 0, s), 255)
+        } else if t < 0.85 {
+            let s = (t - 0.7) / 0.15;
+            (255, lerp(0, 105, s), lerp(255, 180, s))
+        } else {
+            let s = (t - 0.85) / 0.15;
+            (255, lerp(105, 255, s), lerp(180, 255, s))
+        };
+        *entry = [r, g, b, 255];
+    }
+    lut
 }
 
-/// Map a magnitude value to a psychedelic color.
-/// Black -> deep purple -> indigo -> cyan -> magenta -> hot pink -> white.
-fn waterfall_color(magnitude: f32) -> Color {
-    let db = (20.0 * magnitude.max(1e-10).log10()).max(-80.0);
-    let t = ((db + 80.0) / 80.0).clamp(0.0, 1.0);
-
-    let (r, g, b) = if t < 0.15 {
-        let s = t / 0.15;
-        (lerp_u32(0, 48, s), 0, lerp_u32(0, 80, s))
-    } else if t < 0.3 {
-        let s = (t - 0.15) / 0.15;
-        (lerp_u32(48, 75, s), 0, lerp_u32(80, 160, s))
-    } else if t < 0.5 {
-        let s = (t - 0.3) / 0.2;
-        (lerp_u32(75, 0, s), lerp_u32(0, 220, s), lerp_u32(160, 255, s))
-    } else if t < 0.7 {
-        let s = (t - 0.5) / 0.2;
-        (lerp_u32(0, 255, s), lerp_u32(220, 0, s), 255)
-    } else if t < 0.85 {
-        let s = (t - 0.7) / 0.15;
-        (255, lerp_u32(0, 105, s), lerp_u32(255, 180, s))
-    } else {
-        let s = (t - 0.85) / 0.15;
-        (255, lerp_u32(105, 255, s), lerp_u32(180, 255, s))
-    };
-    Color::from_rgba8(r as u8, g as u8, b as u8, 255)
+/// Convert a magnitude to a LUT index (0..255) using dB scaling.
+#[inline]
+fn magnitude_to_lut_index(mag: f32) -> usize {
+    let db = (20.0 * mag.max(1e-10).log10()).max(-80.0);
+    let t = (db + 80.0) / 80.0; // 0..1
+    let idx = (t * (COLOR_LUT_SIZE - 1) as f32) as usize;
+    idx.min(COLOR_LUT_SIZE - 1)
 }
 
 // ── Window handler ──────────────────────────────────────────────────────
@@ -104,6 +117,9 @@ struct WarpZoneWindow {
     params: Arc<WarpZoneParams>,
     display: Arc<SpectralDisplay>,
     text_renderer: widgets::TextRenderer,
+    color_lut: [[u8; 4]; COLOR_LUT_SIZE],
+    /// Last write_pos we drew — only redraw new columns.
+    last_draw_write_pos: usize,
 
     hit_regions: Vec<HitRegion>,
     drag_active: Option<HitAction>,
@@ -147,6 +163,8 @@ impl WarpZoneWindow {
             params,
             display,
             text_renderer,
+            color_lut: build_color_lut(),
+            last_draw_write_pos: 0,
             hit_regions: Vec::new(),
             drag_active: None,
             drag_start_y: 0.0,
@@ -372,39 +390,128 @@ impl WarpZoneWindow {
         }
     }
 
+    /// Draw the spectral waterfall using direct pixel writes and dirty-column tracking.
+    /// Only redraws columns that have been updated since the last frame.
     fn draw_waterfall(&mut self, x: f32, y: f32, w: f32, h: f32) {
         let wp = self.display.write_pos.load(Ordering::Relaxed);
-        let col_width = w / DISPLAY_COLUMNS as f32;
-        let bin_height = h / DISPLAY_BINS as f32;
+        let pixmap_w = self.surface.pixmap.width() as usize;
+        let pixmap_h = self.surface.pixmap.height() as usize;
 
-        for col_offset in 0..DISPLAY_COLUMNS {
-            let col_idx = (wp + col_offset) % DISPLAY_COLUMNS;
-            let px = x + col_offset as f32 * col_width;
+        let x_start = x as usize;
+        let y_start = y as usize;
+        let w_px = w as usize;
+        let h_px = h as usize;
 
-            for bin in 0..DISPLAY_BINS {
-                let mag = self.display.read(col_idx, bin);
-                let color = waterfall_color(mag);
-                let py = y + h - (bin + 1) as f32 * bin_height;
-                widgets::draw_rect(
-                    &mut self.surface.pixmap,
-                    px,
-                    py,
-                    col_width.ceil(),
-                    bin_height.ceil(),
-                    color,
-                );
-            }
+        if w_px == 0 || h_px == 0 {
+            return;
         }
 
+        // How many new columns since last draw?
+        let new_cols = if wp >= self.last_draw_write_pos {
+            wp - self.last_draw_write_pos
+        } else {
+            DISPLAY_COLUMNS - self.last_draw_write_pos + wp
+        };
+
+        // If many new columns (or first frame), shift existing pixels left and draw new ones
+        let cols_to_draw = new_cols.min(DISPLAY_COLUMNS);
+
+        if cols_to_draw > 0 && cols_to_draw < DISPLAY_COLUMNS {
+            // Shift existing waterfall pixels left by (cols_to_draw * pixels_per_col)
+            let pixels_per_col = w_px / DISPLAY_COLUMNS;
+            let shift_px = cols_to_draw * pixels_per_col;
+
+            if shift_px > 0 && shift_px < w_px {
+                let data = self.surface.pixmap.data_mut();
+                for row in y_start..((y_start + h_px).min(pixmap_h)) {
+                    let row_start = row * pixmap_w * 4;
+                    let dst_start = row_start + x_start * 4;
+                    let src_start = dst_start + shift_px * 4;
+                    let copy_len = (w_px - shift_px) * 4;
+                    if src_start + copy_len <= data.len() && dst_start + copy_len <= data.len() {
+                        data.copy_within(src_start..src_start + copy_len, dst_start);
+                    }
+                }
+            }
+
+            // Draw only the new columns on the right edge
+            let draw_start_col = DISPLAY_COLUMNS - cols_to_draw;
+            let draw_start_x = x_start + draw_start_col * pixels_per_col;
+            self.draw_waterfall_columns(
+                draw_start_x, y_start, h_px, pixmap_w,
+                wp, draw_start_col, cols_to_draw,
+            );
+        } else {
+            // Full redraw (first frame or huge jump)
+            self.draw_waterfall_columns(
+                x_start, y_start, h_px, pixmap_w,
+                wp, 0, DISPLAY_COLUMNS,
+            );
+        }
+
+        self.last_draw_write_pos = wp;
+
+        // Border
         widgets::draw_rect_outline(
             &mut self.surface.pixmap,
-            x,
-            y,
-            w,
-            h,
+            x, y, w, h,
             widgets::color_border(),
             1.0,
         );
+    }
+
+    /// Draw a range of waterfall columns using direct pixel writes.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_waterfall_columns(
+        &mut self,
+        start_x: usize,
+        start_y: usize,
+        total_h: usize,
+        pixmap_w: usize,
+        write_pos: usize,
+        col_offset_start: usize,
+        num_cols: usize,
+    ) {
+        let pixels_per_col = (self.physical_width as usize) / DISPLAY_COLUMNS;
+        let data = self.surface.pixmap.data_mut();
+        let pixmap_h = data.len() / (pixmap_w * 4);
+
+        for col_i in 0..num_cols {
+            let col_offset = col_offset_start + col_i;
+            let col_idx = (write_pos + col_offset) % DISPLAY_COLUMNS;
+            let px_x = start_x + col_i * pixels_per_col;
+
+            // Bulk-read all bins for this column into a local array
+            let mut mags = [0u8; DISPLAY_BINS]; // LUT indices
+            for (bin, lut_idx) in mags.iter_mut().enumerate() {
+                let mag = self.display.read(col_idx, bin);
+                *lut_idx = magnitude_to_lut_index(mag) as u8;
+            }
+
+            // Write pixels directly
+            for (bin, &lut_idx) in mags.iter().enumerate() {
+                let color = self.color_lut[lut_idx as usize];
+                // Low frequencies at bottom, high at top
+                let bin_y_start = start_y + total_h - (bin + 1) * total_h / DISPLAY_BINS;
+                let bin_y_end = start_y + total_h - bin * total_h / DISPLAY_BINS;
+
+                for py in bin_y_start..bin_y_end.min(pixmap_h) {
+                    let row_offset = py * pixmap_w * 4;
+                    for dx in 0..pixels_per_col {
+                        let px = px_x + dx;
+                        if px < pixmap_w {
+                            let idx = row_offset + px * 4;
+                            if idx + 3 < data.len() {
+                                data[idx] = color[0];
+                                data[idx + 1] = color[1];
+                                data[idx + 2] = color[2];
+                                data[idx + 3] = color[3];
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn format_value(&self, id: ParamId) -> String {
