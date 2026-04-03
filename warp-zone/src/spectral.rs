@@ -7,8 +7,15 @@
 
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
-use std::f32::consts::PI;
+use std::f32::consts::{PI, TAU};
 use std::sync::Arc;
+
+/// Zero complex value. Defined as a function because `Complex::new` is not
+/// const-compatible in this version of num_complex.
+#[inline(always)]
+fn zero() -> Complex<f32> {
+    Complex { re: 0.0, im: 0.0 }
+}
 
 pub struct SpectralShifter {
     fft_size: usize,
@@ -49,7 +56,7 @@ impl SpectralShifter {
             .max(fft_inverse.get_inplace_scratch_len());
 
         let analysis_window: Vec<f32> = (0..fft_size)
-            .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / fft_size as f32).cos()))
+            .map(|i| 0.5 * (1.0 - (TAU * i as f32 / fft_size as f32).cos()))
             .collect();
 
         // COLA normalization (same approach as satch)
@@ -74,7 +81,7 @@ impl SpectralShifter {
             hop_size,
             fft_forward,
             fft_inverse,
-            scratch: vec![Complex::new(0.0, 0.0); scratch_len],
+            scratch: vec![zero(); scratch_len],
             analysis_window,
             synthesis_window,
             input_ring: vec![0.0; fft_size],
@@ -82,8 +89,8 @@ impl SpectralShifter {
             input_pos: 0,
             read_pos: 0,
             hop_counter: 0,
-            fft_buf: vec![Complex::new(0.0, 0.0); fft_size],
-            out_buf: vec![Complex::new(0.0, 0.0); fft_size],
+            fft_buf: vec![zero(); fft_size],
+            out_buf: vec![zero(); fft_size],
             last_input_phase: vec![0.0; half_plus_one],
             accumulated_output_phase: vec![0.0; half_plus_one],
             last_output_magnitudes: vec![0.0; half_plus_one],
@@ -103,12 +110,8 @@ impl SpectralShifter {
         self.last_input_phase.fill(0.0);
         self.accumulated_output_phase.fill(0.0);
         self.last_output_magnitudes.fill(0.0);
-        for bin in self.fft_buf.iter_mut() {
-            *bin = Complex::new(0.0, 0.0);
-        }
-        for bin in self.out_buf.iter_mut() {
-            *bin = Complex::new(0.0, 0.0);
-        }
+        self.fft_buf.fill(zero());
+        self.out_buf.fill(zero());
     }
 
     /// Returns the output magnitudes from the most recent processed frame.
@@ -211,7 +214,7 @@ impl SpectralShifter {
 
         // Clear output buffer
         for bin in self.out_buf.iter_mut() {
-            *bin = Complex::new(0.0, 0.0);
+            *bin = zero();
         }
 
         let shift_ratio = (shift / 12.0).exp2();
@@ -241,13 +244,14 @@ impl SpectralShifter {
         // We use out_buf as temporary workspace for in-range bins:
         //   out_buf[k].re = best magnitude so far for target bin k
         //   out_buf[k].im = corresponding phase increment
+        let phase_per_bin = TAU * self.hop_size as f32 / n as f32;
+
         for k in lo..hi {
             let mag = self.fft_buf[k].norm();
             let phase = self.fft_buf[k].arg();
 
             // Phase deviation from expected
-            let expected_phase_inc =
-                2.0 * PI * self.hop_size as f32 * k as f32 / n as f32;
+            let expected_phase_inc = phase_per_bin * k as f32;
             let phase_diff = phase - self.last_input_phase[k];
             let phase_dev = wrap_phase(phase_diff - expected_phase_inc);
 
@@ -261,15 +265,9 @@ impl SpectralShifter {
             let target_hi = target_lo + 1;
             let frac = target_f - target_lo as f32;
 
-            // Expected phase increment for target bins (correct phase vocoder formula)
-            let expected_target_lo =
-                2.0 * PI * self.hop_size as f32 * target_lo as f32 / n as f32;
-            let expected_target_hi =
-                2.0 * PI * self.hop_size as f32 * target_hi as f32 / n as f32;
-
             // Phase increment = expected_target + phase_deviation (NOT scaled)
-            let phase_inc_lo = expected_target_lo + phase_dev;
-            let phase_inc_hi = expected_target_hi + phase_dev;
+            let phase_inc_lo = phase_per_bin * target_lo as f32 + phase_dev;
+            let phase_inc_hi = phase_per_bin * target_hi as f32 + phase_dev;
 
             // Low bin contribution (max-magnitude-wins)
             if target_lo > 0 && target_lo < half_plus_one {
@@ -305,9 +303,9 @@ impl SpectralShifter {
                     self.out_buf[n - k] = self.out_buf[k].conj();
                 }
             } else {
-                self.out_buf[k] = Complex::new(0.0, 0.0);
+                self.out_buf[k] = zero();
                 if k < n / 2 {
-                    self.out_buf[n - k] = Complex::new(0.0, 0.0);
+                    self.out_buf[n - k] = zero();
                 }
             }
         }
@@ -321,7 +319,7 @@ impl SpectralShifter {
 /// Safe for arbitrarily large phase values (no loops).
 #[inline]
 fn wrap_phase(phase: f32) -> f32 {
-    phase - (2.0 * PI) * ((phase + PI) / (2.0 * PI)).floor()
+    phase - TAU * ((phase + PI) / TAU).floor()
 }
 
 #[cfg(test)]
@@ -339,7 +337,7 @@ mod tests {
         let freq = 440.0;
         let num_samples = 32768;
         let input: Vec<f32> = (0..num_samples)
-            .map(|i| 0.8 * (2.0 * PI * freq * i as f32 / sr).sin())
+            .map(|i| 0.8 * (TAU * freq * i as f32 / sr).sin())
             .collect();
 
         let output: Vec<f32> = input.iter()
@@ -386,7 +384,7 @@ mod tests {
         let num_samples = 65536;
 
         let input: Vec<f32> = (0..num_samples)
-            .map(|i| 0.8 * (2.0 * PI * freq * i as f32 / sr).sin())
+            .map(|i| 0.8 * (TAU * freq * i as f32 / sr).sin())
             .collect();
 
         let mut shifter = SpectralShifter::new(fft_size, hop_size);
@@ -423,7 +421,7 @@ mod tests {
         let num_samples = 65536;
 
         let input: Vec<f32> = (0..num_samples)
-            .map(|i| 0.8 * (2.0 * PI * freq * i as f32 / sr).sin())
+            .map(|i| 0.8 * (TAU * freq * i as f32 / sr).sin())
             .collect();
 
         let mut shifter = SpectralShifter::new(fft_size, hop_size);
@@ -460,7 +458,7 @@ mod tests {
         let num_samples = 65536;
 
         let input: Vec<f32> = (0..num_samples)
-            .map(|i| 0.8 * (2.0 * PI * freq * i as f32 / sr).sin())
+            .map(|i| 0.8 * (TAU * freq * i as f32 / sr).sin())
             .collect();
 
         let mut shifter = SpectralShifter::new(fft_size, hop_size);
@@ -497,7 +495,7 @@ mod tests {
         let num_samples = 65536;
 
         let input: Vec<f32> = (0..num_samples)
-            .map(|i| 0.8 * (2.0 * PI * freq * i as f32 / sr).sin())
+            .map(|i| 0.8 * (TAU * freq * i as f32 / sr).sin())
             .collect();
 
         let mut shifter = SpectralShifter::new(fft_size, hop_size);
@@ -537,9 +535,9 @@ mod tests {
         let input: Vec<f32> = (0..num_samples)
             .map(|i| {
                 let t = i as f32 / sr;
-                0.5 * (2.0 * PI * 200.0 * t).sin()
-                    + 0.25 * (2.0 * PI * 400.0 * t).sin()
-                    + 0.125 * (2.0 * PI * 600.0 * t).sin()
+                0.5 * (TAU * 200.0 * t).sin()
+                    + 0.25 * (TAU * 400.0 * t).sin()
+                    + 0.125 * (TAU * 600.0 * t).sin()
             })
             .collect();
 
@@ -600,9 +598,9 @@ mod tests {
         let input: Vec<f32> = (0..num_samples)
             .map(|i| {
                 let t = i as f32 / sr;
-                0.5 * (2.0 * PI * 200.0 * t).sin()
-                    + 0.25 * (2.0 * PI * 400.0 * t).sin()
-                    + 0.125 * (2.0 * PI * 600.0 * t).sin()
+                0.5 * (TAU * 200.0 * t).sin()
+                    + 0.25 * (TAU * 400.0 * t).sin()
+                    + 0.125 * (TAU * 600.0 * t).sin()
             })
             .collect();
 
@@ -635,7 +633,7 @@ mod tests {
         let num_samples = 32768;
 
         let input: Vec<f32> = (0..num_samples)
-            .map(|i| 0.8 * (2.0 * PI * 300.0 * i as f32 / sr).sin())
+            .map(|i| 0.8 * (TAU * 300.0 * i as f32 / sr).sin())
             .collect();
 
         // Apply shift=12 + stretch=1.5
