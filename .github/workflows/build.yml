@@ -62,6 +62,9 @@ jobs:
       - name: Build pope-scope
         run: cargo nih-plug bundle pope-scope --release
 
+      - name: Build warp-zone
+        run: cargo nih-plug bundle warp-zone --release
+
       - name: Build standalones
         run: |
           cargo build --bin wavetable-filter --release
@@ -70,6 +73,7 @@ jobs:
           cargo build --bin tinylimit --release
           cargo build --bin satch --release
           cargo build --bin pope-scope --release
+          cargo build --bin warp-zone --release
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
