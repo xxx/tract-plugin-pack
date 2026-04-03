@@ -19,16 +19,6 @@ pub fn default_editor_state() -> Arc<EditorState> {
 
 // ── Hit testing ─────────────────────────────────────────────────────────
 
-/// A rectangular hit region with an associated action.
-#[derive(Clone)]
-struct HitRegion {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    action: HitAction,
-}
-
 #[derive(Clone, Copy, PartialEq)]
 enum HitAction {
     Dial(ParamId),
@@ -135,25 +125,7 @@ struct TinylimitWindow {
     readings: Arc<MeterReadings>,
     text_renderer: widgets::TextRenderer,
 
-    /// Hit regions rebuilt each frame during draw().
-    hit_regions: Vec<HitRegion>,
-    /// Currently dragging a dial.
-    drag_active: Option<HitAction>,
-    /// Y coordinate where the current drag started.
-    drag_start_y: f32,
-    /// Normalized value (0.0–1.0) when the current drag started.
-    drag_start_value: f32,
-    /// Shift state from the last mouse event.
-    last_shift_state: bool,
-    /// When shift is pressed mid-drag, snapshot current Y and normalized value.
-    granular_drag_start_y: f32,
-    granular_drag_start_value: f32,
-    /// Mouse position in physical pixels.
-    mouse_x: f32,
-    mouse_y: f32,
-    /// Timestamp of last click for double-click detection.
-    last_click_time: std::time::Instant,
-    last_click_action: Option<HitAction>,
+    drag: widgets::DragState<HitAction>,
     /// Currently selected preset index (editor-only state, not persisted).
     current_preset: usize,
 }
@@ -186,17 +158,7 @@ impl TinylimitWindow {
             params,
             readings,
             text_renderer,
-            hit_regions: Vec::new(),
-            drag_active: None,
-            drag_start_y: 0.0,
-            drag_start_value: 0.0,
-            last_shift_state: false,
-            granular_drag_start_y: 0.0,
-            granular_drag_start_value: 0.0,
-            mouse_x: 0.0,
-            mouse_y: 0.0,
-            last_click_time: std::time::Instant::now(),
-            last_click_action: None,
+            drag: widgets::DragState::new(),
             current_preset: 0,
         }
     }
@@ -271,7 +233,7 @@ impl TinylimitWindow {
         let s = self.scale_factor;
 
         // Clear hit regions and background
-        self.hit_regions.clear();
+        self.drag.clear_regions();
         self.surface.pixmap.fill(widgets::color_bg());
 
         let pad = 16.0 * s;
@@ -437,13 +399,7 @@ impl TinylimitWindow {
             false,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: plus_x,
-            y: plus_y,
-            w: scale_btn_size,
-            h: scale_btn_size,
-            action: HitAction::Button(ButtonAction::ScaleUp),
-        });
+        self.drag.push_region(plus_x, plus_y, scale_btn_size, scale_btn_size, HitAction::Button(ButtonAction::ScaleUp));
 
         // Scale percentage label
         let pct_x = plus_x - scale_label_w;
@@ -470,13 +426,7 @@ impl TinylimitWindow {
             false,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: minus_x,
-            y: plus_y,
-            w: scale_btn_size,
-            h: scale_btn_size,
-            action: HitAction::Button(ButtonAction::ScaleDown),
-        });
+        self.drag.push_region(minus_x, plus_y, scale_btn_size, scale_btn_size, HitAction::Button(ButtonAction::ScaleDown));
 
         // ── Meter labels ──
         let l_label = "L";
@@ -610,13 +560,7 @@ impl TinylimitWindow {
             );
             let hit_w = dial_col_spacing;
             let hit_h = meter_h * 0.35;
-            self.hit_regions.push(HitRegion {
-                x: cx - hit_w / 2.0,
-                y: dial_row_cy1 - hit_h / 2.0,
-                w: hit_w,
-                h: hit_h,
-                action: HitAction::Dial(pid),
-            });
+            self.drag.push_region(cx - hit_w / 2.0, dial_row_cy1 - hit_h / 2.0, hit_w, hit_h, HitAction::Dial(pid));
         }
 
         // Row 2: last 4 params
@@ -634,13 +578,7 @@ impl TinylimitWindow {
             );
             let hit_w = dial_col_spacing;
             let hit_h = meter_h * 0.35;
-            self.hit_regions.push(HitRegion {
-                x: cx - hit_w / 2.0,
-                y: dial_row_cy2 - hit_h / 2.0,
-                w: hit_w,
-                h: hit_h,
-                action: HitAction::Dial(pid),
-            });
+            self.drag.push_region(cx - hit_w / 2.0, dial_row_cy2 - hit_h / 2.0, hit_w, hit_h, HitAction::Dial(pid));
         }
 
         // ── Preset selector: [<]  Name  [>] ──
@@ -664,13 +602,7 @@ impl TinylimitWindow {
             false,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: preset_left_x,
-            y: preset_row_y,
-            w: preset_arrow_w,
-            h: preset_arrow_h,
-            action: HitAction::Button(ButtonAction::PresetPrev),
-        });
+        self.drag.push_region(preset_left_x, preset_row_y, preset_arrow_w, preset_arrow_h, HitAction::Button(ButtonAction::PresetPrev));
 
         // Preset name label (clickable — applies the preset)
         let preset_name_x = preset_left_x + preset_arrow_w + 4.0 * s;
@@ -685,13 +617,7 @@ impl TinylimitWindow {
             false,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: preset_name_x,
-            y: preset_row_y,
-            w: preset_label_w,
-            h: preset_arrow_h,
-            action: HitAction::Button(ButtonAction::PresetApply),
-        });
+        self.drag.push_region(preset_name_x, preset_row_y, preset_label_w, preset_arrow_h, HitAction::Button(ButtonAction::PresetApply));
         // Right arrow ">"
         let preset_right_x = preset_name_x + preset_label_w + 4.0 * s;
         widgets::draw_button(
@@ -705,13 +631,7 @@ impl TinylimitWindow {
             false,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: preset_right_x,
-            y: preset_row_y,
-            w: preset_arrow_w,
-            h: preset_arrow_h,
-            action: HitAction::Button(ButtonAction::PresetNext),
-        });
+        self.drag.push_region(preset_right_x, preset_row_y, preset_arrow_w, preset_arrow_h, HitAction::Button(ButtonAction::PresetNext));
 
         // ── Toggle buttons: ISP and Gain Link ──
         let btn_w = 80.0 * s;
@@ -731,13 +651,7 @@ impl TinylimitWindow {
             isp_active,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: isp_x,
-            y: btn_row_y,
-            w: btn_w,
-            h: btn_h,
-            action: HitAction::Button(ButtonAction::ToggleIsp),
-        });
+        self.drag.push_region(isp_x, btn_row_y, btn_w, btn_h, HitAction::Button(ButtonAction::ToggleIsp));
 
         let gl_x = center_mid + btn_gap / 2.0;
         widgets::draw_button(
@@ -751,13 +665,7 @@ impl TinylimitWindow {
             gl_active,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: gl_x,
-            y: btn_row_y,
-            w: btn_w,
-            h: btn_h,
-            action: HitAction::Button(ButtonAction::ToggleGainLink),
-        });
+        self.drag.push_region(gl_x, btn_row_y, btn_w, btn_h, HitAction::Button(ButtonAction::ToggleGainLink));
 
         // ── GR readout ──
         let gr_text = if gr_db.abs() < 0.05 {
@@ -863,79 +771,39 @@ impl baseview::WindowHandler for TinylimitWindow {
                 position,
                 modifiers,
             }) => {
-                self.mouse_x = position.x as f32;
-                self.mouse_y = position.y as f32;
-
-                if let Some(HitAction::Dial(param_id)) = self.drag_active {
-                    let shift_now = modifiers.contains(keyboard_types::Modifiers::SHIFT);
-
-                    // Get the current normalized value for detecting shift transitions
-                    let current_norm = self.float_param(param_id).unmodulated_normalized_value();
-                    if shift_now && !self.last_shift_state {
-                        self.granular_drag_start_y = self.mouse_y;
-                        self.granular_drag_start_value = current_norm;
-                    } else if !shift_now && self.last_shift_state {
-                        self.drag_start_y = self.mouse_y;
-                        self.drag_start_value = current_norm;
+                self.drag.set_mouse(position.x as f32, position.y as f32);
+                if let Some(HitAction::Dial(param_id)) = self.drag.active_action().copied() {
+                    let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                    let current = self.float_param(param_id).unmodulated_normalized_value();
+                    if let Some(norm) = self.drag.update_drag(shift, current) {
+                        let setter = ParamSetter::new(self.gui_context.as_ref());
+                        self.set_param_normalized(&setter, param_id, norm);
                     }
-
-                    // Drag sensitivity: 600px = full normalized range (0..1), up = increase
-                    let target_norm = if shift_now {
-                        let delta_y = self.granular_drag_start_y - self.mouse_y;
-                        (self.granular_drag_start_value + delta_y / 600.0 * 0.1).clamp(0.0, 1.0)
-                    } else {
-                        let delta_y = self.drag_start_y - self.mouse_y;
-                        (self.drag_start_value + delta_y / 600.0).clamp(0.0, 1.0)
-                    };
-
-                    let setter = ParamSetter::new(self.gui_context.as_ref());
-                    self.set_param_normalized(&setter, param_id, target_norm);
-
-                    self.last_shift_state = shift_now;
                 }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
-                let mx = self.mouse_x;
-                let my = self.mouse_y;
-
-                // Find which hit region was clicked
-                let hit = self
-                    .hit_regions
-                    .iter()
-                    .find(|r| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h)
-                    .cloned();
-
-                if let Some(region) = hit {
+                if let Some(region) = self.drag.hit_test().cloned() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
-                    let now = std::time::Instant::now();
-                    let is_double_click = now.duration_since(self.last_click_time).as_millis()
-                        < 400
-                        && self.last_click_action.as_ref() == Some(&region.action);
-                    self.last_click_time = now;
-                    self.last_click_action = Some(region.action);
 
                     // End any pending drag before processing new click
-                    if let Some(HitAction::Dial(id)) = self.drag_active.take() {
+                    if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
                         self.end_set_param(&setter, id);
                     }
 
+                    let is_double = self.drag.check_double_click(&region.action);
+
                     match region.action {
                         HitAction::Dial(param_id) => {
-                            if is_double_click {
+                            if is_double {
                                 self.reset_param_to_default(&setter, param_id);
                             } else {
                                 let norm =
                                     self.float_param(param_id).unmodulated_normalized_value();
-                                self.drag_start_y = my;
-                                self.drag_start_value = norm;
-                                self.granular_drag_start_y = my;
-                                self.granular_drag_start_value = norm;
-                                self.last_shift_state =
-                                    modifiers.contains(keyboard_types::Modifiers::SHIFT);
-                                self.drag_active = Some(HitAction::Dial(param_id));
+                                let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                                self.drag.begin_drag(HitAction::Dial(param_id), norm, shift);
                                 self.begin_set_param(&setter, param_id);
                             }
                         }
@@ -977,7 +845,7 @@ impl baseview::WindowHandler for TinylimitWindow {
                 button: baseview::MouseButton::Left,
                 ..
             }) => {
-                if let Some(HitAction::Dial(id)) = self.drag_active.take() {
+                if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
                     self.end_set_param(&setter, id);
                 }

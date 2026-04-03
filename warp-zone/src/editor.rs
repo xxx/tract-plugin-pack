@@ -21,16 +21,7 @@ pub fn default_editor_state() -> Arc<EditorState> {
     EditorState::from_size(WINDOW_WIDTH, WINDOW_HEIGHT)
 }
 
-// ── Hit testing ─────────────────────────────────────────────────────────
-
-#[derive(Clone)]
-struct HitRegion {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    action: HitAction,
-}
+// ── Hit actions ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq)]
 enum HitAction {
@@ -118,18 +109,7 @@ struct WarpZoneWindow {
     display: Arc<SpectralDisplay>,
     text_renderer: widgets::TextRenderer,
     color_lut: [[u8; 4]; COLOR_LUT_SIZE],
-
-    hit_regions: Vec<HitRegion>,
-    drag_active: Option<HitAction>,
-    drag_start_y: f32,
-    drag_start_value: f32,
-    last_shift_state: bool,
-    granular_drag_start_y: f32,
-    granular_drag_start_value: f32,
-    mouse_x: f32,
-    mouse_y: f32,
-    last_click_time: std::time::Instant,
-    last_click_action: Option<HitAction>,
+    drag: widgets::DragState<HitAction>,
 }
 
 impl WarpZoneWindow {
@@ -162,17 +142,7 @@ impl WarpZoneWindow {
             display,
             text_renderer,
             color_lut: build_color_lut(),
-            hit_regions: Vec::new(),
-            drag_active: None,
-            drag_start_y: 0.0,
-            drag_start_value: 0.0,
-            last_shift_state: false,
-            granular_drag_start_y: 0.0,
-            granular_drag_start_value: 0.0,
-            mouse_x: 0.0,
-            mouse_y: 0.0,
-            last_click_time: std::time::Instant::now(),
-            last_click_action: None,
+            drag: widgets::DragState::new(),
         }
     }
 
@@ -214,7 +184,7 @@ impl WarpZoneWindow {
     fn draw(&mut self) {
         let s = self.scale_factor;
 
-        self.hit_regions.clear();
+        self.drag.clear_regions();
 
         let pad = 16.0 * s;
         let w = self.physical_width as f32;
@@ -290,13 +260,7 @@ impl WarpZoneWindow {
             freeze_on,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: freeze_x,
-            y: freeze_y,
-            w: freeze_btn_w,
-            h: freeze_btn_h,
-            action: HitAction::Button(ButtonAction::Freeze),
-        });
+        self.drag.push_region(freeze_x, freeze_y, freeze_btn_w, freeze_btn_h, HitAction::Button(ButtonAction::Freeze));
 
         let dial_area_start = freeze_x + freeze_btn_w + 8.0 * s;
         let dial_cy = y + dial_row_h * 0.5;
@@ -317,13 +281,7 @@ impl WarpZoneWindow {
                 value_text,
                 *normalized,
             );
-            self.hit_regions.push(HitRegion {
-                x: dial_area_start + timbre_spacing * i as f32,
-                y,
-                w: timbre_spacing,
-                h: dial_row_h,
-                action: HitAction::Dial(*param_id),
-            });
+            self.drag.push_region(dial_area_start + timbre_spacing * i as f32, y, timbre_spacing, dial_row_h, HitAction::Dial(*param_id));
         }
 
         // Mix dial on the right
@@ -341,13 +299,7 @@ impl WarpZoneWindow {
                 normalized,
             );
             let mix_hit_w = (w - dial_area_start - timbre_area_w) * 0.8;
-            self.hit_regions.push(HitRegion {
-                x: mix_cx - mix_hit_w * 0.5,
-                y,
-                w: mix_hit_w,
-                h: dial_row_h,
-                action: HitAction::Dial(param_id),
-            });
+            self.drag.push_region(mix_cx - mix_hit_w * 0.5, y, mix_hit_w, dial_row_h, HitAction::Dial(param_id));
         }
 
         y += dial_row_h;
@@ -370,13 +322,7 @@ impl WarpZoneWindow {
                 value_text,
                 *normalized,
             );
-            self.hit_regions.push(HitRegion {
-                x: dial_area_start + row2_spacing * i as f32,
-                y,
-                w: row2_spacing,
-                h: row2_h,
-                action: HitAction::Dial(*param_id),
-            });
+            self.drag.push_region(dial_area_start + row2_spacing * i as f32, y, row2_spacing, row2_h, HitAction::Dial(*param_id));
         }
 
         y += row2_h;
@@ -518,76 +464,38 @@ impl baseview::WindowHandler for WarpZoneWindow {
                 position,
                 modifiers,
             }) => {
-                self.mouse_x = position.x as f32;
-                self.mouse_y = position.y as f32;
-
-                if let Some(HitAction::Dial(param_id)) = self.drag_active {
-                    let shift_now = modifiers.contains(keyboard_types::Modifiers::SHIFT);
-
-                    let current_norm = self.float_param(param_id).unmodulated_normalized_value();
-                    if shift_now && !self.last_shift_state {
-                        self.granular_drag_start_y = self.mouse_y;
-                        self.granular_drag_start_value = current_norm;
-                    } else if !shift_now && self.last_shift_state {
-                        self.drag_start_y = self.mouse_y;
-                        self.drag_start_value = current_norm;
+                self.drag.set_mouse(position.x as f32, position.y as f32);
+                if let Some(HitAction::Dial(param_id)) = self.drag.active_action().copied() {
+                    let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                    let current = self.float_param(param_id).unmodulated_normalized_value();
+                    if let Some(norm) = self.drag.update_drag(shift, current) {
+                        let setter = ParamSetter::new(self.gui_context.as_ref());
+                        self.set_param_normalized(&setter, param_id, norm);
                     }
-
-                    let target_norm = if shift_now {
-                        let delta_y = self.granular_drag_start_y - self.mouse_y;
-                        (self.granular_drag_start_value + delta_y / 600.0 * 0.1).clamp(0.0, 1.0)
-                    } else {
-                        let delta_y = self.drag_start_y - self.mouse_y;
-                        (self.drag_start_value + delta_y / 600.0).clamp(0.0, 1.0)
-                    };
-
-                    let setter = ParamSetter::new(self.gui_context.as_ref());
-                    self.set_param_normalized(&setter, param_id, target_norm);
-
-                    self.last_shift_state = shift_now;
                 }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
-                let mx = self.mouse_x;
-                let my = self.mouse_y;
-
-                let hit = self
-                    .hit_regions
-                    .iter()
-                    .find(|r| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h)
-                    .cloned();
-
-                if let Some(region) = hit {
+                if let Some(region) = self.drag.hit_test().cloned() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
-                    let now = std::time::Instant::now();
-                    let is_double_click = now.duration_since(self.last_click_time).as_millis()
-                        < 400
-                        && self.last_click_action.as_ref() == Some(&region.action);
-                    self.last_click_time = now;
-                    self.last_click_action = Some(region.action);
 
-                    if let Some(HitAction::Dial(id)) = self.drag_active.take() {
+                    // End any pending drag
+                    if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
                         self.end_set_param(&setter, id);
                     }
 
+                    let is_double = self.drag.check_double_click(&region.action);
+
                     match region.action {
                         HitAction::Dial(param_id) => {
-                            if is_double_click {
+                            if is_double {
                                 self.reset_param_to_default(&setter, param_id);
                             } else {
-                                let norm = self
-                                    .float_param(param_id)
-                                    .unmodulated_normalized_value();
-                                self.drag_start_y = my;
-                                self.drag_start_value = norm;
-                                self.granular_drag_start_y = my;
-                                self.granular_drag_start_value = norm;
-                                self.last_shift_state =
-                                    modifiers.contains(keyboard_types::Modifiers::SHIFT);
-                                self.drag_active = Some(HitAction::Dial(param_id));
+                                let norm = self.float_param(param_id).unmodulated_normalized_value();
+                                let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                                self.drag.begin_drag(HitAction::Dial(param_id), norm, shift);
                                 self.begin_set_param(&setter, param_id);
                             }
                         }
@@ -601,7 +509,7 @@ impl baseview::WindowHandler for WarpZoneWindow {
                 button: baseview::MouseButton::Left,
                 ..
             }) => {
-                if let Some(HitAction::Dial(id)) = self.drag_active.take() {
+                if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
                     self.end_set_param(&setter, id);
                 }

@@ -26,15 +26,6 @@ pub fn default_editor_state() -> Arc<EditorState> {
 
 // ── Hit testing ─────────────────────────────────────────────────────────
 
-#[derive(Clone)]
-struct HitRegion {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    action: HitAction,
-}
-
 #[derive(Clone, Copy, PartialEq)]
 enum HitAction {
     Dial(ParamId),
@@ -113,17 +104,7 @@ struct PopeScopeWindow {
     peak_holds: Vec<PeakHoldEntry>,
     /// Last frame timestamp for dt computation.
     last_frame_time: std::time::Instant,
-    hit_regions: Vec<HitRegion>,
-    drag_active: Option<HitAction>,
-    drag_start_y: f32,
-    drag_start_value: f32,
-    last_shift_state: bool,
-    granular_drag_start_y: f32,
-    granular_drag_start_value: f32,
-    mouse_x: f32,
-    mouse_y: f32,
-    last_click_time: std::time::Instant,
-    last_click_action: Option<HitAction>,
+    drag: widgets::DragState<HitAction>,
 }
 
 impl PopeScopeWindow {
@@ -158,17 +139,7 @@ impl PopeScopeWindow {
             cached_snapshots: Vec::new(),
             peak_holds: Vec::new(),
             last_frame_time: std::time::Instant::now(),
-            hit_regions: Vec::new(),
-            drag_active: None,
-            drag_start_y: 0.0,
-            drag_start_value: 0.0,
-            last_shift_state: false,
-            granular_drag_start_y: 0.0,
-            granular_drag_start_value: 0.0,
-            mouse_x: 0.0,
-            mouse_y: 0.0,
-            last_click_time: std::time::Instant::now(),
-            last_click_action: None,
+            drag: widgets::DragState::new(),
         }
     }
 
@@ -220,7 +191,7 @@ impl PopeScopeWindow {
         let ph = self.physical_height as f32;
         let pad = 8.0 * s;
 
-        self.hit_regions.clear();
+        self.drag.clear_regions();
 
         // Pre-compute waveform rect before borrowing text_renderer
         let (wx, wy, ww, wh) = self.waveform_rect();
@@ -367,13 +338,7 @@ impl PopeScopeWindow {
                             s,
                         );
                         for cr in ctrl_regions {
-                            self.hit_regions.push(HitRegion {
-                                x: cr.x,
-                                y: cr.y,
-                                w: cr.w,
-                                h: cr.h,
-                                action: HitAction::Control(cr.action),
-                            });
+                            self.drag.push_region(cr.x, cr.y, cr.w, cr.h, HitAction::Control(cr.action));
                         }
 
                         // Draw amplitude grid — skip when tracks are too
@@ -680,18 +645,19 @@ impl PopeScopeWindow {
         }
 
         // Draw cursor if mouse is in waveform area
-        if self.mouse_x >= wx
-            && self.mouse_x < wx + ww
-            && self.mouse_y >= wy
-            && self.mouse_y < wy + wh
+        let (mouse_x, mouse_y) = self.drag.mouse_pos();
+        if mouse_x >= wx
+            && mouse_x < wx + ww
+            && mouse_y >= wy
+            && mouse_y < wy + wh
         {
-            renderer::draw_cursor(&mut self.surface.pixmap, self.mouse_x, wy, wh);
+            renderer::draw_cursor(&mut self.surface.pixmap, mouse_x, wy, wh);
         }
 
         // ── Name tooltip (drawn over everything else) ──────────────────
-        let mx = self.mouse_x;
-        let my = self.mouse_y;
-        for region in &self.hit_regions {
+        let mx = mouse_x;
+        let my = mouse_y;
+        for region in self.drag.regions() {
             if let HitAction::Control(controls::ControlAction::HoverName(slot_idx)) = region.action {
                 if mx >= region.x && mx < region.x + region.w
                     && my >= region.y && my < region.y + region.h
@@ -792,13 +758,7 @@ impl PopeScopeWindow {
             active_text_c,
             active_fill_c,
         );
-        self.hit_regions.push(HitRegion {
-            x: cx,
-            y: row1_y + label_gap,
-            w: display_w,
-            h: row_h,
-            action: HitAction::Button(ButtonAction::CycleDisplayMode),
-        });
+        self.drag.push_region(cx, row1_y + label_gap, display_w, row_h, HitAction::Button(ButtonAction::CycleDisplayMode));
 
         cx += display_w + gap;
 
@@ -833,13 +793,7 @@ impl PopeScopeWindow {
             active_text_c,
             active_fill_c,
         );
-        self.hit_regions.push(HitRegion {
-            x: cx,
-            y: row1_y + label_gap,
-            w: style_w,
-            h: row_h,
-            action: HitAction::Button(ButtonAction::CycleDrawStyle),
-        });
+        self.drag.push_region(cx, row1_y + label_gap, style_w, row_h, HitAction::Button(ButtonAction::CycleDrawStyle));
 
         cx += style_w + gap;
 
@@ -873,13 +827,7 @@ impl PopeScopeWindow {
             active_text_c,
             active_fill_c,
         );
-        self.hit_regions.push(HitRegion {
-            x: cx,
-            y: row1_y + label_gap,
-            w: sync_w,
-            h: row_h,
-            action: HitAction::Button(ButtonAction::CycleSyncMode),
-        });
+        self.drag.push_region(cx, row1_y + label_gap, sync_w, row_h, HitAction::Button(ButtonAction::CycleSyncMode));
 
         cx += sync_w + gap;
 
@@ -917,13 +865,7 @@ impl PopeScopeWindow {
                 active_text_c,
                 active_fill_c,
             );
-            self.hit_regions.push(HitRegion {
-                x: cx,
-                y: row1_y + label_gap,
-                w: unit_w,
-                h: row_h,
-                action: HitAction::Button(ButtonAction::CycleSyncUnit),
-            });
+            self.drag.push_region(cx, row1_y + label_gap, unit_w, row_h, HitAction::Button(ButtonAction::CycleSyncUnit));
 
             cx += unit_w + gap;
 
@@ -954,13 +896,7 @@ impl PopeScopeWindow {
                 active_text_c,
                 active_fill_c,
             );
-            self.hit_regions.push(HitRegion {
-                x: cx,
-                y: row1_y + label_gap,
-                w: hold_w,
-                h: row_h,
-                action: HitAction::Button(ButtonAction::ToggleHoldMode),
-            });
+            self.drag.push_region(cx, row1_y + label_gap, hold_w, row_h, HitAction::Button(ButtonAction::ToggleHoldMode));
 
             cx += hold_w + gap;
         }
@@ -990,13 +926,7 @@ impl PopeScopeWindow {
             active_border_c,
             active_fill_c,
         );
-        self.hit_regions.push(HitRegion {
-            x: cx,
-            y: row1_y + label_gap,
-            w: freeze_w,
-            h: row_h,
-            action: HitAction::Button(ButtonAction::ToggleFreeze),
-        });
+        self.drag.push_region(cx, row1_y + label_gap, freeze_w, row_h, HitAction::Button(ButtonAction::ToggleFreeze));
 
         cx += freeze_w + gap;
 
@@ -1025,13 +955,7 @@ impl PopeScopeWindow {
             active_border_c,
             active_fill_c,
         );
-        self.hit_regions.push(HitRegion {
-            x: cx,
-            y: row1_y + label_gap,
-            w: mono_w,
-            h: row_h,
-            action: HitAction::Button(ButtonAction::ToggleMono),
-        });
+        self.drag.push_region(cx, row1_y + label_gap, mono_w, row_h, HitAction::Button(ButtonAction::ToggleMono));
 
         // ── Row 2: Timebase slider | Min dB slider | Max dB slider ──────
 
@@ -1069,13 +993,7 @@ impl PopeScopeWindow {
                 active_text_c,
                 slider_fill_c,
             );
-            self.hit_regions.push(HitRegion {
-                x: cx2,
-                y: row2_y + label_gap,
-                w: slider_w,
-                h: row_h,
-                action: HitAction::Dial(ParamId::Timebase),
-            });
+            self.drag.push_region(cx2, row2_y + label_gap, slider_w, row_h, HitAction::Dial(ParamId::Timebase));
 
             cx2 += slider_w + gap;
         }
@@ -1106,13 +1024,7 @@ impl PopeScopeWindow {
             active_text_c,
             slider_fill_c,
         );
-        self.hit_regions.push(HitRegion {
-            x: cx2,
-            y: row2_y + label_gap,
-            w: slider_w,
-            h: row_h,
-            action: HitAction::Dial(ParamId::MinDb),
-        });
+        self.drag.push_region(cx2, row2_y + label_gap, slider_w, row_h, HitAction::Dial(ParamId::MinDb));
 
         cx2 += slider_w + gap;
 
@@ -1142,13 +1054,7 @@ impl PopeScopeWindow {
             active_text_c,
             slider_fill_c,
         );
-        self.hit_regions.push(HitRegion {
-            x: cx2,
-            y: row2_y + label_gap,
-            w: slider_w,
-            h: row_h,
-            action: HitAction::Dial(ParamId::MaxDb),
-        });
+        self.drag.push_region(cx2, row2_y + label_gap, slider_w, row_h, HitAction::Dial(ParamId::MaxDb));
 
     }
 
@@ -1207,80 +1113,41 @@ impl baseview::WindowHandler for PopeScopeWindow {
                 position,
                 modifiers,
             }) => {
-                self.mouse_x = position.x as f32;
-                self.mouse_y = position.y as f32;
-
-                if let Some(HitAction::Dial(param_id)) = self.drag_active {
-                    let shift_now = modifiers.contains(keyboard_types::Modifiers::SHIFT);
-
-                    // Detect shift transitions for fine control
-                    let current_normalized = self.float_param(param_id).modulated_normalized_value();
-                    if shift_now && !self.last_shift_state {
-                        self.granular_drag_start_y = self.mouse_y;
-                        self.granular_drag_start_value = current_normalized;
-                    } else if !shift_now && self.last_shift_state {
-                        self.drag_start_y = self.mouse_y;
-                        self.drag_start_value = current_normalized;
+                self.drag.set_mouse(position.x as f32, position.y as f32);
+                if let Some(HitAction::Dial(param_id)) = self.drag.active_action().copied() {
+                    let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                    let current = self.float_param(param_id).modulated_normalized_value();
+                    if let Some(norm) = self.drag.update_drag(shift, current) {
+                        let setter = ParamSetter::new(self.gui_context.as_ref());
+                        self.set_param_normalized(&setter, param_id, norm);
                     }
-
-                    // Drag: 600px = full range, up = increase
-                    let normalized_per_pixel = 1.0 / 600.0;
-                    let target = if shift_now {
-                        let delta_y = self.granular_drag_start_y - self.mouse_y;
-                        (self.granular_drag_start_value + delta_y * normalized_per_pixel * 0.1)
-                            .clamp(0.0, 1.0)
-                    } else {
-                        let delta_y = self.drag_start_y - self.mouse_y;
-                        (self.drag_start_value + delta_y * normalized_per_pixel).clamp(0.0, 1.0)
-                    };
-
-                    let setter = ParamSetter::new(self.gui_context.as_ref());
-                    self.set_param_normalized(&setter, param_id, target);
-
-                    self.last_shift_state = shift_now;
                 }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
-                let mx = self.mouse_x;
-                let my = self.mouse_y;
+                let (mx, _my) = self.drag.mouse_pos();
 
-                let hit = self
-                    .hit_regions
-                    .iter()
-                    .find(|r| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h)
-                    .cloned();
-
-                if let Some(region) = hit {
+                if let Some(region) = self.drag.hit_test().cloned() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
-                    let now = std::time::Instant::now();
-                    let is_double_click = now.duration_since(self.last_click_time).as_millis()
-                        < 400
-                        && self.last_click_action.as_ref() == Some(&region.action);
-                    self.last_click_time = now;
-                    self.last_click_action = Some(region.action);
 
                     // End any pending drag
-                    if let Some(HitAction::Dial(id)) = self.drag_active.take() {
+                    if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
                         self.end_set_param(&setter, id);
                     }
 
+                    let is_double = self.drag.check_double_click(&region.action);
+
                     match region.action {
                         HitAction::Dial(param_id) => {
-                            if is_double_click {
+                            if is_double {
                                 self.reset_param_to_default(&setter, param_id);
                             } else {
                                 let normalized =
                                     self.float_param(param_id).modulated_normalized_value();
-                                self.drag_start_y = my;
-                                self.drag_start_value = normalized;
-                                self.granular_drag_start_y = my;
-                                self.granular_drag_start_value = normalized;
-                                self.last_shift_state =
-                                    modifiers.contains(keyboard_types::Modifiers::SHIFT);
-                                self.drag_active = Some(HitAction::Dial(param_id));
+                                let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                                self.drag.begin_drag(HitAction::Dial(param_id), normalized, shift);
                                 self.begin_set_param(&setter, param_id);
                             }
                         }
@@ -1397,7 +1264,7 @@ impl baseview::WindowHandler for PopeScopeWindow {
                 button: baseview::MouseButton::Left,
                 ..
             }) => {
-                if let Some(HitAction::Dial(id)) = self.drag_active.take() {
+                if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
                     self.end_set_param(&setter, id);
                 }

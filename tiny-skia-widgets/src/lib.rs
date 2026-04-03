@@ -5,12 +5,14 @@
 //! pure drawing functions.
 
 pub mod controls;
+pub mod drag;
 pub mod editor_base;
 pub mod param_dial;
 pub mod primitives;
 pub mod text;
 
 pub use controls::*;
+pub use drag::*;
 pub use editor_base::*;
 pub use param_dial::*;
 pub use primitives::*;

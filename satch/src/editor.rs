@@ -17,17 +17,7 @@ pub fn default_editor_state() -> Arc<EditorState> {
     EditorState::from_size(WINDOW_WIDTH, WINDOW_HEIGHT)
 }
 
-// ── Hit testing ─────────────────────────────────────────────────────────
-
-/// A rectangular hit region with an associated action.
-#[derive(Clone)]
-struct HitRegion {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    action: HitAction,
-}
+// ── Hit actions ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq)]
 enum HitAction {
@@ -63,26 +53,7 @@ struct SatchWindow {
 
     params: Arc<SatchParams>,
     text_renderer: widgets::TextRenderer,
-
-    /// Hit regions rebuilt each frame during draw().
-    hit_regions: Vec<HitRegion>,
-    /// Currently dragging a dial.
-    drag_active: Option<HitAction>,
-    /// Y coordinate where the current drag started.
-    drag_start_y: f32,
-    /// Normalized value (0.0–1.0) when the current drag started.
-    drag_start_value: f32,
-    /// Shift state from the last mouse event.
-    last_shift_state: bool,
-    /// When shift is pressed mid-drag, snapshot current Y and normalized value.
-    granular_drag_start_y: f32,
-    granular_drag_start_value: f32,
-    /// Mouse position in physical pixels.
-    mouse_x: f32,
-    mouse_y: f32,
-    /// Timestamp of last click for double-click detection.
-    last_click_time: std::time::Instant,
-    last_click_action: Option<HitAction>,
+    drag: widgets::DragState<HitAction>,
 }
 
 impl SatchWindow {
@@ -110,17 +81,7 @@ impl SatchWindow {
             shared_scale,
             params,
             text_renderer,
-            hit_regions: Vec::new(),
-            drag_active: None,
-            drag_start_y: 0.0,
-            drag_start_value: 0.0,
-            last_shift_state: false,
-            granular_drag_start_y: 0.0,
-            granular_drag_start_value: 0.0,
-            mouse_x: 0.0,
-            mouse_y: 0.0,
-            last_click_time: std::time::Instant::now(),
-            last_click_action: None,
+            drag: widgets::DragState::new(),
         }
     }
 
@@ -161,7 +122,7 @@ impl SatchWindow {
     fn draw(&mut self) {
         let s = self.scale_factor;
 
-        self.hit_regions.clear();
+        self.drag.clear_regions();
         self.surface.pixmap.fill(widgets::color_bg());
 
         let pad = 20.0 * s;
@@ -241,13 +202,7 @@ impl SatchWindow {
             false,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: plus_x,
-            y: plus_y,
-            w: scale_btn_size,
-            h: scale_btn_size,
-            action: HitAction::Button(ButtonAction::ScaleUp),
-        });
+        self.drag.push_region(plus_x, plus_y, scale_btn_size, scale_btn_size, HitAction::Button(ButtonAction::ScaleUp));
 
         // Scale percentage label
         let pct_x = plus_x - scale_label_w;
@@ -274,13 +229,7 @@ impl SatchWindow {
             false,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: minus_x,
-            y: plus_y,
-            w: scale_btn_size,
-            h: scale_btn_size,
-            action: HitAction::Button(ButtonAction::ScaleDown),
-        });
+        self.drag.push_region(minus_x, plus_y, scale_btn_size, scale_btn_size, HitAction::Button(ButtonAction::ScaleDown));
 
         y += 36.0 * s; // title row height
 
@@ -305,13 +254,7 @@ impl SatchWindow {
                 value_text,
                 *normalized,
             );
-            self.hit_regions.push(HitRegion {
-                x: cx - col_spacing / 2.0,
-                y,
-                w: col_spacing,
-                h: row_h,
-                action: HitAction::Dial(*param_id),
-            });
+            self.drag.push_region(cx - col_spacing / 2.0, y, col_spacing, row_h, HitAction::Dial(*param_id));
         }
 
         // Row 2: Detail, Knee
@@ -327,13 +270,7 @@ impl SatchWindow {
                 value_text,
                 *normalized,
             );
-            self.hit_regions.push(HitRegion {
-                x: cx - col_spacing / 2.0,
-                y: y + row_h,
-                w: col_spacing,
-                h: row_h,
-                action: HitAction::Dial(*param_id),
-            });
+            self.drag.push_region(cx - col_spacing / 2.0, y + row_h, col_spacing, row_h, HitAction::Dial(*param_id));
         }
 
         // Mix: bottom-right corner, smaller
@@ -353,13 +290,7 @@ impl SatchWindow {
                 normalized,
             );
             let hit_w = col_spacing;
-            self.hit_regions.push(HitRegion {
-                x: mix_cx - hit_w / 2.0,
-                y: y + row_h * 2.0,
-                w: hit_w,
-                h: row_h,
-                action: HitAction::Dial(param_id),
-            });
+            self.drag.push_region(mix_cx - hit_w / 2.0, y + row_h * 2.0, hit_w, row_h, HitAction::Dial(param_id));
         }
     }
 
@@ -441,78 +372,38 @@ impl baseview::WindowHandler for SatchWindow {
                 position,
                 modifiers,
             }) => {
-                self.mouse_x = position.x as f32;
-                self.mouse_y = position.y as f32;
-
-                if let Some(HitAction::Dial(param_id)) = self.drag_active {
-                    let shift_now = modifiers.contains(keyboard_types::Modifiers::SHIFT);
-
-                    // Get the current normalized value for detecting shift transitions
-                    let current_norm = self.float_param(param_id).unmodulated_normalized_value();
-                    if shift_now && !self.last_shift_state {
-                        self.granular_drag_start_y = self.mouse_y;
-                        self.granular_drag_start_value = current_norm;
-                    } else if !shift_now && self.last_shift_state {
-                        self.drag_start_y = self.mouse_y;
-                        self.drag_start_value = current_norm;
+                self.drag.set_mouse(position.x as f32, position.y as f32);
+                if let Some(HitAction::Dial(param_id)) = self.drag.active_action().copied() {
+                    let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                    let current = self.float_param(param_id).unmodulated_normalized_value();
+                    if let Some(norm) = self.drag.update_drag(shift, current) {
+                        let setter = ParamSetter::new(self.gui_context.as_ref());
+                        self.set_param_normalized(&setter, param_id, norm);
                     }
-
-                    // 600px = full normalized range (0..1), up = increase
-                    let target_norm = if shift_now {
-                        let delta_y = self.granular_drag_start_y - self.mouse_y;
-                        (self.granular_drag_start_value + delta_y / 600.0 * 0.1).clamp(0.0, 1.0)
-                    } else {
-                        let delta_y = self.drag_start_y - self.mouse_y;
-                        (self.drag_start_value + delta_y / 600.0).clamp(0.0, 1.0)
-                    };
-
-                    let setter = ParamSetter::new(self.gui_context.as_ref());
-                    self.set_param_normalized(&setter, param_id, target_norm);
-
-                    self.last_shift_state = shift_now;
                 }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
-                let mx = self.mouse_x;
-                let my = self.mouse_y;
-
-                let hit = self
-                    .hit_regions
-                    .iter()
-                    .find(|r| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h)
-                    .cloned();
-
-                if let Some(region) = hit {
+                if let Some(region) = self.drag.hit_test().cloned() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
-                    let now = std::time::Instant::now();
-                    let is_double_click = now.duration_since(self.last_click_time).as_millis()
-                        < 400
-                        && self.last_click_action.as_ref() == Some(&region.action);
-                    self.last_click_time = now;
-                    self.last_click_action = Some(region.action);
 
                     // End any pending drag before processing new click
-                    if let Some(HitAction::Dial(id)) = self.drag_active.take() {
+                    if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
                         self.end_set_param(&setter, id);
                     }
 
+                    let is_double = self.drag.check_double_click(&region.action);
+
                     match region.action {
                         HitAction::Dial(param_id) => {
-                            if is_double_click {
+                            if is_double {
                                 self.reset_param_to_default(&setter, param_id);
                             } else {
-                                let norm =
-                                    self.float_param(param_id).unmodulated_normalized_value();
-                                self.drag_start_y = my;
-                                self.drag_start_value = norm;
-                                self.granular_drag_start_y = my;
-                                self.granular_drag_start_value = norm;
-                                self.last_shift_state =
-                                    modifiers.contains(keyboard_types::Modifiers::SHIFT);
-                                self.drag_active = Some(HitAction::Dial(param_id));
+                                let norm = self.float_param(param_id).unmodulated_normalized_value();
+                                let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                                self.drag.begin_drag(HitAction::Dial(param_id), norm, shift);
                                 self.begin_set_param(&setter, param_id);
                             }
                         }
@@ -529,7 +420,7 @@ impl baseview::WindowHandler for SatchWindow {
                 button: baseview::MouseButton::Left,
                 ..
             }) => {
-                if let Some(HitAction::Dial(id)) = self.drag_active.take() {
+                if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
                     self.end_set_param(&setter, id);
                 }

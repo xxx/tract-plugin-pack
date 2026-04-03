@@ -20,16 +20,6 @@ pub fn default_editor_state() -> Arc<EditorState> {
 
 // ── Window Handler ──────────────────────────────────────────────────────
 
-/// A rectangular hit region with an associated action.
-#[derive(Clone)]
-struct HitRegion {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    action: HitAction,
-}
-
 #[derive(Clone, Copy, PartialEq)]
 enum HitAction {
     Dial(ParamId),
@@ -77,26 +67,7 @@ struct GainBrainWindow {
     user_gain_override: Arc<std::sync::atomic::AtomicI32>,
     text_renderer: widgets::TextRenderer,
 
-    /// Hit regions rebuilt each frame during draw().
-    hit_regions: Vec<HitRegion>,
-    /// Currently dragging a dial.
-    drag_active: Option<HitAction>,
-    /// Y coordinate where the current drag started (for dial vertical drag).
-    drag_start_y: f32,
-    /// Normalized value when the current drag started (for dial vertical drag).
-    drag_start_value: f32,
-    /// Shift state from the last mouse event, for detecting transitions.
-    last_shift_state: bool,
-    /// When shift is pressed mid-drag, snapshot the current Y and value
-    /// so the fine-control drag is relative to that point.
-    granular_drag_start_y: f32,
-    granular_drag_start_value: f32,
-    /// Mouse position in physical pixels.
-    mouse_x: f32,
-    mouse_y: f32,
-    /// Timestamp of last click for double-click detection.
-    last_click_time: std::time::Instant,
-    last_click_action: Option<HitAction>,
+    drag: widgets::DragState<HitAction>,
 }
 
 impl GainBrainWindow {
@@ -132,17 +103,7 @@ impl GainBrainWindow {
             gui_context_holder,
             user_gain_override,
             text_renderer,
-            hit_regions: Vec::new(),
-            drag_active: None,
-            drag_start_y: 0.0,
-            drag_start_value: 0.0,
-            last_shift_state: false,
-            granular_drag_start_y: 0.0,
-            granular_drag_start_value: 0.0,
-            mouse_x: 0.0,
-            mouse_y: 0.0,
-            last_click_time: std::time::Instant::now(),
-            last_click_action: None,
+            drag: widgets::DragState::new(),
         }
     }
 
@@ -150,7 +111,7 @@ impl GainBrainWindow {
         let s = self.scale_factor;
 
         // Clear hit regions and background
-        self.hit_regions.clear();
+        self.drag.clear_regions();
         self.surface.pixmap.fill(widgets::color_bg());
 
         let pad = 20.0 * s;
@@ -194,13 +155,7 @@ impl GainBrainWindow {
             false,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: plus_x,
-            y: plus_y,
-            w: scale_btn_size,
-            h: scale_btn_size,
-            action: HitAction::Button(ButtonAction::ScaleUp),
-        });
+        self.drag.push_region(plus_x, plus_y, scale_btn_size, scale_btn_size, HitAction::Button(ButtonAction::ScaleUp));
 
         // Scale percentage label
         let pct_text = format!("{}%", (self.scale_factor * 100.0).round() as u32);
@@ -228,13 +183,7 @@ impl GainBrainWindow {
             false,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: minus_x,
-            y: plus_y,
-            w: scale_btn_size,
-            h: scale_btn_size,
-            action: HitAction::Button(ButtonAction::ScaleDown),
-        });
+        self.drag.push_region(minus_x, plus_y, scale_btn_size, scale_btn_size, HitAction::Button(ButtonAction::ScaleDown));
 
         y += row_h;
 
@@ -270,13 +219,7 @@ impl GainBrainWindow {
             false,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: stepper_x,
-            y: stepper_y,
-            w: arrow_w,
-            h: slider_h,
-            action: HitAction::GroupDecrement,
-        });
+        self.drag.push_region(stepper_x, stepper_y, arrow_w, slider_h, HitAction::GroupDecrement);
 
         // Value display (centered text, no hit region)
         let val_x = stepper_x + arrow_w + 2.0 * s;
@@ -313,13 +256,7 @@ impl GainBrainWindow {
             false,
             false,
         );
-        self.hit_regions.push(HitRegion {
-            x: right_x,
-            y: stepper_y,
-            w: arrow_w,
-            h: slider_h,
-            action: HitAction::GroupIncrement,
-        });
+        self.drag.push_region(right_x, stepper_y, arrow_w, slider_h, HitAction::GroupIncrement);
         y += row_h;
 
         // ── Link mode selector (only visible when group > 0) ──
@@ -355,16 +292,16 @@ impl GainBrainWindow {
             );
             let link_seg_w = link_selector_w / 2.0;
             for i in 0..2_i32 {
-                self.hit_regions.push(HitRegion {
-                    x: link_x + i as f32 * link_seg_w,
-                    y: link_y,
-                    w: link_seg_w,
-                    h: slider_h,
-                    action: HitAction::SteppedSegment {
+                self.drag.push_region(
+                    link_x + i as f32 * link_seg_w,
+                    link_y,
+                    link_seg_w,
+                    slider_h,
+                    HitAction::SteppedSegment {
                         param: ParamId::LinkMode,
                         index: i,
                     },
-                });
+                );
             }
 
             // Inv toggle button
@@ -382,13 +319,7 @@ impl GainBrainWindow {
                 inv_active,
                 false,
             );
-            self.hit_regions.push(HitRegion {
-                x: inv_x,
-                y: inv_y,
-                w: inv_w,
-                h: slider_h,
-                action: HitAction::ToggleInvert,
-            });
+            self.drag.push_region(inv_x, inv_y, inv_w, slider_h, HitAction::ToggleInvert);
 
             y += row_h;
         }
@@ -417,13 +348,7 @@ impl GainBrainWindow {
             dial_normalized,
         );
         // Hit region covers the full dial area for vertical drag
-        self.hit_regions.push(HitRegion {
-            x: dial_cx - dial_radius - 10.0 * s,
-            y,
-            w: dial_radius * 2.0 + 20.0 * s,
-            h: dial_total_h,
-            action: HitAction::Dial(ParamId::Gain),
-        });
+        self.drag.push_region(dial_cx - dial_radius - 10.0 * s, y, dial_radius * 2.0 + 20.0 * s, dial_total_h, HitAction::Dial(ParamId::Gain));
         let _ = y + dial_total_h; // suppress unused warning; y is the layout cursor
     }
 
@@ -547,100 +472,60 @@ impl baseview::WindowHandler for GainBrainWindow {
                 position,
                 modifiers,
             }) => {
-                self.mouse_x = position.x as f32;
-                self.mouse_y = position.y as f32;
-
-                if let Some(HitAction::Dial(param_id)) = self.drag_active {
-                    let shift_now = modifiers.contains(keyboard_types::Modifiers::SHIFT);
-
-                    // drag_start_value stores dB, not normalized.
-                    // Detect shift transitions to re-anchor drag origin.
-                    let current_display_db =
+                self.drag.set_mouse(position.x as f32, position.y as f32);
+                if let Some(HitAction::Dial(param_id)) = self.drag.active_action().copied() {
+                    let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                    // Drag operates in dB space mapped to 0-1: (dB + 60) / 120
+                    let current_db =
                         self.display_gain_millibels.load(Ordering::Relaxed) as f32 / 100.0;
-                    if shift_now && !self.last_shift_state {
-                        self.granular_drag_start_y = self.mouse_y;
-                        self.granular_drag_start_value = current_display_db;
-                    } else if !shift_now && self.last_shift_state {
-                        self.drag_start_y = self.mouse_y;
-                        self.drag_start_value = current_display_db;
+                    let current_norm = (current_db + 60.0) / 120.0;
+                    if let Some(norm) = self.drag.update_drag(shift, current_norm) {
+                        let target_db = (norm * 120.0 - 60.0).clamp(-60.0, 60.0);
+                        // Convert dB to the parameter's skewed normalized value
+                        let target_linear = nih_plug::util::db_to_gain(target_db);
+                        let normalized = self.params.gain.preview_normalized(target_linear);
+                        let setter = ParamSetter::new(self.gui_context.as_ref());
+                        self.set_param_normalized(&setter, param_id, normalized);
+                        // Keep the display atomic in sync so draw() shows the
+                        // dragged value immediately, even before process() runs.
+                        self.display_gain_millibels.store(
+                            (target_db * 100.0).round() as i32,
+                            Ordering::Relaxed,
+                        );
                     }
-
-                    // Drag in dB: 600px = 120 dB range, up = increase
-                    let db_per_pixel = 120.0 / 600.0;
-                    let target_db = if shift_now {
-                        let delta_y = self.granular_drag_start_y - self.mouse_y;
-                        (self.granular_drag_start_value + delta_y * db_per_pixel * 0.1)
-                            .clamp(-60.0, 60.0)
-                    } else {
-                        let delta_y = self.drag_start_y - self.mouse_y;
-                        (self.drag_start_value + delta_y * db_per_pixel).clamp(-60.0, 60.0)
-                    };
-                    // Convert dB to the parameter's skewed normalized value
-                    let target_linear = nih_plug::util::db_to_gain(target_db);
-                    let normalized = self.params.gain.preview_normalized(target_linear);
-                    let setter = ParamSetter::new(self.gui_context.as_ref());
-                    self.set_param_normalized(&setter, param_id, normalized);
-                    // Keep the display atomic in sync so draw() shows the
-                    // dragged value immediately, even before process() runs.
-                    self.display_gain_millibels.store(
-                        (target_db * 100.0).round() as i32,
-                        Ordering::Relaxed,
-                    );
-
-                    self.last_shift_state = shift_now;
                 }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
-                let mx = self.mouse_x;
-                let my = self.mouse_y;
-
-                // Find which hit region was clicked
-                let hit = self
-                    .hit_regions
-                    .iter()
-                    .find(|r| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h)
-                    .cloned();
-
-                if let Some(region) = hit {
+                if let Some(region) = self.drag.hit_test().cloned() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
-                    let now = std::time::Instant::now();
-                    let is_double_click = now.duration_since(self.last_click_time).as_millis()
-                        < 400
-                        && self.last_click_action.as_ref() == Some(&region.action);
-                    self.last_click_time = now;
-                    self.last_click_action = Some(region.action);
 
                     // End any pending drag before processing new click
-                    if let Some(HitAction::Dial(id)) = self.drag_active.take() {
+                    if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
                         self.end_set_param(&setter, id);
                     }
 
+                    let is_double = self.drag.check_double_click(&region.action);
+
                     match region.action {
                         HitAction::Dial(param_id) => {
-                            if is_double_click {
+                            if is_double {
                                 self.reset_param_to_default(&setter, param_id);
                             } else {
-                                // Read the display atomic for the drag start value.
-                                // This matches what draw() displays, so the drag
-                                // starts from the visually shown position.
+                                // Map dB to 0-1 for DragState: (dB + 60) / 120
                                 let display_db =
                                     self.display_gain_millibels.load(Ordering::Relaxed) as f32
                                         / 100.0;
-                                self.drag_start_y = my;
-                                self.drag_start_value = display_db;
-                                self.granular_drag_start_y = my;
-                                self.granular_drag_start_value = display_db;
-                                self.last_shift_state =
-                                    modifiers.contains(keyboard_types::Modifiers::SHIFT);
-                                self.drag_active = Some(HitAction::Dial(param_id));
+                                let norm = (display_db + 60.0) / 120.0;
+                                let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                                self.drag.begin_drag(HitAction::Dial(param_id), norm, shift);
                                 self.begin_set_param(&setter, param_id);
                             }
                         }
                         HitAction::SteppedSegment { param, index } => {
-                            if is_double_click {
+                            if is_double {
                                 self.reset_param_to_default(&setter, param);
                             } else {
                                 self.begin_set_param(&setter, param);
@@ -681,16 +566,7 @@ impl baseview::WindowHandler for GainBrainWindow {
                 button: baseview::MouseButton::Right,
                 ..
             }) => {
-                let mx = self.mouse_x;
-                let my = self.mouse_y;
-
-                let hit = self
-                    .hit_regions
-                    .iter()
-                    .find(|r| mx >= r.x && mx < r.x + r.w && my >= r.y && my < r.y + r.h)
-                    .cloned();
-
-                if let Some(_region) = hit {
+                if let Some(_region) = self.drag.hit_test() {
                     // Right-click handling reserved for future use
                 }
             }
@@ -698,7 +574,7 @@ impl baseview::WindowHandler for GainBrainWindow {
                 button: baseview::MouseButton::Left,
                 ..
             }) => {
-                if let Some(HitAction::Dial(id)) = self.drag_active.take() {
+                if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
                     self.end_set_param(&setter, id);
                 }
