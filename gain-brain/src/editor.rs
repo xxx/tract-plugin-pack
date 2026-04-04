@@ -1,7 +1,6 @@
 //! Softbuffer-based editor for gain-brain. CPU rendering via tiny-skia.
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
-use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -24,7 +23,6 @@ pub fn default_editor_state() -> Arc<EditorState> {
 enum HitAction {
     Dial(ParamId),
     SteppedSegment { param: ParamId, index: i32 },
-    Button(ButtonAction),
     GroupDecrement,
     GroupIncrement,
     ToggleInvert,
@@ -36,20 +34,14 @@ enum ParamId {
     LinkMode,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum ButtonAction {
-    ScaleDown,
-    ScaleUp,
-}
-
 struct GainBrainWindow {
     gui_context: Arc<dyn GuiContext>,
     surface: widgets::SoftbufferSurface,
     physical_width: u32,
     physical_height: u32,
     scale_factor: f32,
-    /// Shared with GainBrainEditor so Editor::size() stays in sync.
-    shared_scale: Arc<AtomicCell<f32>>,
+    /// Packed (w << 32 | h) pending host-initiated resize, read on next frame.
+    pending_resize: Arc<std::sync::atomic::AtomicU64>,
 
     params: Arc<GainBrainParams>,
     /// Effective gain in millibels. Written by the audio thread (group sync)
@@ -79,7 +71,7 @@ impl GainBrainWindow {
         display_gain_millibels: Arc<std::sync::atomic::AtomicI32>,
         gui_context_holder: Arc<std::sync::Mutex<Option<Arc<dyn GuiContext>>>>,
         user_gain_override: Arc<std::sync::atomic::AtomicI32>,
-        shared_scale: Arc<AtomicCell<f32>>,
+        pending_resize: Arc<std::sync::atomic::AtomicU64>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -97,7 +89,7 @@ impl GainBrainWindow {
             physical_width: pw,
             physical_height: ph,
             scale_factor,
-            shared_scale,
+            pending_resize,
             params,
             display_gain_millibels,
             gui_context_holder,
@@ -126,7 +118,7 @@ impl GainBrainWindow {
         let mut y = 12.0 * s;
         let tr = &mut self.text_renderer;
 
-        // ── Title row with scale controls on the right ──
+        // ── Title ──
         tr.draw_text(
             &mut self.surface.pixmap,
             pad,
@@ -135,55 +127,6 @@ impl GainBrainWindow {
             title_size,
             widgets::color_text(),
         );
-
-        let scale_btn_size = 22.0 * s;
-        let scale_label_w = 44.0 * s;
-        let small_font = 11.0 * s;
-        let w = self.physical_width as f32;
-
-        // "+" button (rightmost)
-        let plus_x = w - pad - scale_btn_size;
-        let plus_y = y + 2.0 * s;
-        widgets::draw_button(
-            &mut self.surface.pixmap,
-            tr,
-            plus_x,
-            plus_y,
-            scale_btn_size,
-            scale_btn_size,
-            "+",
-            false,
-            false,
-        );
-        self.drag.push_region(plus_x, plus_y, scale_btn_size, scale_btn_size, HitAction::Button(ButtonAction::ScaleUp));
-
-        // Scale percentage label
-        let pct_text = format!("{}%", (self.scale_factor * 100.0).round() as u32);
-        let pct_x = plus_x - scale_label_w;
-        let pct_text_w = tr.text_width(&pct_text, small_font);
-        tr.draw_text(
-            &mut self.surface.pixmap,
-            pct_x + (scale_label_w - pct_text_w) / 2.0,
-            plus_y + small_font + 4.0 * s,
-            &pct_text,
-            small_font,
-            widgets::color_muted(),
-        );
-
-        // "-" button
-        let minus_x = pct_x - scale_btn_size;
-        widgets::draw_button(
-            &mut self.surface.pixmap,
-            tr,
-            minus_x,
-            plus_y,
-            scale_btn_size,
-            scale_btn_size,
-            "-",
-            false,
-            false,
-        );
-        self.drag.push_region(minus_x, plus_y, scale_btn_size, scale_btn_size, HitAction::Button(ButtonAction::ScaleDown));
 
         y += row_h;
 
@@ -324,6 +267,9 @@ impl GainBrainWindow {
             y += row_h;
         }
 
+        // Extra breathing room before the dial
+        y += 8.0 * s;
+
         // ── Gain dial ──
         // Read the effective gain from the shared atomic. This is written by
         // process() (group sync) and by the editor drag handler, so it always
@@ -427,20 +373,6 @@ impl GainBrainWindow {
         }
     }
 
-    fn apply_scale_change(&mut self, delta: f32, window: &mut baseview::Window) {
-        let old = self.scale_factor;
-        self.scale_factor = (self.scale_factor + delta).clamp(0.75, 3.0);
-        if (self.scale_factor - old).abs() > 0.01 {
-            // Update shared scale so Editor::size() returns the correct value
-            self.shared_scale.store(self.scale_factor);
-            let new_w = (WINDOW_WIDTH as f32 * self.scale_factor).round() as u32;
-            let new_h = (WINDOW_HEIGHT as f32 * self.scale_factor).round() as u32;
-            self.params.editor_state.store_size(new_w, new_h);
-            window.resize(baseview::Size::new(new_w as f64, new_h as f64));
-            self.gui_context.request_resize();
-        }
-    }
-
     fn resize_buffers(&mut self) {
         let pw = self.physical_width.max(1);
         let ph = self.physical_height.max(1);
@@ -450,14 +382,26 @@ impl GainBrainWindow {
 }
 
 impl baseview::WindowHandler for GainBrainWindow {
-    fn on_frame(&mut self, _window: &mut baseview::Window) {
+    fn on_frame(&mut self, window: &mut baseview::Window) {
+        // Check for pending host-initiated resize
+        let packed = self.pending_resize.swap(0, Ordering::Relaxed);
+        if packed != 0 {
+            let new_w = (packed >> 32) as u32;
+            let new_h = (packed & 0xFFFF_FFFF) as u32;
+            if new_w > 0
+                && new_h > 0
+                && (new_w != self.physical_width || new_h != self.physical_height)
+            {
+                window.resize(baseview::Size::new(new_w as f64, new_h as f64));
+            }
+        }
         self.draw();
         self.surface.present();
     }
 
     fn on_event(
         &mut self,
-        window: &mut baseview::Window,
+        _window: &mut baseview::Window,
         event: baseview::Event,
     ) -> baseview::EventStatus {
         let _param_setter = ParamSetter::new(self.gui_context.as_ref());
@@ -466,6 +410,8 @@ impl baseview::WindowHandler for GainBrainWindow {
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
+                let sf = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+                self.scale_factor = sf;
                 self.resize_buffers();
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorMoved {
@@ -553,12 +499,6 @@ impl baseview::WindowHandler for GainBrainWindow {
                             setter.set_parameter(&self.params.invert, !current);
                             setter.end_set_parameter(&self.params.invert);
                         }
-                        HitAction::Button(ButtonAction::ScaleDown) => {
-                            self.apply_scale_change(-0.25, window);
-                        }
-                        HitAction::Button(ButtonAction::ScaleUp) => {
-                            self.apply_scale_change(0.25, window);
-                        }
                     }
                 }
             }
@@ -579,22 +519,6 @@ impl baseview::WindowHandler for GainBrainWindow {
                     self.end_set_param(&setter, id);
                 }
             }
-            baseview::Event::Keyboard(kb_event) => {
-                use keyboard_types::{Key, KeyState, Modifiers};
-                if kb_event.state == KeyState::Down
-                    && kb_event.modifiers.contains(Modifiers::CONTROL)
-                {
-                    match &kb_event.key {
-                        Key::Character(c) if c == "=" || c == "+" => {
-                            self.apply_scale_change(0.25, window);
-                        }
-                        Key::Character(c) if c == "-" => {
-                            self.apply_scale_change(-0.25, window);
-                        }
-                        _ => {}
-                    }
-                }
-            }
             _ => {}
         }
 
@@ -611,8 +535,8 @@ pub(crate) struct GainBrainEditor {
     /// can use ParamSetter even when the editor window is closed.
     gui_context_holder: Arc<std::sync::Mutex<Option<Arc<dyn GuiContext>>>>,
     user_gain_override: Arc<std::sync::atomic::AtomicI32>,
-    /// Shared with GainBrainWindow so Editor::size() reflects runtime changes.
-    scaling_factor: Arc<AtomicCell<f32>>,
+    /// Packed (w << 32 | h) for host-initiated resize, consumed by window on next frame.
+    pending_resize: Arc<std::sync::atomic::AtomicU64>,
 }
 
 pub(crate) fn create(
@@ -621,14 +545,12 @@ pub(crate) fn create(
     gui_context_holder: Arc<std::sync::Mutex<Option<Arc<dyn GuiContext>>>>,
     user_gain_override: Arc<std::sync::atomic::AtomicI32>,
 ) -> Option<Box<dyn Editor>> {
-    // NOTE: persisted state may not be restored yet (host calls create() before set()).
-    // Scale factor is derived from persisted size in spawn() instead.
     Some(Box::new(GainBrainEditor {
         params,
         display_gain_millibels,
         gui_context_holder,
         user_gain_override,
-        scaling_factor: Arc::new(AtomicCell::new(1.0)),
+        pending_resize: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     }))
 }
 
@@ -645,26 +567,21 @@ impl Editor for GainBrainEditor {
             *guard = Some(Arc::clone(&context));
         }
 
-        // Derive scale factor from persisted size (restored by host before spawn).
         let (persisted_w, persisted_h) = self.params.editor_state.size();
-        let sf = (persisted_w as f32 / WINDOW_WIDTH as f32).clamp(0.75, 3.0);
-        self.scaling_factor.store(sf);
+        let sf = (persisted_w as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
 
         let gui_context = Arc::clone(&context);
         let params = Arc::clone(&self.params);
         let display_gain = Arc::clone(&self.display_gain_millibels);
         let gui_ctx_holder = Arc::clone(&self.gui_context_holder);
         let user_gain_ovr = Arc::clone(&self.user_gain_override);
-        let shared_scale = Arc::clone(&self.scaling_factor);
-
-        let scaled_w = persisted_w;
-        let scaled_h = persisted_h;
+        let pending_resize = Arc::clone(&self.pending_resize);
 
         let window = baseview::Window::open_parented(
             &widgets::ParentWindowHandleAdapter(parent),
             WindowOpenOptions {
                 title: String::from("Gain Brain"),
-                size: baseview::Size::new(scaled_w as f64, scaled_h as f64),
+                size: baseview::Size::new(persisted_w as f64, persisted_h as f64),
                 scale: WindowScalePolicy::ScaleFactor(1.0),
                 gl_config: None,
             },
@@ -676,7 +593,7 @@ impl Editor for GainBrainEditor {
                     display_gain,
                     gui_ctx_holder,
                     user_gain_ovr,
-                    shared_scale,
+                    pending_resize,
                     sf,
                 )
             },
@@ -690,17 +607,19 @@ impl Editor for GainBrainEditor {
     }
 
     fn size(&self) -> (u32, u32) {
-        let sf = self.scaling_factor.load();
-        let w = (WINDOW_WIDTH as f32 * sf).round() as u32;
-        let h = (WINDOW_HEIGHT as f32 * sf).round() as u32;
-        (w, h)
+        self.params.editor_state.size()
     }
 
-    fn set_scale_factor(&self, factor: f32) -> bool {
-        if self.params.editor_state.is_open() {
+    fn set_scale_factor(&self, _factor: f32) -> bool {
+        false
+    }
+
+    fn set_size(&self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 {
             return false;
         }
-        self.scaling_factor.store(factor);
+        let packed = ((width as u64) << 32) | (height as u64);
+        self.pending_resize.store(packed, Ordering::Relaxed);
         true
     }
 
