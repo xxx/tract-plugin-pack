@@ -1,7 +1,6 @@
 //! Softbuffer-based editor for gs-meter. CPU rendering via tiny-skia, no GPU required.
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
-use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -51,8 +50,6 @@ enum ParamId {
 enum ButtonAction {
     Reset,
     GainFromReading(GainSource),
-    ScaleDown,
-    ScaleUp,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -77,8 +74,8 @@ struct GsMeterWindow {
     physical_width: u32,
     physical_height: u32,
     scale_factor: f32,
-    /// Shared with GsMeterEditor so Editor::size() stays in sync.
-    shared_scale: Arc<AtomicCell<f32>>,
+    /// Packed (w << 32 | h) pending host-initiated resize, read on next frame.
+    pending_resize: Arc<std::sync::atomic::AtomicU64>,
 
     params: Arc<GsMeterParams>,
     readings: Arc<MeterReadings>,
@@ -104,7 +101,7 @@ impl GsMeterWindow {
         params: Arc<GsMeterParams>,
         readings: Arc<MeterReadings>,
         should_reset: Arc<AtomicBool>,
-        shared_scale: Arc<AtomicCell<f32>>,
+        pending_resize: Arc<std::sync::atomic::AtomicU64>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -122,7 +119,7 @@ impl GsMeterWindow {
             physical_width: pw,
             physical_height: ph,
             scale_factor,
-            shared_scale,
+            pending_resize,
             params,
             readings,
             should_reset,
@@ -174,7 +171,7 @@ impl GsMeterWindow {
         let mut y = 15.0 * s;
         let tr = &mut self.text_renderer;
 
-        // Title row with scale controls on the right
+        // Title
         tr.draw_text(
             &mut self.surface.pixmap,
             pad,
@@ -183,67 +180,6 @@ impl GsMeterWindow {
             title_size,
             widgets::color_text(),
         );
-
-        let scale_btn_size = 24.0 * s;
-        let scale_label_w = 48.0 * s;
-        let small_font = 11.0 * s;
-        let w = self.physical_width as f32;
-
-        // "+" button (rightmost)
-        let plus_x = w - pad - scale_btn_size;
-        let plus_y = y + 4.0 * s;
-        widgets::draw_button(
-            &mut self.surface.pixmap,
-            tr,
-            plus_x,
-            plus_y,
-            scale_btn_size,
-            scale_btn_size,
-            "+",
-            false,
-            false,
-        );
-        self.hit_regions.push(HitRegion {
-            x: plus_x,
-            y: plus_y,
-            w: scale_btn_size,
-            h: scale_btn_size,
-            action: HitAction::Button(ButtonAction::ScaleUp),
-        });
-
-        // Scale percentage label
-        let pct_text = format!("{}%", (self.scale_factor * 100.0).round() as u32);
-        let pct_x = plus_x - scale_label_w;
-        let pct_text_w = tr.text_width(&pct_text, small_font);
-        tr.draw_text(
-            &mut self.surface.pixmap,
-            pct_x + (scale_label_w - pct_text_w) / 2.0,
-            plus_y + small_font + 4.0 * s,
-            &pct_text,
-            small_font,
-            widgets::color_muted(),
-        );
-
-        // "-" button
-        let minus_x = pct_x - scale_btn_size;
-        widgets::draw_button(
-            &mut self.surface.pixmap,
-            tr,
-            minus_x,
-            plus_y,
-            scale_btn_size,
-            scale_btn_size,
-            "-",
-            false,
-            false,
-        );
-        self.hit_regions.push(HitRegion {
-            x: minus_x,
-            y: plus_y,
-            w: scale_btn_size,
-            h: scale_btn_size,
-            action: HitAction::Button(ButtonAction::ScaleDown),
-        });
 
         y += row_h;
 
@@ -717,20 +653,6 @@ impl GsMeterWindow {
         }
     }
 
-    fn apply_scale_change(&mut self, delta: f32, window: &mut baseview::Window) {
-        let old = self.scale_factor;
-        self.scale_factor = (self.scale_factor + delta).clamp(0.75, 3.0);
-        if (self.scale_factor - old).abs() > 0.01 {
-            // Update shared scale so Editor::size() returns the correct value
-            self.shared_scale.store(self.scale_factor);
-            let new_w = (WINDOW_WIDTH as f32 * self.scale_factor).round() as u32;
-            let new_h = (WINDOW_HEIGHT as f32 * self.scale_factor).round() as u32;
-            self.params.editor_state.store_size(new_w, new_h);
-            window.resize(baseview::Size::new(new_w as f64, new_h as f64));
-            self.gui_context.request_resize();
-        }
-    }
-
     fn resize_buffers(&mut self) {
         let pw = self.physical_width.max(1);
         let ph = self.physical_height.max(1);
@@ -790,11 +712,10 @@ mod tests {
     }
 }
 
-/// Compute the gain adjustment (in dB) needed to match a meter reading to a reference level.
+/// Compute the gain *adjustment* (delta in dB) needed to bring a meter reading to a reference.
+/// The caller must add this to the current gain: `new_gain = current_gain + delta`.
 /// Returns None if the reading is below the -100 dB floor (no valid measurement).
 /// Works identically for dB and LUFS modes since both are absolute dB-scale units.
-/// Note: the returned value may exceed the gain parameter's range (-40..+40 dB);
-/// nih-plug's parameter system will clamp it when applied.
 fn gain_match_db(reference: f32, meter_reading: f32) -> Option<f32> {
     if meter_reading <= -100.0 {
         None
@@ -836,14 +757,26 @@ fn format_lu(val: f32) -> String {
 }
 
 impl baseview::WindowHandler for GsMeterWindow {
-    fn on_frame(&mut self, _window: &mut baseview::Window) {
+    fn on_frame(&mut self, window: &mut baseview::Window) {
+        // Check for pending host-initiated resize
+        let packed = self.pending_resize.swap(0, Ordering::Relaxed);
+        if packed != 0 {
+            let new_w = (packed >> 32) as u32;
+            let new_h = (packed & 0xFFFF_FFFF) as u32;
+            if new_w > 0
+                && new_h > 0
+                && (new_w != self.physical_width || new_h != self.physical_height)
+            {
+                window.resize(baseview::Size::new(new_w as f64, new_h as f64));
+            }
+        }
         self.draw();
         self.surface.present();
     }
 
     fn on_event(
         &mut self,
-        window: &mut baseview::Window,
+        _window: &mut baseview::Window,
         event: baseview::Event,
     ) -> baseview::EventStatus {
         let _param_setter = ParamSetter::new(self.gui_context.as_ref());
@@ -852,7 +785,9 @@ impl baseview::WindowHandler for GsMeterWindow {
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
-
+                // Derive scale factor from the new size
+                let sf = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+                self.scale_factor = sf;
                 self.resize_buffers();
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorMoved { position, .. }) => {
@@ -920,12 +855,6 @@ impl baseview::WindowHandler for GsMeterWindow {
                                 self.end_set_param(&setter, param);
                             }
                         }
-                        HitAction::Button(ButtonAction::ScaleDown) => {
-                            self.apply_scale_change(-0.25, window);
-                        }
-                        HitAction::Button(ButtonAction::ScaleUp) => {
-                            self.apply_scale_change(0.25, window);
-                        }
                         HitAction::Button(ButtonAction::Reset) => {
                             self.should_reset.store(true, Ordering::Relaxed);
                         }
@@ -965,11 +894,14 @@ impl baseview::WindowHandler for GsMeterWindow {
                                     MeterReadings::load_db(&self.readings.true_peak_max_db)
                                 }
                             };
-                            if let Some(target_gain_db) =
+                            if let Some(adjustment_db) =
                                 gain_match_db(self.active_reference().value(), meter_db)
                             {
-                                let target_gain_linear = nih_plug::util::db_to_gain(target_gain_db);
                                 let active_gain = self.active_gain();
+                                let current_gain_db =
+                                    nih_plug::util::gain_to_db(active_gain.value());
+                                let target_gain_db = current_gain_db + adjustment_db;
+                                let target_gain_linear = nih_plug::util::db_to_gain(target_gain_db);
                                 let normalized = active_gain.preview_normalized(target_gain_linear);
                                 setter.begin_set_parameter(active_gain);
                                 setter.set_parameter_normalized(active_gain, normalized);
@@ -988,22 +920,6 @@ impl baseview::WindowHandler for GsMeterWindow {
                     self.end_set_param(&setter, param_id);
                 }
             }
-            baseview::Event::Keyboard(kb_event) => {
-                use keyboard_types::{Key, KeyState, Modifiers};
-                if kb_event.state == KeyState::Down
-                    && kb_event.modifiers.contains(Modifiers::CONTROL)
-                {
-                    match &kb_event.key {
-                        Key::Character(c) if c == "=" || c == "+" => {
-                            self.apply_scale_change(0.25, window);
-                        }
-                        Key::Character(c) if c == "-" => {
-                            self.apply_scale_change(-0.25, window);
-                        }
-                        _ => {}
-                    }
-                }
-            }
             _ => {}
         }
 
@@ -1017,8 +933,8 @@ pub(crate) struct GsMeterEditor {
     params: Arc<GsMeterParams>,
     readings: Arc<MeterReadings>,
     should_reset: Arc<AtomicBool>,
-    /// Shared with GsMeterWindow so Editor::size() reflects runtime changes.
-    scaling_factor: Arc<AtomicCell<f32>>,
+    /// Packed (w << 32 | h) for host-initiated resize, consumed by window on next frame.
+    pending_resize: Arc<std::sync::atomic::AtomicU64>,
 }
 
 pub(crate) fn create(
@@ -1026,13 +942,11 @@ pub(crate) fn create(
     readings: Arc<MeterReadings>,
     should_reset: Arc<AtomicBool>,
 ) -> Option<Box<dyn Editor>> {
-    // NOTE: persisted state may not be restored yet (host calls create() before set()).
-    // Scale factor is derived from persisted size in spawn() instead.
     Some(Box::new(GsMeterEditor {
         params,
         readings,
         should_reset,
-        scaling_factor: Arc::new(AtomicCell::new(1.0)),
+        pending_resize: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     }))
 }
 
@@ -1042,25 +956,20 @@ impl Editor for GsMeterEditor {
         parent: ParentWindowHandle,
         context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
-        // Derive scale factor from persisted size (restored by host before spawn).
         let (persisted_w, persisted_h) = self.params.editor_state.size();
-        let sf = (persisted_w as f32 / WINDOW_WIDTH as f32).clamp(0.75, 3.0);
-        self.scaling_factor.store(sf);
+        let sf = (persisted_w as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
 
         let gui_context = Arc::clone(&context);
         let params = Arc::clone(&self.params);
         let readings = Arc::clone(&self.readings);
         let should_reset = Arc::clone(&self.should_reset);
-        let shared_scale = Arc::clone(&self.scaling_factor);
-
-        let scaled_w = persisted_w;
-        let scaled_h = persisted_h;
+        let pending_resize = Arc::clone(&self.pending_resize);
 
         let window = baseview::Window::open_parented(
             &widgets::ParentWindowHandleAdapter(parent),
             WindowOpenOptions {
                 title: String::from("GS Meter"),
-                size: baseview::Size::new(scaled_w as f64, scaled_h as f64),
+                size: baseview::Size::new(persisted_w as f64, persisted_h as f64),
                 scale: WindowScalePolicy::ScaleFactor(1.0),
                 gl_config: None,
             },
@@ -1071,7 +980,7 @@ impl Editor for GsMeterEditor {
                     params,
                     readings,
                     should_reset,
-                    shared_scale,
+                    pending_resize,
                     sf,
                 )
             },
@@ -1085,17 +994,19 @@ impl Editor for GsMeterEditor {
     }
 
     fn size(&self) -> (u32, u32) {
-        let sf = self.scaling_factor.load();
-        let w = (WINDOW_WIDTH as f32 * sf).round() as u32;
-        let h = (WINDOW_HEIGHT as f32 * sf).round() as u32;
-        (w, h)
+        self.params.editor_state.size()
     }
 
-    fn set_scale_factor(&self, factor: f32) -> bool {
-        if self.params.editor_state.is_open() {
+    fn set_scale_factor(&self, _factor: f32) -> bool {
+        false
+    }
+
+    fn set_size(&self, width: u32, height: u32) -> bool {
+        if width == 0 || height == 0 {
             return false;
         }
-        self.scaling_factor.store(factor);
+        let packed = ((width as u64) << 32) | (height as u64);
+        self.pending_resize.store(packed, Ordering::Relaxed);
         true
     }
 
