@@ -21,7 +21,7 @@ A lightweight loudness meter with integrated gain utility, purpose-built for [cl
 
 - dB and LUFS modes with per-mode gain/reference and gain-match buttons
 - Peak max, true peak (ITU-R BS.1770-4), RMS, EBU R128 (integrated, short-term, momentary, LRA)
-- CPU-rendered GUI (tiny-skia + softbuffer) -- no GPU drivers loaded
+- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable -- no GPU drivers loaded
 - SIMD-optimized metering (`f32x16`)
 - ~1.8 MB RSS and 0.05% CPU per instance (300 instances @ 15% CPU, 560 MB total)
 - Inspired by [TBProAudio dpMeter](https://www.tbproaudio.de/products/dpmeter)
@@ -33,7 +33,7 @@ A lightweight gain utility with cross-instance group linking. Multiple instances
 - 16 groups with Absolute (identical values) and Relative (delta-based) link modes
 - Invert toggle for mirrored gain movement (ducking, sidechain-style workflows)
 - In-process shared state with cumulative canonical delta sync (lock-free atomics, zero overhead)
-- CPU-rendered GUI with rotary dial (tiny-skia + softbuffer)
+- CPU-rendered GUI with rotary dial (tiny-skia + softbuffer), freely resizable
 - ~0.62 MB RSS and 0.03% CPU per instance (200 instances grouped @ 6.3% CPU, 123 MB total)
 - Inspired by [BlueCat's Gain Suite](https://www.bluecataudio.com/Products/Product_GainSuite/)
 
@@ -45,7 +45,7 @@ A low-latency wideband peak limiter for track-level use. Feed-forward topology w
 - 7 built-in character presets (Transparent, Aggressive, Punchy, Smooth, Safe, Vocal, Loud)
 - Optional ISP (true peak targeting via ITU-R BS.1770-4)
 - Gain Link mode for auditioning limiting without loudness change
-- CPU-rendered GUI with input/output meters and GR readout (tiny-skia + softbuffer)
+- CPU-rendered GUI with input/output meters and GR readout (tiny-skia + softbuffer), freely resizable
 - ~1.0 MB RSS and 0.12% CPU per instance (50 instances @ 6.2% CPU, 50 MB total)
 - Inspired by [DMG Audio TrackLimit](https://dmgaudio.com/products_tracklimit.php)
 
@@ -57,7 +57,7 @@ A detail-preserving spectral saturator. Uses FFT-based spectral analysis to pres
 - **Detail** knob preserves quiet harmonics through clipped regions via per-bin spectral magnitude saturation
 - **Knee** crossfades between hard clip (0%) and soft tanh saturation (100%)
 - Clip-aware detail blend — only affects clipped portions, unclipped material is unchanged
-- CPU-rendered GUI (tiny-skia + softbuffer)
+- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable
 - ~0.82 MB RSS and 0.14% CPU per instance (100 instances @ 13.7% CPU, 82 MB total)
 - Inspired by [Newfangled Audio Saturate](https://www.newfangledaudio.com/saturate)
 
@@ -87,7 +87,7 @@ A multichannel real-time oscilloscope with beat sync. Multiple instances share a
 - Peak hold with 2-second hold and 20 dB/s decay
 - Hold mode for phase alignment (shows last complete bar, swaps at boundary)
 - SIMD-optimized ring buffer with f32x16 mipmap reduction
-- CPU-rendered GUI with amber phosphor terminal theme (tiny-skia + softbuffer)
+- CPU-rendered GUI with amber phosphor terminal theme (tiny-skia + softbuffer), freely resizable
 - 16 instances @ 2% CPU headless (0.13% per instance)
 - Per-track solo/mute/color controls with DAW track name via CLAP track-info
 - Inspired by [PsyScope](https://fx23.net/free-vsts/) and [RusovDmitriy/oscilloscope](https://github.com/RusovDmitriy/oscilloscope)
