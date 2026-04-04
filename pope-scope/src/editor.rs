@@ -1,7 +1,6 @@
 //! Softbuffer-based editor for pope-scope. CPU rendering via tiny-skia.
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
-use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -90,8 +89,7 @@ struct PopeScopeWindow {
     physical_width: u32,
     physical_height: u32,
     scale_factor: f32,
-    shared_scale: Arc<AtomicCell<f32>>,
-    /// Pending host-initiated resize (shared with Editor trait impl).
+    /// Packed (w << 32 | h) pending host-initiated resize, read on next frame.
     pending_resize: Arc<std::sync::atomic::AtomicU64>,
 
     params: Arc<PopeScopeParams>,
@@ -113,7 +111,6 @@ impl PopeScopeWindow {
         gui_context: Arc<dyn GuiContext>,
         params: Arc<PopeScopeParams>,
         sample_rate: f32,
-        shared_scale: Arc<AtomicCell<f32>>,
         pending_resize: Arc<std::sync::atomic::AtomicU64>,
         scale_factor: f32,
     ) -> Self {
@@ -131,7 +128,6 @@ impl PopeScopeWindow {
             physical_width: pw,
             physical_height: ph,
             scale_factor,
-            shared_scale,
             pending_resize,
             params,
             sample_rate,
@@ -1058,19 +1054,6 @@ impl PopeScopeWindow {
 
     }
 
-    fn apply_scale_change(&mut self, delta: f32, window: &mut baseview::Window) {
-        let old = self.scale_factor;
-        self.scale_factor = (self.scale_factor + delta).clamp(0.75, 3.0);
-        if (self.scale_factor - old).abs() > 0.01 {
-            self.shared_scale.store(self.scale_factor);
-            let new_w = (WINDOW_WIDTH as f32 * self.scale_factor).round() as u32;
-            let new_h = (WINDOW_HEIGHT as f32 * self.scale_factor).round() as u32;
-            self.params.editor_state.store_size(new_w, new_h);
-            window.resize(baseview::Size::new(new_w as f64, new_h as f64));
-            self.gui_context.request_resize();
-        }
-    }
-
     fn resize_buffers(&mut self) {
         let pw = self.physical_width.max(1);
         let ph = self.physical_height.max(1);
@@ -1096,17 +1079,15 @@ impl baseview::WindowHandler for PopeScopeWindow {
 
     fn on_event(
         &mut self,
-        window: &mut baseview::Window,
+        _window: &mut baseview::Window,
         event: baseview::Event,
     ) -> baseview::EventStatus {
         match &event {
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
-                // Derive scale factor from the new size
-                let sf = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.75, 3.0);
+                let sf = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
                 self.scale_factor = sf;
-                self.shared_scale.store(sf);
                 self.resize_buffers();
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorMoved {
@@ -1269,22 +1250,6 @@ impl baseview::WindowHandler for PopeScopeWindow {
                     self.end_set_param(&setter, id);
                 }
             }
-            baseview::Event::Keyboard(kb_event) => {
-                use keyboard_types::{Key, KeyState, Modifiers};
-                if kb_event.state == KeyState::Down
-                    && kb_event.modifiers.contains(Modifiers::CONTROL)
-                {
-                    match &kb_event.key {
-                        Key::Character(c) if c == "=" || c == "+" => {
-                            self.apply_scale_change(0.25, window);
-                        }
-                        Key::Character(c) if c == "-" => {
-                            self.apply_scale_change(-0.25, window);
-                        }
-                        _ => {}
-                    }
-                }
-            }
             _ => {}
         }
 
@@ -1297,10 +1262,6 @@ impl baseview::WindowHandler for PopeScopeWindow {
 pub(crate) struct PopeScopeEditor {
     params: Arc<PopeScopeParams>,
     shared_sample_rate: Arc<AtomicU32>,
-    scaling_factor: Arc<AtomicCell<f32>>,
-    /// Pending host-initiated resize. Packed as (width << 32 | height).
-    /// 0 = no pending resize. Written by the host thread (via set_size),
-    /// read and cleared by the editor's on_frame.
     pending_resize: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -1311,7 +1272,6 @@ pub(crate) fn create(
     Some(Box::new(PopeScopeEditor {
         params,
         shared_sample_rate,
-        scaling_factor: Arc::new(AtomicCell::new(1.0)),
         pending_resize: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     }))
 }
@@ -1323,12 +1283,10 @@ impl Editor for PopeScopeEditor {
         context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
         let (persisted_w, persisted_h) = self.params.editor_state.size();
-        let sf = (persisted_w as f32 / WINDOW_WIDTH as f32).clamp(0.75, 3.0);
-        self.scaling_factor.store(sf);
+        let sf = (persisted_w as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
 
         let gui_context = Arc::clone(&context);
         let params = Arc::clone(&self.params);
-        let shared_scale = Arc::clone(&self.scaling_factor);
         let pending_resize = Arc::clone(&self.pending_resize);
         let sample_rate = self.shared_sample_rate.load(Ordering::Relaxed) as f32;
 
@@ -1341,7 +1299,7 @@ impl Editor for PopeScopeEditor {
                 gl_config: None,
             },
             move |window| {
-                PopeScopeWindow::new(window, gui_context, params, sample_rate, shared_scale, pending_resize, sf)
+                PopeScopeWindow::new(window, gui_context, params, sample_rate, pending_resize, sf)
             },
         );
 
@@ -1353,18 +1311,11 @@ impl Editor for PopeScopeEditor {
     }
 
     fn size(&self) -> (u32, u32) {
-        let sf = self.scaling_factor.load();
-        let w = (WINDOW_WIDTH as f32 * sf).round() as u32;
-        let h = (WINDOW_HEIGHT as f32 * sf).round() as u32;
-        (w, h)
+        self.params.editor_state.size()
     }
 
-    fn set_scale_factor(&self, factor: f32) -> bool {
-        if self.params.editor_state.is_open() {
-            return false;
-        }
-        self.scaling_factor.store(factor);
-        true
+    fn set_scale_factor(&self, _factor: f32) -> bool {
+        false
     }
 
     fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
