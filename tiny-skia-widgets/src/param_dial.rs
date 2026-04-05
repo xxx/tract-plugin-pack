@@ -26,6 +26,16 @@ fn color_track() -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(64, 64, 64, 255)
 }
 
+/// Modulation indicator color (semi-transparent orange).
+fn color_modulation() -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(255, 160, 50, 150)
+}
+
+/// Modulation dot color (slightly more opaque orange).
+fn color_modulation_dot() -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(255, 160, 50, 200)
+}
+
 // ---------------------------------------------------------------------------
 // Geometry helpers
 // ---------------------------------------------------------------------------
@@ -111,6 +121,10 @@ fn build_arc_path(cx: f32, cy: f32, radius: f32, start: f32, end: f32) -> Option
 /// rendered above the arc in muted color; `value_text` is rendered below in
 /// the standard text color.
 ///
+/// If `modulated_normalized` is `Some`, an orange arc is drawn between the
+/// unmodulated and modulated value positions, with a smaller orange dot at
+/// the modulated endpoint (matching the vizia ParamDial modulation indicator).
+///
 /// `normalized` is clamped to `[0.0, 1.0]` before use.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_dial(
@@ -122,6 +136,26 @@ pub fn draw_dial(
     label: &str,
     value_text: &str,
     normalized: f32,
+) {
+    draw_dial_ex(pixmap, text_renderer, cx, cy, radius, label, value_text, normalized, None);
+}
+
+/// Draw an arc-based rotary dial with optional modulation indicator.
+///
+/// Same as [`draw_dial`] but accepts `modulated_normalized` to show a
+/// host modulation arc in orange between the unmodulated and modulated
+/// positions.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_dial_ex(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    label: &str,
+    value_text: &str,
+    normalized: f32,
+    modulated_normalized: Option<f32>,
 ) {
     let n = normalized.clamp(0.0, 1.0);
     let stroke_width = (radius * 0.1).max(2.0);
@@ -158,19 +192,43 @@ pub fn draw_dial(
     let (dot_x, dot_y) = arc_point(cx, cy, radius, value_angle);
     draw_filled_circle(pixmap, dot_x, dot_y, dot_radius, color_accent());
 
+    // --- Modulation indicator (arc from unmodulated to modulated) ---
+    if let Some(mod_val) = modulated_normalized {
+        let m = mod_val.clamp(0.0, 1.0);
+        if (m - n).abs() > 0.001 {
+            let mod_angle = value_to_angle(m);
+            let (arc_start, arc_end) = if m >= n {
+                (value_angle, mod_angle)
+            } else {
+                (mod_angle, value_angle)
+            };
+            if let Some(mod_path) = build_arc_path(cx, cy, radius, arc_start, arc_end) {
+                let mut paint = Paint::default();
+                paint.set_color(color_modulation());
+                paint.anti_alias = true;
+                let stroke = Stroke {
+                    width: stroke_width + 1.0,
+                    line_cap: LineCap::Round,
+                    ..Default::default()
+                };
+                pixmap.stroke_path(&mod_path, &paint, &stroke, Transform::identity(), None);
+            }
+            let mod_dot_radius = stroke_width * 0.6;
+            let (mod_dot_x, mod_dot_y) = arc_point(cx, cy, radius, mod_angle);
+            draw_filled_circle(pixmap, mod_dot_x, mod_dot_y, mod_dot_radius, color_modulation_dot());
+        }
+    }
+
     // --- Label text centered above the arc ---
     let text_size = (radius * 0.38).max(11.0);
     let label_w = text_renderer.text_width(label, text_size);
     let label_x = cx - label_w * 0.5;
-    // Place label above the center; the top of the arc is at cy - radius,
-    // so put the baseline a little above that.
     let label_y = cy - radius - stroke_width - 8.0;
     text_renderer.draw_text(pixmap, label_x, label_y, label, text_size, color_muted());
 
     // --- Value text centered below the arc ---
     let value_w = text_renderer.text_width(value_text, text_size);
     let value_x = cx - value_w * 0.5;
-    // Place value text just below the arc endpoints (at cy + 0.707*r).
     let value_y = cy + radius * 0.71 + text_size + 4.0;
     text_renderer.draw_text(
         pixmap,
@@ -269,6 +327,50 @@ mod tests {
         // Values outside [0.0, 1.0] must be clamped without panicking.
         draw_dial(&mut pm, &mut tr, 100.0, 100.0, 40.0, "X", "val", -0.5);
         draw_dial(&mut pm, &mut tr, 100.0, 100.0, 40.0, "X", "val", 1.5);
+    }
+
+    // -----------------------------------------------------------------------
+    // draw_dial_ex modulation indicator tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_draw_dial_ex_no_modulation() {
+        let mut pm = test_pixmap();
+        let mut tr = test_renderer();
+        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "Gain", "0 dB", 0.5, None);
+    }
+
+    #[test]
+    fn test_draw_dial_ex_positive_modulation() {
+        let mut pm = test_pixmap();
+        let mut tr = test_renderer();
+        // Modulated value above unmodulated
+        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "Gain", "0 dB", 0.3, Some(0.7));
+    }
+
+    #[test]
+    fn test_draw_dial_ex_negative_modulation() {
+        let mut pm = test_pixmap();
+        let mut tr = test_renderer();
+        // Modulated value below unmodulated
+        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "Gain", "0 dB", 0.7, Some(0.3));
+    }
+
+    #[test]
+    fn test_draw_dial_ex_tiny_modulation_not_drawn() {
+        let mut pm = test_pixmap();
+        let mut tr = test_renderer();
+        // Modulation delta < 0.001 — should skip the arc (no panic)
+        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "X", "v", 0.5, Some(0.5005));
+    }
+
+    #[test]
+    fn test_draw_dial_ex_modulation_clamps() {
+        let mut pm = test_pixmap();
+        let mut tr = test_renderer();
+        // Out-of-range modulated values must be clamped without panicking
+        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "X", "v", 0.5, Some(-0.5));
+        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "X", "v", 0.5, Some(1.5));
     }
 
     // -----------------------------------------------------------------------
