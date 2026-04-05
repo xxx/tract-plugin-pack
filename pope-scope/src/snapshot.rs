@@ -490,6 +490,20 @@ pub fn build_snapshots_beat_sync(
     let global_ppq_offset = global_ppq.rem_euclid(global_window_ppq);
     let global_frac = if global_window_ppq > 0.0 { global_ppq_offset / global_window_ppq } else { 0.0 };
 
+
+
+    // Read ALL time_mapping snapshots in a tight loop BEFORE any other
+    // per-slot work. This prevents the audio thread from advancing one
+    // slot's ring_buffer_pos between reads, which shifts that slot's
+    // beat-aligned window by up to one buffer (~1024 samples).
+    let mut tm_snapshots: [Option<crate::time_mapping::TimeMappingSnapshot>; store::MAX_SLOTS] =
+        [const { None }; store::MAX_SLOTS];
+    for &idx in &slots[..slot_count] {
+        if !slot_stale[idx] {
+            tm_snapshots[idx] = Some(store::slot(idx).time_mapping.snapshot());
+        }
+    }
+
     for &idx in &slots[..slot_count] {
         // Skip stale slots (using cached result — never call is_slot_stale twice)
         if slot_stale[idx] {
@@ -518,20 +532,26 @@ pub fn build_snapshots_beat_sync(
         let ppq_in_bar = global_ppq - global_bar_start;
         let samples_per_bar = global_samples_per_bar;
 
-        // Per-slot: read ring_buffer_pos for this slot's ring buffer position
-        let tm_snap = s.time_mapping.snapshot();
+        // Use the pre-read time_mapping snapshot (read in a tight batch above
+        // to minimize timing skew between slots).
+        let tm_snap = tm_snapshots[idx].unwrap();
 
-        // Compute beat-aligned window: use global PPQ but per-slot ring_buffer_pos.
-        // Override the time mapping's PPQ with global values for consistent alignment.
-        let global_tm = crate::time_mapping::TimeMappingSnapshot {
-            current_ppq: global_ppq,
+        // Compute beat-aligned window using each slot's OWN ppq and
+        // ring_buffer_pos (both written in the same process() call, so the
+        // subtraction rb_pos - sample_offset is consistent). Using global_ppq
+        // here would introduce a shift equal to the transport-position
+        // difference between the reference slot's and this slot's process()
+        // calls (~251 samples in multi-threaded DAWs).
+        // Tempo (samples_per_beat) is global since all tracks share tempo.
+        let per_slot_tm = crate::time_mapping::TimeMappingSnapshot {
+            current_ppq: tm_snap.current_ppq,
             current_sample_pos: tm_snap.current_sample_pos,
             ring_buffer_pos: tm_snap.ring_buffer_pos,
             samples_per_beat: global_spb,
             discontinuity_counter: tm_snap.discontinuity_counter,
         };
         let window = if is_playing {
-            crate::time_mapping::beat_aligned_window(&global_tm, sync_bars, beats_per_bar)
+            crate::time_mapping::beat_aligned_window(&per_slot_tm, sync_bars, beats_per_bar)
         } else {
             None
         };

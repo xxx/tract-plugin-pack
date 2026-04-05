@@ -339,4 +339,71 @@ mod tests {
         // playhead_fraction = 0.5 / 4.0 = 0.125
         assert!((frac - 0.125).abs() < 0.001);
     }
+
+    /// Regression test: in multi-threaded DAWs, different plugin instances
+    /// call process() at slightly different transport positions. Each slot's
+    /// PPQ and ring_buffer_pos must come from the SAME process() call so
+    /// the lookback distance (rb_pos - rb_start) is consistent. Mixing one
+    /// slot's PPQ with another slot's ring_buffer_pos shifts the window by
+    /// the transport-position delta between the two process() calls.
+    #[test]
+    fn test_cross_slot_alignment_uses_per_slot_ppq() {
+        // 120 BPM, 48kHz, 4/4, 1-bar window
+        let spb = 24000.0; // samples_per_beat
+
+        // Slot 0: loaded at DAW start, has processed 4_592_640 samples.
+        // Its process() was called at PPQ = 191.36.
+        let slot0 = TimeMappingSnapshot {
+            current_ppq: 191.36,
+            current_sample_pos: 4_592_640,
+            ring_buffer_pos: 4_592_640,
+            samples_per_beat: spb,
+            discontinuity_counter: 0,
+        };
+
+        // Slot 1: loaded later, has processed 12_989_440 samples.
+        // Its process() was called 251 samples later in the same DAW
+        // cycle — PPQ is slightly ahead (251 / 24000 ≈ 0.01046 beats).
+        let ppq_delta = 251.0 / spb;
+        let slot1 = TimeMappingSnapshot {
+            current_ppq: 191.36 + ppq_delta,
+            current_sample_pos: 4_592_640 + 251,
+            ring_buffer_pos: 12_989_440,
+            samples_per_beat: spb,
+            discontinuity_counter: 0,
+        };
+
+        let (rb_start0, len0, _) = beat_aligned_window(&slot0, 1.0, 4).unwrap();
+        let (rb_start1, len1, _) = beat_aligned_window(&slot1, 1.0, 4).unwrap();
+
+        assert_eq!(len0, len1, "window length must match");
+
+        // KEY INVARIANT: the bar start in absolute DAW time must be the
+        // same for both slots. Each slot's lookback differs (because their
+        // process() calls happen at different transport positions), but the
+        // absolute bar start (sample_pos - lookback) must agree.
+        let lookback0 = slot0.ring_buffer_pos - rb_start0 as u64;
+        let lookback1 = slot1.ring_buffer_pos - rb_start1 as u64;
+        let bar_start0 = slot0.current_sample_pos - lookback0 as i64;
+        let bar_start1 = slot1.current_sample_pos - lookback1 as i64;
+        assert_eq!(
+            bar_start0, bar_start1,
+            "per-slot PPQ: absolute bar start must be identical (got {} vs {})",
+            bar_start0, bar_start1
+        );
+
+        // ANTI-REGRESSION: using slot 0's PPQ for slot 1 (the old bug)
+        // produces a DIFFERENT absolute bar start, shifted by ~251 samples.
+        let slot1_broken = TimeMappingSnapshot {
+            current_ppq: slot0.current_ppq, // WRONG: using slot 0's PPQ
+            ..slot1
+        };
+        let (rb_start1_broken, _, _) = beat_aligned_window(&slot1_broken, 1.0, 4).unwrap();
+        let lookback1_broken = slot1.ring_buffer_pos - rb_start1_broken as u64;
+        let bar_start1_broken = slot1.current_sample_pos - lookback1_broken as i64;
+        assert_ne!(
+            bar_start0, bar_start1_broken,
+            "global PPQ should produce misaligned bar start (this is the bug we fixed)"
+        );
+    }
 }
