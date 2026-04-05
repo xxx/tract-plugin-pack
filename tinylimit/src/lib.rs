@@ -441,7 +441,7 @@ impl Plugin for Tinylimit {
         MeterReadings::store_db(&self.readings.output_peak_r, linear_to_db(output_peak_r));
         MeterReadings::store_db(&self.readings.gain_reduction, gr);
 
-        ProcessStatus::Normal
+        ProcessStatus::Tail(self.limiter.latency_samples() as u32)
     }
 }
 
@@ -462,8 +462,12 @@ impl ClapPlugin for Tinylimit {
     const CLAP_DESCRIPTION: Option<&'static str> = Some("A low-latency wideband peak limiter");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] =
-        &[ClapFeature::AudioEffect, ClapFeature::Mastering];
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::AudioEffect,
+        ClapFeature::Mastering,
+        ClapFeature::Limiter,
+        ClapFeature::Stereo,
+    ];
 }
 
 impl Vst3Plugin for Tinylimit {

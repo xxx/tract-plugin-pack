@@ -389,7 +389,7 @@ impl Plugin for WarpZone {
             }
         }
 
-        ProcessStatus::Normal
+        ProcessStatus::Tail(FFT_SIZE as u32)
     }
 }
 
@@ -401,7 +401,7 @@ impl ClapPlugin for WarpZone {
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] =
-        &[ClapFeature::AudioEffect, ClapFeature::PitchShifter];
+        &[ClapFeature::AudioEffect, ClapFeature::PitchShifter, ClapFeature::Stereo];
 }
 
 impl Vst3Plugin for WarpZone {

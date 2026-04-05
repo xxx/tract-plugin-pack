@@ -925,6 +925,7 @@ impl Plugin for WavetableFilter {
     }
 
     fn reset(&mut self) {
+        #[cfg(debug_assertions)]
         nih_log!("reset() called — scheduling fade-out");
         // Instead of instantly zeroing the history buffer (which causes an audible
         // pop when audio is playing), schedule a fast linear fade-out.  The actual
@@ -1246,7 +1247,7 @@ impl Plugin for WavetableFilter {
             }
         }
 
-        ProcessStatus::Normal
+        ProcessStatus::Tail(KERNEL_LEN as u32)
     }
 }
 

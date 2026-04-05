@@ -261,6 +261,11 @@ impl Plugin for GsMeter {
         true
     }
 
+    fn reset(&mut self) {
+        self.stereo_meter.reset();
+        self.lufs_meter.reset();
+    }
+
     fn process(
         &mut self,
         buffer: &mut Buffer,
@@ -394,6 +399,7 @@ impl ClapPlugin for GsMeter {
         ClapFeature::AudioEffect,
         ClapFeature::Analyzer,
         ClapFeature::Utility,
+        ClapFeature::Stereo,
     ];
 }
 

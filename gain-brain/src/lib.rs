@@ -736,7 +736,8 @@ impl ClapPlugin for GainBrain {
         Some("A gain utility with cross-instance group linking");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Utility];
+    const CLAP_FEATURES: &'static [ClapFeature] =
+        &[ClapFeature::AudioEffect, ClapFeature::Utility, ClapFeature::Stereo];
 }
 
 impl Vst3Plugin for GainBrain {

@@ -275,7 +275,7 @@ impl Plugin for Satch {
             right[i] = mix * wet_r + dry_mix * dry_r;
         }
 
-        ProcessStatus::Normal
+        ProcessStatus::Tail(2048)
     }
 }
 
@@ -287,7 +287,7 @@ impl ClapPlugin for Satch {
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] =
-        &[ClapFeature::AudioEffect, ClapFeature::Distortion];
+        &[ClapFeature::AudioEffect, ClapFeature::Distortion, ClapFeature::Stereo];
 }
 
 impl Vst3Plugin for Satch {

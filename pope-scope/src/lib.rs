@@ -474,7 +474,7 @@ impl ClapPlugin for PopeScope {
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] =
-        &[ClapFeature::AudioEffect, ClapFeature::Analyzer];
+        &[ClapFeature::AudioEffect, ClapFeature::Analyzer, ClapFeature::Stereo];
 }
 
 impl Vst3Plugin for PopeScope {
