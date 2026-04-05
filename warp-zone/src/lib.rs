@@ -85,6 +85,8 @@ pub struct WarpZone {
     display_counter: usize,
     // Pre-computed bin boundaries for downsample_magnitudes (avoids exp() per hop)
     display_bin_ranges: [(usize, usize); DISPLAY_BINS],
+    /// Counts silent input samples for conditional ProcessStatus::Tail.
+    silent_input_samples: u32,
 }
 
 // ── Params ─────────────────────────────────────────────────────────────────────
@@ -131,6 +133,7 @@ impl Default for WarpZone {
             sample_rate: 48000.0,
             display_counter: 0,
             display_bin_ranges: compute_display_bin_ranges(FFT_SIZE / 2 + 1),
+            silent_input_samples: 0,
         }
     }
 }
@@ -389,7 +392,18 @@ impl Plugin for WarpZone {
             }
         }
 
-        ProcessStatus::Tail(FFT_SIZE as u32)
+        const TAIL_LEN: u32 = FFT_SIZE as u32;
+        let input_peak = left.iter().chain(right.iter()).fold(0.0_f32, |a, &s| a.max(s.abs()));
+        if input_peak < 1e-6 {
+            self.silent_input_samples += num_samples as u32;
+        } else {
+            self.silent_input_samples = 0;
+        }
+        if self.silent_input_samples > 0 && self.silent_input_samples <= TAIL_LEN {
+            ProcessStatus::Tail(TAIL_LEN)
+        } else {
+            ProcessStatus::Normal
+        }
     }
 }
 

@@ -14,6 +14,8 @@ pub struct Satch {
     dry_delay_l: Vec<f32>,
     dry_delay_r: Vec<f32>,
     dry_delay_pos: usize,
+    /// Counts silent input samples for conditional ProcessStatus::Tail.
+    silent_input_samples: u32,
 }
 
 // ── Params ─────────────────────────────────────────────────────────────────────
@@ -54,6 +56,7 @@ impl Default for Satch {
             dry_delay_l: vec![0.0; 2048],
             dry_delay_r: vec![0.0; 2048],
             dry_delay_pos: 0,
+            silent_input_samples: 0,
         }
     }
 }
@@ -275,7 +278,18 @@ impl Plugin for Satch {
             right[i] = mix * wet_r + dry_mix * dry_r;
         }
 
-        ProcessStatus::Tail(2048)
+        const TAIL_LEN: u32 = 2048;
+        let input_peak = left.iter().chain(right.iter()).fold(0.0_f32, |a, &s| a.max(s.abs()));
+        if input_peak < 1e-6 {
+            self.silent_input_samples += num_samples as u32;
+        } else {
+            self.silent_input_samples = 0;
+        }
+        if self.silent_input_samples > 0 && self.silent_input_samples <= TAIL_LEN {
+            ProcessStatus::Tail(TAIL_LEN)
+        } else {
+            ProcessStatus::Normal
+        }
     }
 }
 

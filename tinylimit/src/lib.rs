@@ -69,6 +69,8 @@ pub struct Tinylimit {
     last_reported_latency: u32,
     last_attack_ms: f32,
     last_release_ms: f32,
+    /// Counts silent input samples for conditional ProcessStatus::Tail.
+    silent_input_samples: u32,
 }
 
 // ── Params ─────────────────────────────────────────────────────────────────────
@@ -129,6 +131,7 @@ impl Default for Tinylimit {
             last_reported_latency: 0,
             last_attack_ms: f32::NAN,
             last_release_ms: f32::NAN,
+            silent_input_samples: 0,
         }
     }
 }
@@ -441,7 +444,18 @@ impl Plugin for Tinylimit {
         MeterReadings::store_db(&self.readings.output_peak_r, linear_to_db(output_peak_r));
         MeterReadings::store_db(&self.readings.gain_reduction, gr);
 
-        ProcessStatus::Tail(self.limiter.latency_samples() as u32)
+        let tail_len = self.limiter.latency_samples() as u32;
+        let input_silent = input_peak_l < 1e-6 && input_peak_r < 1e-6;
+        if input_silent {
+            self.silent_input_samples += num_samples as u32;
+        } else {
+            self.silent_input_samples = 0;
+        }
+        if self.silent_input_samples > 0 && self.silent_input_samples <= tail_len {
+            ProcessStatus::Tail(tail_len)
+        } else {
+            ProcessStatus::Normal
+        }
     }
 }
 

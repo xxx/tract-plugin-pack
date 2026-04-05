@@ -1247,7 +1247,13 @@ impl Plugin for WavetableFilter {
             }
         }
 
-        ProcessStatus::Tail(KERNEL_LEN as u32)
+        // Tail only while draining: after input goes silent, the convolution/STFT
+        // has KERNEL_LEN samples of tail to flush. During active audio, Normal.
+        if is_silent && self.silence_samples < KERNEL_LEN {
+            ProcessStatus::Tail(KERNEL_LEN as u32)
+        } else {
+            ProcessStatus::Normal
+        }
     }
 }
 
