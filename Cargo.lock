@@ -2469,7 +2469,7 @@ dependencies = [
 [[package]]
 name = "nih_plug"
 version = "0.0.0"
-source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#e962b8255a4e9a78c3d0539fb2a71bb60b8ada62"
+source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#cc4ec92e8d18aad1f53504de3581192208dbb75c"
 dependencies = [
  "anyhow",
  "anymap3",
@@ -2511,7 +2511,7 @@ source = "git+https://github.com/robbert-vdh/nih_plug_assets.git#a04e327923e120b
 [[package]]
 name = "nih_plug_derive"
 version = "0.1.0"
-source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#e962b8255a4e9a78c3d0539fb2a71bb60b8ada62"
+source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#cc4ec92e8d18aad1f53504de3581192208dbb75c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2521,7 +2521,7 @@ dependencies = [
 [[package]]
 name = "nih_plug_vizia"
 version = "0.0.0"
-source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#e962b8255a4e9a78c3d0539fb2a71bb60b8ada62"
+source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#cc4ec92e8d18aad1f53504de3581192208dbb75c"
 dependencies = [
  "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=2c1b1a7b0fef1a29a5150a6a8f6fef6a0cbab8c4)",
  "crossbeam",
