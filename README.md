@@ -41,7 +41,7 @@ A lightweight gain utility with cross-instance group linking. Multiple instances
 
 A low-latency wideband peak limiter for track-level use. Feed-forward topology with lookahead and dual-stage transient/dynamics handling.
 
-- Individual attack, release, knee, and transient controls (no opaque "style" presets)
+- Individual attack, release, knee, and transient controls
 - 7 built-in character presets (Transparent, Aggressive, Punchy, Smooth, Safe, Vocal, Loud)
 - Optional ISP (true peak targeting via ITU-R BS.1770-4)
 - Gain Link mode for auditioning limiting without loudness change
