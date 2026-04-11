@@ -261,27 +261,48 @@ pub fn draw_waveform_line(
     }
 
     // Dense path: one 1px-wide vertical rect per column, spanning the
-    // (min, max) envelope PLUS a "bridge" to the previous column's
-    // envelope so adjacent columns' tops/bottoms connect instead of
-    // showing visible steps. Drawn via `draw_rect_opaque` — the
-    // caller passes an opaque color and we skip tiny-skia's per-pixel
-    // blend loop, which was dominating CPU time in the v2 profile.
+    // (min, max) envelope. Each column's effective top/bot is
+    // half-split toward its neighbors — specifically, the top is the
+    // minimum (highest on screen) of its own top and the midpoints
+    // between itself and each neighbor. This is equivalent to
+    // rasterizing the envelope polyline such that each line segment
+    // between adjacent columns contributes half its vertical span to
+    // each column, which smooths the visible contour without
+    // flattening valleys or losing isolated peaks the way a symmetric
+    // "reach-out-to-neighbor" bridge would.
+    //
+    // All fills use `fill_column_opaque`, which writes directly into
+    // `Pixmap::pixels_mut()` — no tiny-skia raster pipeline.
     let (mins, maxs) = decimate_to_columns(samples, num_cols);
-    let mut prev_top = sample_to_y(maxs[0], min_db, max_db, centre_y, half_height);
-    let mut prev_bot = sample_to_y(mins[0], min_db, max_db, centre_y, half_height);
-    // First column: its own range only. Ensure at least 1px tall so a
-    // flat line is still visible.
-    let first_bot = prev_bot.max(prev_top + 1.0);
-    tiny_skia_widgets::fill_column_opaque(pixmap, x, prev_top, first_bot, color);
-    for i in 1..num_cols {
-        let px = x + i as f32;
-        let y_top = sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
-        let y_bot = sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
-        let top = y_top.min(prev_top);
-        let bot = y_bot.max(prev_bot).max(top + 1.0);
-        tiny_skia_widgets::fill_column_opaque(pixmap, px, top, bot, color);
-        prev_top = y_top;
-        prev_bot = y_bot;
+    let col_top = |i: usize| sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
+    let col_bot = |i: usize| sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
+    for i in 0..num_cols {
+        let own_top = col_top(i);
+        let own_bot = col_bot(i);
+        let mid_prev_top = if i > 0 {
+            (col_top(i - 1) + own_top) * 0.5
+        } else {
+            own_top
+        };
+        let mid_prev_bot = if i > 0 {
+            (col_bot(i - 1) + own_bot) * 0.5
+        } else {
+            own_bot
+        };
+        let mid_next_top = if i + 1 < num_cols {
+            (own_top + col_top(i + 1)) * 0.5
+        } else {
+            own_top
+        };
+        let mid_next_bot = if i + 1 < num_cols {
+            (own_bot + col_bot(i + 1)) * 0.5
+        } else {
+            own_bot
+        };
+        let eff_top = own_top.min(mid_prev_top).min(mid_next_top);
+        let eff_bot = own_bot.max(mid_prev_bot).max(mid_next_bot);
+        let bot = eff_bot.max(eff_top + 1.0);
+        tiny_skia_widgets::fill_column_opaque(pixmap, x + i as f32, eff_top, bot, color);
     }
 }
 
@@ -348,34 +369,46 @@ pub fn draw_waveform_filled(
     }
 
     // Dense path: per-column vertical rects from the center to the
-    // positive and negative envelope peaks, with each column extended
-    // to bridge the previous column's envelope so adjacent columns'
-    // peaks connect instead of showing visible steps.
-    let (mins, maxs) = decimate_to_columns(samples, num_cols);
-    let mut prev_top = sample_to_y(maxs[0], min_db, max_db, centre_y, half_height);
-    let mut prev_bot = sample_to_y(mins[0], min_db, max_db, centre_y, half_height);
-
-    // Helper closure: draw the two halves of a column from `top` and
-    // `bot` (which already incorporate any bridge extension) using
+    // positive and negative envelope peaks, with each column's
+    // effective top/bot half-split toward its neighbors. See
+    // `draw_waveform_line` for the rationale; this produces a
+    // smoother outline than hard column steps while staying within
     // the direct-pixel-write fast path.
-    let mut draw_column = |px: f32, top: f32, bot: f32| {
+    let (mins, maxs) = decimate_to_columns(samples, num_cols);
+    let col_top = |i: usize| sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
+    let col_bot = |i: usize| sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
+    for i in 0..num_cols {
+        let own_top = col_top(i);
+        let own_bot = col_bot(i);
+        let mid_prev_top = if i > 0 {
+            (col_top(i - 1) + own_top) * 0.5
+        } else {
+            own_top
+        };
+        let mid_prev_bot = if i > 0 {
+            (col_bot(i - 1) + own_bot) * 0.5
+        } else {
+            own_bot
+        };
+        let mid_next_top = if i + 1 < num_cols {
+            (own_top + col_top(i + 1)) * 0.5
+        } else {
+            own_top
+        };
+        let mid_next_bot = if i + 1 < num_cols {
+            (own_bot + col_bot(i + 1)) * 0.5
+        } else {
+            own_bot
+        };
+        let top = own_top.min(mid_prev_top).min(mid_next_top);
+        let bot = own_bot.max(mid_prev_bot).max(mid_next_bot);
+        let px = x + i as f32;
         if top < centre_y {
             tiny_skia_widgets::fill_column_opaque(pixmap, px, top, centre_y, fill_color);
         }
         if bot > centre_y {
             tiny_skia_widgets::fill_column_opaque(pixmap, px, centre_y, bot, fill_color);
         }
-    };
-
-    draw_column(x, prev_top, prev_bot);
-    for i in 1..num_cols {
-        let y_top = sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
-        let y_bot = sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
-        let top = y_top.min(prev_top);
-        let bot = y_bot.max(prev_bot);
-        draw_column(x + i as f32, top, bot);
-        prev_top = y_top;
-        prev_bot = y_bot;
     }
 }
 
