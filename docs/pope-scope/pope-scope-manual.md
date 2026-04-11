@@ -37,6 +37,7 @@ The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` fil
 3. Use **Display** to switch between Vertical (stacked), Overlay (superimposed), or Sum (mixed) views
 4. Set **Sync** to Beat for bar-aligned waveforms, or Free for continuous scrolling
 5. Use **Solo** (S) and **Mute** (M) on track control strips to isolate signals
+6. Hover the waveform to see a vertical cursor line and a popup tooltip with the time/bar position and per-track dB readings at that point
 
 ## Controls
 
@@ -199,9 +200,22 @@ Track names are received from the host via the CLAP track-info extension. Long n
 
 Each track is assigned a color from a 16-color palette (amber, cyan, rose, yellow, orange, purple, red, blue, and their lighter variants). Colors are assigned automatically by slot index. The host can also provide a track color via CLAP track-info. Click the color swatch in the control strip to cycle to the next color. Grid lines and dB labels in each track's lane match the track color.
 
-## Mouse Cursor
+## Cursor Tooltip
 
-When the mouse hovers over the waveform display area, a vertical cursor line is drawn at the mouse position. This helps identify the exact time/beat position of features in the waveform.
+When the mouse hovers over the waveform display area, Pope Scope draws a vertical cursor line at the mouse position and a small popup tooltip anchored to it. The tooltip has two parts:
+
+- **Time header** -- the time at the cursor's x position. In **Free** mode this is `X.X ms` or `XXX us` for sub-millisecond timebases, counted from the left edge of the visible window. In **Beat Sync** mode it reads `Bar X.XX`, the fractional bar position within the visible window (matches the grid's bar labels).
+- **Per-track rows** -- one row per track whose waveform is visible, each showing a small color swatch in the track's color and a `Name: -X.X dB` reading. Muted (and non-soloed) tracks are hidden from the tooltip, matching what's drawn on screen. If the host doesn't report a track name the label falls back to `Slot N`. `-inf dB` is shown for silence.
+
+The dB value is sampled from the same pixel column the renderer uses, so the number in the tooltip always matches the visible envelope peak at the cursor -- including at decimated mipmap zoom levels where a single pixel column covers many underlying samples.
+
+**Position.** The tooltip is anchored to the right of the cursor by default. It auto-flips to the left if it would run off the right edge and clamps vertically to stay inside the waveform area (it won't overlap the control bar or control strips).
+
+**Outline color.** When the tooltip shows a single track (always the case in Vertical mode, and in Overlay/Sum mode when only one track is visible) the tooltip's outline matches that track's color. With multiple tracks the outline uses the amber foreground color.
+
+**Vertical mode behavior.** In Vertical display mode the cursor line and tooltip restrict to the single lane the mouse is actually over -- the cursor line only spans that lane's height, and the tooltip reports only that lane's reading. Hovering a muted lane produces no tooltip. In Overlay and Sum modes the cursor spans the full waveform height and the tooltip lists every visible track.
+
+**Frozen view.** When **Freeze** is on, the tooltip's time/bar label and the grid both read from the view parameters that were in effect when the frozen snapshot was captured. Editing timebase or sync mode while frozen won't desync the labels from the frozen waveform -- the visible view stays internally consistent until you unfreeze.
 
 ## Peak Hold
 
@@ -216,11 +230,14 @@ Drag the window edges to resize (host-initiated resize via CLAP/VST3). The displ
 - **Pass-through audio** -- Pope Scope does not modify the audio signal. Input is passed directly to output.
 - **No audio-thread allocations** -- the process() callback pushes samples into pre-allocated ring buffers using `try_lock()` to avoid blocking
 - **CPU rendering** -- uses tiny-skia (software rasterizer) + fontdue (glyph cache) + softbuffer (pixel buffer). No OpenGL context, no GPU drivers loaded
+- **Direct pixel-write waveform path** -- the dense-samples branches of `draw_waveform_line` and `draw_waveform_filled` bypass tiny-skia's raster pipeline entirely. Each pixel column is a single 1-pixel-wide strip written directly into the pixmap's backing buffer, with the color pre-flattened to `PremultipliedColorU8` once per draw. No `Paint`, no anti-aliased blit, no per-pixel source-over blend. The envelope contour uses a half-split smoothing rule (`min(own_top, (prev + own)/2, (own + next)/2)` and the symmetric `max` for the bottom) to avoid visible staircase steps without re-introducing rasterization cost. Profile measurements on a 2-track cursor-motion scenario in Bitwig showed a ~52% reduction in GUI CPU versus the original path-based renderer
+- **Cursor tooltip `peak_at_column`** -- the per-track dB readings in the cursor tooltip use `WaveSnapshot::peak_at_column(col, num_cols, mix_to_mono)`, which samples the buffer over the exact range of underlying samples the renderer assigns to that pixel column. Uses integer `div_ceil` arithmetic that mirrors tiny-skia's floor-based decimation. In the sparse-samples branch (fewer samples than pixel columns) it linearly interpolates between the two adjacent samples bracketing the cursor's fractional position. This guarantees the tooltip's reported dB matches the envelope peak visible at the cursor, even at decimated zoom levels where a single column covers dozens of samples
 - **SIMD ring buffer** -- two-pass push: bulk memcpy + f32x16 SIMD mipmap reduction. 3-level hierarchy (raw, 64-sample blocks, 256-sample blocks) for efficient rendering at any zoom
 - **Atomic time mapping** -- PPQ/sample position mapping uses lock-free atomics with discontinuity detection for loop/seek/play-start events. Bar latch eliminates per-buffer PPQ jitter
 - **Static global store** -- 16 slots with atomic CAS ownership. Ring buffers are allocated on demand when an instance joins and deallocated on leave
 - **32-second ring buffer** -- each channel stores 32 seconds of audio at the current sample rate
 - **Hold mode** -- double-buffered bar display with Arc front buffer for zero-copy reads. Shows last complete bar for phase alignment
+- **Frozen view consistency** -- when Freeze is on, the view parameters (`sync_mode`, `timebase`, `sync_unit`) are cached from the frame that built the snapshot. The grid rendering and cursor tooltip both read from the cache while frozen, so editing live parameters while frozen can't desync the visible grid or tooltip labels from the frozen waveform
 - **DAW track names** -- receives track name/color from host via CLAP track-info extension
 - **Embedded font** -- DejaVu Sans, compiled into the binary. No runtime font loading
 
@@ -229,9 +246,8 @@ Benchmarks (Bitwig, 48 kHz / 1024 samples, 16 instances, audio playing):
 | Condition | CPU | RSS | Per Instance |
 |---|---|---|---|
 | GUI closed | 2% | 247 MB | 0.13% CPU, 15.4 MB |
-| GUI open (large window) | 80% | 249 MB | 5% CPU, 15.6 MB |
 
-GUI rendering cost is dominated by tiny-skia path rasterization and scales with window size × visible tracks × draw style. Audio thread overhead is minimal (~2% for 16 instances).
+The GUI-open number from earlier revisions (80% CPU for 16 instances with a large window) is outdated -- the waveform renderer has been rewritten as described above and the dominant cost with the GUI open is no longer waveform rasterization. Remaining draw-thread cost is split between softbuffer's window blit and the background pixmap clear; both scale with window area and are memory-bandwidth bound. Audio thread overhead is minimal (~2% for 16 instances, unchanged).
 
 ## Formats
 

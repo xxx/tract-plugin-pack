@@ -84,9 +84,11 @@ A multichannel real-time oscilloscope with beat sync. Multiple instances share a
 - Free-running mode with adjustable timebase (1ms - 10s)
 - dB-scaled amplitude mapping with configurable range
 - 16 track groups with per-track solo/mute and color assignment
+- Cursor tooltip on hover shows time (or bar position in beat-sync) plus a color-coded dB reading per track; in Vertical mode the tooltip and cursor line restrict to the hovered lane
 - Peak hold with 2-second hold and 20 dB/s decay
 - Hold mode for phase alignment (shows last complete bar, swaps at boundary)
 - SIMD-optimized ring buffer with f32x16 mipmap reduction
+- Waveform renderer bypasses tiny-skia's raster pipeline — direct pixel-write column fills with half-split envelope smoothing (~52% less GUI CPU than the original path-based rasterizer)
 - CPU-rendered GUI with amber phosphor terminal theme (tiny-skia + softbuffer), freely resizable
 - 16 instances @ 2% CPU headless (0.13% per instance)
 - Per-track solo/mute/color controls with DAW track name via CLAP track-info
@@ -161,7 +163,7 @@ tract-plugin-pack/
 ## Testing
 
 ```bash
-cargo test --workspace       # All tests (300+)
+cargo test --workspace       # All tests (372)
 cargo clippy --workspace     # Lint check
 ```
 
