@@ -16,6 +16,9 @@ use tiny_skia_widgets as widgets;
 const WINDOW_WIDTH: u32 = 800;
 const WINDOW_HEIGHT: u32 = 500;
 const CONTROL_BAR_HEIGHT: f32 = 110.0;
+/// Width of the per-track control strip in Vertical display mode.
+/// Used by both the waveform draw path and the cursor hit-test so they stay in sync.
+const CONTROL_STRIP_WIDTH: f32 = 90.0;
 
 pub use widgets::EditorState;
 
@@ -48,6 +51,55 @@ enum ButtonAction {
     CycleSyncMode,
     CycleSyncUnit,
     ToggleHoldMode,
+}
+
+// ── Cursor tooltip helpers ─────────────────────────────────────────────
+
+/// Build a `CursorReading` from a `WaveSnapshot`. Reads the envelope
+/// peak at the same pixel column the renderer would draw, so the
+/// tooltip's dB value matches the visible waveform even when the
+/// snapshot is more densely decimated than the pixel width.
+///
+/// Extracted from `draw()` because borrowck can't express the lifetime
+/// relationship between `&snap.track_name` and the returned
+/// `Cow<'_, str>` through a closure.
+fn build_cursor_reading<'a>(
+    snap: &'a WaveSnapshot,
+    col: usize,
+    num_cols: usize,
+    mix_to_mono: bool,
+) -> renderer::CursorReading<'a> {
+    let sample = snap.peak_at_column(col, num_cols, mix_to_mono);
+    let abs = sample.abs();
+    let db = if abs > 1e-9 {
+        20.0 * abs.log10()
+    } else {
+        f32::NEG_INFINITY
+    };
+    // Empty-name fallback: some hosts don't report a track name at all.
+    // Fall back to the slot index so the tooltip row still has a label.
+    let name: std::borrow::Cow<'a, str> = if snap.track_name.is_empty() {
+        std::borrow::Cow::Owned(format!("Slot {}", snap.slot_index))
+    } else {
+        std::borrow::Cow::Borrowed(snap.track_name.as_str())
+    };
+    renderer::CursorReading {
+        name,
+        color: snap.display_color,
+        db,
+    }
+}
+
+// ── Cached view params (captured when snapshots are built) ─────────────
+
+/// Snapshot of the view params at snapshot-build time. Used to keep
+/// frozen-mode labels consistent with the frozen waveform even if the
+/// user subsequently changes `timebase` / `sync_mode` / `sync_unit`.
+#[derive(Clone, Copy, Default)]
+struct CachedViewParams {
+    sync_mode: Option<crate::SyncMode>,
+    timebase_ms: f32,
+    sync_unit_bars: f32,
 }
 
 // ── Peak hold state ─────────────────────────────────────────────────────
@@ -98,6 +150,11 @@ struct PopeScopeWindow {
 
     /// Cached snapshots for freeze mode.
     cached_snapshots: Vec<WaveSnapshot>,
+    /// View params captured at the time `cached_snapshots` was built.
+    /// When `freeze` is on, we read labels (time axis, beat count) from
+    /// this struct instead of `self.params` so the tooltip/labels don't
+    /// lie about a live timebase over frozen waveform data.
+    cached_view_params: CachedViewParams,
     /// Per-slot peak hold state.
     peak_holds: Vec<PeakHoldEntry>,
     /// Last frame timestamp for dt computation.
@@ -133,6 +190,7 @@ impl PopeScopeWindow {
             sample_rate,
             text_renderer,
             cached_snapshots: Vec::new(),
+            cached_view_params: CachedViewParams::default(),
             peak_holds: Vec::new(),
             last_frame_time: std::time::Instant::now(),
             drag: widgets::DragState::new(),
@@ -220,30 +278,60 @@ impl PopeScopeWindow {
         let max_db_val = self.params.max_db.value();
 
         if !freeze {
+            // Sample live params exactly once per frame so the snapshot
+            // builder and the view-params cache see identical values.
+            let live_timebase_ms = self.params.timebase.value();
+            let live_sync_bars = self.params.sync_unit.value().to_bars();
             self.cached_snapshots = match sync_mode_val {
-                crate::SyncMode::Free => {
-                    let timebase = self.params.timebase.value();
-                    snapshot::build_snapshots_free(
-                        group,
-                        timebase,
-                        self.sample_rate,
-                        decimation,
-                        mix_to_mono,
-                    )
-                }
+                crate::SyncMode::Free => snapshot::build_snapshots_free(
+                    group,
+                    live_timebase_ms,
+                    self.sample_rate,
+                    decimation,
+                    mix_to_mono,
+                ),
                 crate::SyncMode::BeatSync => {
-                    let sync_bars = self.params.sync_unit.value().to_bars();
                     let hold = self.params.hold_mode.value();
                     snapshot::build_snapshots_beat_sync(
                         group,
-                        sync_bars,
+                        live_sync_bars,
                         self.sample_rate,
                         mix_to_mono,
                         hold,
                     )
                 }
             };
+            // Capture the params that produced this snapshot set so
+            // labels and grid stay consistent if the user then toggles freeze.
+            self.cached_view_params = CachedViewParams {
+                sync_mode: Some(sync_mode_val),
+                timebase_ms: live_timebase_ms,
+                sync_unit_bars: live_sync_bars as f32,
+            };
         }
+
+        // "Effective" view params: when frozen, grid and tooltip both
+        // consult `cached_view_params` so the whole view stays stable
+        // even if the user then edits timebase/sync_mode/sync_unit. If
+        // the snapshot cache is uninitialized (first frame with freeze
+        // persisted from saved state) we fall through to live params.
+        let frozen_view = if freeze {
+            self.cached_view_params.sync_mode.map(|mode| {
+                (
+                    mode,
+                    self.cached_view_params.timebase_ms,
+                    self.cached_view_params.sync_unit_bars,
+                )
+            })
+        } else {
+            None
+        };
+        let (eff_sync_mode, eff_timebase_ms, eff_sync_bars): (crate::SyncMode, f32, f32) =
+            frozen_view.unwrap_or((
+                sync_mode_val,
+                self.params.timebase.value(),
+                self.params.sync_unit.value().to_bars() as f32,
+            ));
 
         // Solo/mute filtering. In vertical mode, all tracks get a lane
         // (for control strips), but muted/non-soloed tracks skip waveform drawing.
@@ -304,7 +392,6 @@ impl PopeScopeWindow {
             match display_mode_val {
                 crate::DisplayMode::Vertical => {
                     // Control strip on the left of each track lane
-                    const CONTROL_STRIP_WIDTH: f32 = 90.0;
                     let strip_w = CONTROL_STRIP_WIDTH * s;
                     let wave_x = wx + strip_w;
                     let wave_w = ww - strip_w;
@@ -355,8 +442,9 @@ impl PopeScopeWindow {
                                 Some(snap.display_color),
                             );
                         }
-                        // Draw time/beat grid
-                        match sync_mode_val {
+                        // Draw time/beat grid — use effective params so
+                        // frozen views stay consistent with frozen data.
+                        match eff_sync_mode {
                             crate::SyncMode::Free => {
                                 renderer::draw_time_grid(
                                     &mut self.surface.pixmap,
@@ -364,15 +452,15 @@ impl PopeScopeWindow {
                                     ty,
                                     wave_w,
                                     track_h,
-                                    self.params.timebase.value(),
+                                    eff_timebase_ms,
                                     tr,
                                     s,
                                     i == num_tracks - 1, // labels on bottom track only
                                 );
                             }
                             crate::SyncMode::BeatSync => {
-                                let total_beats = self.params.sync_unit.value().to_bars()
-                                    * snap.beats_per_bar as f64;
+                                let total_beats =
+                                    eff_sync_bars as f64 * snap.beats_per_bar as f64;
                                 renderer::draw_beat_grid(
                                     &mut self.surface.pixmap,
                                     wave_x,
@@ -472,7 +560,7 @@ impl PopeScopeWindow {
                         s,
                         None,
                     );
-                    match sync_mode_val {
+                    match eff_sync_mode {
                         crate::SyncMode::Free => {
                             renderer::draw_time_grid(
                                 &mut self.surface.pixmap,
@@ -480,7 +568,7 @@ impl PopeScopeWindow {
                                 wy,
                                 ww,
                                 wh,
-                                self.params.timebase.value(),
+                                eff_timebase_ms,
                                 tr,
                                 s,
                                 true,
@@ -488,8 +576,8 @@ impl PopeScopeWindow {
                         }
                         crate::SyncMode::BeatSync => {
                             if let Some(first) = visible.first() {
-                                let total_beats = self.params.sync_unit.value().to_bars()
-                                    * first.beats_per_bar as f64;
+                                let total_beats =
+                                    eff_sync_bars as f64 * first.beats_per_bar as f64;
                                 renderer::draw_beat_grid(
                                     &mut self.surface.pixmap,
                                     wx,
@@ -551,7 +639,7 @@ impl PopeScopeWindow {
                         s,
                         None,
                     );
-                    match sync_mode_val {
+                    match eff_sync_mode {
                         crate::SyncMode::Free => {
                             renderer::draw_time_grid(
                                 &mut self.surface.pixmap,
@@ -559,7 +647,7 @@ impl PopeScopeWindow {
                                 wy,
                                 ww,
                                 wh,
-                                self.params.timebase.value(),
+                                eff_timebase_ms,
                                 tr,
                                 s,
                                 true,
@@ -567,8 +655,8 @@ impl PopeScopeWindow {
                         }
                         crate::SyncMode::BeatSync => {
                             if let Some(first) = visible.first() {
-                                let total_beats = self.params.sync_unit.value().to_bars()
-                                    * first.beats_per_bar as f64;
+                                let total_beats =
+                                    eff_sync_bars as f64 * first.beats_per_bar as f64;
                                 renderer::draw_beat_grid(
                                     &mut self.surface.pixmap,
                                     wx,
@@ -640,59 +728,183 @@ impl PopeScopeWindow {
             }
         }
 
-        // Draw cursor if mouse is in waveform area
+        // Compute the actual waveform draw area (excludes left control
+        // strip in Vertical mode — kept in sync with the Vertical branch
+        // above so the cursor doesn't overlap the per-track control strip).
+        let (wave_area_x, wave_area_w) = match display_mode_val {
+            crate::DisplayMode::Vertical => {
+                let strip_w = CONTROL_STRIP_WIDTH * s;
+                (wx + strip_w, (ww - strip_w).max(1.0))
+            }
+            crate::DisplayMode::Overlay | crate::DisplayMode::Sum => (wx, ww),
+        };
+
+        // Draw cursor if the mouse is inside the window AND inside the
+        // waveform draw area. The window gate prevents phantom cursors
+        // at the latched (0,0) position before the first CursorMoved, or
+        // at the latched last position after CursorLeft.
         let (mouse_x, mouse_y) = self.drag.mouse_pos();
-        if mouse_x >= wx
-            && mouse_x < wx + ww
+        let in_wave_area = self.drag.mouse_in_window()
+            && mouse_x >= wave_area_x
+            && mouse_x < wave_area_x + wave_area_w
             && mouse_y >= wy
-            && mouse_y < wy + wh
+            && mouse_y < wy + wh;
+
+        // In Vertical mode, resolve which lane the cursor is over so the
+        // cursor line and tooltip can restrict themselves to that lane
+        // (matches the visual lane structure — reporting all tracks when
+        // the user clearly hovered one is surprising).
+        let vertical_lane: Option<(usize, f32, f32)> = if in_wave_area
+            && display_mode_val == crate::DisplayMode::Vertical
+            && !self.cached_snapshots.is_empty()
         {
-            renderer::draw_cursor(&mut self.surface.pixmap, mouse_x, wy, wh);
+            let num_tracks = self.cached_snapshots.len();
+            let track_h = wh / num_tracks as f32;
+            let lane_idx = (((mouse_y - wy) / track_h).floor() as usize).min(num_tracks - 1);
+            let lane_y = wy + lane_idx as f32 * track_h;
+            Some((lane_idx, lane_y, track_h))
+        } else {
+            None
+        };
+
+        if in_wave_area {
+            // Vertical: draw the cursor only across the hovered lane.
+            // Other modes: span the full waveform height.
+            let (cursor_y, cursor_h) = match vertical_lane {
+                Some((_, lane_y, lane_h)) => (lane_y, lane_h),
+                None => (wy, wh),
+            };
+            renderer::draw_cursor(&mut self.surface.pixmap, mouse_x, cursor_y, cursor_h);
         }
 
         // ── Name tooltip (drawn over everything else) ──────────────────
+        // Gate on mouse_in_window so a freshly opened editor or a
+        // cursor-left window doesn't latch a phantom hover tooltip.
         let mx = mouse_x;
         let my = mouse_y;
-        for region in self.drag.regions() {
-            if let HitAction::Control(controls::ControlAction::HoverName(slot_idx)) = region.action {
-                if mx >= region.x && mx < region.x + region.w
-                    && my >= region.y && my < region.y + region.h
+        if self.drag.mouse_in_window() {
+            for region in self.drag.regions() {
+                if let HitAction::Control(controls::ControlAction::HoverName(slot_idx)) =
+                    region.action
                 {
-                    // Read full name from the store
-                    let slot = store::slot(slot_idx);
-                    let full_name = slot.metadata.track_name.lock()
-                        .map(|n| n.clone())
-                        .unwrap_or_default();
-                    if !full_name.is_empty() {
-                        let tip_font = 12.0 * s;
-                        let tip_pad = 4.0 * s;
-                        let tip_w = tr.text_width(&full_name, tip_font) + tip_pad * 2.0;
-                        let tip_h = tip_font + tip_pad * 2.0;
-                        let tip_x = (mx - tip_w / 2.0).max(0.0);
-                        let tip_y = region.y + region.h + 2.0 * s;
-                        // Background
-                        tiny_skia_widgets::draw_rect(
-                            &mut self.surface.pixmap,
-                            tip_x, tip_y, tip_w, tip_h,
-                            theme::to_color(theme::BORDER),
-                        );
-                        tiny_skia_widgets::draw_rect_outline(
-                            &mut self.surface.pixmap,
-                            tip_x, tip_y, tip_w, tip_h,
-                            theme::to_color(theme::FG),
-                            1.0,
-                        );
-                        tr.draw_text(
-                            &mut self.surface.pixmap,
-                            tip_x + tip_pad,
-                            tip_y + tip_pad + tip_font,
-                            &full_name,
-                            tip_font,
-                            theme::to_color(theme::FG),
-                        );
+                    if mx >= region.x
+                        && mx < region.x + region.w
+                        && my >= region.y
+                        && my < region.y + region.h
+                    {
+                        // Read full name from the store
+                        let slot = store::slot(slot_idx);
+                        let full_name = slot
+                            .metadata
+                            .track_name
+                            .lock()
+                            .map(|n| n.clone())
+                            .unwrap_or_default();
+                        if !full_name.is_empty() {
+                            let tip_font = 12.0 * s;
+                            let tip_pad = 4.0 * s;
+                            let tip_w = tr.text_width(&full_name, tip_font) + tip_pad * 2.0;
+                            let tip_h = tip_font + tip_pad * 2.0;
+                            let tip_x = (mx - tip_w / 2.0).max(0.0);
+                            let tip_y = region.y + region.h + 2.0 * s;
+                            tiny_skia_widgets::draw_rect(
+                                &mut self.surface.pixmap,
+                                tip_x,
+                                tip_y,
+                                tip_w,
+                                tip_h,
+                                theme::to_color(theme::BORDER),
+                            );
+                            tiny_skia_widgets::draw_rect_outline(
+                                &mut self.surface.pixmap,
+                                tip_x,
+                                tip_y,
+                                tip_w,
+                                tip_h,
+                                theme::to_color(theme::FG),
+                                1.0,
+                            );
+                            tr.draw_text(
+                                &mut self.surface.pixmap,
+                                tip_x + tip_pad,
+                                tip_y + tip_pad + tip_font,
+                                &full_name,
+                                tip_font,
+                                theme::to_color(theme::FG),
+                            );
+                        }
+                        break;
                     }
-                    break;
                 }
+            }
+        }
+
+        // ── Cursor tooltip (mirrors original oscilloscope) ──────────────
+        if in_wave_area {
+            let normalized_x = ((mouse_x - wave_area_x) / wave_area_w).clamp(0.0, 1.0);
+            // Use the same pixel-column discretization the renderer uses
+            // (`num_cols = wave_area_w.floor() as usize`) so the tooltip
+            // reads from the exact same block range the renderer draws.
+            let num_cols = (wave_area_w.floor() as usize).max(1);
+            let col = ((normalized_x * num_cols as f32) as usize).min(num_cols - 1);
+
+            // Redundant-looking mute filter: `visible` keeps muted tracks
+            // when `all_muted` is true so the Vertical-mode lanes still
+            // render. For the tooltip we want to report only tracks whose
+            // waveform is actually drawn — so drop them here. If every
+            // track is muted, `readings` ends up empty and no tooltip is
+            // drawn (matches "no waveform ⇒ nothing to report").
+            let mut readings: Vec<renderer::CursorReading> = Vec::new();
+            if let Some((lane_idx, _, _)) = vertical_lane {
+                // Vertical: show ONLY the hovered lane's reading. If the
+                // hovered lane is muted (and not soloed) or hidden by an
+                // active solo on another track, emit no reading → no tooltip.
+                if let Some(snap) = self.cached_snapshots.get(lane_idx) {
+                    let hidden_by_solo = any_solo && !snap.solo;
+                    let hidden_by_mute = snap.mute && !snap.solo;
+                    if !hidden_by_solo && !hidden_by_mute {
+                        readings.push(build_cursor_reading(snap, col, num_cols, mix_to_mono));
+                    }
+                }
+            } else {
+                // Overlay / Sum: show all non-hidden tracks.
+                for snap in &visible {
+                    if snap.mute && !snap.solo {
+                        continue;
+                    }
+                    readings.push(build_cursor_reading(snap, col, num_cols, mix_to_mono));
+                }
+            }
+
+            if !readings.is_empty() {
+                // Use the effective (freeze-aware) sync/timebase so the
+                // tooltip label matches the grid it's drawn over.
+                let time_label = match eff_sync_mode {
+                    crate::SyncMode::Free => {
+                        renderer::format_time_ms(normalized_x * eff_timebase_ms)
+                    }
+                    crate::SyncMode::BeatSync => {
+                        // The beat grid labels bars ("1", "2", ...), so
+                        // report the window position in bars too. "Bar X.XX"
+                        // is unambiguous about what the anchor is (start
+                        // of the visible window, not song-start).
+                        format!("Bar {:.2}", normalized_x * eff_sync_bars)
+                    }
+                };
+
+                renderer::draw_cursor_tooltip(
+                    &mut self.surface.pixmap,
+                    tr,
+                    mouse_x,
+                    mouse_y,
+                    &time_label,
+                    &readings,
+                    wave_area_x,
+                    wy,
+                    wave_area_w,
+                    wh,
+                    s,
+                );
             }
         }
 
@@ -1103,6 +1315,12 @@ impl baseview::WindowHandler for PopeScopeWindow {
                         self.set_param_normalized(&setter, param_id, norm);
                     }
                 }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::CursorEntered) => {
+                self.drag.on_cursor_entered();
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::CursorLeft) => {
+                self.drag.on_cursor_left();
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
                 button: baseview::MouseButton::Left,

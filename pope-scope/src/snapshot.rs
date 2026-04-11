@@ -288,6 +288,165 @@ pub fn compute_peak(audio_data: &[Vec<f32>]) -> (f32, f32) {
     (peak, db)
 }
 
+impl WaveSnapshot {
+    /// Return the sample value at a normalized x position `[0.0, 1.0]`.
+    ///
+    /// This samples ONE element of the underlying buffer regardless of
+    /// mipmap level. It matches what the user sees only when the buffer
+    /// has roughly the same size as the rendered pixel width; when the
+    /// renderer further decimates (because the window is narrower than
+    /// the buffer), a single-element readout can disagree with the
+    /// rendered envelope by several dB. Use `peak_at_column` instead to
+    /// align with the renderer's actual per-pixel-column output.
+    ///
+    /// Picks the appropriate buffer:
+    /// - If `mix_to_mono` is set and `mono_mix` is populated (only at mipmap L0),
+    ///   read from `mono_mix`.
+    /// - At mipmap level 0 (raw), read `audio_data[0]` (first channel — stereo
+    ///   is not distinguished here; the tooltip only reports the first channel
+    ///   unless mono mixing is enabled).
+    /// - At mipmap level 1/2, `audio_data[0]` holds interleaved `(min, max)`
+    ///   pairs — return whichever sample has the greater absolute magnitude so
+    ///   the readout tracks the visible envelope peak.
+    pub fn sample_at_normalized_x(&self, normalized_x: f32, mix_to_mono: bool) -> f32 {
+        let n = self.data_points;
+        if n == 0 {
+            return 0.0;
+        }
+        let t = normalized_x.clamp(0.0, 1.0);
+        // Clamp index to n - 1 to avoid off-by-one at t == 1.0
+        let i = ((t * n as f32) as usize).min(n - 1);
+
+        if mix_to_mono && !self.mono_mix.is_empty() {
+            debug_assert!(
+                self.mono_mix.len() >= n,
+                "mono_mix length {} < data_points {}",
+                self.mono_mix.len(),
+                n
+            );
+            return self.mono_mix.get(i).copied().unwrap_or(0.0);
+        }
+
+        let Some(ch0) = self.audio_data.first() else {
+            return 0.0;
+        };
+
+        if self.mipmap_level == 0 {
+            ch0.get(i).copied().unwrap_or(0.0)
+        } else {
+            let lo = ch0.get(i * 2).copied().unwrap_or(0.0);
+            let hi = ch0.get(i * 2 + 1).copied().unwrap_or(0.0);
+            if lo.abs() > hi.abs() {
+                lo
+            } else {
+                hi
+            }
+        }
+    }
+
+    /// Return the value visible at pixel column `col` of `num_cols`,
+    /// matching what the renderer draws for the same column:
+    ///
+    /// - When `buf.len() > num_cols` (normal or decimated case), this is
+    ///   the sign-preserving max-abs sample across the block of samples
+    ///   the renderer assigns to `col` via `decimate_to_columns`.
+    /// - When `buf.len() <= num_cols` (extreme zoom, renderer draws
+    ///   line segments between samples), this is a linear interpolation
+    ///   between the two adjacent samples at the cursor's pixel
+    ///   position. Interpolation is done in sample space, not in
+    ///   dB/pixel space — the renderer's segments are drawn in pixel
+    ///   space so the two agree to within a fraction of a dB except at
+    ///   zero-crossings.
+    ///
+    /// Sign is preserved so callers can still distinguish polarity.
+    ///
+    /// This is the function the cursor tooltip should use. For the raw
+    /// "one element at this index" semantic, use `sample_at_normalized_x`.
+    ///
+    /// Precision note: column mapping uses integer arithmetic
+    /// (`(col * n).div_ceil(num_cols)`). The renderer's
+    /// `decimate_to_columns_into` uses f32 arithmetic, which begins to
+    /// lose integer precision around `i * num_cols > 2^24` (~16.7M).
+    /// The snapshot builder decimates raw data into L1/L2 mipmap levels
+    /// well before any realistic combination of `data_points * num_cols`
+    /// approaches that magnitude, so the two column mappings agree in
+    /// practice. Tests `test_peak_at_column_matches_decimate_on_*`
+    /// pin parity on representative small cases.
+    pub fn peak_at_column(&self, col: usize, num_cols: usize, mix_to_mono: bool) -> f32 {
+        if num_cols == 0 {
+            return 0.0;
+        }
+        let buf: &[f32] = if mix_to_mono && !self.mono_mix.is_empty() {
+            &self.mono_mix
+        } else {
+            match self.audio_data.first() {
+                Some(ch) => ch,
+                None => return 0.0,
+            }
+        };
+        let n = buf.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let col = col.min(num_cols - 1);
+
+        // Sparse-samples path: when the buffer is smaller than the pixel
+        // width the renderer draws line segments between adjacent samples.
+        // The renderer places sample i at pixel `i * num_cols / n`
+        // (equivalently, `i * step` where `step = w / n`), and draws a
+        // line from there to sample i+1. At pixel `col`, the visible
+        // value is therefore a linear interpolation between the two
+        // samples bracketing `col * n / num_cols`. Beyond the last
+        // sample the renderer draws nothing, so we return the last
+        // sample value — which is also what the eye expects if the
+        // cursor is past the end of the visible line.
+        if n <= num_cols {
+            if n == 1 {
+                return buf[0];
+            }
+            let t = col as f32 * n as f32 / num_cols as f32;
+            let i_lo_f = t.floor();
+            let i_lo = (i_lo_f as usize).min(n - 1);
+            if i_lo >= n - 1 {
+                return buf[n - 1];
+            }
+            let frac = (t - i_lo_f).clamp(0.0, 1.0);
+            return buf[i_lo] * (1.0 - frac) + buf[i_lo + 1] * frac;
+        }
+
+        // Dense-samples path: exact inverse of
+        // `decimate_to_columns_into`'s `col = (i * num_cols / n) as usize`
+        // mapping, in integer arithmetic. Sample i belongs to column c
+        // iff `c * n <= i * num_cols < (c + 1) * n`, so:
+        //   i_lo = ceil(col * n / num_cols)
+        //   i_hi = ceil((col + 1) * n / num_cols)  (exclusive)
+        //
+        // At `col == num_cols - 1`, `((col + 1) * n).div_ceil(num_cols)`
+        // equals `n` exactly, so no special case is needed for the last
+        // column — `.min(n)` is belt-and-braces in case upstream math
+        // ever rounds differently.
+        let i_lo = (col * n).div_ceil(num_cols);
+        let i_hi = ((col + 1) * n).div_ceil(num_cols).min(n);
+
+        if i_lo >= i_hi {
+            // Should be unreachable given `n > num_cols` above, but
+            // degrade gracefully rather than panic.
+            return buf.get(i_lo.min(n - 1)).copied().unwrap_or(0.0);
+        }
+
+        let mut best: f32 = 0.0;
+        let mut best_abs: f32 = 0.0;
+        for &s in &buf[i_lo..i_hi] {
+            let a = s.abs();
+            if a > best_abs {
+                best_abs = a;
+                best = s;
+            }
+        }
+        best
+    }
+}
+
 /// Build snapshots for free (non-beat-sync) mode.
 ///
 /// - `group`: which group to filter for
@@ -842,6 +1001,240 @@ mod tests {
         let (peak, db) = compute_peak(&data);
         assert_eq!(peak, 0.0);
         assert_eq!(db, -96.0);
+    }
+
+    // ── sample_at_normalized_x ─────────────────────────────────────────
+
+    fn empty_snap() -> WaveSnapshot {
+        WaveSnapshot {
+            slot_index: 0,
+            track_name: String::new(),
+            display_color: 0,
+            num_channels: 1,
+            group: 0,
+            is_active: true,
+            solo: false,
+            mute: false,
+            audio_data: Vec::new(),
+            mipmap_level: 0,
+            data_points: 0,
+            data_version: 0,
+            is_playing: false,
+            bpm: 120.0,
+            beats_per_bar: 4,
+            samples_per_bar: 0.0,
+            ppq_position_in_bar: 0.0,
+            mono_mix: Vec::new(),
+            peak_amplitude: 0.0,
+            peak_db: -96.0,
+        }
+    }
+
+    #[test]
+    fn test_sample_at_normalized_x_empty_returns_zero() {
+        let snap = empty_snap();
+        assert_eq!(snap.sample_at_normalized_x(0.5, false), 0.0);
+    }
+
+    #[test]
+    fn test_sample_at_normalized_x_raw_l0() {
+        let mut snap = empty_snap();
+        snap.audio_data = vec![vec![0.1, 0.2, 0.3, 0.4]];
+        snap.data_points = 4;
+        assert!((snap.sample_at_normalized_x(0.0, false) - 0.1).abs() < 1e-6);
+        assert!((snap.sample_at_normalized_x(0.25, false) - 0.2).abs() < 1e-6);
+        // Clamp at t == 1.0 should pick the last sample, not panic
+        assert!((snap.sample_at_normalized_x(1.0, false) - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sample_at_normalized_x_uses_mono_mix_when_requested() {
+        let mut snap = empty_snap();
+        snap.audio_data = vec![vec![1.0, 1.0], vec![-1.0, -1.0]];
+        snap.mono_mix = vec![0.5, -0.5];
+        snap.data_points = 2;
+        // mono_mix path
+        assert!((snap.sample_at_normalized_x(0.0, true) - 0.5).abs() < 1e-6);
+        assert!((snap.sample_at_normalized_x(0.75, true) + 0.5).abs() < 1e-6);
+        // without mix_to_mono, falls back to first channel
+        assert!((snap.sample_at_normalized_x(0.0, false) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sample_at_normalized_x_decimated_min_max_pairs() {
+        let mut snap = empty_snap();
+        snap.mipmap_level = 1;
+        // Two pairs: (min=-0.2, max=0.7) and (min=-0.9, max=0.1)
+        snap.audio_data = vec![vec![-0.2, 0.7, -0.9, 0.1]];
+        snap.data_points = 2; // number of pairs
+        // First pair: |max| > |min|, so should return max (0.7)
+        assert!((snap.sample_at_normalized_x(0.0, false) - 0.7).abs() < 1e-6);
+        // Second pair: |min| > |max|, so should return min (-0.9)
+        assert!((snap.sample_at_normalized_x(0.75, false) + 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sample_at_normalized_x_out_of_range_clamps() {
+        let mut snap = empty_snap();
+        snap.audio_data = vec![vec![1.0, 2.0, 3.0]];
+        snap.data_points = 3;
+        // Negative clamps to 0.0
+        assert!((snap.sample_at_normalized_x(-0.5, false) - 1.0).abs() < 1e-6);
+        // >1.0 clamps to last sample
+        assert!((snap.sample_at_normalized_x(2.0, false) - 3.0).abs() < 1e-6);
+    }
+
+    // ── peak_at_column ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_peak_at_column_empty() {
+        let snap = empty_snap();
+        assert_eq!(snap.peak_at_column(0, 10, false), 0.0);
+        assert_eq!(snap.peak_at_column(0, 0, false), 0.0);
+    }
+
+    #[test]
+    fn test_peak_at_column_matches_decimate_on_raw_l0() {
+        // Construct a buffer longer than num_cols to force decimation.
+        let samples: Vec<f32> =
+            (0..20).map(|i| ((i as f32 * 0.37).sin()) * 0.9).collect();
+        let mut snap = empty_snap();
+        snap.audio_data = vec![samples.clone()];
+        snap.data_points = samples.len();
+        snap.mipmap_level = 0;
+
+        let num_cols = 5;
+        let (mins, maxs) = crate::renderer::decimate_to_columns(&samples, num_cols);
+
+        for col in 0..num_cols {
+            let tooltip = snap.peak_at_column(col, num_cols, false);
+            let rendered_peak_abs = mins[col].abs().max(maxs[col].abs());
+            // Whichever sample the tooltip returns must have the same
+            // absolute magnitude as the column's envelope peak.
+            assert!(
+                (tooltip.abs() - rendered_peak_abs).abs() < 1e-5,
+                "col {col}: tooltip {tooltip} vs envelope {rendered_peak_abs}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_peak_at_column_matches_decimate_on_interleaved_l1() {
+        // Simulate an L1 mipmap buffer: `audio_data[0]` holds flat
+        // [min, max, min, max, ...] pairs for many blocks. The renderer
+        // treats this as one flat sample array and decimates it again
+        // when num_cols < 2 * data_points.
+        let n_blocks = 50;
+        let samples: Vec<f32> = (0..n_blocks)
+            .flat_map(|b| {
+                let lo = -(b as f32 * 0.02);
+                let hi = (b as f32 * 0.02) + 0.01;
+                [lo, hi]
+            })
+            .collect();
+        let mut snap = empty_snap();
+        snap.audio_data = vec![samples.clone()];
+        snap.data_points = n_blocks;
+        snap.mipmap_level = 1;
+
+        let num_cols = 10;
+        let (mins, maxs) = crate::renderer::decimate_to_columns(&samples, num_cols);
+
+        for col in 0..num_cols {
+            let tooltip = snap.peak_at_column(col, num_cols, false);
+            let rendered_peak_abs = mins[col].abs().max(maxs[col].abs());
+            assert!(
+                (tooltip.abs() - rendered_peak_abs).abs() < 1e-5,
+                "col {col}: tooltip {tooltip} (abs {}) vs envelope {rendered_peak_abs}",
+                tooltip.abs()
+            );
+        }
+    }
+
+    #[test]
+    fn test_peak_at_column_preserves_sign() {
+        // A buffer whose max-abs is negative; the tooltip should report
+        // the negative number, not its absolute value.
+        let mut snap = empty_snap();
+        snap.audio_data = vec![vec![0.1, -0.9, 0.2, 0.3]];
+        snap.data_points = 4;
+        let best = snap.peak_at_column(0, 1, false);
+        assert!((best - (-0.9)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_peak_at_column_prefers_mono_mix_when_enabled() {
+        let mut snap = empty_snap();
+        snap.audio_data = vec![vec![1.0, 1.0], vec![-1.0, -1.0]];
+        snap.mono_mix = vec![0.5, -0.7];
+        snap.data_points = 2;
+        // With mix_to_mono, we read mono_mix → max-abs is -0.7
+        let best = snap.peak_at_column(0, 1, true);
+        assert!((best - (-0.7)).abs() < 1e-6);
+        // Without mix_to_mono, we read audio_data[0] → max-abs is 1.0
+        let best2 = snap.peak_at_column(0, 1, false);
+        assert!((best2 - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_peak_at_column_wider_than_data_interpolates() {
+        // num_cols > n: renderer draws line segments between samples at
+        // pixels (i * num_cols / n). peak_at_column should return the
+        // linearly interpolated value between the two adjacent samples,
+        // not the nearest discrete sample.
+        let mut snap = empty_snap();
+        snap.audio_data = vec![vec![0.0, 1.0, 2.0]]; // slope
+        snap.data_points = 3;
+
+        // With num_cols=9, step = 9/3 = 3. Samples drawn at pixels 0, 3, 6.
+        // col 0: t=0.0 → samples[0]=0.0
+        // col 1: t=0.333 → 0*(1-0.333) + 1*0.333 ≈ 0.333
+        // col 2: t=0.666 → 0*(1-0.666) + 1*0.666 ≈ 0.666
+        // col 3: t=1.0   → samples[1]=1.0 (frac=0 path)
+        // col 4: t=1.333 → 1*(1-0.333) + 2*0.333 ≈ 1.333
+        // col 6: t=2.0   → samples[2]=2.0 (clamped)
+        // col 7: t=2.333 → past end, returns last sample = 2.0
+        let num_cols = 9;
+        assert!((snap.peak_at_column(0, num_cols, false) - 0.0).abs() < 1e-5);
+        assert!((snap.peak_at_column(1, num_cols, false) - 0.333).abs() < 1e-3);
+        assert!((snap.peak_at_column(2, num_cols, false) - 0.666).abs() < 1e-3);
+        assert!((snap.peak_at_column(3, num_cols, false) - 1.0).abs() < 1e-5);
+        assert!((snap.peak_at_column(4, num_cols, false) - 1.333).abs() < 1e-3);
+        assert!((snap.peak_at_column(6, num_cols, false) - 2.0).abs() < 1e-5);
+        assert_eq!(snap.peak_at_column(7, num_cols, false), 2.0);
+        assert_eq!(snap.peak_at_column(8, num_cols, false), 2.0);
+    }
+
+    #[test]
+    fn test_peak_at_column_single_sample_buffer() {
+        // Pathological edge: buffer of length 1. Interpolation path
+        // should return the single sample without panicking.
+        let mut snap = empty_snap();
+        snap.audio_data = vec![vec![0.42]];
+        snap.data_points = 1;
+        for col in 0..5 {
+            assert_eq!(snap.peak_at_column(col, 5, false), 0.42);
+        }
+    }
+
+    #[test]
+    fn test_peak_at_column_dense_matches_renderer_at_last_col() {
+        // Regression: verify parity at the last column specifically, to
+        // pin the "no special case needed" claim in the implementation.
+        let samples: Vec<f32> = (0..17).map(|i| (i as f32).sin()).collect();
+        let mut snap = empty_snap();
+        snap.audio_data = vec![samples.clone()];
+        snap.data_points = samples.len();
+
+        let num_cols = 4;
+        let (mins, maxs) = crate::renderer::decimate_to_columns(&samples, num_cols);
+        let last = num_cols - 1;
+        let tooltip = snap.peak_at_column(last, num_cols, false);
+        let envelope_peak_abs = mins[last].abs().max(maxs[last].abs());
+        assert!(
+            (tooltip.abs() - envelope_peak_abs).abs() < 1e-5,
+            "last col: tooltip {tooltip} vs envelope {envelope_peak_abs}"
+        );
     }
 
     #[test]

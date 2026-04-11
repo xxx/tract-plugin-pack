@@ -1,6 +1,7 @@
 //! Waveform rendering: amplitude mapping, grid, waveform paths, display modes.
 
 use crate::theme;
+use std::borrow::Cow;
 
 /// Map a sample value to a Y pixel coordinate using dB scaling.
 ///
@@ -540,7 +541,7 @@ pub fn draw_beat_grid(
     }
 }
 
-/// Draw a cursor line at the given X position with track info tooltip.
+/// Draw a vertical cursor line at the given X position.
 pub fn draw_cursor(
     pixmap: &mut tiny_skia::Pixmap,
     cursor_x: f32,
@@ -553,8 +554,191 @@ pub fn draw_cursor(
         y,
         1.0,
         h,
+        theme::to_color_alpha(theme::CYAN, 0.8),
+    );
+}
+
+/// Per-track reading for the cursor tooltip.
+///
+/// `name` is a `Cow` so callers can either borrow a `&str` directly
+/// (e.g. from `snap.track_name`) or provide an owned fallback like
+/// `"Slot 3"` when a track has no user-visible name.
+pub struct CursorReading<'a> {
+    pub name: Cow<'a, str>,
+    pub color: u32,
+    pub db: f32,
+}
+
+/// Format a time in milliseconds the same way the original oscilloscope does:
+/// `"123 us"` for values below `1 ms`, `"12.3 ms"` otherwise.
+/// Matches JUCE's signed `if (timeMs < 1.0f)` branch so negative millisecond
+/// values (e.g. "-0.5 ms" relative to a beat anchor) still round to whole
+/// microseconds, not to a decimal millisecond.
+pub fn format_time_ms(time_ms: f32) -> String {
+    // Collapse -0.0 → 0.0 so we don't emit "-0 us".
+    let t = if time_ms == 0.0 { 0.0 } else { time_ms };
+    if t < 1.0 {
+        format!("{:.0} us", t * 1000.0)
+    } else {
+        format!("{:.1} ms", t)
+    }
+}
+
+/// Format a dB value the same way the original oscilloscope does:
+/// `"-inf dB"` for silence, `"-12.3 dB"` otherwise.
+pub fn format_db(db: f32) -> String {
+    if !db.is_finite() || db < -96.0 {
+        "-inf dB".to_string()
+    } else {
+        format!("{:.1} dB", db)
+    }
+}
+
+/// Compute a tooltip's on-screen rectangle, clamped to a caller-supplied
+/// area (normally the waveform draw rect, so the tooltip doesn't overlap
+/// control bars or strips).
+///
+/// Anchors to `(cursor_x + 15, cursor_y - h/2)`. If that spills off the right
+/// edge of the area, flips to the other side of the cursor
+/// (`cursor_x - w - 15`). Then clamps Y to keep the tooltip fully inside
+/// the area.
+#[allow(clippy::too_many_arguments)]
+pub fn cursor_tooltip_rect(
+    cursor_x: f32,
+    cursor_y: f32,
+    tooltip_w: f32,
+    tooltip_h: f32,
+    area_x: f32,
+    area_y: f32,
+    area_w: f32,
+    area_h: f32,
+    scale: f32,
+) -> (f32, f32) {
+    let offset = 15.0 * scale;
+    let mut tx = cursor_x + offset;
+    if tx + tooltip_w > area_x + area_w {
+        tx = cursor_x - tooltip_w - offset;
+    }
+    // If still off the left edge (very narrow area), clamp.
+    if tx < area_x {
+        tx = area_x;
+    }
+    let mut ty = cursor_y - tooltip_h / 2.0;
+    if ty < area_y {
+        ty = area_y;
+    }
+    if ty + tooltip_h > area_y + area_h {
+        ty = (area_y + area_h - tooltip_h).max(area_y);
+    }
+    (tx, ty)
+}
+
+/// Draw the cursor tooltip: a time header plus one row per track reading.
+/// Layout matches the original JUCE oscilloscope's drawCursorTooltip.
+///
+/// `(area_x, area_y, area_w, area_h)` describes the rectangle the tooltip
+/// is allowed to occupy — typically the waveform draw area — so the
+/// tooltip can't spill over into the control bar or control strips.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_cursor_tooltip(
+    pixmap: &mut tiny_skia::Pixmap,
+    text_renderer: &mut tiny_skia_widgets::TextRenderer,
+    cursor_x: f32,
+    cursor_y: f32,
+    time_label: &str,
+    readings: &[CursorReading],
+    area_x: f32,
+    area_y: f32,
+    area_w: f32,
+    area_h: f32,
+    scale: f32,
+) {
+    if readings.is_empty() {
+        return;
+    }
+    // Tooltip dimensions (mirroring original: 130px wide, 14px line-height,
+    // 6px padding, with an extra line for the time header). Width bumped
+    // to 140px in the Rust port because DejaVuSans is proportional-width
+    // and needs a bit more room than JUCE's monospaced default for longer
+    // "-XX.X dB" readings.
+    let font_size = 10.0 * scale;
+    let line_h = 14.0 * scale;
+    let padding = 6.0 * scale;
+    let tooltip_w = 140.0 * scale;
+    let tooltip_h = padding * 2.0 + line_h * (1.0 + readings.len() as f32);
+
+    let (tx, ty) = cursor_tooltip_rect(
+        cursor_x, cursor_y, tooltip_w, tooltip_h, area_x, area_y, area_w, area_h, scale,
+    );
+
+    // Background + border. When the tooltip is reporting a single
+    // track (Vertical mode, or Overlay/Sum with only one visible
+    // track), match the outline to that track's color — this ties the
+    // tooltip visually to the lane/trace the cursor is over. With
+    // multiple readings there's no unambiguous "the track", so fall
+    // back to the amber foreground to match the rest of the theme
+    // (and the existing name-hover tooltip, which uses the same color).
+    let outline_color = if readings.len() == 1 {
+        theme::to_color(readings[0].color)
+    } else {
+        theme::to_color(theme::FG)
+    };
+    tiny_skia_widgets::draw_rect(
+        pixmap,
+        tx,
+        ty,
+        tooltip_w,
+        tooltip_h,
+        theme::to_color_alpha(theme::BG, 0.95),
+    );
+    tiny_skia_widgets::draw_rect_outline(
+        pixmap,
+        tx,
+        ty,
+        tooltip_w,
+        tooltip_h,
+        outline_color,
+        1.0,
+    );
+
+    // Time header (cyan)
+    let mut y = ty + padding + font_size;
+    text_renderer.draw_text(
+        pixmap,
+        tx + padding,
+        y,
+        time_label,
+        font_size,
         theme::to_color(theme::CYAN),
     );
+    y += line_h;
+
+    // Per-track rows: color swatch + "Name[:8]: XdB"
+    let swatch_size = 8.0 * scale;
+    let swatch_gap = 4.0 * scale;
+    for reading in readings {
+        // Color swatch
+        tiny_skia_widgets::draw_rect(
+            pixmap,
+            tx + padding,
+            y - font_size + (font_size - swatch_size) / 2.0,
+            swatch_size,
+            swatch_size,
+            theme::to_color(reading.color),
+        );
+        // Label text: truncated name (<=8 chars) + dB value
+        let short_name: String = reading.name.chars().take(8).collect();
+        let line = format!("{}: {}", short_name, format_db(reading.db));
+        text_renderer.draw_text(
+            pixmap,
+            tx + padding + swatch_size + swatch_gap,
+            y,
+            &line,
+            font_size,
+            theme::to_color(theme::FG),
+        );
+        y += line_h;
+    }
 }
 
 #[cfg(test)]
@@ -800,6 +984,200 @@ mod tests {
     fn test_draw_cursor_smoke() {
         let mut pm = make_test_pixmap(200, 100);
         draw_cursor(&mut pm, 100.0, 0.0, 100.0);
+        assert!(pixmap_has_nonzero(&pm));
+    }
+
+    // ── Cursor tooltip ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_format_time_ms_sub_millisecond() {
+        assert_eq!(format_time_ms(0.5), "500 us");
+        assert_eq!(format_time_ms(0.123), "123 us");
+        assert_eq!(format_time_ms(0.0), "0 us");
+    }
+
+    #[test]
+    fn test_format_time_ms_above_millisecond() {
+        assert_eq!(format_time_ms(1.0), "1.0 ms");
+        assert_eq!(format_time_ms(12.34), "12.3 ms");
+        assert_eq!(format_time_ms(1500.0), "1500.0 ms");
+    }
+
+    #[test]
+    fn test_format_time_ms_negative_zero_is_zero() {
+        // Cosmetic: -0.0 * 1000 = -0 → would render "-0 us" without care.
+        assert_eq!(format_time_ms(-0.0), "0 us");
+    }
+
+    #[test]
+    fn test_format_time_ms_negative_uses_us_branch() {
+        // Matches JUCE's signed branch (`if (timeMs < 1.0f)`), which sends
+        // ALL negative values to the microsecond format regardless of
+        // magnitude. Prevents "-5.0 ms" from disagreeing with "5000 us".
+        assert_eq!(format_time_ms(-0.5), "-500 us");
+        assert_eq!(format_time_ms(-5.0), "-5000 us");
+    }
+
+    #[test]
+    fn test_format_db_normal() {
+        assert_eq!(format_db(-12.3), "-12.3 dB");
+        assert_eq!(format_db(0.0), "0.0 dB");
+        assert_eq!(format_db(-96.0), "-96.0 dB");
+    }
+
+    #[test]
+    fn test_format_db_silence() {
+        assert_eq!(format_db(f32::NEG_INFINITY), "-inf dB");
+        assert_eq!(format_db(-200.0), "-inf dB");
+    }
+
+    #[test]
+    fn test_cursor_tooltip_rect_fits_right_of_cursor() {
+        // area = (0, 0, 800, 500) with cursor at (100, 200)
+        let (tx, ty) =
+            cursor_tooltip_rect(100.0, 200.0, 140.0, 60.0, 0.0, 0.0, 800.0, 500.0, 1.0);
+        // Right of cursor + 15px offset
+        assert!((tx - 115.0).abs() < 0.001);
+        // Vertically centred on cursor
+        assert!((ty - (200.0 - 30.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cursor_tooltip_rect_flips_off_right_edge() {
+        // Cursor near right edge — tooltip won't fit to the right, should flip
+        let (tx, _) =
+            cursor_tooltip_rect(780.0, 200.0, 140.0, 60.0, 0.0, 0.0, 800.0, 500.0, 1.0);
+        // Flipped: cursor_x - tooltip_w - 15
+        assert!((tx - (780.0 - 140.0 - 15.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cursor_tooltip_rect_clamps_top() {
+        // Verify that the clamp actually triggers: without the clamp, the
+        // Y would be cursor_y - tooltip_h / 2.0 = 5 - 30 = -25, which is
+        // above the area top. This pins the behavior so nobody can
+        // accidentally "pass" this test by tweaking centering math.
+        let cursor_y = 5.0;
+        let tooltip_h = 60.0;
+        let pre_clamp_y = cursor_y - tooltip_h / 2.0;
+        assert!(pre_clamp_y < 0.0, "test setup must put tooltip above the area");
+
+        let (_, ty) =
+            cursor_tooltip_rect(100.0, cursor_y, 140.0, tooltip_h, 0.0, 0.0, 800.0, 500.0, 1.0);
+        assert_eq!(ty, 0.0);
+    }
+
+    #[test]
+    fn test_cursor_tooltip_rect_clamps_bottom() {
+        // Cursor near bottom — tooltip would spill below area bottom
+        let (_, ty) =
+            cursor_tooltip_rect(100.0, 495.0, 140.0, 60.0, 0.0, 0.0, 800.0, 500.0, 1.0);
+        assert!((ty - (500.0 - 60.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cursor_tooltip_rect_clamps_to_non_origin_area() {
+        // Regression: passing a waveform-area rect whose origin is NOT
+        // (0, 0) (e.g. in Vertical mode where wave_area_x = strip_w).
+        // The tooltip must respect the area's top-left corner and bottom.
+        let area_x = 90.0;
+        let area_y = 10.0;
+        let area_w = 500.0;
+        let area_h = 300.0;
+        // Cursor near the top of the area: clamp should use area_y, not 0.
+        let (_, ty) = cursor_tooltip_rect(
+            200.0, area_y + 5.0, 140.0, 60.0, area_x, area_y, area_w, area_h, 1.0,
+        );
+        assert_eq!(ty, area_y);
+        // Cursor near the area's right edge should flip to the left of
+        // the cursor but still not cross the area's left edge.
+        let cursor_x = area_x + area_w - 5.0;
+        let (tx, _) = cursor_tooltip_rect(
+            cursor_x, 150.0, 140.0, 60.0, area_x, area_y, area_w, area_h, 1.0,
+        );
+        assert!(tx >= area_x);
+        assert!(tx + 140.0 <= area_x + area_w + 0.001);
+    }
+
+    #[test]
+    fn test_draw_cursor_tooltip_smoke() {
+        let mut pm = make_test_pixmap(400, 300);
+        let font_data = include_bytes!("fonts/DejaVuSans.ttf");
+        let mut tr = tiny_skia_widgets::TextRenderer::new(font_data);
+        let readings = [
+            CursorReading {
+                name: "Kick".into(),
+                color: theme::FG,
+                db: -6.0,
+            },
+            CursorReading {
+                name: "Snare".into(),
+                color: theme::CYAN,
+                db: -12.5,
+            },
+        ];
+        draw_cursor_tooltip(
+            &mut pm,
+            &mut tr,
+            200.0,
+            150.0,
+            "12.3 ms",
+            &readings,
+            0.0,
+            0.0,
+            400.0,
+            300.0,
+            1.0,
+        );
+        assert!(pixmap_has_nonzero(&pm));
+    }
+
+    #[test]
+    fn test_draw_cursor_tooltip_empty_readings_noop() {
+        let mut pm = make_test_pixmap(400, 300);
+        let font_data = include_bytes!("fonts/DejaVuSans.ttf");
+        let mut tr = tiny_skia_widgets::TextRenderer::new(font_data);
+        draw_cursor_tooltip(
+            &mut pm,
+            &mut tr,
+            200.0,
+            150.0,
+            "0 us",
+            &[],
+            0.0,
+            0.0,
+            400.0,
+            300.0,
+            1.0,
+        );
+        // No readings → no draw
+        assert!(!pixmap_has_nonzero(&pm));
+    }
+
+    #[test]
+    fn test_draw_cursor_tooltip_truncates_long_name() {
+        // Just a smoke test that long names don't panic
+        let mut pm = make_test_pixmap(400, 300);
+        let font_data = include_bytes!("fonts/DejaVuSans.ttf");
+        let mut tr = tiny_skia_widgets::TextRenderer::new(font_data);
+        let readings = [CursorReading {
+            name: "A very long track name that exceeds eight characters".into(),
+            color: theme::FG,
+            db: -3.0,
+        }];
+        draw_cursor_tooltip(
+            &mut pm,
+            &mut tr,
+            200.0,
+            150.0,
+            "1.2 ms",
+            &readings,
+            0.0,
+            0.0,
+            400.0,
+            300.0,
+            1.0,
+        );
         assert!(pixmap_has_nonzero(&pm));
     }
 }

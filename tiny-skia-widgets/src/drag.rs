@@ -34,6 +34,11 @@ pub struct DragState<A: Clone + PartialEq> {
     granular_start_value: f32,
     mouse_x: f32,
     mouse_y: f32,
+    /// Whether the cursor is currently inside the editor window. Starts
+    /// `false` (before the first CursorMoved) and is cleared on CursorLeft.
+    /// Use `mouse_in_window()` to query — this avoids phantom hover state
+    /// when the window first opens or after the cursor leaves.
+    mouse_in_window: bool,
     last_click_time: Instant,
     last_click_action: Option<A>,
 }
@@ -50,6 +55,7 @@ impl<A: Clone + PartialEq> DragState<A> {
             granular_start_value: 0.0,
             mouse_x: 0.0,
             mouse_y: 0.0,
+            mouse_in_window: false,
             last_click_time: Instant::now(),
             last_click_action: None,
         }
@@ -79,6 +85,14 @@ impl<A: Clone + PartialEq> DragState<A> {
         (self.mouse_x, self.mouse_y)
     }
 
+    /// Returns `true` after a `CursorMoved`/`CursorEntered` event has been
+    /// seen and before a matching `CursorLeft`. Always `false` before the
+    /// first mouse event, which prevents spurious hover state when the
+    /// editor window first opens with the cursor outside the window.
+    pub fn mouse_in_window(&self) -> bool {
+        self.mouse_in_window
+    }
+
     /// Returns a slice of all current hit regions.
     pub fn regions(&self) -> &[HitRegion<A>] {
         &self.hit_regions
@@ -95,6 +109,22 @@ impl<A: Clone + PartialEq> DragState<A> {
     pub fn set_mouse(&mut self, x: f32, y: f32) {
         self.mouse_x = x;
         self.mouse_y = y;
+        self.mouse_in_window = true;
+    }
+
+    /// Mark the cursor as inside the window. Call on CursorEntered.
+    /// Not strictly required — `set_mouse` also flips this flag — but
+    /// useful on platforms that fire CursorEntered before the first move.
+    pub fn on_cursor_entered(&mut self) {
+        self.mouse_in_window = true;
+    }
+
+    /// Mark the cursor as outside the window. Call on CursorLeft. Does
+    /// not move the cursor position, so latched positions remain readable
+    /// for anything that needs them — consumers should gate visibility
+    /// queries on `mouse_in_window()`.
+    pub fn on_cursor_left(&mut self) {
+        self.mouse_in_window = false;
     }
 
     /// Update drag value during CursorMoved. Returns the new normalized value
@@ -165,5 +195,43 @@ impl<A: Clone + PartialEq> DragState<A> {
 impl<A: Clone + PartialEq> Default for DragState<A> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mouse_in_window_starts_false() {
+        let d: DragState<()> = DragState::new();
+        assert!(!d.mouse_in_window(), "new DragState must not claim the mouse is in window");
+    }
+
+    #[test]
+    fn test_set_mouse_marks_in_window() {
+        let mut d: DragState<()> = DragState::new();
+        d.set_mouse(10.0, 20.0);
+        assert!(d.mouse_in_window());
+        assert_eq!(d.mouse_pos(), (10.0, 20.0));
+    }
+
+    #[test]
+    fn test_cursor_left_clears_flag_without_moving_position() {
+        let mut d: DragState<()> = DragState::new();
+        d.set_mouse(42.0, 84.0);
+        d.on_cursor_left();
+        assert!(!d.mouse_in_window());
+        // Position is latched for consumers that still want it, but the
+        // in-window flag is authoritative for visibility.
+        assert_eq!(d.mouse_pos(), (42.0, 84.0));
+    }
+
+    #[test]
+    fn test_cursor_entered_re_flags() {
+        let mut d: DragState<()> = DragState::new();
+        d.on_cursor_left();
+        d.on_cursor_entered();
+        assert!(d.mouse_in_window());
     }
 }
