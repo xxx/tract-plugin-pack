@@ -251,7 +251,10 @@ impl PopeScopeWindow {
         let (wx, wy, ww, wh) = self.waveform_rect();
 
         // Fill background
-        self.surface.pixmap.fill(theme::to_color(theme::BG));
+        // Fast BG clear — tiny_skia_widgets::fill_pixmap_opaque uses a
+        // slice memset under the hood, ~4× faster than tiny-skia's
+        // per-pixel Pixmap::fill loop under profile.
+        tiny_skia_widgets::fill_pixmap_opaque(&mut self.surface.pixmap, theme::to_color(theme::BG));
 
         let tr = &mut self.text_renderer;
 

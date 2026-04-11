@@ -269,17 +269,17 @@ pub fn draw_waveform_line(
     let (mins, maxs) = decimate_to_columns(samples, num_cols);
     let mut prev_top = sample_to_y(maxs[0], min_db, max_db, centre_y, half_height);
     let mut prev_bot = sample_to_y(mins[0], min_db, max_db, centre_y, half_height);
-    // First column: its own range only.
-    let h0 = (prev_bot - prev_top).max(1.0);
-    tiny_skia_widgets::draw_rect_opaque(pixmap, x, prev_top, 1.0, h0, color);
+    // First column: its own range only. Ensure at least 1px tall so a
+    // flat line is still visible.
+    let first_bot = prev_bot.max(prev_top + 1.0);
+    tiny_skia_widgets::fill_column_opaque(pixmap, x, prev_top, first_bot, color);
     for i in 1..num_cols {
         let px = x + i as f32;
         let y_top = sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
         let y_bot = sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
         let top = y_top.min(prev_top);
-        let bot = y_bot.max(prev_bot);
-        let seg_h = (bot - top).max(1.0);
-        tiny_skia_widgets::draw_rect_opaque(pixmap, px, top, 1.0, seg_h, color);
+        let bot = y_bot.max(prev_bot).max(top + 1.0);
+        tiny_skia_widgets::fill_column_opaque(pixmap, px, top, bot, color);
         prev_top = y_top;
         prev_bot = y_bot;
     }
@@ -357,27 +357,13 @@ pub fn draw_waveform_filled(
 
     // Helper closure: draw the two halves of a column from `top` and
     // `bot` (which already incorporate any bridge extension) using
-    // the opaque blit fast path.
+    // the direct-pixel-write fast path.
     let mut draw_column = |px: f32, top: f32, bot: f32| {
         if top < centre_y {
-            tiny_skia_widgets::draw_rect_opaque(
-                pixmap,
-                px,
-                top,
-                1.0,
-                centre_y - top,
-                fill_color,
-            );
+            tiny_skia_widgets::fill_column_opaque(pixmap, px, top, centre_y, fill_color);
         }
         if bot > centre_y {
-            tiny_skia_widgets::draw_rect_opaque(
-                pixmap,
-                px,
-                centre_y,
-                1.0,
-                bot - centre_y,
-                fill_color,
-            );
+            tiny_skia_widgets::fill_column_opaque(pixmap, px, centre_y, bot, fill_color);
         }
     };
 
