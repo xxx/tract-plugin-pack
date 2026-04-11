@@ -194,7 +194,20 @@ pub fn decimate_to_columns(samples: &[f32], num_columns: usize) -> (Vec<f32>, Ve
     (mins, maxs)
 }
 
-/// Draw a waveform as a connected line stroke using tiny-skia paths.
+/// Draw a waveform as a 1-pixel-per-column envelope.
+///
+/// In the dense-samples path (`samples.len() > num_cols`), every pixel
+/// column gets a single vertical `draw_rect` covering the [min, max]
+/// range of the samples that map to it. No paths, no anti-aliased
+/// stroking — profiling showed that >40% of GUI time was burned in
+/// tiny-skia's `stroke_path` / raster pipeline while the scope was
+/// playing audio, and replacing it with column rects turns that into
+/// a cheap `memset` per column.
+///
+/// In the sparse-samples path (`samples.len() <= num_cols`, i.e.
+/// extreme zoom) the renderer still builds a tiny connected polyline
+/// using `stroke_path`, since there are only a handful of segments
+/// and the visible line quality matters there.
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 pub fn draw_waveform_line(
     pixmap: &mut tiny_skia::Pixmap,
@@ -215,11 +228,12 @@ pub fn draw_waveform_line(
     let half_height = h / 2.0;
     let num_cols = w.floor() as usize;
 
-    let mut pb = tiny_skia::PathBuilder::new();
-
     if samples.len() <= num_cols {
-        // Fewer samples than pixels: connect each sample with a line
+        // Sparse path: few samples, many pixels → keep the connected
+        // line stroke so the visible segments look smooth. This branch
+        // is not on the hot profile.
         let step = w / samples.len().max(1) as f32;
+        let mut pb = tiny_skia::PathBuilder::new();
         let py0 = sample_to_y(samples[0], min_db, max_db, centre_y, half_height);
         pb.move_to(x, py0);
         for (i, &s) in samples.iter().enumerate().skip(1) {
@@ -227,72 +241,63 @@ pub fn draw_waveform_line(
             let py = sample_to_y(s, min_db, max_db, centre_y, half_height);
             pb.line_to(px, py);
         }
-    } else {
-        // More samples than pixels: draw two connected envelope paths
-        // (max envelope and min envelope) with consistent stroke width.
-        let (mins, maxs) = decimate_to_columns(samples, num_cols);
-
-        // Max envelope path (positive peaks)
-        let y0_top = sample_to_y(maxs[0], min_db, max_db, centre_y, half_height);
-        pb.move_to(x, y0_top);
-        for i in 1..num_cols {
-            let px = x + i as f32;
-            let y_top = sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
-            pb.line_to(px, y_top);
+        if let Some(path) = pb.finish() {
+            let mut paint = tiny_skia::Paint::default();
+            paint.set_color(color);
+            paint.anti_alias = true;
+            let stroke = tiny_skia::Stroke {
+                width: 1.0,
+                ..Default::default()
+            };
+            pixmap.stroke_path(
+                &path,
+                &paint,
+                &stroke,
+                tiny_skia::Transform::identity(),
+                None,
+            );
         }
-
-        // Min envelope path (negative peaks)
-        let mut pb2 = tiny_skia::PathBuilder::new();
-        let y0_bot = sample_to_y(mins[0], min_db, max_db, centre_y, half_height);
-        pb2.move_to(x, y0_bot);
-        for i in 1..num_cols {
-            let px = x + i as f32;
-            let y_bot = sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
-            pb2.line_to(px, y_bot);
-        }
-
-        let mut paint = tiny_skia::Paint::default();
-        paint.set_color(color);
-        paint.anti_alias = true;
-        let stroke = tiny_skia::Stroke {
-            width: 1.0,
-            ..Default::default()
-        };
-        if let Some(path2) = pb2.finish() {
-            pixmap.stroke_path(&path2, &paint, &stroke, tiny_skia::Transform::identity(), None);
-        }
-        // Also draw vertical segments connecting the two envelopes at each column
-        // to fill the gap between min and max.
-        for i in 0..num_cols {
-            let px = x + i as f32;
-            let y_top = sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
-            let y_bot = sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
-            let seg_h = (y_bot - y_top).max(0.0);
-            if seg_h > 1.0 {
-                tiny_skia_widgets::draw_rect(pixmap, px, y_top, 1.0, seg_h, color);
-            }
-        }
+        return;
     }
 
-    if let Some(path) = pb.finish() {
-        let mut paint = tiny_skia::Paint::default();
-        paint.set_color(color);
-        paint.anti_alias = true;
-        let stroke = tiny_skia::Stroke {
-            width: 1.0,
-            ..Default::default()
-        };
-        pixmap.stroke_path(
-            &path,
-            &paint,
-            &stroke,
-            tiny_skia::Transform::identity(),
-            None,
-        );
+    // Dense path: one 1px-wide vertical rect per column, spanning the
+    // (min, max) envelope PLUS a "bridge" to the previous column's
+    // envelope so adjacent columns' tops/bottoms connect instead of
+    // showing visible steps. Drawn via `draw_rect_opaque` — the
+    // caller passes an opaque color and we skip tiny-skia's per-pixel
+    // blend loop, which was dominating CPU time in the v2 profile.
+    let (mins, maxs) = decimate_to_columns(samples, num_cols);
+    let mut prev_top = sample_to_y(maxs[0], min_db, max_db, centre_y, half_height);
+    let mut prev_bot = sample_to_y(mins[0], min_db, max_db, centre_y, half_height);
+    // First column: its own range only.
+    let h0 = (prev_bot - prev_top).max(1.0);
+    tiny_skia_widgets::draw_rect_opaque(pixmap, x, prev_top, 1.0, h0, color);
+    for i in 1..num_cols {
+        let px = x + i as f32;
+        let y_top = sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
+        let y_bot = sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
+        let top = y_top.min(prev_top);
+        let bot = y_bot.max(prev_bot);
+        let seg_h = (bot - top).max(1.0);
+        tiny_skia_widgets::draw_rect_opaque(pixmap, px, top, 1.0, seg_h, color);
+        prev_top = y_top;
+        prev_bot = y_bot;
     }
 }
 
-/// Draw a waveform as a filled region from center line using tiny-skia paths.
+/// Draw a waveform as a filled envelope from the center line.
+///
+/// `color` must be a fully opaque color — callers should pre-mix any
+/// desired transparency with the background via `theme::blend_u32`.
+/// All dense-path rects are drawn via `draw_rect_opaque` with
+/// `BlendMode::Source`, which skips tiny-skia's per-pixel blend loop
+/// and is roughly 4× faster than source-over blending for the
+/// hundreds of thin columns a scope emits per frame.
+///
+/// In the sparse-samples path (extreme zoom) the renderer still
+/// builds a closed path and fills it via `fill_path`, because at
+/// that density the polygon has few edges and the visible fill
+/// quality matters.
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 pub fn draw_waveform_filled(
     pixmap: &mut tiny_skia::Pixmap,
@@ -303,17 +308,8 @@ pub fn draw_waveform_filled(
     h: f32,
     min_db: f32,
     max_db: f32,
-    color: tiny_skia::Color,
-    alpha: f32,
+    fill_color: tiny_skia::Color,
 ) {
-    let fill_color = tiny_skia::Color::from_rgba(
-        color.red(),
-        color.green(),
-        color.blue(),
-        alpha,
-    )
-    .unwrap_or(color);
-
     if samples.is_empty() || w < 2.0 {
         return;
     }
@@ -322,74 +318,91 @@ pub fn draw_waveform_filled(
     let half_height = h / 2.0;
     let num_cols = w.floor() as usize;
 
-    let mut pb = tiny_skia::PathBuilder::new();
-
     if samples.len() <= num_cols {
-        // Forward pass: sample values
+        // Sparse path: few samples, many pixels. Keep the closed
+        // polygon fill so the visible shape is smooth. Not on the
+        // hot profile.
         let step = w / samples.len().max(1) as f32;
+        let mut pb = tiny_skia::PathBuilder::new();
         pb.move_to(x, centre_y);
         for (i, &s) in samples.iter().enumerate() {
             let px = x + i as f32 * step;
             let py = sample_to_y(s, min_db, max_db, centre_y, half_height);
             pb.line_to(px, py);
         }
-        // Close back to center line
         pb.line_to(x + (samples.len() - 1) as f32 * step, centre_y);
         pb.close();
-    } else {
-        // Envelope fill: max values forward, min values backward
-        let (mins, maxs) = decimate_to_columns(samples, num_cols);
-        // Forward along max envelope (above center = peaks)
-        pb.move_to(x, centre_y);
-        for i in 0..num_cols {
-            let px = x + i as f32;
-            let y_top = sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
-            pb.line_to(px, y_top);
-        }
-        // Connect to center at far end
-        pb.line_to(x + (num_cols - 1) as f32, centre_y);
-        pb.close();
-
-        // Second path for negative half (below center)
-        let mut pb2 = tiny_skia::PathBuilder::new();
-        pb2.move_to(x, centre_y);
-        for i in 0..num_cols {
-            let px = x + i as f32;
-            let y_bot = sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
-            pb2.line_to(px, y_bot);
-        }
-        pb2.line_to(x + (num_cols - 1) as f32, centre_y);
-        pb2.close();
-
-        let mut paint = tiny_skia::Paint::default();
-        paint.set_color(fill_color);
-        paint.anti_alias = true;
-        if let Some(path2) = pb2.finish() {
+        if let Some(path) = pb.finish() {
+            let mut paint = tiny_skia::Paint::default();
+            paint.set_color(fill_color);
+            paint.anti_alias = true;
             pixmap.fill_path(
-                &path2,
+                &path,
                 &paint,
                 tiny_skia::FillRule::Winding,
                 tiny_skia::Transform::identity(),
                 None,
             );
         }
+        return;
     }
 
-    if let Some(path) = pb.finish() {
-        let mut paint = tiny_skia::Paint::default();
-        paint.set_color(fill_color);
-        paint.anti_alias = true;
-        pixmap.fill_path(
-            &path,
-            &paint,
-            tiny_skia::FillRule::Winding,
-            tiny_skia::Transform::identity(),
-            None,
-        );
+    // Dense path: per-column vertical rects from the center to the
+    // positive and negative envelope peaks, with each column extended
+    // to bridge the previous column's envelope so adjacent columns'
+    // peaks connect instead of showing visible steps.
+    let (mins, maxs) = decimate_to_columns(samples, num_cols);
+    let mut prev_top = sample_to_y(maxs[0], min_db, max_db, centre_y, half_height);
+    let mut prev_bot = sample_to_y(mins[0], min_db, max_db, centre_y, half_height);
+
+    // Helper closure: draw the two halves of a column from `top` and
+    // `bot` (which already incorporate any bridge extension) using
+    // the opaque blit fast path.
+    let mut draw_column = |px: f32, top: f32, bot: f32| {
+        if top < centre_y {
+            tiny_skia_widgets::draw_rect_opaque(
+                pixmap,
+                px,
+                top,
+                1.0,
+                centre_y - top,
+                fill_color,
+            );
+        }
+        if bot > centre_y {
+            tiny_skia_widgets::draw_rect_opaque(
+                pixmap,
+                px,
+                centre_y,
+                1.0,
+                bot - centre_y,
+                fill_color,
+            );
+        }
+    };
+
+    draw_column(x, prev_top, prev_bot);
+    for i in 1..num_cols {
+        let y_top = sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
+        let y_bot = sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
+        let top = y_top.min(prev_top);
+        let bot = y_bot.max(prev_bot);
+        draw_column(x + i as f32, top, bot);
+        prev_top = y_top;
+        prev_bot = y_bot;
     }
 }
 
 /// Draw a waveform using the specified draw style.
+///
+/// The filled variants are drawn with a pre-mixed opaque color
+/// (`theme::blend_u32(theme::BG, color, alpha)`) rather than a
+/// translucent overlay, so the fast `draw_rect_opaque` path can be
+/// used. This is visually identical to a translucent blend against
+/// the solid background, provided nothing is drawn between the
+/// background fill and the waveform that we still want to show
+/// through (the grid is under the waveform and gets hidden inside
+/// filled columns — that's acceptable for a scope).
 #[allow(clippy::too_many_arguments)]
 pub fn draw_waveform(
     pixmap: &mut tiny_skia::Pixmap,
@@ -403,17 +416,19 @@ pub fn draw_waveform(
     color: u32,
     draw_style: crate::DrawStyle,
 ) {
-    let c = theme::to_color(color);
+    let line_c = theme::to_color(color);
     match draw_style {
         crate::DrawStyle::Line => {
-            draw_waveform_line(pixmap, samples, x, y, w, h, min_db, max_db, c);
+            draw_waveform_line(pixmap, samples, x, y, w, h, min_db, max_db, line_c);
         }
         crate::DrawStyle::Filled => {
-            draw_waveform_filled(pixmap, samples, x, y, w, h, min_db, max_db, c, 0.75);
+            let fill_c = theme::to_color(theme::blend_u32(theme::BG, color, 0.75));
+            draw_waveform_filled(pixmap, samples, x, y, w, h, min_db, max_db, fill_c);
         }
         crate::DrawStyle::Both => {
-            draw_waveform_filled(pixmap, samples, x, y, w, h, min_db, max_db, c, 0.3);
-            draw_waveform_line(pixmap, samples, x, y, w, h, min_db, max_db, c);
+            let fill_c = theme::to_color(theme::blend_u32(theme::BG, color, 0.3));
+            draw_waveform_filled(pixmap, samples, x, y, w, h, min_db, max_db, fill_c);
+            draw_waveform_line(pixmap, samples, x, y, w, h, min_db, max_db, line_c);
         }
     }
 }
@@ -903,7 +918,7 @@ mod tests {
         let mut pm = make_test_pixmap(200, 100);
         let samples = sine_samples(400);
         let color = tiny_skia::Color::from_rgba8(255, 128, 0, 255);
-        draw_waveform_filled(&mut pm, &samples, 0.0, 0.0, 200.0, 100.0, -48.0, 0.0, color, 0.75);
+        draw_waveform_filled(&mut pm, &samples, 0.0, 0.0, 200.0, 100.0, -48.0, 0.0, color);
         assert!(pixmap_has_nonzero(&pm));
     }
 

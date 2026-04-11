@@ -38,7 +38,12 @@ pub fn color_border() -> Color {
 // Primitive drawing helpers
 // ---------------------------------------------------------------------------
 
-/// Fill a rectangle on `pixmap`.
+/// Fill a rectangle on `pixmap` using source-over compositing.
+///
+/// This is the safe default — respects alpha, composes correctly over
+/// existing pixels. If the color is fully opaque and you know you're
+/// overwriting the region, prefer [`draw_rect_opaque`] which skips the
+/// per-pixel blend entirely.
 pub fn draw_rect(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, color: Color) {
     let Some(rect) = Rect::from_xywh(x, y, w, h) else {
         return;
@@ -46,6 +51,28 @@ pub fn draw_rect(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, color: Col
     let mut paint = Paint::default();
     paint.set_color(color);
     paint.anti_alias = false;
+    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+}
+
+/// Fill a rectangle on `pixmap` using `BlendMode::Source` — the
+/// destination pixels are **replaced** with the source color, with no
+/// source-over blend. This is significantly faster than [`draw_rect`]
+/// because it skips the per-pixel blend loop (`source_over_rgba_tail`
+/// in tiny-skia's raster pipeline), which dominates CPU time when
+/// drawing many small rects.
+///
+/// Only use when you're happy to overwrite whatever was under the
+/// rect. The color should generally be opaque — with `Source` mode a
+/// translucent color produces a visually-translucent *pixel* (alpha
+/// stored in the destination), not a blended composite.
+pub fn draw_rect_opaque(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, color: Color) {
+    let Some(rect) = Rect::from_xywh(x, y, w, h) else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = false;
+    paint.blend_mode = tiny_skia::BlendMode::Source;
     pixmap.fill_rect(rect, &paint, Transform::identity(), None);
 }
 

@@ -120,6 +120,27 @@ pub fn to_color_alpha(argb: u32, alpha: f32) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba(r, g, b, alpha).unwrap()
 }
 
+/// Linearly blend two ARGB u32 colors at `t` (0.0 = a, 1.0 = b),
+/// returning a fully opaque ARGB u32. Used to pre-mix translucent
+/// overlays with the known background color so they can be drawn
+/// with an opaque `BlendMode::Source` fast path (~4× faster per pixel
+/// than source-over blending). The result is visually identical to
+/// drawing `b` at alpha `t` over `a`, as long as nothing else ever
+/// draws under it.
+pub fn blend_u32(a: u32, b: u32, t: f32) -> u32 {
+    let t = t.clamp(0.0, 1.0);
+    let ar = ((a >> 16) & 0xFF) as f32;
+    let ag = ((a >> 8) & 0xFF) as f32;
+    let ab = (a & 0xFF) as f32;
+    let br = ((b >> 16) & 0xFF) as f32;
+    let bg = ((b >> 8) & 0xFF) as f32;
+    let bb = (b & 0xFF) as f32;
+    let r = (ar * (1.0 - t) + br * t).round() as u32;
+    let g = (ag * (1.0 - t) + bg * t).round() as u32;
+    let bl = (ab * (1.0 - t) + bb * t).round() as u32;
+    0xFF00_0000 | (r << 16) | (g << 8) | bl
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
