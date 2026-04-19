@@ -80,6 +80,15 @@ impl<A: Clone + PartialEq> TextEditState<A> {
             self.buffer.push(c);
         }
     }
+
+    /// Remove the last character from the buffer if there's an active edit
+    /// and the buffer is not empty. No-op otherwise.
+    pub fn backspace(&mut self) {
+        if self.active.is_none() {
+            return;
+        }
+        self.buffer.pop();
+    }
 }
 
 impl<A: Clone + PartialEq> Default for TextEditState<A> {
@@ -181,6 +190,29 @@ mod tests {
     fn insert_char_noop_when_inactive() {
         let mut s: TextEditState<A> = TextEditState::new();
         s.insert_char('5');
+        assert!(s.active_for(&A::Gain).is_none());
+    }
+
+    #[test]
+    fn backspace_removes_last_char() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.begin(A::Gain, "123");
+        s.backspace();
+        assert_eq!(s.active_for(&A::Gain), Some("12"));
+    }
+
+    #[test]
+    fn backspace_on_empty_buffer_is_noop() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.begin(A::Gain, "");
+        s.backspace();
+        assert_eq!(s.active_for(&A::Gain), Some(""));
+    }
+
+    #[test]
+    fn backspace_when_inactive_is_noop() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.backspace();
         assert!(s.active_for(&A::Gain).is_none());
     }
 }
