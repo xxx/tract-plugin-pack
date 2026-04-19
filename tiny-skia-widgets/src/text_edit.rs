@@ -103,16 +103,14 @@ impl<A: Clone + PartialEq> TextEditState<A> {
         self.active.is_some()
     }
 
-    /// `true` if the caret should be visible. Blinks on a 500ms cycle
-    /// (250ms on, 250ms off) while an edit is active. Always `false` when
-    /// inactive. Resets when a new edit begins.
+    /// `true` during the "on" half of the 1000 ms blink cycle. Returns
+    /// `false` when no edit is active.
     pub fn caret_visible(&self) -> bool {
-        if !self.is_active() {
+        if self.active.is_none() {
             return false;
         }
-        let elapsed_ms = self.started_at.elapsed().as_millis() as u64;
-        let phase = elapsed_ms % 500;
-        phase < 250
+        let elapsed_ms = self.started_at.elapsed().as_millis();
+        (elapsed_ms % 1000) < 500
     }
 }
 
@@ -277,15 +275,14 @@ mod tests {
     }
 
     #[test]
-    fn caret_visible_blinks_on_off() {
+    fn caret_visible_flips_after_half_second() {
         use std::thread;
         let mut s: TextEditState<A> = TextEditState::new();
-        s.begin(A::Gain, "10");
-        assert!(s.caret_visible());
-        thread::sleep(std::time::Duration::from_millis(260));
-        assert!(!s.caret_visible());
-        thread::sleep(std::time::Duration::from_millis(250));
-        assert!(s.caret_visible());
+        s.begin(A::Gain, "");
+        thread::sleep(std::time::Duration::from_millis(550));
+        assert!(!s.caret_visible(), "hidden ~550ms in (second half of 1000ms cycle)");
+        thread::sleep(std::time::Duration::from_millis(500));
+        assert!(s.caret_visible(), "visible again ~1050ms in (start of next cycle)");
     }
 
     #[test]
@@ -293,7 +290,7 @@ mod tests {
         use std::thread;
         let mut s: TextEditState<A> = TextEditState::new();
         s.begin(A::Gain, "10");
-        thread::sleep(std::time::Duration::from_millis(300));
+        thread::sleep(std::time::Duration::from_millis(550));
         assert!(!s.caret_visible());
         s.begin(A::Freq, "440");
         assert!(s.caret_visible());
