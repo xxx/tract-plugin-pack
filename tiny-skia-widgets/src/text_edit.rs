@@ -35,7 +35,14 @@ impl<A: Clone + PartialEq> TextEditState<A> {
         self.buffer.clear();
         self.buffer.push_str(initial);
         if self.buffer.len() > MAX_BUFFER_LEN {
-            self.buffer.truncate(MAX_BUFFER_LEN);
+            // Truncate on the nearest char boundary at or below MAX_BUFFER_LEN.
+            // Callers pass ASCII numeric strings, but this keeps `begin` panic-safe
+            // if that ever changes (insert_char filters non-numeric in Task 2).
+            let end = (0..=MAX_BUFFER_LEN)
+                .rev()
+                .find(|&i| self.buffer.is_char_boundary(i))
+                .unwrap_or(0);
+            self.buffer.truncate(end);
         }
         self.started_at = Instant::now();
     }
@@ -101,5 +108,13 @@ mod tests {
         s.begin(A::Freq, "440");
         assert!(s.active_for(&A::Gain).is_none());
         assert_eq!(s.active_for(&A::Freq), Some("440"));
+    }
+
+    #[test]
+    fn begin_on_same_action_replaces_buffer() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.begin(A::Gain, "-6.0");
+        s.begin(A::Gain, "-12.0");
+        assert_eq!(s.active_for(&A::Gain), Some("-12.0"));
     }
 }
