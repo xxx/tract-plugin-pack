@@ -10,6 +10,7 @@ pub mod editor_base;
 pub mod param_dial;
 pub mod primitives;
 pub mod text;
+pub mod text_edit;
 
 pub use controls::*;
 pub use drag::*;
@@ -17,3 +18,4 @@ pub use editor_base::*;
 pub use param_dial::*;
 pub use primitives::*;
 pub use text::*;
+pub use text_edit::*;

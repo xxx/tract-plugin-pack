@@ -296,3 +296,14 @@ mod tests {
         assert!(s.caret_visible());
     }
 }
+
+#[test]
+fn text_edit_state_is_re_exported() {
+    use crate::TextEditState;
+    #[derive(Clone, PartialEq)]
+    #[allow(dead_code)]
+    enum TestAction {
+        Test,
+    }
+    let _s = TextEditState::<TestAction>::new();
+}
