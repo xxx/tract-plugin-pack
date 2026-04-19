@@ -89,6 +89,19 @@ impl<A: Clone + PartialEq> TextEditState<A> {
         }
         self.buffer.pop();
     }
+
+    /// Finalize the edit and return the action and buffer contents.
+    /// Returns `None` if no edit is active. Clears the state after returning.
+    pub fn commit(&mut self) -> Option<(A, String)> {
+        let action = self.active.take()?;
+        let buffer = std::mem::take(&mut self.buffer);
+        Some((action, buffer))
+    }
+
+    /// Check if an edit is currently active.
+    pub fn is_active(&self) -> bool {
+        self.active.is_some()
+    }
 }
 
 impl<A: Clone + PartialEq> Default for TextEditState<A> {
@@ -214,5 +227,34 @@ mod tests {
         let mut s: TextEditState<A> = TextEditState::new();
         s.backspace();
         assert!(s.active_for(&A::Gain).is_none());
+    }
+
+    #[test]
+    fn commit_returns_action_and_buffer() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.begin(A::Gain, "");
+        s.insert_char('5');
+        let (action, buffer) = s.commit().unwrap();
+        assert_eq!(action, A::Gain);
+        assert_eq!(buffer, "5");
+    }
+
+    #[test]
+    fn commit_clears_state() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.begin(A::Gain, "-6.0");
+        s.commit();
+        assert!(s.active_for(&A::Gain).is_none());
+        assert!(s.commit().is_none());
+    }
+
+    #[test]
+    fn is_active_matches_state() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        assert!(!s.is_active());
+        s.begin(A::Gain, "10");
+        assert!(s.is_active());
+        s.cancel();
+        assert!(!s.is_active());
     }
 }
