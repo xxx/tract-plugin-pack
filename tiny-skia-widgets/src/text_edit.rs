@@ -18,6 +18,11 @@ pub struct TextEditState<A: Clone + PartialEq> {
 /// Maximum buffer length (defensive cap — typed values are short).
 const MAX_BUFFER_LEN: usize = 16;
 
+/// Check if a character is valid for numeric entry: 0-9, . - + e E
+fn is_numeric_char(c: char) -> bool {
+    matches!(c, '0'..='9' | '.' | '-' | '+' | 'e' | 'E')
+}
+
 impl<A: Clone + PartialEq> TextEditState<A> {
     pub fn new() -> Self {
         Self {
@@ -59,6 +64,21 @@ impl<A: Clone + PartialEq> TextEditState<A> {
     pub fn cancel(&mut self) {
         self.active = None;
         self.buffer.clear();
+    }
+
+    /// Insert a character at the end of the buffer if there's an active edit.
+    /// Only accepts numeric characters (0-9 . - + e E). Respects the 16-char cap.
+    /// No-op if no edit is active.
+    pub fn insert_char(&mut self, c: char) {
+        if self.active.is_none() {
+            return;
+        }
+        if !is_numeric_char(c) {
+            return;
+        }
+        if self.buffer.len() < MAX_BUFFER_LEN {
+            self.buffer.push(c);
+        }
     }
 }
 
@@ -116,5 +136,51 @@ mod tests {
         s.begin(A::Gain, "-6.0");
         s.begin(A::Gain, "-12.0");
         assert_eq!(s.active_for(&A::Gain), Some("-12.0"));
+    }
+
+    #[test]
+    fn insert_char_accepts_digits() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.begin(A::Gain, "");
+        s.insert_char('5');
+        assert_eq!(s.active_for(&A::Gain), Some("5"));
+    }
+
+    #[test]
+    fn insert_char_accepts_numeric_chars() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.begin(A::Gain, "-6");
+        s.insert_char('.');
+        s.insert_char('5');
+        s.insert_char('+');
+        assert_eq!(s.active_for(&A::Gain), Some("-6.5+"));
+    }
+
+    #[test]
+    fn insert_char_rejects_non_numeric() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.begin(A::Gain, "10");
+        s.insert_char('a');
+        s.insert_char(' ');
+        assert_eq!(s.active_for(&A::Gain), Some("10"));
+    }
+
+    #[test]
+    fn insert_char_respects_max_buffer_len() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.begin(A::Gain, "");
+        for _ in 0..20 {
+            s.insert_char('5');
+        }
+        let buf = s.active_for(&A::Gain).unwrap();
+        assert_eq!(buf.len(), MAX_BUFFER_LEN);
+        assert_eq!(buf, "5555555555555555");
+    }
+
+    #[test]
+    fn insert_char_noop_when_inactive() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.insert_char('5');
+        assert!(s.active_for(&A::Gain).is_none());
     }
 }
