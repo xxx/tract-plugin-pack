@@ -474,10 +474,12 @@ mod tests {
             output.push(mix * wet + dry_mix * dry);
         }
 
+        // Identity fast-path trims wet by 3 dB; expected = mix*trim*input + (1-mix)*input.
+        let trim = 0.7079458_f32;
         let skip = FFT_SIZE * 2;
         let mut max_err = 0.0_f32;
         for i in skip..num_samples {
-            let expected = input[i - FFT_SIZE];
+            let expected = mix * trim * input[i - FFT_SIZE] + dry_mix * input[i - FFT_SIZE];
             let err = (output[i] - expected).abs();
             max_err = max_err.max(err);
         }

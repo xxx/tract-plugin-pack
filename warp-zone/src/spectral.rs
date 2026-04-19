@@ -169,10 +169,31 @@ impl SpectralShifter {
         self.fft_forward
             .process_with_scratch(&mut self.fft_buf, &mut self.scratch);
 
-        // Identity short-circuit: skip phase vocoder when no shift/stretch
+        // Identity short-circuit: skip phase vocoder when no shift/stretch.
+        //
+        // Attenuate the identity output by 3 dB to match the RMS level the
+        // remap path produces on broadband input. Without this trim,
+        // exact-default settings output the input verbatim (full gain),
+        // while any non-identity setting loses ~3 dB RMS due to max-wins
+        // dropping each target bin's weaker contributor plus the
+        // independent-bin phase accumulation breaking the main-lobe
+        // vertical phase coherence a windowed sinusoid relies on for its
+        // peak sum (the two paths' peaks only differ by ~1.7 dB; RMS
+        // differs more because the non-identity output is slightly
+        // spikier). Matching RMS rather than peak tracks perceived
+        // loudness, which is what makes the moment-to-moment volume feel
+        // continuous as the user moves the dial off default. This is a
+        // practical calibration against measured program material, not a
+        // mathematical derivation.
+        const IDENTITY_TRIM: f32 = 0.7079458; // 10^(-3.0 / 20)
         let is_identity = shift.abs() < 1e-6 && (stretch - 1.0).abs() < 1e-6;
         if is_identity {
-            self.out_buf.copy_from_slice(&self.fft_buf);
+            for k in 0..n {
+                self.out_buf[k] = Complex::new(
+                    self.fft_buf[k].re * IDENTITY_TRIM,
+                    self.fft_buf[k].im * IDENTITY_TRIM,
+                );
+            }
         } else {
             self.remap_bins(shift, stretch, low_bin, high_bin);
         }
@@ -348,9 +369,12 @@ mod tests {
         let skip = fft_size + fft_size;
         let latency = fft_size;
 
+        // Identity fast path trims output by 3 dB (≈×0.708) to match the
+        // typical non-identity RMS level — see IDENTITY_TRIM in process_frame.
+        let trim = 0.7079458_f32;
         let mut max_err = 0.0_f32;
         for i in skip..num_samples {
-            let expected = input[i - latency];
+            let expected = input[i - latency] * trim;
             let err = (output[i] - expected).abs();
             max_err = max_err.max(err);
         }
