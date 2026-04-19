@@ -102,6 +102,18 @@ impl<A: Clone + PartialEq> TextEditState<A> {
     pub fn is_active(&self) -> bool {
         self.active.is_some()
     }
+
+    /// `true` if the caret should be visible. Blinks on a 500ms cycle
+    /// (250ms on, 250ms off) while an edit is active. Always `false` when
+    /// inactive. Resets when a new edit begins.
+    pub fn caret_visible(&self) -> bool {
+        if !self.is_active() {
+            return false;
+        }
+        let elapsed_ms = self.started_at.elapsed().as_millis() as u64;
+        let phase = elapsed_ms % 500;
+        phase < 250
+    }
 }
 
 impl<A: Clone + PartialEq> Default for TextEditState<A> {
@@ -256,5 +268,34 @@ mod tests {
         assert!(s.is_active());
         s.cancel();
         assert!(!s.is_active());
+    }
+
+    #[test]
+    fn caret_visible_false_when_inactive() {
+        let s: TextEditState<A> = TextEditState::new();
+        assert!(!s.caret_visible());
+    }
+
+    #[test]
+    fn caret_visible_blinks_on_off() {
+        use std::thread;
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.begin(A::Gain, "10");
+        assert!(s.caret_visible());
+        thread::sleep(std::time::Duration::from_millis(260));
+        assert!(!s.caret_visible());
+        thread::sleep(std::time::Duration::from_millis(250));
+        assert!(s.caret_visible());
+    }
+
+    #[test]
+    fn caret_visible_resets_on_begin() {
+        use std::thread;
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.begin(A::Gain, "10");
+        thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!s.caret_visible());
+        s.begin(A::Freq, "440");
+        assert!(s.caret_visible());
     }
 }
