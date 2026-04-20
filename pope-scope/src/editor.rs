@@ -28,21 +28,21 @@ pub fn default_editor_state() -> Arc<EditorState> {
 
 // ── Hit testing ─────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum HitAction {
     Dial(ParamId),
     Button(ButtonAction),
     Control(controls::ControlAction),
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum ParamId {
     Timebase,
     MinDb,
     MaxDb,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum ButtonAction {
     ToggleFreeze,
     ToggleMono,
@@ -160,6 +160,7 @@ struct PopeScopeWindow {
     /// Last frame timestamp for dt computation.
     last_frame_time: std::time::Instant,
     drag: widgets::DragState<HitAction>,
+    text_edit: widgets::TextEditState<HitAction>,
 }
 
 impl PopeScopeWindow {
@@ -194,6 +195,7 @@ impl PopeScopeWindow {
             peak_holds: Vec::new(),
             last_frame_time: std::time::Instant::now(),
             drag: widgets::DragState::new(),
+            text_edit: widgets::TextEditState::new(),
         }
     }
 
@@ -225,6 +227,28 @@ impl PopeScopeWindow {
         setter.begin_set_parameter(p);
         setter.set_parameter_normalized(p, p.default_normalized_value());
         setter.end_set_parameter(p);
+    }
+
+    fn formatted_value_without_unit(&self, id: ParamId) -> String {
+        use nih_plug::prelude::Param;
+        let p = self.float_param(id);
+        let v = p.modulated_normalized_value();
+        p.normalized_value_to_string(v, false)
+    }
+
+    fn commit_text_edit(&mut self) {
+        use nih_plug::prelude::Param;
+        let Some((action, text)) = self.text_edit.commit() else {
+            return;
+        };
+        let HitAction::Dial(param_id) = action else { return };
+        let p = self.float_param(param_id);
+        let norm = p.string_to_normalized_value(&text);
+        let Some(norm) = norm else { return };
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        self.begin_set_param(&setter, param_id);
+        self.set_param_normalized(&setter, param_id, norm);
+        self.end_set_param(&setter, param_id);
     }
 
     // ── Layout helpers ──────────────────────────────────────────────────
@@ -1190,6 +1214,11 @@ impl PopeScopeWindow {
                 theme::to_color(theme::PRIMARY_DIM),
             );
             let tb_normalized = self.params.timebase.modulated_normalized_value();
+            let editing_buf: Option<String> = self
+                .text_edit
+                .active_for(&HitAction::Dial(ParamId::Timebase))
+                .map(str::to_owned);
+            let caret = self.text_edit.caret_visible();
             widgets::draw_outline_slider(
                 &mut self.surface.pixmap,
                 tr,
@@ -1203,8 +1232,8 @@ impl PopeScopeWindow {
                 border_c,
                 active_text_c,
                 slider_fill_c,
-                None,
-                false,
+                editing_buf.as_deref(),
+                caret,
             );
             self.drag.push_region(cx2, row2_y + label_gap, slider_w, row_h, HitAction::Dial(ParamId::Timebase));
 
@@ -1223,6 +1252,11 @@ impl PopeScopeWindow {
             theme::to_color(theme::PRIMARY_DIM),
         );
         let min_normalized = self.params.min_db.modulated_normalized_value();
+        let editing_buf: Option<String> = self
+            .text_edit
+            .active_for(&HitAction::Dial(ParamId::MinDb))
+            .map(str::to_owned);
+        let caret = self.text_edit.caret_visible();
         widgets::draw_outline_slider(
             &mut self.surface.pixmap,
             tr,
@@ -1236,8 +1270,8 @@ impl PopeScopeWindow {
             border_c,
             active_text_c,
             slider_fill_c,
-            None,
-            false,
+            editing_buf.as_deref(),
+            caret,
         );
         self.drag.push_region(cx2, row2_y + label_gap, slider_w, row_h, HitAction::Dial(ParamId::MinDb));
 
@@ -1255,6 +1289,11 @@ impl PopeScopeWindow {
             theme::to_color(theme::PRIMARY_DIM),
         );
         let max_normalized = self.params.max_db.modulated_normalized_value();
+        let editing_buf: Option<String> = self
+            .text_edit
+            .active_for(&HitAction::Dial(ParamId::MaxDb))
+            .map(str::to_owned);
+        let caret = self.text_edit.caret_visible();
         widgets::draw_outline_slider(
             &mut self.surface.pixmap,
             tr,
@@ -1268,8 +1307,8 @@ impl PopeScopeWindow {
             border_c,
             active_text_c,
             slider_fill_c,
-            None,
-            false,
+            editing_buf.as_deref(),
+            caret,
         );
         self.drag.push_region(cx2, row2_y + label_gap, slider_w, row_h, HitAction::Dial(ParamId::MaxDb));
 
@@ -1335,6 +1374,9 @@ impl baseview::WindowHandler for PopeScopeWindow {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
+                // Auto-commit any in-flight edit before starting a drag
+                self.commit_text_edit();
+
                 let (mx, _my) = self.drag.mouse_pos();
 
                 if let Some(region) = self.drag.hit_test().cloned() {
@@ -1477,6 +1519,44 @@ impl baseview::WindowHandler for PopeScopeWindow {
                     self.end_set_param(&setter, id);
                 }
             }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Right,
+                ..
+            }) => {
+                // Ignore right-click during an active drag.
+                if self.drag.active_action().is_some() {
+                    return baseview::EventStatus::Captured;
+                }
+                if let Some(region) = self.drag.hit_test().cloned() {
+                    // Auto-commit any in-flight edit on a different widget.
+                    self.commit_text_edit();
+                    if let HitAction::Dial(param_id) = region.action {
+                        let initial = self.formatted_value_without_unit(param_id);
+                        self.text_edit.begin(HitAction::Dial(param_id), &initial);
+                    }
+                }
+            }
+            baseview::Event::Keyboard(ev) if self.text_edit.is_active() => {
+                if ev.state != keyboard_types::KeyState::Down {
+                    // Swallow key-up events while editing so the host DAW doesn't
+                    // process Enter/Escape releases as its own shortcuts.
+                    return baseview::EventStatus::Captured;
+                }
+                match &ev.key {
+                    keyboard_types::Key::Character(s) => {
+                        for c in s.chars() {
+                            self.text_edit.insert_char(c);
+                        }
+                    }
+                    keyboard_types::Key::Backspace => self.text_edit.backspace(),
+                    keyboard_types::Key::Escape => self.text_edit.cancel(),
+                    keyboard_types::Key::Enter => {
+                        self.commit_text_edit();
+                    }
+                    _ => return baseview::EventStatus::Ignored,
+                }
+                return baseview::EventStatus::Captured;
+            }
             _ => {}
         }
 
@@ -1557,6 +1637,42 @@ impl Editor for PopeScopeEditor {
         let packed = ((width as u64) << 32) | (height as u64);
         self.pending_resize.store(packed, Ordering::Relaxed);
         true
+    }
+}
+
+#[cfg(test)]
+mod text_entry_tests {
+    use super::*;
+
+    #[test]
+    fn text_edit_roundtrip_for_timebase_action() {
+        let mut text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
+        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Timebase)).is_none());
+
+        text_edit.begin(HitAction::Dial(ParamId::Timebase), "100");
+        assert_eq!(
+            text_edit.active_for(&HitAction::Dial(ParamId::Timebase)),
+            Some("100")
+        );
+
+        text_edit.insert_char('0');
+        assert_eq!(
+            text_edit.active_for(&HitAction::Dial(ParamId::Timebase)),
+            Some("1000")
+        );
+
+        let (action, buffer) = text_edit.commit().unwrap();
+        assert_eq!(action, HitAction::Dial(ParamId::Timebase));
+        assert_eq!(buffer, "1000");
+        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Timebase)).is_none());
+    }
+
+    #[test]
+    fn state_starts_inactive() {
+        let text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
+        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Timebase)).is_none());
+        assert!(text_edit.active_for(&HitAction::Dial(ParamId::MinDb)).is_none());
+        assert!(text_edit.active_for(&HitAction::Dial(ParamId::MaxDb)).is_none());
     }
 }
 
