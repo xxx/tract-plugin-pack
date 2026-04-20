@@ -23,13 +23,13 @@ pub fn default_editor_state() -> Arc<EditorState> {
 
 // ── Hit actions ─────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum HitAction {
     Dial(ParamId),
     Button(ButtonAction),
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum ParamId {
     Shift,
     Stretch,
@@ -39,7 +39,7 @@ enum ParamId {
     HighFreq,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum ButtonAction {
     Freeze,
 }
@@ -110,6 +110,7 @@ struct WarpZoneWindow {
     text_renderer: widgets::TextRenderer,
     color_lut: [[u8; 4]; COLOR_LUT_SIZE],
     drag: widgets::DragState<HitAction>,
+    text_edit: widgets::TextEditState<HitAction>,
 }
 
 impl WarpZoneWindow {
@@ -143,6 +144,7 @@ impl WarpZoneWindow {
             text_renderer,
             color_lut: build_color_lut(),
             drag: widgets::DragState::new(),
+            text_edit: widgets::TextEditState::new(),
         }
     }
 
@@ -177,6 +179,28 @@ impl WarpZoneWindow {
         setter.begin_set_parameter(p);
         setter.set_parameter_normalized(p, p.default_normalized_value());
         setter.end_set_parameter(p);
+    }
+
+    fn formatted_value_without_unit(&self, id: ParamId) -> String {
+        use nih_plug::prelude::Param;
+        let p = self.float_param(id);
+        let v = p.modulated_normalized_value();
+        p.normalized_value_to_string(v, false)
+    }
+
+    fn commit_text_edit(&mut self) {
+        use nih_plug::prelude::Param;
+        let Some((action, text)) = self.text_edit.commit() else {
+            return;
+        };
+        let HitAction::Dial(param_id) = action else { return };
+        let p = self.float_param(param_id);
+        let norm = p.string_to_normalized_value(&text);
+        let Some(norm) = norm else { return };
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        self.begin_set_param(&setter, param_id);
+        self.set_param_normalized(&setter, param_id, norm);
+        self.end_set_param(&setter, param_id);
     }
 
     // ── Drawing ─────────────────────────────────────────────────────────
@@ -271,7 +295,12 @@ impl WarpZoneWindow {
 
         for (i, (param_id, label, normalized, value_text)) in timbre_dials.iter().enumerate() {
             let cx = dial_area_start + timbre_spacing * (i as f32 + 0.5);
-            widgets::draw_dial(
+            let editing_buf: Option<String> = self
+                .text_edit
+                .active_for(&HitAction::Dial(*param_id))
+                .map(str::to_owned);
+            let caret = self.text_edit.caret_visible();
+            widgets::draw_dial_ex(
                 &mut self.surface.pixmap,
                 tr,
                 cx,
@@ -280,6 +309,9 @@ impl WarpZoneWindow {
                 label,
                 value_text,
                 *normalized,
+                None,
+                editing_buf.as_deref(),
+                caret,
             );
             self.drag.push_region(dial_area_start + timbre_spacing * i as f32, y, timbre_spacing, dial_row_h, HitAction::Dial(*param_id));
         }
@@ -288,7 +320,12 @@ impl WarpZoneWindow {
         {
             let (param_id, label, normalized, ref value_text) = mix_dial;
             let mix_cx = w - pad - dial_radius - 10.0 * s;
-            widgets::draw_dial(
+            let editing_buf: Option<String> = self
+                .text_edit
+                .active_for(&HitAction::Dial(param_id))
+                .map(str::to_owned);
+            let caret = self.text_edit.caret_visible();
+            widgets::draw_dial_ex(
                 &mut self.surface.pixmap,
                 tr,
                 mix_cx,
@@ -297,6 +334,9 @@ impl WarpZoneWindow {
                 label,
                 value_text,
                 normalized,
+                None,
+                editing_buf.as_deref(),
+                caret,
             );
             let mix_hit_w = (w - dial_area_start - timbre_area_w) * 0.8;
             self.drag.push_region(mix_cx - mix_hit_w * 0.5, y, mix_hit_w, dial_row_h, HitAction::Dial(param_id));
@@ -312,7 +352,12 @@ impl WarpZoneWindow {
 
         for (i, (param_id, label, normalized, value_text)) in row2_dials.iter().enumerate() {
             let cx = dial_area_start + row2_spacing * (i as f32 + 0.5);
-            widgets::draw_dial(
+            let editing_buf: Option<String> = self
+                .text_edit
+                .active_for(&HitAction::Dial(*param_id))
+                .map(str::to_owned);
+            let caret = self.text_edit.caret_visible();
+            widgets::draw_dial_ex(
                 &mut self.surface.pixmap,
                 tr,
                 cx,
@@ -321,6 +366,9 @@ impl WarpZoneWindow {
                 label,
                 value_text,
                 *normalized,
+                None,
+                editing_buf.as_deref(),
+                caret,
             );
             self.drag.push_region(dial_area_start + row2_spacing * i as f32, y, row2_spacing, row2_h, HitAction::Dial(*param_id));
         }
@@ -479,6 +527,9 @@ impl baseview::WindowHandler for WarpZoneWindow {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
+                // Auto-commit any in-flight edit before starting a drag
+                self.commit_text_edit();
+
                 if let Some(region) = self.drag.hit_test().cloned() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
 
@@ -514,6 +565,44 @@ impl baseview::WindowHandler for WarpZoneWindow {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
                     self.end_set_param(&setter, id);
                 }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Right,
+                ..
+            }) => {
+                // Ignore right-click during an active drag.
+                if self.drag.active_action().is_some() {
+                    return baseview::EventStatus::Captured;
+                }
+                if let Some(region) = self.drag.hit_test().cloned() {
+                    // Auto-commit any in-flight edit on a different widget.
+                    self.commit_text_edit();
+                    if let HitAction::Dial(param_id) = region.action {
+                        let initial = self.formatted_value_without_unit(param_id);
+                        self.text_edit.begin(HitAction::Dial(param_id), &initial);
+                    }
+                }
+            }
+            baseview::Event::Keyboard(ev) if self.text_edit.is_active() => {
+                if ev.state != keyboard_types::KeyState::Down {
+                    // Swallow key-up events while editing so the host DAW doesn't
+                    // process Enter/Escape releases as its own shortcuts.
+                    return baseview::EventStatus::Captured;
+                }
+                match &ev.key {
+                    keyboard_types::Key::Character(s) => {
+                        for c in s.chars() {
+                            self.text_edit.insert_char(c);
+                        }
+                    }
+                    keyboard_types::Key::Backspace => self.text_edit.backspace(),
+                    keyboard_types::Key::Escape => self.text_edit.cancel(),
+                    keyboard_types::Key::Enter => {
+                        self.commit_text_edit();
+                    }
+                    _ => return baseview::EventStatus::Ignored,
+                }
+                return baseview::EventStatus::Captured;
             }
             _ => {}
         }
@@ -612,4 +701,43 @@ impl Editor for WarpZoneEditor {
     fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
     fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
     fn param_values_changed(&self) {}
+}
+
+#[cfg(test)]
+mod text_entry_tests {
+    use super::*;
+
+    #[test]
+    fn text_edit_roundtrip_for_shift_action() {
+        let mut text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
+        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Shift)).is_none());
+
+        text_edit.begin(HitAction::Dial(ParamId::Shift), "-12");
+        assert_eq!(
+            text_edit.active_for(&HitAction::Dial(ParamId::Shift)),
+            Some("-12")
+        );
+
+        text_edit.insert_char('5');
+        assert_eq!(
+            text_edit.active_for(&HitAction::Dial(ParamId::Shift)),
+            Some("-125")
+        );
+
+        let (action, buffer) = text_edit.commit().unwrap();
+        assert_eq!(action, HitAction::Dial(ParamId::Shift));
+        assert_eq!(buffer, "-125");
+        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Shift)).is_none());
+    }
+
+    #[test]
+    fn state_starts_inactive() {
+        let text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
+        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Shift)).is_none());
+        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Stretch)).is_none());
+        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Mix)).is_none());
+        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Feedback)).is_none());
+        assert!(text_edit.active_for(&HitAction::Dial(ParamId::LowFreq)).is_none());
+        assert!(text_edit.active_for(&HitAction::Dial(ParamId::HighFreq)).is_none());
+    }
 }
