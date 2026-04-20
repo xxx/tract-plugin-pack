@@ -36,6 +36,11 @@ fn color_modulation_dot() -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(255, 160, 50, 200)
 }
 
+/// Edit-mode highlight color — a brighter variant of the control background.
+fn color_edit_bg() -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(48, 52, 64, 255)
+}
+
 // ---------------------------------------------------------------------------
 // Geometry helpers
 // ---------------------------------------------------------------------------
@@ -137,7 +142,10 @@ pub fn draw_dial(
     value_text: &str,
     normalized: f32,
 ) {
-    draw_dial_ex(pixmap, text_renderer, cx, cy, radius, label, value_text, normalized, None);
+    draw_dial_ex(
+        pixmap, text_renderer, cx, cy, radius, label, value_text, normalized,
+        None, None, false,
+    );
 }
 
 /// Draw an arc-based rotary dial with optional modulation indicator.
@@ -156,6 +164,8 @@ pub fn draw_dial_ex(
     value_text: &str,
     normalized: f32,
     modulated_normalized: Option<f32>,
+    editing_text: Option<&str>,
+    caret_on: bool,
 ) {
     let n = normalized.clamp(0.0, 1.0);
     let stroke_width = (radius * 0.1).max(2.0);
@@ -226,18 +236,32 @@ pub fn draw_dial_ex(
     let label_y = cy - radius - stroke_width - 8.0;
     text_renderer.draw_text(pixmap, label_x, label_y, label, text_size, color_muted());
 
-    // --- Value text centered below the arc ---
-    let value_w = text_renderer.text_width(value_text, text_size);
-    let value_x = cx - value_w * 0.5;
+    // --- Value readout: buffer + caret when editing, otherwise formatted value ---
     let value_y = cy + radius * 0.71 + text_size + 4.0;
-    text_renderer.draw_text(
-        pixmap,
-        value_x,
-        value_y,
-        value_text,
-        text_size,
-        color_text(),
-    );
+    if let Some(buf) = editing_text {
+        let ref_w = text_renderer.text_width("-999.99", text_size);
+        let box_w = ref_w + 12.0;
+        let box_h = text_size + 6.0;
+        let box_x = cx - box_w * 0.5;
+        let box_y = value_y - text_size - 2.0;
+        crate::primitives::draw_rect(pixmap, box_x, box_y, box_w, box_h, color_edit_bg());
+        crate::primitives::draw_rect_outline(pixmap, box_x, box_y, box_w, box_h, color_accent(), 1.0);
+
+        let buf_x = box_x + 6.0;
+        text_renderer.draw_text(pixmap, buf_x, value_y, buf, text_size, color_text());
+
+        if caret_on {
+            let buf_w = text_renderer.text_width(buf, text_size);
+            let caret_x = buf_x + buf_w + 1.0;
+            let caret_y = box_y + 3.0;
+            let caret_h = box_h - 6.0;
+            crate::primitives::draw_rect(pixmap, caret_x, caret_y, 1.0, caret_h, color_text());
+        }
+    } else {
+        let value_w = text_renderer.text_width(value_text, text_size);
+        let value_x = cx - value_w * 0.5;
+        text_renderer.draw_text(pixmap, value_x, value_y, value_text, text_size, color_text());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +361,7 @@ mod tests {
     fn test_draw_dial_ex_no_modulation() {
         let mut pm = test_pixmap();
         let mut tr = test_renderer();
-        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "Gain", "0 dB", 0.5, None);
+        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "Gain", "0 dB", 0.5, None, None, false);
     }
 
     #[test]
@@ -345,7 +369,7 @@ mod tests {
         let mut pm = test_pixmap();
         let mut tr = test_renderer();
         // Modulated value above unmodulated
-        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "Gain", "0 dB", 0.3, Some(0.7));
+        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "Gain", "0 dB", 0.3, Some(0.7), None, false);
     }
 
     #[test]
@@ -353,7 +377,7 @@ mod tests {
         let mut pm = test_pixmap();
         let mut tr = test_renderer();
         // Modulated value below unmodulated
-        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "Gain", "0 dB", 0.7, Some(0.3));
+        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "Gain", "0 dB", 0.7, Some(0.3), None, false);
     }
 
     #[test]
@@ -361,7 +385,7 @@ mod tests {
         let mut pm = test_pixmap();
         let mut tr = test_renderer();
         // Modulation delta < 0.001 — should skip the arc (no panic)
-        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "X", "v", 0.5, Some(0.5005));
+        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "X", "v", 0.5, Some(0.5005), None, false);
     }
 
     #[test]
@@ -369,8 +393,66 @@ mod tests {
         let mut pm = test_pixmap();
         let mut tr = test_renderer();
         // Out-of-range modulated values must be clamped without panicking
-        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "X", "v", 0.5, Some(-0.5));
-        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "X", "v", 0.5, Some(1.5));
+        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "X", "v", 0.5, Some(-0.5), None, false);
+        draw_dial_ex(&mut pm, &mut tr, 100.0, 100.0, 40.0, "X", "v", 0.5, Some(1.5), None, false);
+    }
+
+    // -----------------------------------------------------------------------
+    // Text-entry overlay rendering
+    // -----------------------------------------------------------------------
+
+    /// With `editing_text = None`, behaviour is byte-identical to the
+    /// unit-aware path. Regression guard for legacy callers.
+    #[test]
+    fn test_draw_dial_ex_editing_none_matches_existing_render() {
+        let mut pm = test_pixmap();
+        let mut tr = test_renderer();
+        draw_dial_ex(
+            &mut pm, &mut tr, 100.0, 100.0, 40.0,
+            "Gain", "-6.0 dB", 0.5, None,
+            /* editing_text */ None, /* caret_on */ false,
+        );
+    }
+
+    #[test]
+    fn test_draw_dial_ex_with_editing_text_no_panic() {
+        let mut pm = test_pixmap();
+        let mut tr = test_renderer();
+        draw_dial_ex(
+            &mut pm, &mut tr, 100.0, 100.0, 40.0,
+            "Gain", "-6.0 dB", 0.5, None,
+            Some("-6."), /* caret_on */ true,
+        );
+        draw_dial_ex(
+            &mut pm, &mut tr, 100.0, 100.0, 40.0,
+            "Gain", "-6.0 dB", 0.5, None,
+            Some("-6."), /* caret_on */ false,
+        );
+    }
+
+    #[test]
+    fn test_draw_dial_editing_highlight_visible() {
+        let mut pm_plain = test_pixmap();
+        let mut pm_edit = test_pixmap();
+        let mut tr = test_renderer();
+        draw_dial_ex(
+            &mut pm_plain, &mut tr, 100.0, 100.0, 40.0,
+            "G", "-6 dB", 0.5, None, None, false,
+        );
+        draw_dial_ex(
+            &mut pm_edit, &mut tr, 100.0, 100.0, 40.0,
+            "G", "-6 dB", 0.5, None, Some("-6"), true,
+        );
+        let y = (100.0 + 40.0 * 0.71 + 6.0) as u32;
+        let plain_px = pm_plain.pixels()[(y * pm_plain.width() + 100) as usize];
+        let edit_px = pm_edit.pixels()[(y * pm_edit.width() + 100) as usize];
+        assert!(
+            plain_px.red() != edit_px.red()
+                || plain_px.green() != edit_px.green()
+                || plain_px.blue() != edit_px.blue()
+                || plain_px.alpha() != edit_px.alpha(),
+            "editing overlay must paint a highlight that differs from background"
+        );
     }
 
     // -----------------------------------------------------------------------
