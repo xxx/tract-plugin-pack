@@ -369,6 +369,81 @@ impl WavetableFilterWindow {
             1.0,
             widgets::color_border(),
         );
+
+        let h = self.physical_height as f32;
+
+        // ── Dial geometry ──
+        let dial_row_h = 60.0 * s;
+        let dial_radius = 22.0 * s;
+
+        // Lower dial row: sits at the bottom of the window
+        let dial_row_y = h - dial_row_h;
+
+        // Frame dial takes the left half; Freq/Res/Drive/Mix share the right half
+        let left_w = w * 0.5;
+        let right_w = w - left_w;
+
+        // Frame dial, centered in left half
+        self.draw_dial(
+            ParamId::Frame,
+            "Frame",
+            left_w * 0.5,
+            dial_row_y + dial_row_h * 0.5,
+            dial_radius,
+        );
+
+        // Right-side dials: 4 evenly spaced
+        let right_dials: [(ParamId, &str); 4] = [
+            (ParamId::Frequency, "Freq"),
+            (ParamId::Resonance, "Res"),
+            (ParamId::Drive, "Drive"),
+            (ParamId::Mix, "Mix"),
+        ];
+        let spacing = right_w / right_dials.len() as f32;
+        for (i, &(pid, label)) in right_dials.iter().enumerate() {
+            let cx = left_w + spacing * (i as f32 + 0.5);
+            let cy = dial_row_y + dial_row_h * 0.5;
+            self.draw_dial(pid, label, cx, cy, dial_radius);
+        }
+    }
+
+    fn draw_dial(&mut self, param_id: ParamId, label: &str, cx: f32, cy: f32, radius: f32) {
+        use nih_plug::prelude::Param;
+        let p = self.float_param(param_id);
+        let unmod = p.unmodulated_normalized_value();
+        let modulated = p.modulated_normalized_value();
+        let value_text = self.format_value(param_id);
+
+        let editing_buf: Option<String> = self
+            .text_edit
+            .active_for(&HitAction::Dial(param_id))
+            .map(str::to_owned);
+        let caret = self.text_edit.caret_visible();
+
+        // Hit region is the bounding square around the dial plus label/value area.
+        let hit_w = radius * 3.2;
+        let hit_h = radius * 3.2;
+        self.drag.push_region(
+            cx - hit_w * 0.5,
+            cy - hit_h * 0.5,
+            hit_w,
+            hit_h,
+            HitAction::Dial(param_id),
+        );
+
+        widgets::draw_dial_ex(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            cx,
+            cy,
+            radius,
+            label,
+            &value_text,
+            unmod,
+            Some(modulated),
+            editing_buf.as_deref(),
+            caret,
+        );
     }
 
     fn resize_buffers(&mut self) {
