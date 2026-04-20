@@ -31,7 +31,7 @@ pub(crate) struct PendingReload {
 
 pub struct WavetableFilter {
     params: Arc<WavetableFilterParams>,
-    editor_state: Arc<nih_plug_vizia::ViziaState>,
+    editor_state: Arc<editor::EditorState>,
     wavetable: Option<Wavetable>,
     sample_rate: f32,
     // Circular buffer for convolution (per channel)
@@ -136,9 +136,6 @@ struct WavetableFilterParams {
     #[persist = "wavetable_path"]
     pub wavetable_path: Arc<Mutex<String>>,
 
-    #[id = "ui_scale"]
-    pub ui_scale: IntParam,
-
     #[id = "frequency"]
     pub frequency: FloatParam,
 
@@ -186,7 +183,7 @@ impl Default for WavetableFilter {
 
         Self {
             params: Arc::new(WavetableFilterParams::new(current_frame_count.clone())),
-            editor_state: editor::default_state(),
+            editor_state: editor::default_editor_state(),
             wavetable: Some(default_wt.clone()),
             sample_rate: 48000.0,
             filter_state: [FilterState::new(KERNEL_LEN), FilterState::new(KERNEL_LEN)],
@@ -741,8 +738,6 @@ impl WavetableFilterParams {
     fn new(frame_count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
         Self {
             wavetable_path: Arc::new(Mutex::new(String::new())),
-            ui_scale: IntParam::new("UI Scale", 100, IntRange::Linear { min: 100, max: 300 })
-                .with_unit("%"),
 
             frequency: FloatParam::new(
                 "Frequency",
@@ -840,12 +835,10 @@ impl Plugin for WavetableFilter {
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         editor::create(
             self.params.clone(),
-            self.params.wavetable_path.clone(),
             self.should_reload.clone(),
             self.pending_reload.clone(),
             self.shared_wavetable.clone(),
             self.wavetable_version.clone(),
-            self.editor_state.clone(),
             self.shared_input_spectrum.clone(),
         )
     }
@@ -858,17 +851,6 @@ impl Plugin for WavetableFilter {
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
         self.crossfade_step = 1.0 / (self.sample_rate * 0.020);
-
-        // Sync editor scale from the persisted ui_scale parameter
-        let scale_pct = self.params.ui_scale.value() as f64;
-        let scale = (scale_pct / 100.0).clamp(1.0, 3.0);
-        // Write into ViziaState so next editor open uses this scale
-        let new_state = nih_plug_vizia::ViziaState::new_with_default_scale_factor(
-            || (editor::WINDOW_WIDTH, editor::WINDOW_HEIGHT),
-            scale,
-        );
-        let new_inner = Arc::try_unwrap(new_state).unwrap();
-        nih_plug::params::persist::PersistentField::set(&self.editor_state, new_inner);
 
         self.try_load_user_wavetable();
 
