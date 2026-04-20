@@ -13,6 +13,12 @@ pub(crate) struct FrameCache {
     pub cached_frame_size: usize,
     pub global_min: f32,
     pub global_max: f32,
+    /// Pre-rasterized 3D background (all strands + bg fill + border + zero line).
+    /// Rebuilt only when the wavetable version changes or the viewport resizes.
+    /// Drawing an active strand on top of this is essentially free compared to
+    /// rasterizing ~40 anti-aliased 200-point strokes every frame.
+    pub bg_pixmap: Option<Pixmap>,
+    pub bg_key: (u32, u32, u32, usize),
 }
 
 impl FrameCache {
@@ -24,6 +30,8 @@ impl FrameCache {
             cached_frame_size: 0,
             global_min: 0.0,
             global_max: 0.0,
+            bg_pixmap: None,
+            bg_key: (0, 0, u32::MAX, 0),
         }
     }
 }
@@ -65,7 +73,7 @@ pub(crate) fn refresh_frame_cache(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_wavetable_view(
     pixmap: &mut Pixmap,
-    cache: &FrameCache,
+    cache: &mut FrameCache,
     x: f32,
     y: f32,
     w: f32,
@@ -73,7 +81,96 @@ pub(crate) fn draw_wavetable_view(
     current_frame_pos: f32,
     show_2d: bool,
 ) {
-    // Background
+    let frame_count = cache.cached_frame_count;
+    let frame_size = cache.cached_frame_size;
+    let padding = 20.0;
+    let width = w - padding * 2.0;
+    let height = h - padding * 2.0;
+
+    // 2D mode: cheap (~3 µs), no caching worth doing.
+    if show_2d {
+        fill_view_bg(pixmap, x, y, w, h);
+        if frame_count == 0 || frame_size == 0 || width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        draw_2d_face_on(
+            pixmap,
+            &cache.cached_frames,
+            current_frame_pos,
+            x + padding,
+            y + padding,
+            width,
+            height,
+            frame_count,
+            frame_size,
+        );
+        draw_zero_line(pixmap, x + padding, y + padding + height * 0.5, width);
+        return;
+    }
+
+    // 3D mode: rasterizing all strands every frame is expensive. Cache the full
+    // background (bg fill, border, all strands, zero line) into a viewport-sized
+    // pixmap, rebuild only when the wavetable or viewport changes, and overlay
+    // just the active strand each frame.
+    if frame_count == 0 || frame_size == 0 || width <= 0.0 || height <= 0.0 {
+        fill_view_bg(pixmap, x, y, w, h);
+        return;
+    }
+
+    let w_px = w.ceil() as u32;
+    let h_px = h.ceil() as u32;
+    let key = (w_px, h_px, cache.cached_version, frame_count);
+    if cache.bg_pixmap.is_none() || cache.bg_key != key {
+        cache.bg_pixmap = build_3d_background_pixmap(
+            cache.cached_version,
+            &cache.cached_frames,
+            cache.global_min,
+            cache.global_max,
+            w_px,
+            h_px,
+            padding,
+            width,
+            height,
+            frame_count,
+            frame_size,
+        );
+        cache.bg_key = key;
+    }
+
+    if let Some(bg) = cache.bg_pixmap.as_ref() {
+        pixmap.draw_pixmap(
+            x as i32,
+            y as i32,
+            bg.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            Transform::identity(),
+            None,
+        );
+    } else {
+        fill_view_bg(pixmap, x, y, w, h);
+    }
+
+    let range = (cache.global_max - cache.global_min).max(0.001);
+    let current_frame_idx = (current_frame_pos * (frame_count - 1) as f32).round() as usize;
+    draw_active_strand(
+        pixmap,
+        &cache.cached_frames,
+        current_frame_idx,
+        cache.global_min,
+        range,
+        x,
+        y,
+        h,
+        padding,
+        width,
+        height,
+        frame_count,
+        frame_size,
+    );
+}
+
+/// Fill the full view rect with bg + border. Used by 2D mode and as a fallback.
+fn fill_view_bg(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32) {
     let mut bg = PathBuilder::new();
     bg.push_rect(tiny_skia::Rect::from_xywh(x, y, w, h).expect("valid rect"));
     if let Some(bg_path) = bg.finish() {
@@ -96,58 +193,134 @@ pub(crate) fn draw_wavetable_view(
         };
         pixmap.stroke_path(&bg_path, &border, &stroke, Transform::identity(), None);
     }
+}
 
-    let frame_count = cache.cached_frame_count;
-    let frame_size = cache.cached_frame_size;
-    if frame_count == 0 || frame_size == 0 {
-        return;
+/// Render the full 3D background (bg fill, border, all stridden strands, zero line)
+/// into a fresh `(w_px, h_px)` pixmap. Strand coords are in local viewport space.
+#[allow(clippy::too_many_arguments)]
+fn build_3d_background_pixmap(
+    _version: u32,
+    frames: &[Vec<f32>],
+    global_min: f32,
+    global_max: f32,
+    w_px: u32,
+    h_px: u32,
+    padding: f32,
+    width: f32,
+    height: f32,
+    frame_count: usize,
+    frame_size: usize,
+) -> Option<Pixmap> {
+    let mut bg = Pixmap::new(w_px, h_px)?;
+    // Fill + border into the cache pixmap at local (0,0).
+    fill_view_bg(&mut bg, 0.0, 0.0, w_px as f32, h_px as f32);
+
+    let range = (global_max - global_min).max(0.001);
+
+    const MAX_STRANDS: usize = 48;
+    let stride = frame_count.div_ceil(MAX_STRANDS).max(1);
+
+    // All strands, back-to-front. No active skipping — the active strand is
+    // overlaid on the target pixmap separately.
+    for frame_idx in (0..frame_count).rev() {
+        if frame_idx % stride != 0 {
+            continue;
+        }
+        let frame = &frames[frame_idx];
+        let depth = frame_idx as f32 / frame_count.max(1) as f32;
+        let perspective_x = depth * 80.0;
+        let perspective_y = -depth * 80.0;
+        let alpha = 0.3 + (1.0 - depth) * 0.4;
+
+        let draw_w = (width * 0.7) as usize;
+        let pts = draw_w.min(frame_size).max(1);
+
+        let mut pb = PathBuilder::new();
+        for pi in 0..pts {
+            let t = pi as f32 / pts as f32;
+            let si = ((t * frame_size as f32) as usize).min(frame_size - 1);
+            let normalized = (frame[si] - global_min) / range;
+            // Local coords: bounds_x = bounds_y = 0.
+            let x = padding + t * (width * 0.7) + perspective_x;
+            let y = h_px as f32 - padding * 2.0 - (normalized * height * 0.4) + perspective_y;
+            if pi == 0 {
+                pb.move_to(x, y);
+            } else {
+                pb.line_to(x, y);
+            }
+        }
+        if let Some(path) = pb.finish() {
+            let r = (50.0 + (1.0 - depth) * 100.0) as u8;
+            let g = (100.0 + (1.0 - depth) * 100.0) as u8;
+            let a = (alpha * 255.0) as u8;
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(r, g, 255, a);
+            paint.anti_alias = true;
+            let stroke = Stroke {
+                width: 1.2,
+                line_cap: LineCap::Round,
+                ..Default::default()
+            };
+            bg.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        }
     }
 
-    let padding = 20.0;
-    let width = w - padding * 2.0;
-    let height = h - padding * 2.0;
-    if width <= 0.0 || height <= 0.0 {
+    // Zero line in the cached bg.
+    draw_zero_line(&mut bg, padding, padding + height * 0.5, width);
+    Some(bg)
+}
+
+/// Draw the orange active strand on top of the blitted background.
+#[allow(clippy::too_many_arguments)]
+fn draw_active_strand(
+    pixmap: &mut Pixmap,
+    frames: &[Vec<f32>],
+    current_frame_idx: usize,
+    global_min: f32,
+    range: f32,
+    bounds_x: f32,
+    bounds_y: f32,
+    bounds_h: f32,
+    padding: f32,
+    width: f32,
+    height: f32,
+    frame_count: usize,
+    frame_size: usize,
+) {
+    if current_frame_idx >= frame_count {
         return;
     }
+    let frame = &frames[current_frame_idx];
+    let depth = current_frame_idx as f32 / frame_count.max(1) as f32;
+    let perspective_x = depth * 80.0;
+    let perspective_y = -depth * 80.0;
 
-    let range = (cache.global_max - cache.global_min).max(0.001);
-    let current_frame_idx = (current_frame_pos * (frame_count - 1) as f32).round() as usize;
-
-    if show_2d {
-        draw_2d_face_on(
-            pixmap,
-            &cache.cached_frames,
-            current_frame_pos,
-            x + padding,
-            y + padding,
-            width,
-            height,
-            frame_count,
-            frame_size,
-        );
-        draw_zero_line(pixmap, x + padding, y + padding + height * 0.5, width);
-        return;
+    let draw_w = (width * 0.7) as usize;
+    let pts = draw_w.min(frame_size).max(1);
+    let mut pb = PathBuilder::new();
+    for pi in 0..pts {
+        let t = pi as f32 / pts as f32;
+        let si = ((t * frame_size as f32) as usize).min(frame_size - 1);
+        let normalized = (frame[si] - global_min) / range;
+        let x = bounds_x + padding + t * (width * 0.7) + perspective_x;
+        let y = bounds_y + bounds_h - padding * 2.0 - (normalized * height * 0.4) + perspective_y;
+        if pi == 0 {
+            pb.move_to(x, y);
+        } else {
+            pb.line_to(x, y);
+        }
     }
-
-    draw_3d_overhead(
-        pixmap,
-        &cache.cached_frames,
-        current_frame_idx,
-        cache.global_min,
-        range,
-        x,
-        y,
-        w,
-        h,
-        padding,
-        width,
-        height,
-        frame_count,
-        frame_size,
-    );
-
-    // Zero line (grid)
-    draw_zero_line(pixmap, x + padding, y + padding + height * 0.5, width);
+    if let Some(path) = pb.finish() {
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(255, 200, 100, 255);
+        paint.anti_alias = true;
+        let stroke = Stroke {
+            width: 2.5,
+            line_cap: LineCap::Round,
+            ..Default::default()
+        };
+        pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -228,104 +401,6 @@ fn draw_2d_face_on(
             ..Default::default()
         };
         pixmap.stroke_path(&stroke_path, &paint, &stroke, Transform::identity(), None);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_3d_overhead(
-    pixmap: &mut Pixmap,
-    frames: &[Vec<f32>],
-    current_frame_idx: usize,
-    global_min: f32,
-    range: f32,
-    bounds_x: f32,
-    bounds_y: f32,
-    _bounds_w: f32,
-    bounds_h: f32,
-    padding: f32,
-    width: f32,
-    height: f32,
-    frame_count: usize,
-    frame_size: usize,
-) {
-    // Non-active frames, back-to-front
-    for frame_idx in (0..frame_count).rev() {
-        if frame_idx == current_frame_idx {
-            continue;
-        }
-        let frame = &frames[frame_idx];
-        let depth = frame_idx as f32 / frame_count.max(1) as f32;
-        let perspective_x = depth * 80.0;
-        let perspective_y = -depth * 80.0;
-        let alpha = 0.3 + (1.0 - depth) * 0.4;
-
-        let draw_w = (width * 0.7) as usize;
-        let pts = draw_w.min(frame_size).max(1);
-
-        let mut pb = PathBuilder::new();
-        for pi in 0..pts {
-            let t = pi as f32 / pts as f32;
-            let si = ((t * frame_size as f32) as usize).min(frame_size - 1);
-            let normalized = (frame[si] - global_min) / range;
-            let x = bounds_x + padding + t * (width * 0.7) + perspective_x;
-            let y =
-                bounds_y + bounds_h - padding * 2.0 - (normalized * height * 0.4) + perspective_y;
-            if pi == 0 {
-                pb.move_to(x, y);
-            } else {
-                pb.line_to(x, y);
-            }
-        }
-        if let Some(path) = pb.finish() {
-            let r = (50.0 + (1.0 - depth) * 100.0) as u8;
-            let g = (100.0 + (1.0 - depth) * 100.0) as u8;
-            let a = (alpha * 255.0) as u8;
-            let mut paint = Paint::default();
-            paint.set_color_rgba8(r, g, 255, a);
-            paint.anti_alias = true;
-            let stroke = Stroke {
-                width: 1.2,
-                line_cap: LineCap::Round,
-                ..Default::default()
-            };
-            pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-        }
-    }
-
-    // Active frame on top
-    if current_frame_idx < frame_count {
-        let frame = &frames[current_frame_idx];
-        let depth = current_frame_idx as f32 / frame_count.max(1) as f32;
-        let perspective_x = depth * 80.0;
-        let perspective_y = -depth * 80.0;
-
-        let draw_w = (width * 0.7) as usize;
-        let pts = draw_w.min(frame_size).max(1);
-        let mut pb = PathBuilder::new();
-        for pi in 0..pts {
-            let t = pi as f32 / pts as f32;
-            let si = ((t * frame_size as f32) as usize).min(frame_size - 1);
-            let normalized = (frame[si] - global_min) / range;
-            let x = bounds_x + padding + t * (width * 0.7) + perspective_x;
-            let y =
-                bounds_y + bounds_h - padding * 2.0 - (normalized * height * 0.4) + perspective_y;
-            if pi == 0 {
-                pb.move_to(x, y);
-            } else {
-                pb.line_to(x, y);
-            }
-        }
-        if let Some(path) = pb.finish() {
-            let mut paint = Paint::default();
-            paint.set_color_rgba8(255, 200, 100, 255);
-            paint.anti_alias = true;
-            let stroke = Stroke {
-                width: 2.5,
-                line_cap: LineCap::Round,
-                ..Default::default()
-            };
-            pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-        }
     }
 }
 

@@ -395,11 +395,13 @@ impl WavetableFilterWindow {
             &self.shared_wavetable,
             &self.wavetable_version,
         );
+
         use nih_plug::prelude::Param;
         let current_frame_pos = self.params.frame_position.modulated_normalized_value();
+
         wavetable_view::draw_wavetable_view(
             &mut self.surface.pixmap,
-            &self.frame_cache,
+            &mut self.frame_cache,
             left_x,
             viz_top + viz_pad,
             col_w,
@@ -407,6 +409,7 @@ impl WavetableFilterWindow {
             current_frame_pos,
             self.show_2d,
         );
+
         self.drag.push_region(
             left_x,
             viz_top + viz_pad,
@@ -460,18 +463,22 @@ impl WavetableFilterWindow {
             dial_radius,
         );
 
-        // Right-side dials: 4 evenly spaced
-        let right_dials: [(ParamId, &str); 4] = [
-            (ParamId::Frequency, "Freq"),
-            (ParamId::Resonance, "Res"),
-            (ParamId::Drive, "Drive"),
-            (ParamId::Mix, "Mix"),
+        // Right-side dials, grouped as two pairs: (Freq, Res) | (Drive, Mix).
+        let pairs: [[(ParamId, &str); 2]; 2] = [
+            [(ParamId::Frequency, "Freq"), (ParamId::Resonance, "Res")],
+            [(ParamId::Drive, "Drive"), (ParamId::Mix, "Mix")],
         ];
-        let spacing = right_w / right_dials.len() as f32;
-        for (i, &(pid, label)) in right_dials.iter().enumerate() {
-            let cx = left_w + spacing * (i as f32 + 0.5);
-            let cy = dial_row_y + dial_row_h * 0.5;
-            self.draw_dial(pid, label, cx, cy, dial_radius);
+        let pair_gap = 24.0 * s;
+        let pair_w = (right_w - pair_gap) * 0.5;
+        let dial_cy = dial_row_y + dial_row_h * 0.5;
+        // Distance between the two dial centers within a pair (fraction of pair_w).
+        let within_pair_dist = pair_w * 0.38;
+        for (group_i, pair) in pairs.iter().enumerate() {
+            let pair_center_x = left_w + (pair_w + pair_gap) * group_i as f32 + pair_w * 0.5;
+            for (i, &(pid, label)) in pair.iter().enumerate() {
+                let cx = pair_center_x + (i as f32 - 0.5) * within_pair_dist;
+                self.draw_dial(pid, label, cx, dial_cy, dial_radius);
+            }
         }
     }
 
