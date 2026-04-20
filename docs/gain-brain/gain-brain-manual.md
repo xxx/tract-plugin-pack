@@ -36,7 +36,7 @@ The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` fil
 
 Output gain applied to the audio signal. Range: -60 to +60 dB. Default: 0 dB. Displayed as a rotary dial with a 270-degree arc.
 
-Drag vertically to adjust (up = increase, down = decrease). Hold **Shift** while dragging for fine control (10x slower). **Double-click** to reset to 0 dB.
+Drag vertically to adjust (up = increase, down = decrease). Hold **Shift** while dragging for fine control (10x slower). **Double-click** to reset to 0 dB. **Right-click** to type a value; **Enter** commits, **Escape** cancels, clicking outside auto-commits.
 
 ### Group
 

@@ -109,6 +109,7 @@ Use the **-** / **+** buttons in the upper right corner, or **Ctrl+=** / **Ctrl+
 - **Drag vertically** on any dial to adjust (up = increase)
 - **Shift+drag** for fine control (10x slower)
 - **Double-click** any dial to reset to default
+- **Right-click** any dial to type a value; **Enter** commits, **Escape** cancels, clicking outside auto-commits
 
 ## Technical Notes
 

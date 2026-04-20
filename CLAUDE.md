@@ -173,12 +173,13 @@ Tests are inline `#[cfg(test)]` modules:
 
 | File | Role |
 |------|------|
-| `tiny-skia-widgets/src/primitives.rs` | Color palette, `draw_rect` (auto-fast-path on opaque colors via `BlendMode::Source`), `draw_rect_outline`, `draw_rect_opaque` (explicit Source blend), `fill_pixmap_opaque` (slice-fill BG clear), `fill_column_opaque` (1px-wide direct pixel-write strip used by pope-scope waveform fast path) |
+| `tiny-skia-widgets/src/primitives.rs` | Color palette (incl. `color_edit_bg` for right-click text-entry highlight), `draw_rect` (auto-fast-path on opaque colors via `BlendMode::Source`), `draw_rect_outline`, `draw_rect_opaque` (explicit Source blend), `fill_pixmap_opaque` (slice-fill BG clear), `fill_column_opaque` (1px-wide direct pixel-write strip used by pope-scope waveform fast path) |
 | `tiny-skia-widgets/src/text.rs` | TextRenderer with fontdue glyph cache |
-| `tiny-skia-widgets/src/controls.rs` | draw_button, draw_slider, draw_stepped_selector + outline variants |
-| `tiny-skia-widgets/src/param_dial.rs` | Arc-based rotary dial widget (draw_dial) |
+| `tiny-skia-widgets/src/controls.rs` | draw_button, draw_slider, draw_stepped_selector + outline variants. Sliders render a unit-stripped edit field with 1px caret when their `editing_text: Option<&str>` argument is `Some` |
+| `tiny-skia-widgets/src/param_dial.rs` | Arc-based rotary dial widget (draw_dial; draw_dial_ex renders the edit field + caret when `editing_text: Option<&str>` is `Some`) |
 | `tiny-skia-widgets/src/editor_base.rs` | Shared EditorState (size persistence), SurfaceState (pixmap + softbuffer) |
 | `tiny-skia-widgets/src/drag.rs` | DragState with hit regions, drag/shift-granular handling, `mouse_in_window()` tracking via CursorEntered/CursorLeft events |
+| `tiny-skia-widgets/src/text_edit.rs` | TextEditState<A> — right-click-to-type state machine shared by every softbuffer editor. Filtered numeric buffer (`0-9 . - + e E`), 16-char cap, 1000 ms caret blink |
 | `nih-plug-widgets/src/lib.rs` | Re-exports vizia ParamDial, provides `load_style()` for vizia CSS |
 | `nih-plug-widgets/src/param_dial.rs` | Vizia rotary knob widget with modulation indicator |
 | `nih-plug-widgets/src/style.css` | Dark theme CSS for vizia plugins |
@@ -187,6 +188,7 @@ Tests are inline `#[cfg(test)]` modules:
 
 - **GS Meter uses CPU rendering** (softbuffer + tiny-skia + fontdue) instead of vizia/OpenGL. This eliminates 25 MB of GPU driver overhead (Mesa/LLVM) per instance. At 300 instances (Bitwig, 48kHz/1024): 15% CPU, 560 MB RSS (~1.8 MB per instance).
 - **All softbuffer plugins are freely resizable.** Scale factor is derived from `physical_width / WINDOW_WIDTH` on resize. Window size is persisted via `EditorState`. Host-initiated resize uses a packed `AtomicU64` (`pending_resize`) consumed on the next frame.
+- **Right-click text entry on continuous dials/sliders** is shared across gain-brain, satch, tinylimit, pope-scope, and warp-zone via `tiny_skia_widgets::TextEditState<A>`. Right-click opens a highlighted edit field seeded with `Param::normalized_value_to_string(_, false)` (unit stripped). `Enter` commits through `Param::string_to_normalized_value` + `begin/set/end_set_parameter`; `Escape` cancels; click-outside or drag-start auto-commits; right-click during a drag is ignored. Key-up events are swallowed while editing so host DAW shortcuts don't fire on release. Stepped selectors, buttons, and toggles remain non-editable — right-click on them is a no-op.
 - **True peak uses exact ITU-R BS.1770-4 coefficients** (48-tap, 4-phase polyphase FIR). Double-buffered history for contiguous SIMD dot products. Sample-rate-aware: 4x OS at <96kHz, 2x at 96-192kHz, bypass at >=192kHz.
 - **Stereo RMS uses sum-of-power** (matches dpMeter5 SUM mode): `sqrt(ms_L + ms_R)`.
 - **Crest factor uses dpMeter5's convention** (peak_stereo vs rms_stereo), not the mathematically correct max(crest_L, crest_R). Documented for future "correct mode" toggle.
