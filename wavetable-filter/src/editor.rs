@@ -234,7 +234,9 @@ impl WavetableFilterWindow {
         let Some(path) = dialog.pick_file() else {
             return;
         };
-        let Some(path_str) = path.to_str() else { return };
+        let Some(path_str) = path.to_str() else {
+            return;
+        };
         let path_string = path_str.to_string();
 
         let new_wavetable = match Wavetable::from_file(&path_string) {
@@ -386,7 +388,11 @@ impl WavetableFilterWindow {
         let left_x = viz_pad;
         let right_x = viz_pad * 2.0 + col_w;
 
-        wavetable_view::refresh_frame_cache(&mut self.frame_cache, &self.shared_wavetable, &self.wavetable_version);
+        wavetable_view::refresh_frame_cache(
+            &mut self.frame_cache,
+            &self.shared_wavetable,
+            &self.wavetable_version,
+        );
         use nih_plug::prelude::Param;
         let current_frame_pos = self.params.frame_position.modulated_normalized_value();
         wavetable_view::draw_wavetable_view(
@@ -406,14 +412,31 @@ impl WavetableFilterWindow {
             viz_h - viz_pad * 2.0,
             HitAction::Button(ButtonAction::WavetableToggle2D3D),
         );
-        widgets::draw_rect_outline(
+
+        let cutoff_hz = self.params.frequency.modulated_plain_value();
+        let resonance = self.params.resonance.modulated_plain_value();
+
+        filter_response_view::refresh_fft_cache(
+            &mut self.fft_cache,
+            current_frame_pos,
+            cutoff_hz,
+            resonance,
+            &self.shared_wavetable,
+        );
+        filter_response_view::refresh_input_spectrum(
+            &mut self.fft_cache,
+            &self.shared_input_spectrum,
+        );
+        filter_response_view::draw_filter_response(
             &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            &mut self.fft_cache,
             right_x,
             viz_top + viz_pad,
             col_w,
             viz_h - viz_pad * 2.0,
-            widgets::color_border(),
-            1.0,
+            cutoff_hz,
+            resonance,
         );
 
         // ── Dial geometry ──

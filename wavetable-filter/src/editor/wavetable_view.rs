@@ -79,7 +79,13 @@ pub(crate) fn draw_wavetable_view(
     if let Some(bg_path) = bg.finish() {
         let mut paint = Paint::default();
         paint.set_color_rgba8(20, 22, 28, 255);
-        pixmap.fill_path(&bg_path, &paint, FillRule::Winding, Transform::identity(), None);
+        pixmap.fill_path(
+            &bg_path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
 
         let mut border = Paint::default();
         border.set_color_rgba8(60, 60, 70, 255);
@@ -204,7 +210,13 @@ fn draw_2d_face_on(
         let mut paint = Paint::default();
         paint.set_color_rgba8(79, 195, 247, 30);
         paint.anti_alias = true;
-        pixmap.fill_path(&fill_path, &paint, FillRule::Winding, Transform::identity(), None);
+        pixmap.fill_path(
+            &fill_path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
     if let Some(stroke_path) = stroke_pb.finish() {
         let mut paint = Paint::default();
