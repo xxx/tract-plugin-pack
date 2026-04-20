@@ -54,6 +54,19 @@ pub(crate) enum ButtonAction {
     Mode(u8),
 }
 
+// ── Constants and helpers ───────────────────────────────────────────────
+
+const TOP_STRIP_H: f32 = 32.0;
+const STRIP_PAD: f32 = 8.0;
+
+fn format_wavetable_label(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("(none)")
+        .to_string()
+}
+
 // ── Window handler ──────────────────────────────────────────────────────
 
 struct WavetableFilterWindow {
@@ -129,9 +142,233 @@ impl WavetableFilterWindow {
         }
     }
 
+    fn float_param(&self, id: ParamId) -> &FloatParam {
+        match id {
+            ParamId::Frame => &self.params.frame_position,
+            ParamId::Frequency => &self.params.frequency,
+            ParamId::Resonance => &self.params.resonance,
+            ParamId::Drive => &self.params.drive,
+            ParamId::Mix => &self.params.mix,
+        }
+    }
+
+    fn begin_set_param(&self, setter: &ParamSetter, id: ParamId) {
+        setter.begin_set_parameter(self.float_param(id));
+    }
+
+    fn set_param_normalized(&self, setter: &ParamSetter, id: ParamId, normalized: f32) {
+        setter.set_parameter_normalized(self.float_param(id), normalized);
+    }
+
+    fn end_set_param(&self, setter: &ParamSetter, id: ParamId) {
+        setter.end_set_parameter(self.float_param(id));
+    }
+
+    fn reset_param_to_default(&self, setter: &ParamSetter, id: ParamId) {
+        use nih_plug::prelude::Param;
+        let p = self.float_param(id);
+        setter.begin_set_parameter(p);
+        setter.set_parameter_normalized(p, p.default_normalized_value());
+        setter.end_set_parameter(p);
+    }
+
+    fn format_value(&self, id: ParamId) -> String {
+        use nih_plug::prelude::Param;
+        let p = self.float_param(id);
+        p.normalized_value_to_string(p.modulated_normalized_value(), true)
+    }
+
+    fn formatted_value_without_unit(&self, id: ParamId) -> String {
+        use nih_plug::prelude::Param;
+        let p = self.float_param(id);
+        p.normalized_value_to_string(p.modulated_normalized_value(), false)
+    }
+
+    fn commit_text_edit(&mut self) {
+        use nih_plug::prelude::Param;
+        let Some((action, text)) = self.text_edit.commit() else {
+            return;
+        };
+        let HitAction::Dial(param_id) = action else {
+            return;
+        };
+        let p = self.float_param(param_id);
+        let Some(norm) = p.string_to_normalized_value(&text) else {
+            return;
+        };
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        self.begin_set_param(&setter, param_id);
+        self.set_param_normalized(&setter, param_id, norm);
+        self.end_set_param(&setter, param_id);
+    }
+
+    fn set_mode(&self, variant: u8) {
+        use crate::FilterMode;
+        use nih_plug::prelude::Param;
+        let target = match variant {
+            0 => FilterMode::Raw,
+            _ => FilterMode::Minimum,
+        };
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        let norm = self.params.mode.preview_normalized(target);
+        setter.begin_set_parameter(&self.params.mode);
+        setter.set_parameter_normalized(&self.params.mode, norm);
+        setter.end_set_parameter(&self.params.mode);
+    }
+
+    fn open_file_dialog(&mut self) {
+        use nih_plug::nih_log;
+
+        let mut dialog = rfd::FileDialog::new().add_filter("Wavetable files", &["wav", "wt"]);
+        if let Ok(current) = self.params.wavetable_path.lock() {
+            if let Some(dir) = std::path::Path::new(current.as_str()).parent() {
+                if dir.exists() {
+                    dialog = dialog.set_directory(dir);
+                }
+            }
+        }
+        let Some(path) = dialog.pick_file() else {
+            return;
+        };
+        let Some(path_str) = path.to_str() else { return };
+        let path_string = path_str.to_string();
+
+        let new_wavetable = match Wavetable::from_file(&path_string) {
+            Ok(wt) => wt,
+            Err(e) => {
+                nih_log!("Wavetable load error: {e}");
+                return;
+            }
+        };
+
+        // Pre-allocate FFT scratch on the GUI thread — audio thread stays allocation-free.
+        let new_size = new_wavetable.frame_size;
+        let spec_len = new_size / 2 + 1;
+        let mut planner = realfft::RealFftPlanner::<f32>::new();
+        let frame_fft = planner.plan_fft_forward(new_size);
+        let reload = PendingReload {
+            wavetable: new_wavetable.clone(),
+            frame_fft,
+            frame_cache: vec![0.0; new_size],
+            frame_buf: vec![0.0; new_size],
+            frame_spectrum: vec![rustfft::num_complex::Complex::new(0.0, 0.0); spec_len],
+            frame_mags: vec![0.0; spec_len],
+        };
+
+        if let Ok(mut pending) = self.pending_reload.lock() {
+            *pending = Some(reload);
+        }
+        if let Ok(mut shared) = self.shared_wavetable.lock() {
+            *shared = new_wavetable;
+        }
+        self.wavetable_version.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut wt) = self.params.wavetable_path.lock() {
+            *wt = path_string.clone();
+        }
+        self.should_reload.store(true, Ordering::Relaxed);
+    }
+
     fn draw(&mut self) {
-        // Full-frame clear; layout comes in Task 5.
+        let s = self.scale_factor;
+
+        self.drag.clear_regions();
         self.surface.pixmap.fill(widgets::color_bg());
+
+        let w = self.physical_width as f32;
+
+        // ── Top strip: Browse | path | Mode selector ──
+        let strip_y = 0.0;
+        let strip_h = TOP_STRIP_H * s;
+        let pad = STRIP_PAD * s;
+
+        let browse_w = 72.0 * s;
+        let browse_h = 22.0 * s;
+        let browse_x = pad;
+        let browse_y = strip_y + (strip_h - browse_h) * 0.5;
+
+        widgets::draw_button(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            browse_x,
+            browse_y,
+            browse_w,
+            browse_h,
+            "Browse",
+            false,
+            false,
+        );
+        self.drag.push_region(
+            browse_x,
+            browse_y,
+            browse_w,
+            browse_h,
+            HitAction::Button(ButtonAction::Browse),
+        );
+
+        // Mode selector (right-aligned)
+        let mode_w = 160.0 * s;
+        let mode_h = 22.0 * s;
+        let mode_x = w - pad - mode_w;
+        let mode_y = strip_y + (strip_h - mode_h) * 0.5;
+        let active_idx = if self.params.mode.value() == crate::FilterMode::Raw {
+            0
+        } else {
+            1
+        };
+        let segments = ["Raw", "Phaseless"];
+        widgets::draw_stepped_selector(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            mode_x,
+            mode_y,
+            mode_w,
+            mode_h,
+            &segments,
+            active_idx,
+        );
+        let seg_w = mode_w / segments.len() as f32;
+        for i in 0..segments.len() as u8 {
+            self.drag.push_region(
+                mode_x + seg_w * i as f32,
+                mode_y,
+                seg_w,
+                mode_h,
+                HitAction::Button(ButtonAction::Mode(i)),
+            );
+        }
+
+        // Path label between Browse and Mode selector
+        let path_x = browse_x + browse_w + pad;
+        let path_right = mode_x - pad;
+        let path_w = (path_right - path_x).max(0.0);
+        if path_w > 10.0 {
+            let path_text = self
+                .params
+                .wavetable_path
+                .lock()
+                .map(|p| format_wavetable_label(&p))
+                .unwrap_or_else(|_| "(locked)".to_string());
+            let text_size = 13.0 * s;
+            let text_y = strip_y + (strip_h + text_size) * 0.5 - 3.0 * s;
+            self.text_renderer.draw_text(
+                &mut self.surface.pixmap,
+                path_x,
+                text_y,
+                &path_text,
+                text_size,
+                widgets::color_text(),
+            );
+        }
+
+        // Bottom rule under the strip
+        widgets::draw_rect(
+            &mut self.surface.pixmap,
+            0.0,
+            strip_h - 1.0,
+            w,
+            1.0,
+            widgets::color_border(),
+        );
     }
 
     fn resize_buffers(&mut self) {
