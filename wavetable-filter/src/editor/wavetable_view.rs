@@ -1,5 +1,6 @@
 //! Wavetable visualization (2D face-on / 3D overhead). Rewritten in Task 8.
 
+#[allow(dead_code)]
 pub(crate) struct FrameCache {
     pub cached_frames: Vec<Vec<f32>>,
     pub cached_version: u32,

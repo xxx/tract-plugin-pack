@@ -3,6 +3,7 @@
 use realfft::RealFftPlanner;
 use rustfft::num_complex::Complex;
 
+#[allow(dead_code)]
 pub(crate) struct FftCache {
     pub planner: RealFftPlanner<f32>,
     pub frame_buf: Vec<f32>,

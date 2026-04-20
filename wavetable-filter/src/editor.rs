@@ -49,6 +49,7 @@ pub(crate) enum ParamId {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum ButtonAction {
     Browse,
+    #[allow(dead_code)]
     WavetableToggle2D3D,
     /// 0 = Raw, 1 = Phaseless. Matches the EnumParam::variants() order.
     Mode(u8),
@@ -88,11 +89,14 @@ struct WavetableFilterWindow {
     pending_reload: Arc<Mutex<Option<PendingReload>>>,
     shared_wavetable: Arc<Mutex<Wavetable>>,
     wavetable_version: Arc<AtomicU32>,
+    #[allow(dead_code)]
     shared_input_spectrum: Arc<Mutex<(f32, Vec<f32>)>>,
 
     // View-local state
     show_2d: bool,
+    #[allow(dead_code)]
     frame_cache: wavetable_view::FrameCache,
+    #[allow(dead_code)]
     fft_cache: filter_response_view::FftCache,
 }
 
@@ -485,8 +489,108 @@ impl baseview::WindowHandler for WavetableFilterWindow {
                 self.shared_scale.store(sf);
                 self.resize_buffers();
             }
+            baseview::Event::Mouse(baseview::MouseEvent::CursorEntered) => {
+                self.drag.on_cursor_entered();
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::CursorLeft) => {
+                self.drag.on_cursor_left();
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved {
+                position,
+                modifiers,
+            }) => {
+                self.drag.set_mouse(position.x as f32, position.y as f32);
+                if let Some(HitAction::Dial(param_id)) = self.drag.active_action().copied() {
+                    let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                    let current = self.float_param(param_id).unmodulated_normalized_value();
+                    if let Some(norm) = self.drag.update_drag(shift, current) {
+                        let setter = ParamSetter::new(self.gui_context.as_ref());
+                        self.set_param_normalized(&setter, param_id, norm);
+                    }
+                }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Left,
+                modifiers,
+            }) => {
+                self.commit_text_edit();
+
+                if let Some(region) = self.drag.hit_test().cloned() {
+                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                    if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
+                        self.end_set_param(&setter, id);
+                    }
+                    let is_double = self.drag.check_double_click(&region.action);
+                    match region.action {
+                        HitAction::Dial(param_id) => {
+                            if is_double {
+                                self.reset_param_to_default(&setter, param_id);
+                            } else {
+                                let norm =
+                                    self.float_param(param_id).unmodulated_normalized_value();
+                                let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                                self.drag.begin_drag(HitAction::Dial(param_id), norm, shift);
+                                self.begin_set_param(&setter, param_id);
+                            }
+                        }
+                        HitAction::Button(ButtonAction::Browse) => {
+                            self.open_file_dialog();
+                        }
+                        HitAction::Button(ButtonAction::WavetableToggle2D3D) => {
+                            self.show_2d = !self.show_2d;
+                        }
+                        HitAction::Button(ButtonAction::Mode(variant)) => {
+                            self.set_mode(variant);
+                        }
+                    }
+                }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                ..
+            }) => {
+                if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
+                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                    self.end_set_param(&setter, id);
+                }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Right,
+                ..
+            }) => {
+                if self.drag.active_action().is_some() {
+                    return baseview::EventStatus::Captured;
+                }
+                if let Some(region) = self.drag.hit_test().cloned() {
+                    self.commit_text_edit();
+                    if let HitAction::Dial(param_id) = region.action {
+                        let initial = self.formatted_value_without_unit(param_id);
+                        self.text_edit.begin(HitAction::Dial(param_id), &initial);
+                    }
+                }
+            }
+            baseview::Event::Keyboard(ev) if self.text_edit.is_active() => {
+                if ev.state != keyboard_types::KeyState::Down {
+                    return baseview::EventStatus::Captured;
+                }
+                match &ev.key {
+                    keyboard_types::Key::Character(s) => {
+                        for c in s.chars() {
+                            self.text_edit.insert_char(c);
+                        }
+                    }
+                    keyboard_types::Key::Backspace => self.text_edit.backspace(),
+                    keyboard_types::Key::Escape => self.text_edit.cancel(),
+                    keyboard_types::Key::Enter => {
+                        self.commit_text_edit();
+                    }
+                    _ => return baseview::EventStatus::Ignored,
+                }
+                return baseview::EventStatus::Captured;
+            }
             _ => {}
         }
+
         baseview::EventStatus::Captured
     }
 }
