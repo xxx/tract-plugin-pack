@@ -5,7 +5,7 @@
 
 use tiny_skia::{FillRule, LineCap, Paint, Path, PathBuilder, Pixmap, Stroke, Transform};
 
-use crate::primitives::{color_accent, color_muted, color_text};
+use crate::primitives::{color_accent, color_edit_bg, color_muted, color_text};
 use crate::text::TextRenderer;
 
 // ---------------------------------------------------------------------------
@@ -34,11 +34,6 @@ fn color_modulation() -> tiny_skia::Color {
 /// Modulation dot color (slightly more opaque orange).
 fn color_modulation_dot() -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(255, 160, 50, 200)
-}
-
-/// Edit-mode highlight color — a brighter variant of the control background.
-fn color_edit_bg() -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba8(48, 52, 64, 255)
 }
 
 // ---------------------------------------------------------------------------

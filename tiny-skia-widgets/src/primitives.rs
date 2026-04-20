@@ -33,6 +33,10 @@ pub fn color_control_bg() -> Color {
 pub fn color_border() -> Color {
     Color::from_rgba8(0x40, 0x40, 0x40, 0xff)
 }
+#[inline]
+pub fn color_edit_bg() -> Color {
+    Color::from_rgba8(0x30, 0x34, 0x40, 0xff)
+}
 
 // ---------------------------------------------------------------------------
 // Primitive drawing helpers

@@ -6,15 +6,6 @@ use crate::primitives::*;
 use crate::text::TextRenderer;
 
 // ---------------------------------------------------------------------------
-// Color helpers
-// ---------------------------------------------------------------------------
-
-/// Edit-mode highlight color — a brighter variant of the control background.
-fn color_edit_bg() -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba8(48, 52, 64, 255)
-}
-
-// ---------------------------------------------------------------------------
 // Composite widgets
 // ---------------------------------------------------------------------------
 
@@ -639,13 +630,13 @@ mod tests {
     }
 
     #[test]
-    fn test_draw_slider_with_editing_text() {
+    fn test_draw_slider_editing_paints_highlight() {
         let data = test_font_data();
         let mut renderer = TextRenderer::new(&data);
-        let mut pm = Pixmap::new(300, 50).unwrap();
-        // Editing mode should render the highlight box and buffer without panic.
+        let mut pm_plain = Pixmap::new(300, 50).unwrap();
+        let mut pm_edit = Pixmap::new(300, 50).unwrap();
         draw_slider(
-            &mut pm,
+            &mut pm_plain,
             &mut renderer,
             5.0,
             5.0,
@@ -654,19 +645,52 @@ mod tests {
             "Gain",
             "-3.0 dB",
             0.5,
-            Some("-6.2"),
+            None,
+            false,
+        );
+        draw_slider(
+            &mut pm_edit,
+            &mut renderer,
+            5.0,
+            5.0,
+            250.0,
+            28.0,
+            "Gain",
+            "-3.0 dB",
+            0.5,
+            Some("-3.0"),
             true,
+        );
+
+        // Sample inside the highlight box. The box sits near the right edge
+        // of the slider, at roughly (x + w - readout_w - pad). Use a coord
+        // clearly inside it regardless of font metrics.
+        let sample_x: u32 = 240; // rightward, inside the readout box
+        let sample_y: u32 = 19;  // vertical middle of the 28px-tall slider
+
+        let plain_px = pm_plain.pixels()[(sample_y * pm_plain.width() + sample_x) as usize];
+        let edit_px = pm_edit.pixels()[(sample_y * pm_edit.width() + sample_x) as usize];
+        assert!(
+            plain_px.red() != edit_px.red()
+                || plain_px.green() != edit_px.green()
+                || plain_px.blue() != edit_px.blue()
+                || plain_px.alpha() != edit_px.alpha(),
+            "editing overlay must change the readout-region pixels vs. non-editing"
         );
     }
 
     #[test]
-    fn test_draw_outline_slider_with_editing_text() {
+    fn test_draw_outline_slider_editing_paints_highlight() {
         let data = test_font_data();
         let mut renderer = TextRenderer::new(&data);
-        let mut pm = Pixmap::new(300, 50).unwrap();
-        // Editing mode on outline slider should render without panic.
+        let mut pm_plain = Pixmap::new(300, 50).unwrap();
+        let mut pm_edit = Pixmap::new(300, 50).unwrap();
+        let border_c = color_accent();
+        let text_c = color_text();
+        let fill_c = color_accent();
+
         draw_outline_slider(
-            &mut pm,
+            &mut pm_plain,
             &mut renderer,
             5.0,
             5.0,
@@ -675,11 +699,41 @@ mod tests {
             "Gain",
             "-3.0 dB",
             0.5,
-            color_accent(),
-            color_text(),
-            color_accent(),
-            Some("-6.2"),
+            border_c,
+            text_c,
+            fill_c,
+            None,
+            false,
+        );
+        draw_outline_slider(
+            &mut pm_edit,
+            &mut renderer,
+            5.0,
+            5.0,
+            250.0,
+            28.0,
+            "Gain",
+            "-3.0 dB",
+            0.5,
+            border_c,
+            text_c,
+            fill_c,
+            Some("-3.0"),
             true,
+        );
+
+        // Sample inside the highlight box.
+        let sample_x: u32 = 240;
+        let sample_y: u32 = 19;
+
+        let plain_px = pm_plain.pixels()[(sample_y * pm_plain.width() + sample_x) as usize];
+        let edit_px = pm_edit.pixels()[(sample_y * pm_edit.width() + sample_x) as usize];
+        assert!(
+            plain_px.red() != edit_px.red()
+                || plain_px.green() != edit_px.green()
+                || plain_px.blue() != edit_px.blue()
+                || plain_px.alpha() != edit_px.alpha(),
+            "editing overlay must change the readout-region pixels vs. non-editing"
         );
     }
 
