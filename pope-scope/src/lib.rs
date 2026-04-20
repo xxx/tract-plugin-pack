@@ -219,7 +219,14 @@ impl PopeScopeParams {
 
             mix_to_mono: BoolParam::new("Mono", true),
 
-            decimation: IntParam::new("Decimation", 2048, IntRange::Linear { min: 128, max: 4096 }),
+            decimation: IntParam::new(
+                "Decimation",
+                2048,
+                IntRange::Linear {
+                    min: 128,
+                    max: 4096,
+                },
+            ),
 
             group: IntParam::new("Group", 0, IntRange::Linear { min: 0, max: 15 }),
 
@@ -387,7 +394,9 @@ impl Plugin for PopeScope {
         let sample_pos = transport.pos_samples().unwrap_or(0);
 
         // Update playhead atomics
-        slot.playhead.is_playing.store(is_playing, Ordering::Relaxed);
+        slot.playhead
+            .is_playing
+            .store(is_playing, Ordering::Relaxed);
         slot.playhead.bpm.store(bpm.to_bits(), Ordering::Relaxed);
         slot.playhead
             .time_sig_num
@@ -429,7 +438,9 @@ impl Plugin for PopeScope {
                 let mut pending_samples = 0u64;
                 for (ch, pending) in self.pending_push.iter_mut().enumerate() {
                     if !pending.is_empty() && ch < bufs.len() {
-                        if ch == 0 { pending_samples = pending.len() as u64; }
+                        if ch == 0 {
+                            pending_samples = pending.len() as u64;
+                        }
                         bufs[ch].push(pending);
                         pending.clear();
                     }
@@ -469,12 +480,14 @@ impl Plugin for PopeScope {
 
 impl ClapPlugin for PopeScope {
     const CLAP_ID: &'static str = "com.mpd.pope-scope";
-    const CLAP_DESCRIPTION: Option<&'static str> =
-        Some("A multichannel real-time oscilloscope");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("A multichannel real-time oscilloscope");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] =
-        &[ClapFeature::AudioEffect, ClapFeature::Analyzer, ClapFeature::Stereo];
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::AudioEffect,
+        ClapFeature::Analyzer,
+        ClapFeature::Stereo,
+    ];
 }
 
 impl Vst3Plugin for PopeScope {

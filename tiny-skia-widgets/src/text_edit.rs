@@ -280,9 +280,15 @@ mod tests {
         let mut s: TextEditState<A> = TextEditState::new();
         s.begin(A::Gain, "");
         thread::sleep(std::time::Duration::from_millis(550));
-        assert!(!s.caret_visible(), "hidden ~550ms in (second half of 1000ms cycle)");
+        assert!(
+            !s.caret_visible(),
+            "hidden ~550ms in (second half of 1000ms cycle)"
+        );
         thread::sleep(std::time::Duration::from_millis(500));
-        assert!(s.caret_visible(), "visible again ~1050ms in (start of next cycle)");
+        assert!(
+            s.caret_visible(),
+            "visible again ~1050ms in (start of next cycle)"
+        );
     }
 
     #[test]

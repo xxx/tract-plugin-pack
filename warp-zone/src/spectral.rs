@@ -159,10 +159,8 @@ impl SpectralShifter {
         // Extract frame from input ring, apply analysis window
         for i in 0..n {
             let ring_idx = (self.input_pos + i) % n;
-            self.fft_buf[i] = Complex::new(
-                self.input_ring[ring_idx] * self.analysis_window[i],
-                0.0,
-            );
+            self.fft_buf[i] =
+                Complex::new(self.input_ring[ring_idx] * self.analysis_window[i], 0.0);
         }
 
         // Forward FFT
@@ -215,8 +213,7 @@ impl SpectralShifter {
         let write_start = self.read_pos;
         for i in 0..n {
             let idx = (write_start + i) % out_len;
-            self.output_ring[idx] +=
-                (self.out_buf[i].re * inv_n * self.synthesis_window[i]) as f64;
+            self.output_ring[idx] += (self.out_buf[i].re * inv_n * self.synthesis_window[i]) as f64;
         }
     }
 
@@ -361,7 +358,8 @@ mod tests {
             .map(|i| 0.8 * (TAU * freq * i as f32 / sr).sin())
             .collect();
 
-        let output: Vec<f32> = input.iter()
+        let output: Vec<f32> = input
+            .iter()
             .map(|&s| shifter.process_sample(s, 0.0, 1.0, false, 0, usize::MAX))
             .collect();
 
@@ -379,7 +377,10 @@ mod tests {
             max_err = max_err.max(err);
         }
 
-        assert!(max_err < 0.01, "identity passthrough error too large: {max_err}");
+        assert!(
+            max_err < 0.01,
+            "identity passthrough error too large: {max_err}"
+        );
     }
 
     #[test]
@@ -389,7 +390,10 @@ mod tests {
             .map(|_| shifter.process_sample(0.0, 0.0, 1.0, false, 0, usize::MAX))
             .collect();
         let peak = output.iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
-        assert!(peak < 1e-10, "silence should produce silence, got peak={peak}");
+        assert!(
+            peak < 1e-10,
+            "silence should produce silence, got peak={peak}"
+        );
     }
 
     #[test]
@@ -412,7 +416,8 @@ mod tests {
             .collect();
 
         let mut shifter = SpectralShifter::new(fft_size, hop_size);
-        let output: Vec<f32> = input.iter()
+        let output: Vec<f32> = input
+            .iter()
             .map(|&s| shifter.process_sample(s, 12.0, 1.0, false, 0, usize::MAX))
             .collect();
 
@@ -449,7 +454,8 @@ mod tests {
             .collect();
 
         let mut shifter = SpectralShifter::new(fft_size, hop_size);
-        let output: Vec<f32> = input.iter()
+        let output: Vec<f32> = input
+            .iter()
             .map(|&s| shifter.process_sample(s, -12.0, 1.0, false, 0, usize::MAX))
             .collect();
 
@@ -486,7 +492,8 @@ mod tests {
             .collect();
 
         let mut shifter = SpectralShifter::new(fft_size, hop_size);
-        let output: Vec<f32> = input.iter()
+        let output: Vec<f32> = input
+            .iter()
             .map(|&s| shifter.process_sample(s, 7.0, 1.0, false, 0, usize::MAX))
             .collect();
 
@@ -523,7 +530,8 @@ mod tests {
             .collect();
 
         let mut shifter = SpectralShifter::new(fft_size, hop_size);
-        let output: Vec<f32> = input.iter()
+        let output: Vec<f32> = input
+            .iter()
             .map(|&s| shifter.process_sample(s, 24.0, 1.0, false, 0, usize::MAX))
             .collect();
 
@@ -566,7 +574,8 @@ mod tests {
             .collect();
 
         let mut stretched = SpectralShifter::new(fft_size, hop_size);
-        let output: Vec<f32> = input.iter()
+        let output: Vec<f32> = input
+            .iter()
             .map(|&s| stretched.process_sample(s, 0.0, 2.0, false, 0, usize::MAX))
             .collect();
 
@@ -576,9 +585,7 @@ mod tests {
 
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(fft_size);
-        let mut buf: Vec<Complex<f32>> = chunk.iter()
-            .map(|&s| Complex::new(s, 0.0))
-            .collect();
+        let mut buf: Vec<Complex<f32>> = chunk.iter().map(|&s| Complex::new(s, 0.0)).collect();
         fft.process(&mut buf);
 
         // Find the bin with maximum energy
@@ -588,7 +595,8 @@ mod tests {
             .enumerate()
             .max_by(|(_, a), (_, b)| a.norm().partial_cmp(&b.norm()).unwrap())
             .unwrap()
-            .0 + 1;
+            .0
+            + 1;
         let peak_freq = bin_to_freq(peak_bin);
 
         // With stretch=2.0, fundamental (200 Hz, strongest component) maps to ~400 Hz
@@ -629,12 +637,14 @@ mod tests {
             .collect();
 
         let mut identity = SpectralShifter::new(fft_size, hop_size);
-        let out_identity: Vec<f32> = input.iter()
+        let out_identity: Vec<f32> = input
+            .iter()
             .map(|&s| identity.process_sample(s, 0.0, 1.0, false, 0, usize::MAX))
             .collect();
 
         let mut compressed = SpectralShifter::new(fft_size, hop_size);
-        let out_compressed: Vec<f32> = input.iter()
+        let out_compressed: Vec<f32> = input
+            .iter()
             .map(|&s| compressed.process_sample(s, 0.0, 0.5, false, 0, usize::MAX))
             .collect();
 
@@ -645,7 +655,10 @@ mod tests {
             diff_sum += d * d;
         }
         let rms_diff = (diff_sum / (num_samples - skip) as f64).sqrt();
-        assert!(rms_diff > 0.01, "stretch=0.5 should differ from identity: {rms_diff}");
+        assert!(
+            rms_diff > 0.01,
+            "stretch=0.5 should differ from identity: {rms_diff}"
+        );
     }
 
     /// Combined shift+stretch: verify stretch is applied first, then shift.
@@ -662,13 +675,17 @@ mod tests {
 
         // Apply shift=12 + stretch=1.5
         let mut shifter = SpectralShifter::new(fft_size, hop_size);
-        let output: Vec<f32> = input.iter()
+        let output: Vec<f32> = input
+            .iter()
             .map(|&s| shifter.process_sample(s, 12.0, 1.5, false, 0, usize::MAX))
             .collect();
 
         // Output should exist and not be silence
         let skip = fft_size * 3;
         let peak = output[skip..].iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
-        assert!(peak > 0.1, "combined shift+stretch should produce audible output: peak={peak}");
+        assert!(
+            peak > 0.1,
+            "combined shift+stretch should produce audible output: peak={peak}"
+        );
     }
 }

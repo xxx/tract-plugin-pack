@@ -412,7 +412,6 @@ impl ChannelMeter {
         }
         linear_to_db(peak) - linear_to_db(rms)
     }
-
 }
 
 /// Stereo meter that combines two channels.
@@ -480,8 +479,16 @@ impl StereoMeter {
         if count_l == 0 && count_r == 0 {
             return 0.0;
         }
-        let ms_l = if count_l > 0 { sum_l / count_l as f64 } else { 0.0 };
-        let ms_r = if count_r > 0 { sum_r / count_r as f64 } else { 0.0 };
+        let ms_l = if count_l > 0 {
+            sum_l / count_l as f64
+        } else {
+            0.0
+        };
+        let ms_r = if count_r > 0 {
+            sum_r / count_r as f64
+        } else {
+            0.0
+        };
         (ms_l + ms_r).sqrt() as f32
     }
 
@@ -518,7 +525,6 @@ impl StereoMeter {
         }
         linear_to_db(peak) - linear_to_db(rms)
     }
-
 }
 
 /// Convert linear amplitude to dB. Returns -f32::INFINITY for zero.
@@ -651,11 +657,7 @@ mod tests {
         }
         // Crest factor of sine = 20*log10(1.0) - 20*log10(1/sqrt(2)) = 3.01 dB
         let cf = m.crest_factor_db();
-        assert!(
-            (cf - 3.01).abs() < 0.05,
-            "expected ~3.01 dB, got {} dB",
-            cf
-        );
+        assert!((cf - 3.01).abs() < 0.05, "expected ~3.01 dB, got {} dB", cf);
     }
 
     #[test]
@@ -854,7 +856,8 @@ mod tests {
         assert!(
             tp > sp,
             "at 15kHz/48kHz: true peak {} should exceed sample peak {}",
-            tp, sp
+            tp,
+            sp
         );
         assert!(
             diff_db > 0.01,
@@ -987,7 +990,8 @@ mod tests {
         assert!(
             (per_ch_cf - stereo_cf - 3.01).abs() < 0.1,
             "stereo crest ({:.2}) should be ~3 dB below per-channel ({:.2})",
-            stereo_cf, per_ch_cf
+            stereo_cf,
+            per_ch_cf
         );
     }
 
@@ -1052,30 +1056,47 @@ mod tests {
 
         assert!(
             approx_eq(scalar.peak_max(), batched.peak_max()),
-            "peak: scalar={}, batched={}", scalar.peak_max(), batched.peak_max()
+            "peak: scalar={}, batched={}",
+            scalar.peak_max(),
+            batched.peak_max()
         );
         assert!(
-            approx_eq(scalar.rms_integrated_linear(), batched.rms_integrated_linear()),
-            "rms_int: scalar={}, batched={}", scalar.rms_integrated_linear(), batched.rms_integrated_linear()
+            approx_eq(
+                scalar.rms_integrated_linear(),
+                batched.rms_integrated_linear()
+            ),
+            "rms_int: scalar={}, batched={}",
+            scalar.rms_integrated_linear(),
+            batched.rms_integrated_linear()
         );
         assert!(
-            approx_eq(scalar.rms_momentary_linear(), batched.rms_momentary_linear()),
-            "rms_mom: scalar={}, batched={}", scalar.rms_momentary_linear(), batched.rms_momentary_linear()
+            approx_eq(
+                scalar.rms_momentary_linear(),
+                batched.rms_momentary_linear()
+            ),
+            "rms_mom: scalar={}, batched={}",
+            scalar.rms_momentary_linear(),
+            batched.rms_momentary_linear()
         );
         assert!(
             approx_eq(scalar.true_peak_max(), batched.true_peak_max()),
-            "true_peak: scalar={}, batched={}", scalar.true_peak_max(), batched.true_peak_max()
+            "true_peak: scalar={}, batched={}",
+            scalar.true_peak_max(),
+            batched.true_peak_max()
         );
         assert!(
             approx_eq(scalar.rms_momentary_max(), batched.rms_momentary_max()),
-            "rms_mom_max: scalar={}, batched={}", scalar.rms_momentary_max(), batched.rms_momentary_max()
+            "rms_mom_max: scalar={}, batched={}",
+            scalar.rms_momentary_max(),
+            batched.rms_momentary_max()
         );
     }
 
     #[test]
     fn test_simd_peak_sumsq() {
-        let samples: Vec<f32> = vec![0.1, -0.5, 0.3, 0.9, -0.2, 0.0, 0.4, -0.7,
-                                      0.6, -0.1, 0.8, -0.3, 0.2, -0.9, 0.5, -0.4];
+        let samples: Vec<f32> = vec![
+            0.1, -0.5, 0.3, 0.9, -0.2, 0.0, 0.4, -0.7, 0.6, -0.1, 0.8, -0.3, 0.2, -0.9, 0.5, -0.4,
+        ];
         let (peak, sumsq) = simd_peak_sumsq(&samples);
 
         // Scalar reference
@@ -1084,20 +1105,22 @@ mod tests {
 
         assert!(
             approx_eq(peak, expected_peak),
-            "peak: simd={}, scalar={}", peak, expected_peak
+            "peak: simd={}, scalar={}",
+            peak,
+            expected_peak
         );
         assert!(
             (sumsq - expected_sumsq).abs() < 1e-4,
-            "sumsq: simd={}, scalar={}", sumsq, expected_sumsq
+            "sumsq: simd={}, scalar={}",
+            sumsq,
+            expected_sumsq
         );
     }
 
     #[test]
     fn test_simd_peak_sumsq_tail() {
         // Non-multiple-of-16 length to exercise scalar tail
-        let samples: Vec<f32> = (0..37)
-            .map(|i| (i as f32 * 0.1).sin())
-            .collect();
+        let samples: Vec<f32> = (0..37).map(|i| (i as f32 * 0.1).sin()).collect();
         let (peak, sumsq) = simd_peak_sumsq(&samples);
 
         let expected_peak = samples.iter().map(|s| s.abs()).fold(0.0_f32, f32::max);
@@ -1105,26 +1128,36 @@ mod tests {
 
         assert!(
             approx_eq(peak, expected_peak),
-            "tail peak: simd={}, scalar={}", peak, expected_peak
+            "tail peak: simd={}, scalar={}",
+            peak,
+            expected_peak
         );
         assert!(
             (sumsq - expected_sumsq).abs() < 1e-4,
-            "tail sumsq: simd={}, scalar={}", sumsq, expected_sumsq
+            "tail sumsq: simd={}, scalar={}",
+            sumsq,
+            expected_sumsq
         );
     }
 
     #[test]
     fn test_dot12_simd_matches_scalar() {
-        let history: [f32; 12] = [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8, 0.9, -1.0, 0.5, -0.3];
+        let history: [f32; 12] = [
+            0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8, 0.9, -1.0, 0.5, -0.3,
+        ];
         for phase in 0..4 {
             let simd_result = dot12_simd(&history, &ITU_COEFFS_PADDED[phase]);
-            let scalar_result: f32 = history.iter()
+            let scalar_result: f32 = history
+                .iter()
                 .zip(ITU_COEFFS[phase].iter())
                 .map(|(h, c)| h * c)
                 .sum();
             assert!(
                 (simd_result - scalar_result).abs() < 1e-5,
-                "phase {}: simd={}, scalar={}", phase, simd_result, scalar_result
+                "phase {}: simd={}, scalar={}",
+                phase,
+                simd_result,
+                scalar_result
             );
         }
     }

@@ -15,7 +15,7 @@ const MAX_CHANNELS: usize = 16;
 /// Playhead info written by the audio thread.
 pub struct PlayheadInfo {
     pub is_playing: AtomicBool,
-    pub bpm: AtomicU64,           // f64 bit-cast
+    pub bpm: AtomicU64, // f64 bit-cast
     pub time_sig_num: AtomicU32,
     pub time_sig_den: AtomicU32,
     pub ppq_position: AtomicU64,  // f64 bit-cast
@@ -103,12 +103,10 @@ pub fn acquire_slot(instance_hash: u64) -> Option<usize> {
         return None;
     }
     for i in 0..MAX_SLOTS {
-        let result = STORE[i].owner.compare_exchange(
-            0,
-            instance_hash,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        );
+        let result =
+            STORE[i]
+                .owner
+                .compare_exchange(0, instance_hash, Ordering::AcqRel, Ordering::Relaxed);
         if result.is_ok() {
             return Some(i);
         }
@@ -119,12 +117,10 @@ pub fn acquire_slot(instance_hash: u64) -> Option<usize> {
 /// Release a slot. Verifies ownership before releasing.
 pub fn release_slot(index: usize, instance_hash: u64) {
     assert!(index < MAX_SLOTS);
-    let result = STORE[index].owner.compare_exchange(
-        instance_hash,
-        0,
-        Ordering::AcqRel,
-        Ordering::Relaxed,
-    );
+    let result =
+        STORE[index]
+            .owner
+            .compare_exchange(instance_hash, 0, Ordering::AcqRel, Ordering::Relaxed);
     if result.is_ok() {
         // Deallocate buffers — recover from poisoned lock to ensure cleanup.
         let mut guard = STORE[index]

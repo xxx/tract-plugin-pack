@@ -96,8 +96,7 @@ impl TimeMapping {
 
             self.current_ppq.store(ppq.to_bits(), Ordering::Relaxed);
             self.current_sample_pos.store(sample_pos, Ordering::Relaxed);
-            self.ring_buffer_pos
-                .store(ring_buf_pos, Ordering::Relaxed);
+            self.ring_buffer_pos.store(ring_buf_pos, Ordering::Relaxed);
             self.last_ppq.store(ppq.to_bits(), Ordering::Relaxed);
         }
 
@@ -155,8 +154,9 @@ pub fn beat_aligned_window(
     }
     let beats_in_window = sync_bars * beats_per_bar as f64;
     // Cap window_len to 1_536_000 (32s @ 48kHz) to match ring buffer capacity.
-    let window_len =
-        (beats_in_window * snap.samples_per_beat).round().min(1_536_000.0) as usize;
+    let window_len = (beats_in_window * snap.samples_per_beat)
+        .round()
+        .min(1_536_000.0) as usize;
     let ppq_per_bar = beats_per_bar as f64;
     let window_ppq = sync_bars * ppq_per_bar;
 

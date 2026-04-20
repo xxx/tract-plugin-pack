@@ -86,7 +86,9 @@ pub fn hue_shift_u32(argb: u32, degrees: f32) -> u32 {
 
     // Shift hue
     h = (h + degrees) % 360.0;
-    if h < 0.0 { h += 360.0; }
+    if h < 0.0 {
+        h += 360.0;
+    }
 
     // HSV to RGB
     let c = v * s;

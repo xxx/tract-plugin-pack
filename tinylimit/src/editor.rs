@@ -211,7 +211,9 @@ impl TinylimitWindow {
         let Some((action, text)) = self.text_edit.commit() else {
             return;
         };
-        let HitAction::Dial(param_id) = action else { return };
+        let HitAction::Dial(param_id) = action else {
+            return;
+        };
         let p = self.float_param(param_id);
         let norm = p.string_to_normalized_value(&text);
         let Some(norm) = norm else { return };
@@ -542,7 +544,13 @@ impl TinylimitWindow {
             );
             let hit_w = dial_col_spacing;
             let hit_h = meter_h * 0.35;
-            self.drag.push_region(cx - hit_w / 2.0, dial_row_cy1 - hit_h / 2.0, hit_w, hit_h, HitAction::Dial(pid));
+            self.drag.push_region(
+                cx - hit_w / 2.0,
+                dial_row_cy1 - hit_h / 2.0,
+                hit_w,
+                hit_h,
+                HitAction::Dial(pid),
+            );
         }
 
         // Row 2: last 4 params
@@ -568,7 +576,13 @@ impl TinylimitWindow {
             );
             let hit_w = dial_col_spacing;
             let hit_h = meter_h * 0.35;
-            self.drag.push_region(cx - hit_w / 2.0, dial_row_cy2 - hit_h / 2.0, hit_w, hit_h, HitAction::Dial(pid));
+            self.drag.push_region(
+                cx - hit_w / 2.0,
+                dial_row_cy2 - hit_h / 2.0,
+                hit_w,
+                hit_h,
+                HitAction::Dial(pid),
+            );
         }
 
         // ── Preset selector: [<]  Name  [>] ──
@@ -592,7 +606,13 @@ impl TinylimitWindow {
             false,
             false,
         );
-        self.drag.push_region(preset_left_x, preset_row_y, preset_arrow_w, preset_arrow_h, HitAction::Button(ButtonAction::PresetPrev));
+        self.drag.push_region(
+            preset_left_x,
+            preset_row_y,
+            preset_arrow_w,
+            preset_arrow_h,
+            HitAction::Button(ButtonAction::PresetPrev),
+        );
 
         // Preset name label (clickable — applies the preset)
         let preset_name_x = preset_left_x + preset_arrow_w + 4.0 * s;
@@ -607,7 +627,13 @@ impl TinylimitWindow {
             false,
             false,
         );
-        self.drag.push_region(preset_name_x, preset_row_y, preset_label_w, preset_arrow_h, HitAction::Button(ButtonAction::PresetApply));
+        self.drag.push_region(
+            preset_name_x,
+            preset_row_y,
+            preset_label_w,
+            preset_arrow_h,
+            HitAction::Button(ButtonAction::PresetApply),
+        );
         // Right arrow ">"
         let preset_right_x = preset_name_x + preset_label_w + 4.0 * s;
         widgets::draw_button(
@@ -621,7 +647,13 @@ impl TinylimitWindow {
             false,
             false,
         );
-        self.drag.push_region(preset_right_x, preset_row_y, preset_arrow_w, preset_arrow_h, HitAction::Button(ButtonAction::PresetNext));
+        self.drag.push_region(
+            preset_right_x,
+            preset_row_y,
+            preset_arrow_w,
+            preset_arrow_h,
+            HitAction::Button(ButtonAction::PresetNext),
+        );
 
         // ── Toggle buttons: ISP and Gain Link ──
         let btn_w = 80.0 * s;
@@ -641,7 +673,13 @@ impl TinylimitWindow {
             isp_active,
             false,
         );
-        self.drag.push_region(isp_x, btn_row_y, btn_w, btn_h, HitAction::Button(ButtonAction::ToggleIsp));
+        self.drag.push_region(
+            isp_x,
+            btn_row_y,
+            btn_w,
+            btn_h,
+            HitAction::Button(ButtonAction::ToggleIsp),
+        );
 
         let gl_x = center_mid + btn_gap / 2.0;
         widgets::draw_button(
@@ -655,7 +693,13 @@ impl TinylimitWindow {
             gl_active,
             false,
         );
-        self.drag.push_region(gl_x, btn_row_y, btn_w, btn_h, HitAction::Button(ButtonAction::ToggleGainLink));
+        self.drag.push_region(
+            gl_x,
+            btn_row_y,
+            btn_w,
+            btn_h,
+            HitAction::Button(ButtonAction::ToggleGainLink),
+        );
 
         // ── GR readout ──
         let gr_text = if gr_db.abs() < 0.05 {
@@ -733,7 +777,10 @@ impl baseview::WindowHandler for TinylimitWindow {
         if packed != 0 {
             let new_w = (packed >> 32) as u32;
             let new_h = (packed & 0xFFFF_FFFF) as u32;
-            if new_w > 0 && new_h > 0 && (new_w != self.physical_width || new_h != self.physical_height) {
+            if new_w > 0
+                && new_h > 0
+                && (new_w != self.physical_width || new_h != self.physical_height)
+            {
                 window.resize(baseview::Size::new(new_w as f64, new_h as f64));
             }
         }
@@ -963,7 +1010,9 @@ mod text_entry_tests {
     #[test]
     fn text_edit_roundtrip_for_threshold_action() {
         let mut text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Threshold)).is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Threshold))
+            .is_none());
 
         text_edit.begin(HitAction::Dial(ParamId::Threshold), "-6.0");
         assert_eq!(
@@ -980,19 +1029,37 @@ mod text_entry_tests {
         let (action, buffer) = text_edit.commit().unwrap();
         assert_eq!(action, HitAction::Dial(ParamId::Threshold));
         assert_eq!(buffer, "-6.00");
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Threshold)).is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Threshold))
+            .is_none());
     }
 
     #[test]
     fn state_starts_inactive() {
         let text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Input)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Threshold)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Ceiling)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Attack)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Release)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Knee)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::StereoLink)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Transient)).is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Input))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Threshold))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Ceiling))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Attack))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Release))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Knee))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::StereoLink))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Transient))
+            .is_none());
     }
 }

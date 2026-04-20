@@ -163,13 +163,20 @@ impl View for WavetableView {
                 let y = y0 + height - normalized * height;
 
                 fill_path.line_to(x, y);
-                if pi == 0 { stroke_path.move_to(x, y); } else { stroke_path.line_to(x, y); }
+                if pi == 0 {
+                    stroke_path.move_to(x, y);
+                } else {
+                    stroke_path.line_to(x, y);
+                }
             }
 
             fill_path.line_to(x0 + width, zero_y);
             fill_path.close();
 
-            canvas.fill_path(&fill_path, &vg::Paint::color(vg::Color::rgba(79, 195, 247, 30)));
+            canvas.fill_path(
+                &fill_path,
+                &vg::Paint::color(vg::Color::rgba(79, 195, 247, 30)),
+            );
             canvas.stroke_path(
                 &stroke_path,
                 &vg::Paint::color(vg::Color::rgba(79, 195, 247, 220)).with_line_width(1.5),
@@ -178,7 +185,10 @@ impl View for WavetableView {
             let mut zp = vg::Path::new();
             zp.move_to(x0, zero_y);
             zp.line_to(x0 + width, zero_y);
-            canvas.stroke_path(&zp, &vg::Paint::color(vg::Color::rgba(80, 80, 90, 100)).with_line_width(0.5));
+            canvas.stroke_path(
+                &zp,
+                &vg::Paint::color(vg::Color::rgba(80, 80, 90, 100)).with_line_width(0.5),
+            );
 
             drop(cache);
             return;
@@ -214,10 +224,14 @@ impl View for WavetableView {
                 let si = ((t * frame_size as f32) as usize).min(frame_size - 1);
                 let normalized = (frame[si] - global_min) / range;
                 let x = bounds.x + padding + t * (width * 0.7) + perspective_x;
-                let y = bounds.y + bounds.h - padding * 2.0
-                    - (normalized * height * 0.4) + perspective_y;
+                let y = bounds.y + bounds.h - padding * 2.0 - (normalized * height * 0.4)
+                    + perspective_y;
 
-                if pi == 0 { path.move_to(x, y); } else { path.line_to(x, y); }
+                if pi == 0 {
+                    path.move_to(x, y);
+                } else {
+                    path.line_to(x, y);
+                }
             }
 
             let color = vg::Color::rgba(
@@ -247,10 +261,14 @@ impl View for WavetableView {
                 let si = ((t * frame_size as f32) as usize).min(frame_size - 1);
                 let normalized = (frame[si] - global_min) / range;
                 let x = bounds.x + padding + t * (width * 0.7) + perspective_x;
-                let y = bounds.y + bounds.h - padding * 2.0
-                    - (normalized * height * 0.4) + perspective_y;
+                let y = bounds.y + bounds.h - padding * 2.0 - (normalized * height * 0.4)
+                    + perspective_y;
 
-                if pi == 0 { path.move_to(x, y); } else { path.line_to(x, y); }
+                if pi == 0 {
+                    path.move_to(x, y);
+                } else {
+                    path.line_to(x, y);
+                }
             }
 
             let color = vg::Color::rgba(255, 200, 100, 255); // Bright orange for active

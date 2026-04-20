@@ -1,2 +1,4 @@
 use nih_plug::prelude::*;
-fn main() { nih_export_standalone::<satch::Satch>(); }
+fn main() {
+    nih_export_standalone::<satch::Satch>();
+}

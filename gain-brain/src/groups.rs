@@ -110,12 +110,16 @@ pub fn reset_cumulative(group: u8) {
 
 pub fn increment_active(group: u8) {
     assert_group(group);
-    GROUPS[idx(group)].active_count.fetch_add(1, Ordering::Relaxed);
+    GROUPS[idx(group)]
+        .active_count
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn decrement_active(group: u8) {
     assert_group(group);
-    GROUPS[idx(group)].active_count.fetch_sub(1, Ordering::Relaxed);
+    GROUPS[idx(group)]
+        .active_count
+        .fetch_sub(1, Ordering::Relaxed);
 }
 
 pub fn active_count(group: u8) -> u32 {

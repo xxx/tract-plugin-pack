@@ -169,7 +169,6 @@ enum FilterMode {
     Minimum,
 }
 
-
 impl Default for WavetableFilter {
     fn default() -> Self {
         let default_wt = Self::create_default_wavetable();
@@ -225,8 +224,7 @@ impl Default for WavetableFilter {
                 let mut w = vec![0.0f32; KERNEL_LEN];
                 for (i, w_i) in w.iter_mut().enumerate() {
                     *w_i = 0.5
-                        * (1.0
-                            - (2.0 * std::f32::consts::PI * i as f32 / KERNEL_LEN as f32).cos());
+                        * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / KERNEL_LEN as f32).cos());
                 }
                 w
             },
@@ -274,7 +272,10 @@ impl WavetableFilter {
     ) -> Option<(Vec<f32>, Vec<f32>)> {
         let mut frame_buf = frame.to_vec();
         let mut frame_spectrum = vec![Complex::new(0.0_f32, 0.0); frame.len() / 2 + 1];
-        if frame_fft.process(&mut frame_buf, &mut frame_spectrum).is_err() {
+        if frame_fft
+            .process(&mut frame_buf, &mut frame_spectrum)
+            .is_err()
+        {
             return None;
         }
 
@@ -627,12 +628,15 @@ impl WavetableFilter {
 
     pub fn try_load_user_wavetable(&mut self) {
         // 1. Persisted path from the DAW session (highest priority)
-        let persisted = self.params.wavetable_path.lock().ok()
+        let persisted = self
+            .params
+            .wavetable_path
+            .lock()
+            .ok()
             .map(|p| p.clone())
             .filter(|p| !p.is_empty());
         if let Some(path) = persisted {
-            if std::path::Path::new(&path).exists()
-                && self.load_wavetable_from_file(&path).is_ok()
+            if std::path::Path::new(&path).exists() && self.load_wavetable_from_file(&path).is_ok()
             {
                 return;
             }
@@ -689,7 +693,12 @@ impl FilterState {
 
     #[cfg(test)]
     fn get(&self, offset: usize) -> f32 {
-        let idx = (self.write_pos.wrapping_add(self.len).wrapping_sub(offset).wrapping_sub(1)) & self.mask;
+        let idx = (self
+            .write_pos
+            .wrapping_add(self.len)
+            .wrapping_sub(offset)
+            .wrapping_sub(1))
+            & self.mask;
         self.history[idx]
     }
 
@@ -697,7 +706,12 @@ impl FilterState {
     fn get_bulk<const N: usize>(&self, start_offset: usize) -> [f32; N] {
         let mut result = [0.0f32; N];
 
-        let start_idx = (self.write_pos.wrapping_add(self.len).wrapping_sub(start_offset).wrapping_sub(1)) & self.mask;
+        let start_idx = (self
+            .write_pos
+            .wrapping_add(self.len)
+            .wrapping_sub(start_offset)
+            .wrapping_sub(1))
+            & self.mask;
 
         if start_idx >= N - 1 {
             // No wrap-around in this window; index directly without mask.
@@ -744,34 +758,27 @@ impl WavetableFilterParams {
 
             frame_position: {
                 let frame_count_clone = frame_count.clone();
-                FloatParam::new(
-                    "Frame",
-                    0.0,
-                    FloatRange::Linear { min: 0.0, max: 1.0 },
-                )
-                .with_smoother(SmoothingStyle::Linear(50.0))
-                .with_value_to_string(Arc::new(move |value| {
-                    let count = frame_count.load(std::sync::atomic::Ordering::Relaxed);
-                    let frame_num = (value * count.saturating_sub(1) as f32).round() as usize + 1;
-                    format!("{}", frame_num)
-                }))
-                .with_string_to_value(Arc::new(move |string| {
-                    let count = frame_count_clone.load(std::sync::atomic::Ordering::Relaxed);
-                    string
-                        .parse::<f32>()
-                        .ok()
-                        .map(|frame| (frame - 1.0) / (count - 1).max(1) as f32)
-                }))
+                FloatParam::new("Frame", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                    .with_smoother(SmoothingStyle::Linear(50.0))
+                    .with_value_to_string(Arc::new(move |value| {
+                        let count = frame_count.load(std::sync::atomic::Ordering::Relaxed);
+                        let frame_num =
+                            (value * count.saturating_sub(1) as f32).round() as usize + 1;
+                        format!("{}", frame_num)
+                    }))
+                    .with_string_to_value(Arc::new(move |string| {
+                        let count = frame_count_clone.load(std::sync::atomic::Ordering::Relaxed);
+                        string
+                            .parse::<f32>()
+                            .ok()
+                            .map(|frame| (frame - 1.0) / (count - 1).max(1) as f32)
+                    }))
             },
 
-            resonance: FloatParam::new(
-                "Resonance",
-                0.0,
-                FloatRange::Linear { min: 0.0, max: 1.0 },
-            )
-            .with_smoother(SmoothingStyle::Linear(50.0))
-            .with_unit("%")
-            .with_value_to_string(formatters::v2s_f32_percentage(0)),
+            resonance: FloatParam::new("Resonance", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_smoother(SmoothingStyle::Linear(50.0))
+                .with_unit("%")
+                .with_value_to_string(formatters::v2s_f32_percentage(0)),
 
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(50.0))
@@ -987,22 +994,30 @@ impl Plugin for WavetableFilter {
 
         if filter_mode != self.last_mode {
             if filter_mode != FilterMode::Raw {
-                for buf in &mut self.stft_in { buf.fill(0.0); }
-                for buf in &mut self.stft_out { buf.fill(0.0); }
+                for buf in &mut self.stft_in {
+                    buf.fill(0.0);
+                }
+                for buf in &mut self.stft_out {
+                    buf.fill(0.0);
+                }
                 self.stft_in_pos = 0;
                 self.stft_out_pos = 0;
             }
             self.last_mode = filter_mode;
         }
 
-        let stft_latency = if filter_mode == FilterMode::Raw { 0 } else { HOP as u32 };
+        let stft_latency = if filter_mode == FilterMode::Raw {
+            0
+        } else {
+            HOP as u32
+        };
         if stft_latency != self.last_reported_latency {
             context.set_latency_samples(stft_latency);
             self.last_reported_latency = stft_latency;
         }
 
-        let frame_pos_changed = self.first_process
-            || (frame_pos - self.last_frame_pos).abs() > 0.0001;
+        let frame_pos_changed =
+            self.first_process || (frame_pos - self.last_frame_pos).abs() > 0.0001;
         let needs_update = frame_pos_changed
             || (cutoff - self.last_cutoff).abs() > 0.1
             || (resonance - self.last_resonance).abs() > 0.005;
@@ -1044,8 +1059,7 @@ impl Plugin for WavetableFilter {
                             let s = f32x16::from_slice(&self.synthesized_kernel[k..k + 16]);
                             let t = f32x16::from_slice(&self.crossfade_target_kernel[k..k + 16]);
                             let blended = s * one_minus_a + t * a_vec;
-                            self.synthesized_kernel[k..k + 16]
-                                .copy_from_slice(&blended.to_array());
+                            self.synthesized_kernel[k..k + 16].copy_from_slice(&blended.to_array());
                         }
                         self.crossfade_active = false;
                         self.crossfade_alpha = 0.0;
@@ -1099,10 +1113,15 @@ impl Plugin for WavetableFilter {
                         self.stft_out[ch].copy_within(HOP..KERNEL_LEN, 0);
                         self.stft_out[ch][HOP..].fill(0.0);
                         Self::process_stft_frame(
-                            &self.stft_in[ch], self.stft_in_pos,
-                            &mut self.stft_out[ch], &self.stft_magnitudes,
-                            &self.stft_window, &self.stft_fft, &self.kernel_ifft,
-                            &mut self.stft_scratch, &mut self.spectrum_work,
+                            &self.stft_in[ch],
+                            self.stft_in_pos,
+                            &mut self.stft_out[ch],
+                            &self.stft_magnitudes,
+                            &self.stft_window,
+                            &self.stft_fft,
+                            &self.kernel_ifft,
+                            &mut self.stft_scratch,
+                            &mut self.spectrum_work,
                         );
                     }
                 }
@@ -1135,8 +1154,9 @@ impl Plugin for WavetableFilter {
                             for chunk_idx in 0..SIMD_CHUNKS {
                                 let k = chunk_idx * SIMD_LANES;
                                 let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
-                                acc += h
-                                    * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
+                                acc += h * f32x16::from_slice(
+                                    &self.synthesized_kernel[k..k + SIMD_LANES],
+                                );
                                 acc2 += h * f32x16::from_slice(
                                     &self.crossfade_target_kernel[k..k + SIMD_LANES],
                                 );
@@ -1148,8 +1168,9 @@ impl Plugin for WavetableFilter {
                             for chunk_idx in 0..SIMD_CHUNKS {
                                 let k = chunk_idx * SIMD_LANES;
                                 let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
-                                acc += h
-                                    * f32x16::from_slice(&self.synthesized_kernel[k..k + SIMD_LANES]);
+                                acc += h * f32x16::from_slice(
+                                    &self.synthesized_kernel[k..k + SIMD_LANES],
+                                );
                             }
                             hsum(acc)
                         };
@@ -1183,7 +1204,10 @@ impl Plugin for WavetableFilter {
                     if self.crossfade_active {
                         self.crossfade_alpha += self.crossfade_step;
                         if self.crossfade_alpha >= 1.0 {
-                            std::mem::swap(&mut self.synthesized_kernel, &mut self.crossfade_target_kernel);
+                            std::mem::swap(
+                                &mut self.synthesized_kernel,
+                                &mut self.crossfade_target_kernel,
+                            );
                             self.crossfade_active = false;
                             self.crossfade_alpha = 0.0;
                         }
@@ -1191,7 +1215,9 @@ impl Plugin for WavetableFilter {
                 } else {
                     self.stft_in_pos = (self.stft_in_pos + 1) & (KERNEL_LEN - 1);
                     self.stft_out_pos += 1;
-                    if self.stft_out_pos >= HOP { self.stft_out_pos = 0; }
+                    if self.stft_out_pos >= HOP {
+                        self.stft_out_pos = 0;
+                    }
                 }
             }
         }
@@ -1203,8 +1229,12 @@ impl Plugin for WavetableFilter {
                 for state in &mut self.filter_state {
                     state.reset();
                 }
-                for buf in &mut self.stft_in { buf.fill(0.0); }
-                for buf in &mut self.stft_out { buf.fill(0.0); }
+                for buf in &mut self.stft_in {
+                    buf.fill(0.0);
+                }
+                for buf in &mut self.stft_out {
+                    buf.fill(0.0);
+                }
                 self.stft_in_pos = 0;
                 self.stft_out_pos = 0;
                 self.silence_samples = 0; // Reset so we don't clear every buffer
@@ -1342,7 +1372,10 @@ mod tests {
         // start_idx = (0 + 2048 - 0 - 1) & 2047 = 2047 ≥ 15 → fast path.
         assert_eq!(state.get_bulk::<16>(0), expected_bulk::<16>(&state, 0));
         // For start_offset=2040: start_idx = (2048 - 2040 - 1) & 2047 = 7 < 15 → slow path.
-        assert_eq!(state.get_bulk::<16>(2040), expected_bulk::<16>(&state, 2040));
+        assert_eq!(
+            state.get_bulk::<16>(2040),
+            expected_bulk::<16>(&state, 2040)
+        );
         // Check many offsets to cover both branches exhaustively.
         for off in (0..2032).step_by(16) {
             let bulk = state.get_bulk::<16>(off);
@@ -1387,7 +1420,8 @@ mod tests {
         assert!(
             (y0 - kernel[0]).abs() < 1e-5,
             "y[0] should equal kernel[0]={:.6}, got {:.6}",
-            kernel[0], y0
+            kernel[0],
+            y0
         );
 
         // t=1: push zero, y[1] should equal kernel[1].
@@ -1396,7 +1430,8 @@ mod tests {
         assert!(
             (y1 - kernel[1]).abs() < 1e-5,
             "y[1] should equal kernel[1]={:.6}, got {:.6}",
-            kernel[1], y1
+            kernel[1],
+            y1
         );
 
         // t=15..16 (straddles the fast/slow boundary for chunk 0).
@@ -1406,7 +1441,8 @@ mod tests {
             assert!(
                 (yt - kernel[t]).abs() < 1e-5,
                 "y[{t}] should equal kernel[{t}]={:.6}, got {:.6}",
-                kernel[t], yt
+                kernel[t],
+                yt
             );
         }
     }
@@ -1639,8 +1675,7 @@ mod tests {
 
         // Run crossfade A→B for 100 samples so alpha > 0.
         for n in 0..100usize {
-            let v = ((KERNEL_LEN + n) as f32 * 440.0 / 48000.0 * 2.0 * std::f32::consts::PI)
-                .sin();
+            let v = ((KERNEL_LEN + n) as f32 * 440.0 / 48000.0 * 2.0 * std::f32::consts::PI).sin();
             state.push(v);
             alpha += alpha_step; // advance alpha
         }
@@ -1703,8 +1738,7 @@ mod tests {
 
             if let Some(ref prev) = prev_kernel {
                 let prev_energy: f32 = prev.iter().map(|x| x * x).sum();
-                let energy_jump =
-                    (energy - prev_energy).abs() / prev_energy.max(energy).max(1e-10);
+                let energy_jump = (energy - prev_energy).abs() / prev_energy.max(energy).max(1e-10);
                 if energy_jump > max_energy_jump {
                     max_energy_jump = energy_jump;
                 }
@@ -1743,14 +1777,14 @@ mod tests {
     /// Print kernel properties at various cutoffs to diagnose boundary issues.
     #[test]
     fn debug_kernel_gain_across_cutoffs() {
-        for &cutoff in &[20.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0, 15000.0, 19000.0, 20000.0] {
+        for &cutoff in &[
+            20.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0, 15000.0, 19000.0, 20000.0,
+        ] {
             let kernel = make_test_kernel(cutoff);
             let l1: f32 = kernel.iter().map(|x| x.abs()).sum();
             let dc: f32 = kernel.iter().sum();
             let peak: f32 = kernel.iter().cloned().fold(0.0f32, |a, b| a.max(b.abs()));
-            eprintln!(
-                "cutoff={cutoff:>8.1} Hz: L1={l1:.6}, DC={dc:.6}, peak={peak:.6}"
-            );
+            eprintln!("cutoff={cutoff:>8.1} Hz: L1={l1:.6}, DC={dc:.6}, peak={peak:.6}");
         }
     }
 
@@ -1772,7 +1806,6 @@ mod tests {
             }
         }
     }
-
 
     // ── STFT magnitude computation ──────────────────────────────────────
 
@@ -1796,7 +1829,10 @@ mod tests {
         // All values should be finite and non-negative
         assert!(stft_mags.iter().all(|v| v.is_finite() && *v >= 0.0));
         // DC bin should have a value (lowpass passes DC)
-        assert!(stft_mags[0] > 0.0, "DC magnitude should be non-zero for lowpass");
+        assert!(
+            stft_mags[0] > 0.0,
+            "DC magnitude should be non-zero for lowpass"
+        );
         // High-frequency bins should be near zero for lowpass
         let nyquist_mag = stft_mags[KERNEL_LEN / 2];
         assert!(
@@ -1836,10 +1872,9 @@ mod tests {
 
         let mut cutoff = critical + 1.0;
         while cutoff >= critical - 1.0 {
-            let (mags, _) = WavetableFilter::compute_base_spectrum(
-                &frame, cutoff, sample_rate, &frame_fft,
-            )
-            .expect("spectrum computation failed");
+            let (mags, _) =
+                WavetableFilter::compute_base_spectrum(&frame, cutoff, sample_rate, &frame_fft)
+                    .expect("spectrum computation failed");
 
             if let Some(prev) = prev_mag5 {
                 let jump = (mags[5] - prev).abs();
@@ -1869,10 +1904,15 @@ mod tests {
                 plugin.stft_out[0].copy_within(HOP..KERNEL_LEN, 0);
                 plugin.stft_out[0][HOP..].fill(0.0);
                 WavetableFilter::process_stft_frame(
-                    &plugin.stft_in[0], plugin.stft_in_pos,
-                    &mut plugin.stft_out[0], &plugin.stft_magnitudes,
-                    &plugin.stft_window, &plugin.stft_fft, &plugin.kernel_ifft,
-                    &mut plugin.stft_scratch, &mut plugin.spectrum_work,
+                    &plugin.stft_in[0],
+                    plugin.stft_in_pos,
+                    &mut plugin.stft_out[0],
+                    &plugin.stft_magnitudes,
+                    &plugin.stft_window,
+                    &plugin.stft_fft,
+                    &plugin.kernel_ifft,
+                    &mut plugin.stft_scratch,
+                    &mut plugin.spectrum_work,
                 );
             }
 
@@ -1881,7 +1921,9 @@ mod tests {
 
             plugin.stft_in_pos = (plugin.stft_in_pos + 1) & (KERNEL_LEN - 1);
             plugin.stft_out_pos += 1;
-            if plugin.stft_out_pos >= HOP { plugin.stft_out_pos = 0; }
+            if plugin.stft_out_pos >= HOP {
+                plugin.stft_out_pos = 0;
+            }
         }
         output
     }
@@ -1998,7 +2040,10 @@ mod tests {
         // Verify non-zero history and non-zero write_pos before reset.
         assert_eq!(state.write_pos, 5);
         let has_nonzero = state.history.iter().any(|&v| v != 0.0);
-        assert!(has_nonzero, "history should contain non-zero samples before reset");
+        assert!(
+            has_nonzero,
+            "history should contain non-zero samples before reset"
+        );
 
         state.reset();
 
@@ -2032,10 +2077,12 @@ mod tests {
 
         // Use the allocating path for simplicity.
         let frame = wt.get_frame_interpolated(0.0);
-        let result = WavetableFilter::compute_base_spectrum(
-            &frame, cutoff, sample_rate, &frame_fft,
+        let result =
+            WavetableFilter::compute_base_spectrum(&frame, cutoff, sample_rate, &frame_fft);
+        assert!(
+            result.is_some(),
+            "compute_base_spectrum should succeed at low cutoff"
         );
-        assert!(result.is_some(), "compute_base_spectrum should succeed at low cutoff");
 
         let (mags, fracs) = result.unwrap();
 
@@ -2060,7 +2107,10 @@ mod tests {
         // DC bin should have a value (frame 0 is a sine which has some DC content after FFT).
         // At minimum, magnitudes should not all be zero.
         let max_mag = mags.iter().cloned().fold(0.0f32, f32::max);
-        assert!(max_mag > 0.0, "at least some bins should have non-zero magnitude");
+        assert!(
+            max_mag > 0.0,
+            "at least some bins should have non-zero magnitude"
+        );
 
         // Also test via the allocation-free path.
         let mut frame_buf = wt.get_frame_interpolated(0.0);
@@ -2080,7 +2130,10 @@ mod tests {
             &mut out_mags,
             &mut out_fracs,
         );
-        assert!(ok, "compute_base_spectrum_into should succeed at low cutoff");
+        assert!(
+            ok,
+            "compute_base_spectrum_into should succeed at low cutoff"
+        );
         assert!(
             out_mags.iter().all(|v| v.is_finite() && *v >= 0.0),
             "all output magnitudes should be finite and non-negative (alloc-free path)"
@@ -2124,9 +2177,16 @@ mod tests {
     #[test]
     fn test_wavetable_file_loading() {
         // Load the sample wavetable file included in the repo.
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/phaseless-bass.wt");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/phaseless-bass.wt"
+        );
         let wt = Wavetable::from_file(path);
-        assert!(wt.is_ok(), "phaseless-bass.wt should load successfully: {:?}", wt.err());
+        assert!(
+            wt.is_ok(),
+            "phaseless-bass.wt should load successfully: {:?}",
+            wt.err()
+        );
 
         let wt = wt.unwrap();
         assert!(wt.frame_count > 0, "frame_count should be > 0");
@@ -2186,9 +2246,18 @@ mod tests {
         assert_eq!(mid.len(), wt.frame_size);
         // The result should differ from both the first and last frame (unless all
         // frames are identical, which they are not for the default wavetable).
-        let differs_from_first = mid.iter().zip(wt.frames[0].iter()).any(|(a, b)| (a - b).abs() > 1e-6);
-        let differs_from_last = mid.iter().zip(last_frame.iter()).any(|(a, b)| (a - b).abs() > 1e-6);
-        assert!(differs_from_first, "mid-frame should differ from first frame");
+        let differs_from_first = mid
+            .iter()
+            .zip(wt.frames[0].iter())
+            .any(|(a, b)| (a - b).abs() > 1e-6);
+        let differs_from_last = mid
+            .iter()
+            .zip(last_frame.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-6);
+        assert!(
+            differs_from_first,
+            "mid-frame should differ from first frame"
+        );
         assert!(differs_from_last, "mid-frame should differ from last frame");
 
         // interpolate_frame_into should produce the same results as get_frame_interpolated.
@@ -2244,9 +2313,16 @@ mod tests {
 
         /// Run one full synthesis cycle: interpolate + spectrum + IFFT.
         /// Returns (interpolate_us, spectrum_us, ifft_us).
-        fn synthesize(&mut self, frame_pos: f32, cutoff_hz: f32, sample_rate: f32, resonance: f32) -> (f64, f64, f64) {
+        fn synthesize(
+            &mut self,
+            frame_pos: f32,
+            cutoff_hz: f32,
+            sample_rate: f32,
+            resonance: f32,
+        ) -> (f64, f64, f64) {
             let t0 = std::time::Instant::now();
-            self.wt.interpolate_frame_into(frame_pos, &mut self.frame_buf);
+            self.wt
+                .interpolate_frame_into(frame_pos, &mut self.frame_buf);
             let t1 = std::time::Instant::now();
 
             WavetableFilter::compute_base_spectrum_into(
@@ -2298,7 +2374,10 @@ mod tests {
 
         eprintln!("  {label}:");
         eprintln!("    min={min:.1} us  avg={avg:.1} us  p50={p50:.1} us  p95={p95:.1} us  p99={p99:.1} us  max={max:.1} us");
-        eprintln!("    exceeded 50% buffer period ({threshold_us:.0} us): {exceeded}/{} calls", times_us.len());
+        eprintln!(
+            "    exceeded 50% buffer period ({threshold_us:.0} us): {exceeded}/{} calls",
+            times_us.len()
+        );
     }
 
     /// Benchmark: sweep frame_position from 0.0 to 1.0 over ~100 buffer periods.
@@ -2306,10 +2385,16 @@ mod tests {
     /// Uses the real phaseless-bass.wt fixture to reproduce reported lag.
     #[test]
     fn bench_frame_sweep() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/phaseless-bass.wt");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/phaseless-bass.wt"
+        );
         let wt = Wavetable::from_file(path).expect("failed to load phaseless-bass.wt");
         eprintln!("\n=== FRAME SWEEP BENCHMARK ===");
-        eprintln!("Wavetable: {} frames x {} samples", wt.frame_count, wt.frame_size);
+        eprintln!(
+            "Wavetable: {} frames x {} samples",
+            wt.frame_count, wt.frame_size
+        );
 
         let sample_rate = 48000.0f32;
         let cutoff_hz = 1000.0f32;
@@ -2338,7 +2423,9 @@ mod tests {
             total_times.push(t_interp + t_spectrum + t_ifft);
         }
 
-        eprintln!("\n--- Per-step breakdown (sweeping frame 0.0 -> 1.0, {num_buffers} buffers) ---");
+        eprintln!(
+            "\n--- Per-step breakdown (sweeping frame 0.0 -> 1.0, {num_buffers} buffers) ---"
+        );
         print_timing_stats("interpolate_frame_into", &interp_times);
         print_timing_stats("compute_base_spectrum_into", &spectrum_times);
         print_timing_stats("apply_resonance_and_ifft", &ifft_times);
@@ -2362,10 +2449,16 @@ mod tests {
     /// whether the frame interpolation input changes between calls.
     #[test]
     fn bench_frame_static() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/phaseless-bass.wt");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/phaseless-bass.wt"
+        );
         let wt = Wavetable::from_file(path).expect("failed to load phaseless-bass.wt");
         eprintln!("\n=== STATIC FRAME BENCHMARK (baseline) ===");
-        eprintln!("Wavetable: {} frames x {} samples", wt.frame_count, wt.frame_size);
+        eprintln!(
+            "Wavetable: {} frames x {} samples",
+            wt.frame_count, wt.frame_size
+        );
 
         let sample_rate = 48000.0f32;
         let cutoff_hz = 1000.0f32;
@@ -2404,7 +2497,8 @@ mod tests {
         eprintln!("\n--- Extended run: 200 iterations at static frame position ---");
         let mut ext_total = Vec::with_capacity(200);
         for _ in 0..200 {
-            let (t_i, t_s, t_f) = bench.synthesize(static_frame_pos, cutoff_hz, sample_rate, resonance);
+            let (t_i, t_s, t_f) =
+                bench.synthesize(static_frame_pos, cutoff_hz, sample_rate, resonance);
             ext_total.push(t_i + t_s + t_f);
         }
         print_timing_stats("TOTAL (200 iterations)", &ext_total);
@@ -2418,7 +2512,10 @@ mod tests {
     /// Run with: cargo test --lib --release bench_wavetable_draw -- --nocapture
     #[test]
     fn bench_wavetable_draw() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/phaseless-bass.wt");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/phaseless-bass.wt"
+        );
         let wt = Wavetable::from_file(path).expect("failed to load phaseless-bass.wt");
         let frame_count = wt.frame_count;
         let frame_size = wt.frame_size;
@@ -2452,7 +2549,10 @@ mod tests {
                 let mut _gmin = f32::INFINITY;
                 let mut _gmax = f32::NEG_INFINITY;
                 for frame in &wavetable.frames {
-                    for &s in frame { _gmin = _gmin.min(s); _gmax = _gmax.max(s); }
+                    for &s in frame {
+                        _gmin = _gmin.min(s);
+                        _gmax = _gmax.max(s);
+                    }
                 }
                 std::hint::black_box((_gmin, _gmax));
                 drop(wavetable);
@@ -2523,8 +2623,10 @@ mod tests {
                 for pi in 0..num_points {
                     let si = ((pi as f32 / num_points as f32) * frame_size as f32) as usize;
                     let si = si.min(frame_size - 1);
-                    let s = wavetable.frames[lo][si] * (1.0 - frac) + wavetable.frames[hi][si] * frac;
-                    _fmin = _fmin.min(s); _fmax = _fmax.max(s);
+                    let s =
+                        wavetable.frames[lo][si] * (1.0 - frac) + wavetable.frames[hi][si] * frac;
+                    _fmin = _fmin.min(s);
+                    _fmax = _fmax.max(s);
                 }
                 std::hint::black_box((_fmin, _fmax));
                 drop(wavetable);
@@ -2542,8 +2644,8 @@ mod tests {
                 for pi in 0..num_points {
                     let si = ((pi as f32 / num_points as f32) * frame_size as f32) as usize;
                     let si = si.min(frame_size - 1);
-                    let s = wavetable.frames[lo][si] * (1.0 - frac)
-                        + wavetable.frames[hi][si] * frac;
+                    let s =
+                        wavetable.frames[lo][si] * (1.0 - frac) + wavetable.frames[hi][si] * frac;
                     fmin = fmin.min(s);
                     fmax = fmax.max(s);
                 }
@@ -2558,8 +2660,8 @@ mod tests {
                 for pi in 0..num_points {
                     let t = pi as f32 / num_points as f32;
                     let si = ((t * frame_size as f32) as usize).min(frame_size - 1);
-                    let s = wavetable.frames[lo][si] * (1.0 - frac)
-                        + wavetable.frames[hi][si] * frac;
+                    let s =
+                        wavetable.frames[lo][si] * (1.0 - frac) + wavetable.frames[hi][si] * frac;
                     let normalized = (s - fmin) / range_2d;
                     let x = x0 + t * width;
                     let y = y0 + height - normalized * height;
@@ -2601,10 +2703,16 @@ mod tests {
         let mut plugin = WavetableFilter::default();
 
         // ── 2. Load the real test wavetable ─────────────────────────────
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/phaseless-bass.wt");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/phaseless-bass.wt"
+        );
         let loaded_wt = Wavetable::from_file(path).expect("failed to load phaseless-bass.wt");
         eprintln!("\n=== FRAME SWEEP REGRESSION TEST ===");
-        eprintln!("Wavetable: {} frames x {} samples", loaded_wt.frame_count, loaded_wt.frame_size);
+        eprintln!(
+            "Wavetable: {} frames x {} samples",
+            loaded_wt.frame_count, loaded_wt.frame_size
+        );
 
         // ── 3. Set wavetable directly (not through reload mechanism) ────
         let new_size = loaded_wt.frame_size;
@@ -2616,7 +2724,9 @@ mod tests {
         let spec_len = new_size / 2 + 1;
         plugin.frame_cache.resize(new_size, 0.0);
         plugin.frame_buf.resize(new_size, 0.0);
-        plugin.frame_spectrum.resize(spec_len, Complex::new(0.0, 0.0));
+        plugin
+            .frame_spectrum
+            .resize(spec_len, Complex::new(0.0, 0.0));
         plugin.frame_mags.resize(spec_len, 0.0);
 
         let sample_rate = plugin.sample_rate;
@@ -2666,8 +2776,7 @@ mod tests {
                         let s = f32x16::from_slice(&plugin.synthesized_kernel[k..k + 16]);
                         let t = f32x16::from_slice(&plugin.crossfade_target_kernel[k..k + 16]);
                         let blended = s * one_minus_a + t * a_vec;
-                        plugin.synthesized_kernel[k..k + 16]
-                            .copy_from_slice(&blended.to_array());
+                        plugin.synthesized_kernel[k..k + 16].copy_from_slice(&blended.to_array());
                     }
                     plugin.crossfade_active = false;
                     plugin.crossfade_alpha = 0.0;
@@ -2711,8 +2820,10 @@ mod tests {
         for i in 0..num_steps {
             let frame_pos = i as f32 / (num_steps - 1) as f32;
             // Simulate partial crossfade progress between buffers
-            plugin.crossfade_alpha = (plugin.crossfade_alpha + plugin.crossfade_step * 256.0).min(1.0);
-            let t = run_synthesis_iteration(&mut plugin, frame_pos, cutoff_hz, sample_rate, resonance);
+            plugin.crossfade_alpha =
+                (plugin.crossfade_alpha + plugin.crossfade_step * 256.0).min(1.0);
+            let t =
+                run_synthesis_iteration(&mut plugin, frame_pos, cutoff_hz, sample_rate, resonance);
             sweep_times.push(t);
             if t > threshold_us {
                 sweep_exceeded += 1;
@@ -2720,18 +2831,36 @@ mod tests {
         }
 
         print_timing_stats("SWEEP total", &sweep_times);
-        eprintln!("  iterations exceeding {threshold_us:.0} us (1 ms): {sweep_exceeded}/{num_steps}");
+        eprintln!(
+            "  iterations exceeding {threshold_us:.0} us (1 ms): {sweep_exceeded}/{num_steps}"
+        );
 
         // Print first 10 and last 10 per-iteration times
         eprintln!("\n  Per-iteration times (first 10):");
         for i in 0..10.min(num_steps) {
-            let flag = if sweep_times[i] > threshold_us { " *** EXCEEDED 1ms" } else { "" };
-            eprintln!("    step {i:3}: frame_pos={:.3}  {:.1} us{flag}", i as f32 / (num_steps - 1) as f32, sweep_times[i]);
+            let flag = if sweep_times[i] > threshold_us {
+                " *** EXCEEDED 1ms"
+            } else {
+                ""
+            };
+            eprintln!(
+                "    step {i:3}: frame_pos={:.3}  {:.1} us{flag}",
+                i as f32 / (num_steps - 1) as f32,
+                sweep_times[i]
+            );
         }
         eprintln!("  Per-iteration times (last 10):");
         for i in (num_steps - 10).max(0)..num_steps {
-            let flag = if sweep_times[i] > threshold_us { " *** EXCEEDED 1ms" } else { "" };
-            eprintln!("    step {i:3}: frame_pos={:.3}  {:.1} us{flag}", i as f32 / (num_steps - 1) as f32, sweep_times[i]);
+            let flag = if sweep_times[i] > threshold_us {
+                " *** EXCEEDED 1ms"
+            } else {
+                ""
+            };
+            eprintln!(
+                "    step {i:3}: frame_pos={:.3}  {:.1} us{flag}",
+                i as f32 / (num_steps - 1) as f32,
+                sweep_times[i]
+            );
         }
 
         // ── STATIC: same frame_pos repeated ─────────────────────────────
@@ -2744,7 +2873,8 @@ mod tests {
         plugin.crossfade_alpha = 0.0;
 
         for _ in 0..num_steps {
-            plugin.crossfade_alpha = (plugin.crossfade_alpha + plugin.crossfade_step * 256.0).min(1.0);
+            plugin.crossfade_alpha =
+                (plugin.crossfade_alpha + plugin.crossfade_step * 256.0).min(1.0);
             let t = run_synthesis_iteration(&mut plugin, 0.5, cutoff_hz, sample_rate, resonance);
             static_times.push(t);
             if t > threshold_us {
@@ -2753,7 +2883,9 @@ mod tests {
         }
 
         print_timing_stats("STATIC total", &static_times);
-        eprintln!("  iterations exceeding {threshold_us:.0} us (1 ms): {static_exceeded}/{num_steps}");
+        eprintln!(
+            "  iterations exceeding {threshold_us:.0} us (1 ms): {static_exceeded}/{num_steps}"
+        );
 
         // ── Compare sweep vs static ─────────────────────────────────────
         let sweep_avg = sweep_times.iter().sum::<f64>() / num_steps as f64;
@@ -2789,5 +2921,4 @@ mod tests {
             );
         }
     }
-
 }

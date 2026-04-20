@@ -241,7 +241,9 @@ impl PopeScopeWindow {
         let Some((action, text)) = self.text_edit.commit() else {
             return;
         };
-        let HitAction::Dial(param_id) = action else { return };
+        let HitAction::Dial(param_id) = action else {
+            return;
+        };
         let p = self.float_param(param_id);
         let norm = p.string_to_normalized_value(&text);
         let Some(norm) = norm else { return };
@@ -448,7 +450,13 @@ impl PopeScopeWindow {
                             s,
                         );
                         for cr in ctrl_regions {
-                            self.drag.push_region(cr.x, cr.y, cr.w, cr.h, HitAction::Control(cr.action));
+                            self.drag.push_region(
+                                cr.x,
+                                cr.y,
+                                cr.w,
+                                cr.h,
+                                HitAction::Control(cr.action),
+                            );
                         }
 
                         // Draw amplitude grid — skip when tracks are too
@@ -486,8 +494,7 @@ impl PopeScopeWindow {
                                 );
                             }
                             crate::SyncMode::BeatSync => {
-                                let total_beats =
-                                    eff_sync_bars as f64 * snap.beats_per_bar as f64;
+                                let total_beats = eff_sync_bars as f64 * snap.beats_per_bar as f64;
                                 renderer::draw_beat_grid(
                                     &mut self.surface.pixmap,
                                     wave_x,
@@ -509,9 +516,14 @@ impl PopeScopeWindow {
                             renderer::draw_waveform(
                                 &mut self.surface.pixmap,
                                 &snap.mono_mix,
-                                wave_x, ty, wave_w, track_h,
-                                min_db_val, max_db_val,
-                                snap.display_color, draw_style_val,
+                                wave_x,
+                                ty,
+                                wave_w,
+                                track_h,
+                                min_db_val,
+                                max_db_val,
+                                snap.display_color,
+                                draw_style_val,
                             );
                         } else if track_visible && !snap.audio_data.is_empty() {
                             for (ch, ch_data) in snap.audio_data.iter().enumerate() {
@@ -523,9 +535,14 @@ impl PopeScopeWindow {
                                 renderer::draw_waveform(
                                     &mut self.surface.pixmap,
                                     ch_data,
-                                    wave_x, ty, wave_w, track_h,
-                                    min_db_val, max_db_val,
-                                    color, draw_style_val,
+                                    wave_x,
+                                    ty,
+                                    wave_w,
+                                    track_h,
+                                    min_db_val,
+                                    max_db_val,
+                                    color,
+                                    draw_style_val,
                                 );
                             }
                         }
@@ -535,14 +552,13 @@ impl PopeScopeWindow {
                             if peak_db > min_db_val {
                                 let centre_y = ty + track_h / 2.0;
                                 let half_h = track_h / 2.0;
-                                let y_pos =
-                                    renderer::sample_to_y(
-                                        10.0f32.powf(peak_db / 20.0),
-                                        min_db_val,
-                                        max_db_val,
-                                        centre_y,
-                                        half_h,
-                                    );
+                                let y_pos = renderer::sample_to_y(
+                                    10.0f32.powf(peak_db / 20.0),
+                                    min_db_val,
+                                    max_db_val,
+                                    centre_y,
+                                    half_h,
+                                );
                                 // Dashed line
                                 let dash_len = 4.0 * s;
                                 let mut dx = wave_x;
@@ -603,8 +619,7 @@ impl PopeScopeWindow {
                         }
                         crate::SyncMode::BeatSync => {
                             if let Some(first) = visible.first() {
-                                let total_beats =
-                                    eff_sync_bars as f64 * first.beats_per_bar as f64;
+                                let total_beats = eff_sync_bars as f64 * first.beats_per_bar as f64;
                                 renderer::draw_beat_grid(
                                     &mut self.surface.pixmap,
                                     wx,
@@ -630,9 +645,14 @@ impl PopeScopeWindow {
                             renderer::draw_waveform(
                                 &mut self.surface.pixmap,
                                 &snap.mono_mix,
-                                wx, wy, ww, wh,
-                                min_db_val, max_db_val,
-                                snap.display_color, draw_style_val,
+                                wx,
+                                wy,
+                                ww,
+                                wh,
+                                min_db_val,
+                                max_db_val,
+                                snap.display_color,
+                                draw_style_val,
                             );
                         } else if !snap.audio_data.is_empty() {
                             for (ch, ch_data) in snap.audio_data.iter().enumerate() {
@@ -644,9 +664,14 @@ impl PopeScopeWindow {
                                 renderer::draw_waveform(
                                     &mut self.surface.pixmap,
                                     ch_data,
-                                    wx, wy, ww, wh,
-                                    min_db_val, max_db_val,
-                                    color, draw_style_val,
+                                    wx,
+                                    wy,
+                                    ww,
+                                    wh,
+                                    min_db_val,
+                                    max_db_val,
+                                    color,
+                                    draw_style_val,
                                 );
                             }
                         }
@@ -682,8 +707,7 @@ impl PopeScopeWindow {
                         }
                         crate::SyncMode::BeatSync => {
                             if let Some(first) = visible.first() {
-                                let total_beats =
-                                    eff_sync_bars as f64 * first.beats_per_bar as f64;
+                                let total_beats = eff_sync_bars as f64 * first.beats_per_bar as f64;
                                 renderer::draw_beat_grid(
                                     &mut self.surface.pixmap,
                                     wx,
@@ -947,7 +971,7 @@ impl PopeScopeWindow {
         let label_gap = (label_font * 2.0 / 3.0).round();
         let row_total = label_font + label_gap + row_h;
         let row1_y = control_y + gap + label_font; // baseline of row 1 label
-        let row2_y = row1_y + row_total + gap;     // baseline of row 2 label
+        let row2_y = row1_y + row_total + gap; // baseline of row 2 label
 
         let mut cx = pad;
 
@@ -993,7 +1017,13 @@ impl PopeScopeWindow {
             active_text_c,
             active_fill_c,
         );
-        self.drag.push_region(cx, row1_y + label_gap, display_w, row_h, HitAction::Button(ButtonAction::CycleDisplayMode));
+        self.drag.push_region(
+            cx,
+            row1_y + label_gap,
+            display_w,
+            row_h,
+            HitAction::Button(ButtonAction::CycleDisplayMode),
+        );
 
         cx += display_w + gap;
 
@@ -1028,7 +1058,13 @@ impl PopeScopeWindow {
             active_text_c,
             active_fill_c,
         );
-        self.drag.push_region(cx, row1_y + label_gap, style_w, row_h, HitAction::Button(ButtonAction::CycleDrawStyle));
+        self.drag.push_region(
+            cx,
+            row1_y + label_gap,
+            style_w,
+            row_h,
+            HitAction::Button(ButtonAction::CycleDrawStyle),
+        );
 
         cx += style_w + gap;
 
@@ -1062,7 +1098,13 @@ impl PopeScopeWindow {
             active_text_c,
             active_fill_c,
         );
-        self.drag.push_region(cx, row1_y + label_gap, sync_w, row_h, HitAction::Button(ButtonAction::CycleSyncMode));
+        self.drag.push_region(
+            cx,
+            row1_y + label_gap,
+            sync_w,
+            row_h,
+            HitAction::Button(ButtonAction::CycleSyncMode),
+        );
 
         cx += sync_w + gap;
 
@@ -1100,7 +1142,13 @@ impl PopeScopeWindow {
                 active_text_c,
                 active_fill_c,
             );
-            self.drag.push_region(cx, row1_y + label_gap, unit_w, row_h, HitAction::Button(ButtonAction::CycleSyncUnit));
+            self.drag.push_region(
+                cx,
+                row1_y + label_gap,
+                unit_w,
+                row_h,
+                HitAction::Button(ButtonAction::CycleSyncUnit),
+            );
 
             cx += unit_w + gap;
 
@@ -1131,7 +1179,13 @@ impl PopeScopeWindow {
                 active_text_c,
                 active_fill_c,
             );
-            self.drag.push_region(cx, row1_y + label_gap, hold_w, row_h, HitAction::Button(ButtonAction::ToggleHoldMode));
+            self.drag.push_region(
+                cx,
+                row1_y + label_gap,
+                hold_w,
+                row_h,
+                HitAction::Button(ButtonAction::ToggleHoldMode),
+            );
 
             cx += hold_w + gap;
         }
@@ -1161,7 +1215,13 @@ impl PopeScopeWindow {
             active_border_c,
             active_fill_c,
         );
-        self.drag.push_region(cx, row1_y + label_gap, freeze_w, row_h, HitAction::Button(ButtonAction::ToggleFreeze));
+        self.drag.push_region(
+            cx,
+            row1_y + label_gap,
+            freeze_w,
+            row_h,
+            HitAction::Button(ButtonAction::ToggleFreeze),
+        );
 
         cx += freeze_w + gap;
 
@@ -1190,7 +1250,13 @@ impl PopeScopeWindow {
             active_border_c,
             active_fill_c,
         );
-        self.drag.push_region(cx, row1_y + label_gap, mono_w, row_h, HitAction::Button(ButtonAction::ToggleMono));
+        self.drag.push_region(
+            cx,
+            row1_y + label_gap,
+            mono_w,
+            row_h,
+            HitAction::Button(ButtonAction::ToggleMono),
+        );
 
         // ── Row 2: Timebase slider | Min dB slider | Max dB slider ──────
 
@@ -1235,7 +1301,13 @@ impl PopeScopeWindow {
                 editing_buf.as_deref(),
                 caret,
             );
-            self.drag.push_region(cx2, row2_y + label_gap, slider_w, row_h, HitAction::Dial(ParamId::Timebase));
+            self.drag.push_region(
+                cx2,
+                row2_y + label_gap,
+                slider_w,
+                row_h,
+                HitAction::Dial(ParamId::Timebase),
+            );
 
             cx2 += slider_w + gap;
         }
@@ -1273,7 +1345,13 @@ impl PopeScopeWindow {
             editing_buf.as_deref(),
             caret,
         );
-        self.drag.push_region(cx2, row2_y + label_gap, slider_w, row_h, HitAction::Dial(ParamId::MinDb));
+        self.drag.push_region(
+            cx2,
+            row2_y + label_gap,
+            slider_w,
+            row_h,
+            HitAction::Dial(ParamId::MinDb),
+        );
 
         cx2 += slider_w + gap;
 
@@ -1310,8 +1388,13 @@ impl PopeScopeWindow {
             editing_buf.as_deref(),
             caret,
         );
-        self.drag.push_region(cx2, row2_y + label_gap, slider_w, row_h, HitAction::Dial(ParamId::MaxDb));
-
+        self.drag.push_region(
+            cx2,
+            row2_y + label_gap,
+            slider_w,
+            row_h,
+            HitAction::Dial(ParamId::MaxDb),
+        );
     }
 
     fn resize_buffers(&mut self) {
@@ -1329,7 +1412,10 @@ impl baseview::WindowHandler for PopeScopeWindow {
         if packed != 0 {
             let new_w = (packed >> 32) as u32;
             let new_h = (packed & 0xFFFF_FFFF) as u32;
-            if new_w > 0 && new_h > 0 && (new_w != self.physical_width || new_h != self.physical_height) {
+            if new_w > 0
+                && new_h > 0
+                && (new_w != self.physical_width || new_h != self.physical_height)
+            {
                 window.resize(baseview::Size::new(new_w as f64, new_h as f64));
             }
         }
@@ -1397,7 +1483,8 @@ impl baseview::WindowHandler for PopeScopeWindow {
                                 let normalized =
                                     self.float_param(param_id).modulated_normalized_value();
                                 let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
-                                self.drag.begin_drag(HitAction::Dial(param_id), normalized, shift);
+                                self.drag
+                                    .begin_drag(HitAction::Dial(param_id), normalized, shift);
                                 self.begin_set_param(&setter, param_id);
                             }
                         }
@@ -1647,7 +1734,9 @@ mod text_entry_tests {
     #[test]
     fn text_edit_roundtrip_for_timebase_action() {
         let mut text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Timebase)).is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Timebase))
+            .is_none());
 
         text_edit.begin(HitAction::Dial(ParamId::Timebase), "100");
         assert_eq!(
@@ -1664,15 +1753,23 @@ mod text_entry_tests {
         let (action, buffer) = text_edit.commit().unwrap();
         assert_eq!(action, HitAction::Dial(ParamId::Timebase));
         assert_eq!(buffer, "1000");
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Timebase)).is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Timebase))
+            .is_none());
     }
 
     #[test]
     fn state_starts_inactive() {
         let text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Timebase)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::MinDb)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::MaxDb)).is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Timebase))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::MinDb))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::MaxDb))
+            .is_none());
     }
 }
 

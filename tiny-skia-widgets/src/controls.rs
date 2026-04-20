@@ -188,7 +188,11 @@ pub fn draw_outline_button(
     active_border_color: Color,
     active_fill_color: Color,
 ) {
-    let border = if active { active_border_color } else { border_color };
+    let border = if active {
+        active_border_color
+    } else {
+        border_color
+    };
     if active {
         draw_rect(pixmap, x, y, w, h, active_fill_color);
     }
@@ -198,7 +202,11 @@ pub fn draw_outline_button(
     let tw = text_renderer.text_width(label, text_size);
     let tx = x + (w - tw) * 0.5;
     let ty = y + (h + text_size) * 0.5 - 2.0;
-    let fg = if active { active_border_color } else { text_color };
+    let fg = if active {
+        active_border_color
+    } else {
+        text_color
+    };
     text_renderer.draw_text(pixmap, tx, ty, label, text_size, fg);
 }
 
@@ -232,8 +240,16 @@ pub fn draw_outline_stepped_selector(
         let sx = x + i as f32 * seg_w;
         let is_active = i == active_index;
 
-        let border = if is_active { active_border_color } else { border_color };
-        let fg = if is_active { active_text_color } else { text_color };
+        let border = if is_active {
+            active_border_color
+        } else {
+            border_color
+        };
+        let fg = if is_active {
+            active_text_color
+        } else {
+            text_color
+        };
 
         if is_active {
             draw_rect(pixmap, sx, y, seg_w, h, active_fill_color);
@@ -307,7 +323,14 @@ pub fn draw_outline_slider(
         }
     } else {
         let vw = text_renderer.text_width(value_text, text_size);
-        text_renderer.draw_text(pixmap, x + w - vw - pad, text_y, value_text, text_size, text_color);
+        text_renderer.draw_text(
+            pixmap,
+            x + w - vw - pad,
+            text_y,
+            value_text,
+            text_size,
+            text_color,
+        );
     }
 }
 
@@ -666,7 +689,7 @@ mod tests {
         // of the slider, at roughly (x + w - readout_w - pad). Use a coord
         // clearly inside it regardless of font metrics.
         let sample_x: u32 = 240; // rightward, inside the readout box
-        let sample_y: u32 = 19;  // vertical middle of the 28px-tall slider
+        let sample_y: u32 = 19; // vertical middle of the 28px-tall slider
 
         let plain_px = pm_plain.pixels()[(sample_y * pm_plain.width() + sample_x) as usize];
         let edit_px = pm_edit.pixels()[(sample_y * pm_edit.width() + sample_x) as usize];

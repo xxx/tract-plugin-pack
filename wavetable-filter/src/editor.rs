@@ -19,9 +19,7 @@ fn nearest_scale_idx(scale: f64) -> usize {
     SCALE_STEPS
         .iter()
         .enumerate()
-        .min_by(|(_, a), (_, b)| {
-            (*a - scale).abs().partial_cmp(&(*b - scale).abs()).unwrap()
-        })
+        .min_by(|(_, a), (_, b)| (*a - scale).abs().partial_cmp(&(*b - scale).abs()).unwrap())
         .map(|(i, _)| i)
         .unwrap_or(0)
 }
@@ -38,7 +36,6 @@ fn set_scale_param(cx: &mut EventContext, param: &nih_plug::prelude::IntParam, s
     ));
     cx.emit(RawParamEvent::EndSetParameter(param.as_ptr()));
 }
-
 
 #[derive(Lens, Clone)]
 struct Data {
@@ -98,7 +95,10 @@ pub(crate) fn create(
 
         let initial_path = wavetable_path.lock().unwrap().clone();
         let initial_scale = cx.user_scale_factor();
-        nih_plug::nih_log!("[SCALE] Editor opened, cx.user_scale_factor() = {}", initial_scale);
+        nih_plug::nih_log!(
+            "[SCALE] Editor opened, cx.user_scale_factor() = {}",
+            initial_scale
+        );
         let initial_scale_pct = format!("{}%", (initial_scale * 100.0).round() as u32);
 
         Data {
@@ -133,9 +133,10 @@ pub(crate) fn create(
                             cx.set_user_scale_factor(new_scale);
                             let p = Data::params.get(cx);
                             set_scale_param(cx, &p.ui_scale, new_scale);
-                            cx.emit(DataEvent::SetUiScalePct(
-                                format!("{}%", (new_scale * 100.0).round() as u32),
-                            ));
+                            cx.emit(DataEvent::SetUiScalePct(format!(
+                                "{}%",
+                                (new_scale * 100.0).round() as u32
+                            )));
                         }
                     },
                     |cx| Label::new(cx, "-"),
@@ -159,9 +160,10 @@ pub(crate) fn create(
                             cx.set_user_scale_factor(new_scale);
                             let p = Data::params.get(cx);
                             set_scale_param(cx, &p.ui_scale, new_scale);
-                            cx.emit(DataEvent::SetUiScalePct(
-                                format!("{}%", (new_scale * 100.0).round() as u32),
-                            ));
+                            cx.emit(DataEvent::SetUiScalePct(format!(
+                                "{}%",
+                                (new_scale * 100.0).round() as u32
+                            )));
                         }
                     },
                     |cx| Label::new(cx, "+"),
@@ -208,8 +210,8 @@ pub(crate) fn create(
                     cx,
                     move |cx| {
                         nih_plug::nih_log!("Browse button clicked");
-                        let mut dialog = rfd::FileDialog::new()
-                            .add_filter("Wavetable files", &["wav", "wt"]);
+                        let mut dialog =
+                            rfd::FileDialog::new().add_filter("Wavetable files", &["wav", "wt"]);
                         if let Ok(current) = wt_path_inner.lock() {
                             if let Some(dir) = std::path::Path::new(current.as_str()).parent() {
                                 if dir.exists() {
@@ -217,8 +219,7 @@ pub(crate) fn create(
                                 }
                             }
                         }
-                        if let Some(path) = dialog.pick_file()
-                        {
+                        if let Some(path) = dialog.pick_file() {
                             nih_plug::nih_log!("File selected: {:?}", path);
                             if let Some(path_str) = path.to_str() {
                                 let path_string = path_str.to_string();
@@ -251,7 +252,12 @@ pub(crate) fn create(
                                             frame_fft,
                                             frame_cache: vec![0.0; new_size],
                                             frame_buf: vec![0.0; new_size],
-                                            frame_spectrum: vec![rustfft::num_complex::Complex::new(0.0, 0.0); spec_len],
+                                            frame_spectrum: vec![
+                                                rustfft::num_complex::Complex::new(
+                                                    0.0, 0.0
+                                                );
+                                                spec_len
+                                            ],
                                             frame_mags: vec![0.0; spec_len],
                                         };
                                         if let Ok(mut pending) = pending_reload_inner.lock() {

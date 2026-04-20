@@ -164,7 +164,13 @@ impl GainBrainWindow {
             false,
             false,
         );
-        self.drag.push_region(stepper_x, stepper_y, arrow_w, slider_h, HitAction::GroupDecrement);
+        self.drag.push_region(
+            stepper_x,
+            stepper_y,
+            arrow_w,
+            slider_h,
+            HitAction::GroupDecrement,
+        );
 
         // Value display (centered text, no hit region)
         let val_x = stepper_x + arrow_w + 2.0 * s;
@@ -201,7 +207,13 @@ impl GainBrainWindow {
             false,
             false,
         );
-        self.drag.push_region(right_x, stepper_y, arrow_w, slider_h, HitAction::GroupIncrement);
+        self.drag.push_region(
+            right_x,
+            stepper_y,
+            arrow_w,
+            slider_h,
+            HitAction::GroupIncrement,
+        );
         y += row_h;
 
         // ── Link mode selector (only visible when group > 0) ──
@@ -264,7 +276,8 @@ impl GainBrainWindow {
                 inv_active,
                 false,
             );
-            self.drag.push_region(inv_x, inv_y, inv_w, slider_h, HitAction::ToggleInvert);
+            self.drag
+                .push_region(inv_x, inv_y, inv_w, slider_h, HitAction::ToggleInvert);
 
             y += row_h;
         }
@@ -308,7 +321,13 @@ impl GainBrainWindow {
             caret,
         );
         // Hit region covers the full dial area for vertical drag
-        self.drag.push_region(dial_cx - dial_radius - 10.0 * s, y, dial_radius * 2.0 + 20.0 * s, dial_total_h, HitAction::Dial(ParamId::Gain));
+        self.drag.push_region(
+            dial_cx - dial_radius - 10.0 * s,
+            y,
+            dial_radius * 2.0 + 20.0 * s,
+            dial_total_h,
+            HitAction::Dial(ParamId::Gain),
+        );
         let _ = y + dial_total_h; // suppress unused warning; y is the layout cursor
     }
 
@@ -411,7 +430,8 @@ impl GainBrainWindow {
                 // Update display atomic so draw() reflects the reset immediately.
                 let default_db = nih_plug::util::gain_to_db(self.params.gain.default_plain_value());
                 let default_mb = (default_db * 100.0).round() as i32;
-                self.display_gain_millibels.store(default_mb, Ordering::Relaxed);
+                self.display_gain_millibels
+                    .store(default_mb, Ordering::Relaxed);
                 // Signal user intent to the audio thread.
                 self.user_gain_override.store(default_mb, Ordering::Relaxed);
             }
@@ -494,10 +514,8 @@ impl baseview::WindowHandler for GainBrainWindow {
                         self.set_param_normalized(&setter, param_id, normalized);
                         // Keep the display atomic in sync so draw() shows the
                         // dragged value immediately, even before process() runs.
-                        self.display_gain_millibels.store(
-                            (target_db * 100.0).round() as i32,
-                            Ordering::Relaxed,
-                        );
+                        self.display_gain_millibels
+                            .store((target_db * 100.0).round() as i32, Ordering::Relaxed);
                     }
                 }
             }
@@ -524,9 +542,9 @@ impl baseview::WindowHandler for GainBrainWindow {
                                 self.reset_param_to_default(&setter, param_id);
                             } else {
                                 // Map dB to 0-1 for DragState: (dB + 60) / 120
-                                let display_db =
-                                    self.display_gain_millibels.load(Ordering::Relaxed) as f32
-                                        / 100.0;
+                                let display_db = self.display_gain_millibels.load(Ordering::Relaxed)
+                                    as f32
+                                    / 100.0;
                                 let norm = (display_db + 60.0) / 120.0;
                                 let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
                                 self.drag.begin_drag(HitAction::Dial(param_id), norm, shift);
@@ -721,19 +739,15 @@ impl Editor for GainBrainEditor {
     fn param_value_changed(&self, id: &str, _normalized_value: f32) {
         if id == "gain" {
             let gain_db = nih_plug::util::gain_to_db(self.params.gain.value());
-            self.display_gain_millibels.store(
-                (gain_db * 100.0).round() as i32,
-                Ordering::Relaxed,
-            );
+            self.display_gain_millibels
+                .store((gain_db * 100.0).round() as i32, Ordering::Relaxed);
         }
     }
     fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
     fn param_values_changed(&self) {
         let gain_db = nih_plug::util::gain_to_db(self.params.gain.value());
-        self.display_gain_millibels.store(
-            (gain_db * 100.0).round() as i32,
-            Ordering::Relaxed,
-        );
+        self.display_gain_millibels
+            .store((gain_db * 100.0).round() as i32, Ordering::Relaxed);
     }
 }
 
@@ -752,7 +766,10 @@ mod text_entry_tests {
             s.insert_char(c);
         }
         let out = s.commit();
-        assert_eq!(out, Some((HitAction::Dial(ParamId::Gain), "-6.2".to_string())));
+        assert_eq!(
+            out,
+            Some((HitAction::Dial(ParamId::Gain), "-6.2".to_string()))
+        );
     }
 
     /// Regression guard for the TextEditState API: calling `begin` is

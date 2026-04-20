@@ -341,16 +341,20 @@ impl Plugin for GainBrain {
         self.last_group = group;
 
         // Sync display gain for the editor.
-        self.display_gain_millibels.store(
-            db_to_millibels(self.effective_gain_db),
-            Ordering::Relaxed,
-        );
+        self.display_gain_millibels
+            .store(db_to_millibels(self.effective_gain_db), Ordering::Relaxed);
 
         debug_log!(
             "gain-brain[{}]: initialize() gain={:.2}dB group={} mode={:?} invert={} \
              effective={:.2}dB persisted={}mb prev_last_group={}",
-            self.instance_id, gain_db, group, link_mode, invert,
-            self.effective_gain_db, persisted_mb, prev_last_group
+            self.instance_id,
+            gain_db,
+            group,
+            link_mode,
+            invert,
+            self.effective_gain_db,
+            persisted_mb,
+            prev_last_group
         );
         true
     }
@@ -378,7 +382,9 @@ impl Plugin for GainBrain {
             let target_gain = util::db_to_gain(target_db);
             debug_log!(
                 "gain-brain[{}]: APPLY OVERRIDE {}mb -> {:.2}dB (param was {:.2}dB)",
-                self.instance_id, override_mb, target_db,
+                self.instance_id,
+                override_mb,
+                target_db,
                 util::gain_to_db(self.params.gain.value())
             );
             self.params
@@ -408,7 +414,9 @@ impl Plugin for GainBrain {
             .store(effective_mb, Ordering::Relaxed);
 
         // Persist the effective gain so the host saves the correct value.
-        self.params.effective_gain_mb.store(effective_mb, Ordering::Relaxed);
+        self.params
+            .effective_gain_mb
+            .store(effective_mb, Ordering::Relaxed);
 
         // ── Sync host-visible param via main-thread task ──────────────
         let param_db = util::gain_to_db(self.params.gain.value());
@@ -416,7 +424,10 @@ impl Plugin for GainBrain {
             let target_mb = effective_mb;
             let target_linear = util::db_to_gain(self.effective_gain_db);
             let normalized = self.params.gain.preview_normalized(target_linear);
-            let stale_normalized = self.params.gain.preview_normalized(self.params.gain.value());
+            let stale_normalized = self
+                .params
+                .gain
+                .preview_normalized(self.params.gain.value());
             context.execute_gui(GainBrainTask::SyncGainParam {
                 normalized,
                 stale_normalized,
@@ -445,7 +456,8 @@ impl Plugin for GainBrain {
         }
         debug_log!(
             "gain-brain[{}]: deactivate() last_group={}",
-            self.instance_id, self.last_group
+            self.instance_id,
+            self.last_group
         );
         self.last_group = 0;
     }
@@ -466,8 +478,12 @@ impl GainBrain {
         if group_changed || mode_changed {
             debug_log!(
                 "gain-brain[{}]: TRANSITION group {}→{} mode {:?}→{:?} effective={:.2}dB",
-                self.instance_id, self.last_group, group,
-                self.last_link_mode, link_mode, self.effective_gain_db
+                self.instance_id,
+                self.last_group,
+                group,
+                self.last_link_mode,
+                link_mode,
+                self.effective_gain_db
             );
             self.handle_transition(group, link_mode);
             self.last_group = group;
@@ -482,7 +498,10 @@ impl GainBrain {
         if invert != self.last_invert {
             debug_log!(
                 "gain-brain[{}]: INVERT TOGGLE {}→{} effective={:.2}dB",
-                self.instance_id, self.last_invert, invert, self.effective_gain_db
+                self.instance_id,
+                self.last_invert,
+                invert,
+                self.effective_gain_db
             );
             let snap = groups::read_slot(group as u8);
             self.last_seen_cumulative = snap.cumulative_delta;
@@ -499,7 +518,10 @@ impl GainBrain {
         if snap.epoch != self.last_seen_epoch {
             debug_log!(
                 "gain-brain[{}]: READ REBASELINE epoch {}→{} cum={}",
-                self.instance_id, self.last_seen_epoch, snap.epoch, snap.cumulative_delta
+                self.instance_id,
+                self.last_seen_epoch,
+                snap.epoch,
+                snap.cumulative_delta
             );
             self.last_seen_cumulative = snap.cumulative_delta;
             self.last_seen_epoch = snap.epoch;
@@ -523,7 +545,10 @@ impl GainBrain {
                         let local = local.clamp(-6000, 6000);
                         debug_log!(
                             "gain-brain[{}]: READ ABS canonical={}mb local={}mb gen={}",
-                            self.instance_id, canonical, local, snap.generation
+                            self.instance_id,
+                            canonical,
+                            local,
+                            snap.generation
                         );
                         self.group_gain_override.store(local, Ordering::Relaxed);
                         self.effective_gain_db = millibels_to_db(local);
@@ -536,7 +561,11 @@ impl GainBrain {
                 LinkMode::Relative => {
                     if snap.cumulative_delta != self.last_seen_cumulative {
                         let canonical_delta = snap.cumulative_delta - self.last_seen_cumulative;
-                        let local_delta = if invert { -canonical_delta } else { canonical_delta };
+                        let local_delta = if invert {
+                            -canonical_delta
+                        } else {
+                            canonical_delta
+                        };
                         let current_mb = db_to_millibels(self.effective_gain_db);
                         let new_mb = current_mb + local_delta;
                         let clamped_db = clamp_db(millibels_to_db(new_mb));
@@ -546,7 +575,8 @@ impl GainBrain {
                             self.instance_id, canonical_delta, local_delta,
                             self.effective_gain_db, clamped_db
                         );
-                        self.group_gain_override.store(clamped_mb, Ordering::Relaxed);
+                        self.group_gain_override
+                            .store(clamped_mb, Ordering::Relaxed);
                         self.effective_gain_db = clamped_db;
                         self.last_seen_cumulative = snap.cumulative_delta;
                         self.last_seen_generation = snap.generation;
@@ -563,9 +593,7 @@ impl GainBrain {
         // the GUI when the user drags or double-clicks the gain knob. It
         // provides a reliable user-intent signal that survives the
         // SyncGainParam race condition.
-        let user_override_mb = self
-            .user_gain_override
-            .swap(NO_OVERRIDE, Ordering::Relaxed);
+        let user_override_mb = self.user_gain_override.swap(NO_OVERRIDE, Ordering::Relaxed);
         if user_override_mb != NO_OVERRIDE && !read_fired {
             let effective_mb = db_to_millibels(self.effective_gain_db);
             let local_delta = user_override_mb - effective_mb;
@@ -627,10 +655,7 @@ impl GainBrain {
                 false
             };
 
-            if (current_mb - self.last_param_value_mb).abs() > 1
-                && !read_fired
-                && !sync_blocked
-            {
+            if (current_mb - self.last_param_value_mb).abs() > 1 && !read_fired && !sync_blocked {
                 let local_delta = current_mb - self.last_param_value_mb;
                 let canonical_delta = if invert { -local_delta } else { local_delta };
                 let canonical_absolute = if invert { -current_mb } else { current_mb };
@@ -680,7 +705,9 @@ impl GainBrain {
             // First instance (stale slot) — reset
             debug_log!(
                 "gain-brain[{}]: TRANSITION STALE RESET group={} effective={:.2}dB",
-                self.instance_id, new_group, self.effective_gain_db
+                self.instance_id,
+                new_group,
+                self.effective_gain_db
             );
             groups::reset_cumulative(new_group as u8);
             self.last_seen_cumulative = 0;
@@ -736,8 +763,11 @@ impl ClapPlugin for GainBrain {
         Some("A gain utility with cross-instance group linking");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] =
-        &[ClapFeature::AudioEffect, ClapFeature::Utility, ClapFeature::Stereo];
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::AudioEffect,
+        ClapFeature::Utility,
+        ClapFeature::Stereo,
+    ];
 }
 
 impl Vst3Plugin for GainBrain {
@@ -938,10 +968,8 @@ mod tests {
             inst.handle_transition(group, link_mode);
         }
         inst.last_group = group;
-        inst.display_gain_millibels.store(
-            db_to_millibels(inst.effective_gain_db),
-            Ordering::Relaxed,
-        );
+        inst.display_gain_millibels
+            .store(db_to_millibels(inst.effective_gain_db), Ordering::Relaxed);
     }
 
     #[allow(dead_code)]
@@ -991,14 +1019,25 @@ mod tests {
         groups::reset_slot(1);
         let mut a = make_instance(make_params(0.0, 1, LinkMode::Relative, false));
         let mut b = make_instance(make_params(0.0, 1, LinkMode::Relative, false));
-        init(&mut a); init(&mut b);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        init(&mut a);
+        init(&mut b);
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // A drags to +3dB
         a.params = make_params(3.0, 1, LinkMode::Relative, false);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
-        assert!((b.effective_gain_db - 3.0).abs() < 0.5, "B should follow A: got {}", b.effective_gain_db);
+        assert!(
+            (b.effective_gain_db - 3.0).abs() < 0.5,
+            "B should follow A: got {}",
+            b.effective_gain_db
+        );
     }
 
     #[test]
@@ -1006,14 +1045,25 @@ mod tests {
         groups::reset_slot(2);
         let mut a = make_instance(make_params(0.0, 2, LinkMode::Relative, false));
         let mut b = make_instance(make_params(0.0, 2, LinkMode::Relative, true));
-        init(&mut a); init(&mut b);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        init(&mut a);
+        init(&mut b);
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // A drags to +3dB
         a.params = make_params(3.0, 2, LinkMode::Relative, false);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
-        assert!((b.effective_gain_db - (-3.0)).abs() < 0.5, "B inverted should go -3dB: got {}", b.effective_gain_db);
+        assert!(
+            (b.effective_gain_db - (-3.0)).abs() < 0.5,
+            "B inverted should go -3dB: got {}",
+            b.effective_gain_db
+        );
     }
 
     #[test]
@@ -1021,18 +1071,34 @@ mod tests {
         groups::reset_slot(3);
         let mut a = make_instance(make_params(5.0, 3, LinkMode::Relative, false));
         let mut b = make_instance(make_params(5.0, 3, LinkMode::Relative, false));
-        init(&mut a); init(&mut b);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        init(&mut a);
+        init(&mut b);
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         let b_before = b.effective_gain_db;
         // B toggles invert
         b.params = make_params(5.0, 3, LinkMode::Relative, true);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // B's effective should not jump
-        assert!((b.effective_gain_db - b_before).abs() < 0.5, "B should not jump on invert toggle: got {} (was {})", b.effective_gain_db, b_before);
+        assert!(
+            (b.effective_gain_db - b_before).abs() < 0.5,
+            "B should not jump on invert toggle: got {} (was {})",
+            b.effective_gain_db,
+            b_before
+        );
         // A's effective should not jump
-        assert!((a.effective_gain_db - 5.0).abs() < 0.5, "A should not jump on B's invert toggle: got {}", a.effective_gain_db);
+        assert!(
+            (a.effective_gain_db - 5.0).abs() < 0.5,
+            "A should not jump on B's invert toggle: got {}",
+            a.effective_gain_db
+        );
     }
 
     #[test]
@@ -1040,8 +1106,12 @@ mod tests {
         groups::reset_slot(4);
         let mut a = make_instance(make_params(0.0, 4, LinkMode::Relative, false));
         let mut b = make_instance(make_params(0.0, 4, LinkMode::Relative, false));
-        init(&mut a); init(&mut b);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        init(&mut a);
+        init(&mut b);
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // A writes 5 times without B reading
         for gain in [1.0, 2.0, 3.0, 4.0, 5.0] {
@@ -1050,8 +1120,14 @@ mod tests {
         }
 
         // B reads once — should get the full +5dB delta
-        for _ in 0..3 { tick(&mut b); }
-        assert!((b.effective_gain_db - 5.0).abs() < 0.5, "B should get cumulative delta: got {}", b.effective_gain_db);
+        for _ in 0..3 {
+            tick(&mut b);
+        }
+        assert!(
+            (b.effective_gain_db - 5.0).abs() < 0.5,
+            "B should get cumulative delta: got {}",
+            b.effective_gain_db
+        );
     }
 
     #[test]
@@ -1059,13 +1135,19 @@ mod tests {
         groups::reset_slot(5);
         let mut a = make_instance(make_params(0.0, 5, LinkMode::Relative, false));
         init(&mut a);
-        for _ in 0..3 { tick(&mut a); }
+        for _ in 0..3 {
+            tick(&mut a);
+        }
 
         a.params = make_params(3.0, 5, LinkMode::Relative, false);
         tick(&mut a);
 
         // A should be at 3dB (from its own write), not 6dB (from reading its own delta)
-        assert!((a.effective_gain_db - 3.0).abs() < 0.5, "A should not read its own delta: got {}", a.effective_gain_db);
+        assert!(
+            (a.effective_gain_db - 3.0).abs() < 0.5,
+            "A should not read its own delta: got {}",
+            a.effective_gain_db
+        );
     }
 
     #[test]
@@ -1077,10 +1159,16 @@ mod tests {
 
         let mut a = make_instance(make_params(0.0, 6, LinkMode::Relative, false));
         init(&mut a);
-        for _ in 0..3 { tick(&mut a); }
+        for _ in 0..3 {
+            tick(&mut a);
+        }
 
         // A should be at 0dB, not affected by stale 1000mb
-        assert!(a.effective_gain_db.abs() < 0.5, "A should not be affected by stale data: got {}", a.effective_gain_db);
+        assert!(
+            a.effective_gain_db.abs() < 0.5,
+            "A should not be affected by stale data: got {}",
+            a.effective_gain_db
+        );
     }
 
     #[test]
@@ -1088,14 +1176,23 @@ mod tests {
         groups::reset_slot(7);
         let mut a = make_instance(make_params(6.0, 7, LinkMode::Relative, false));
         init(&mut a);
-        for _ in 0..3 { tick(&mut a); }
+        for _ in 0..3 {
+            tick(&mut a);
+        }
 
         let mut b = make_instance(make_params(0.0, 7, LinkMode::Relative, false));
         init(&mut b);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // A should still be at ~6dB
-        assert!((a.effective_gain_db - 6.0).abs() < 0.5, "A should not be clobbered: got {}", a.effective_gain_db);
+        assert!(
+            (a.effective_gain_db - 6.0).abs() < 0.5,
+            "A should not be clobbered: got {}",
+            a.effective_gain_db
+        );
     }
 
     #[test]
@@ -1103,11 +1200,19 @@ mod tests {
         groups::reset_slot(8);
         let mut a = make_instance(make_params(5.0, 8, LinkMode::Absolute, false));
         let mut b = make_instance(make_params(0.0, 8, LinkMode::Absolute, false));
-        init(&mut a); init(&mut b);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        init(&mut a);
+        init(&mut b);
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // B should adopt A's value
-        assert!((b.effective_gain_db - 5.0).abs() < 0.5, "B should adopt A's gain: got {}", b.effective_gain_db);
+        assert!(
+            (b.effective_gain_db - 5.0).abs() < 0.5,
+            "B should adopt A's gain: got {}",
+            b.effective_gain_db
+        );
     }
 
     #[test]
@@ -1115,11 +1220,19 @@ mod tests {
         groups::reset_slot(9);
         let mut a = make_instance(make_params(5.0, 9, LinkMode::Absolute, false));
         let mut b = make_instance(make_params(0.0, 9, LinkMode::Absolute, true));
-        init(&mut a); init(&mut b);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        init(&mut a);
+        init(&mut b);
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // B inverted should adopt -5dB
-        assert!((b.effective_gain_db - (-5.0)).abs() < 0.5, "B inverted should adopt -5dB: got {}", b.effective_gain_db);
+        assert!(
+            (b.effective_gain_db - (-5.0)).abs() < 0.5,
+            "B inverted should adopt -5dB: got {}",
+            b.effective_gain_db
+        );
     }
 
     /// Regression: toggling invert on/off without moving gain must not break
@@ -1132,18 +1245,31 @@ mod tests {
         groups::reset_slot(10);
         let mut a = make_instance(make_params(0.0, 10, LinkMode::Relative, false));
         let mut b = make_instance(make_params(0.0, 10, LinkMode::Relative, false));
-        init(&mut a); init(&mut b);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        init(&mut a);
+        init(&mut b);
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // B toggles invert ON then OFF without moving gain
         b.params = make_params(0.0, 10, LinkMode::Relative, true);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
         b.params = make_params(0.0, 10, LinkMode::Relative, false);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // Now A moves to +4dB — B must follow
         a.params = make_params(4.0, 10, LinkMode::Relative, false);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         assert!(
             (b.effective_gain_db - 4.0).abs() < 0.5,
@@ -1161,23 +1287,34 @@ mod tests {
         groups::reset_slot(11);
         let mut a = make_instance(make_params(5.0, 11, LinkMode::Relative, false));
         let mut b = make_instance(make_params(5.0, 11, LinkMode::Relative, false));
-        init(&mut a); init(&mut b);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        init(&mut a);
+        init(&mut b);
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // A toggles invert on then off — ONLY A ticks, B sleeps
         a.params = make_params(5.0, 11, LinkMode::Relative, true);
-        tick(&mut a);  // A detects toggle
+        tick(&mut a); // A detects toggle
         a.params = make_params(5.0, 11, LinkMode::Relative, false);
-        tick(&mut a);  // A detects toggle back
+        tick(&mut a); // A detects toggle back
 
         // A moves to 8dB — ONLY A ticks, B still sleeping
         a.params = make_params(8.0, 11, LinkMode::Relative, false);
-        for _ in 0..3 { tick(&mut a); }
+        for _ in 0..3 {
+            tick(&mut a);
+        }
 
         // B finally wakes up — must see the +3dB delta
-        for _ in 0..3 { tick(&mut b); }
-        assert!((b.effective_gain_db - 8.0).abs() < 0.5,
-            "B must follow A after delayed toggle detection: got {}", b.effective_gain_db);
+        for _ in 0..3 {
+            tick(&mut b);
+        }
+        assert!(
+            (b.effective_gain_db - 8.0).abs() < 0.5,
+            "B must follow A after delayed toggle detection: got {}",
+            b.effective_gain_db
+        );
     }
 
     // ── Regression tests: SyncGainParam feedback ────────────────────────
@@ -1208,22 +1345,34 @@ mod tests {
         groups::reset_slot(12);
         let mut a = make_instance(make_params(0.0, 12, LinkMode::Relative, false));
         let mut b = make_instance(make_params(0.0, 12, LinkMode::Relative, false));
-        init(&mut a); init(&mut b);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        init(&mut a);
+        init(&mut b);
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // A moves to -5dB
         a.params = make_params(-5.0, 12, LinkMode::Relative, false);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // B should have followed A to -5dB
-        assert!((b.effective_gain_db - (-5.0)).abs() < 0.5,
-            "B should follow A to -5dB, got {:.2}", b.effective_gain_db);
+        assert!(
+            (b.effective_gain_db - (-5.0)).abs() < 0.5,
+            "B should follow A to -5dB, got {:.2}",
+            b.effective_gain_db
+        );
 
         // User double-clicks B to reset to 0dB.
         // The GUI writes user_gain_override AND sets the param.
         b.user_gain_override.store(0, Ordering::Relaxed);
         b.params = make_params(0.0, 12, LinkMode::Relative, false);
-        for _ in 0..2 { tick(&mut b); }
+        for _ in 0..2 {
+            tick(&mut b);
+        }
 
         // Stale SyncGainParam arrives — overwrites B's param to -5dB.
         // But user_gain_override already fired on the previous tick.
@@ -1231,13 +1380,21 @@ mod tests {
         tick(&mut b);
 
         // Let everything settle.
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
-        assert!((b.effective_gain_db).abs() < 0.5,
+        assert!(
+            (b.effective_gain_db).abs() < 0.5,
             "B should be at 0dB after double-click reset, got {:.2}",
-            b.effective_gain_db);
-        assert!((a.effective_gain_db).abs() < 0.5,
-            "A should follow B to 0dB, got {:.2}", a.effective_gain_db);
+            b.effective_gain_db
+        );
+        assert!(
+            (a.effective_gain_db).abs() < 0.5,
+            "A should follow B to 0dB, got {:.2}",
+            a.effective_gain_db
+        );
     }
 
     /// Regression 2: Same race with inverted B. The reset to 0dB
@@ -1247,38 +1404,60 @@ mod tests {
         groups::reset_slot(13);
         let mut a = make_instance(make_params(0.0, 13, LinkMode::Relative, false));
         let mut b = make_instance(make_params(0.0, 13, LinkMode::Relative, true));
-        init(&mut a); init(&mut b);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        init(&mut a);
+        init(&mut b);
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // A moves to -5dB (B inverted follows to +5dB)
         a.params = make_params(-5.0, 13, LinkMode::Relative, false);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
-        assert!((b.effective_gain_db - 5.0).abs() < 0.5,
-            "B inverted should follow to +5dB, got {:.2}", b.effective_gain_db);
+        assert!(
+            (b.effective_gain_db - 5.0).abs() < 0.5,
+            "B inverted should follow to +5dB, got {:.2}",
+            b.effective_gain_db
+        );
 
         // User double-clicks B to 0dB.
         b.user_gain_override.store(0, Ordering::Relaxed);
         b.params = make_params(0.0, 13, LinkMode::Relative, true);
-        for _ in 0..2 { tick(&mut b); }
+        for _ in 0..2 {
+            tick(&mut b);
+        }
 
         // Stale SyncGainParam arrives — overwrites B's param to +5dB.
         b.params = make_params(5.0, 13, LinkMode::Relative, true);
         tick(&mut b);
 
         // Let settle.
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // SyncGainParam on A (param catches up)
         a.params = make_params(a.effective_gain_db, 13, LinkMode::Relative, false);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
-        assert!((b.effective_gain_db).abs() < 0.5,
+        assert!(
+            (b.effective_gain_db).abs() < 0.5,
             "B should be at 0dB after double-click reset, got {:.2}",
-            b.effective_gain_db);
-        assert!((a.effective_gain_db).abs() < 0.5,
+            b.effective_gain_db
+        );
+        assert!(
+            (a.effective_gain_db).abs() < 0.5,
             "A should follow B's reset to 0dB, got {:.2}",
-            a.effective_gain_db);
+            a.effective_gain_db
+        );
     }
 
     /// Regression 3: User move eaten by stale SyncGainParam.
@@ -1289,33 +1468,53 @@ mod tests {
         groups::reset_slot(14);
         let mut a = make_instance(make_params(0.0, 14, LinkMode::Relative, false));
         let mut b = make_instance(make_params(0.0, 14, LinkMode::Relative, false));
-        init(&mut a); init(&mut b);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        init(&mut a);
+        init(&mut b);
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
         // A moves to -5dB
         a.params = make_params(-5.0, 14, LinkMode::Relative, false);
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
-        assert!((b.effective_gain_db - (-5.0)).abs() < 0.5,
-            "B should follow A to -5dB, got {:.2}", b.effective_gain_db);
+        assert!(
+            (b.effective_gain_db - (-5.0)).abs() < 0.5,
+            "B should follow A to -5dB, got {:.2}",
+            b.effective_gain_db
+        );
 
         // User moves B to -2dB before SyncGainParam arrives.
         b.user_gain_override
             .store(db_to_millibels(-2.0), Ordering::Relaxed);
         b.params = make_params(-2.0, 14, LinkMode::Relative, false);
-        for _ in 0..2 { tick(&mut b); }
+        for _ in 0..2 {
+            tick(&mut b);
+        }
 
         // Stale SyncGainParam arrives — overwrites B's param to -5dB.
         b.params = make_params(-5.0, 14, LinkMode::Relative, false);
         tick(&mut b);
 
         // Let settle.
-        for _ in 0..3 { tick(&mut a); tick(&mut b); }
+        for _ in 0..3 {
+            tick(&mut a);
+            tick(&mut b);
+        }
 
-        assert!((b.effective_gain_db - (-2.0)).abs() < 0.5,
+        assert!(
+            (b.effective_gain_db - (-2.0)).abs() < 0.5,
             "B should be at -2dB (user's move), not reverted to -5dB, got {:.2}",
-            b.effective_gain_db);
-        assert!((a.effective_gain_db - (-2.0)).abs() < 0.5,
-            "A should follow B to -2dB, got {:.2}", a.effective_gain_db);
+            b.effective_gain_db
+        );
+        assert!(
+            (a.effective_gain_db - (-2.0)).abs() < 0.5,
+            "A should follow B to -2dB, got {:.2}",
+            a.effective_gain_db
+        );
     }
 }

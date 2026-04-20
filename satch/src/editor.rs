@@ -230,7 +230,13 @@ impl SatchWindow {
                 editing_buf.as_deref(),
                 caret,
             );
-            self.drag.push_region(cx - col_spacing / 2.0, y, col_spacing, row_h, HitAction::Dial(*param_id));
+            self.drag.push_region(
+                cx - col_spacing / 2.0,
+                y,
+                col_spacing,
+                row_h,
+                HitAction::Dial(*param_id),
+            );
         }
 
         // Row 2: Detail, Knee
@@ -254,7 +260,13 @@ impl SatchWindow {
                 editing_buf.as_deref(),
                 caret,
             );
-            self.drag.push_region(cx - col_spacing / 2.0, y + row_h, col_spacing, row_h, HitAction::Dial(*param_id));
+            self.drag.push_region(
+                cx - col_spacing / 2.0,
+                y + row_h,
+                col_spacing,
+                row_h,
+                HitAction::Dial(*param_id),
+            );
         }
 
         // Mix: bottom-right corner, smaller
@@ -282,7 +294,13 @@ impl SatchWindow {
                 caret,
             );
             let hit_w = col_spacing;
-            self.drag.push_region(mix_cx - hit_w / 2.0, y + row_h * 2.0, hit_w, row_h, HitAction::Dial(param_id));
+            self.drag.push_region(
+                mix_cx - hit_w / 2.0,
+                y + row_h * 2.0,
+                hit_w,
+                row_h,
+                HitAction::Dial(param_id),
+            );
         }
     }
 
@@ -381,7 +399,8 @@ impl baseview::WindowHandler for SatchWindow {
                             if is_double {
                                 self.reset_param_to_default(&setter, param_id);
                             } else {
-                                let norm = self.float_param(param_id).unmodulated_normalized_value();
+                                let norm =
+                                    self.float_param(param_id).unmodulated_normalized_value();
                                 let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
                                 self.drag.begin_drag(HitAction::Dial(param_id), norm, shift);
                                 self.begin_set_param(&setter, param_id);
@@ -517,7 +536,9 @@ mod text_entry_tests {
     #[test]
     fn text_edit_roundtrip_for_threshold_action() {
         let mut text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Threshold)).is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Threshold))
+            .is_none());
 
         text_edit.begin(HitAction::Dial(ParamId::Threshold), "5.0");
         assert_eq!(
@@ -534,16 +555,28 @@ mod text_entry_tests {
         let (action, buffer) = text_edit.commit().unwrap();
         assert_eq!(action, HitAction::Dial(ParamId::Threshold));
         assert_eq!(buffer, "5.00");
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Threshold)).is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Threshold))
+            .is_none());
     }
 
     #[test]
     fn state_starts_inactive() {
         let text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Gain)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Threshold)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Detail)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Knee)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Mix)).is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Gain))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Threshold))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Detail))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Knee))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Mix))
+            .is_none());
     }
 }

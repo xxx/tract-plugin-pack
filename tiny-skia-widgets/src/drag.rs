@@ -70,13 +70,7 @@ impl<A: Clone + PartialEq> DragState<A> {
 
     /// Add a hit region.
     pub fn push_region(&mut self, x: f32, y: f32, w: f32, h: f32, action: A) {
-        self.hit_regions.push(HitRegion {
-            x,
-            y,
-            w,
-            h,
-            action,
-        });
+        self.hit_regions.push(HitRegion { x, y, w, h, action });
     }
 
     // ── Queries ─────────────────────────────────────────────────────
@@ -205,7 +199,10 @@ mod tests {
     #[test]
     fn test_mouse_in_window_starts_false() {
         let d: DragState<()> = DragState::new();
-        assert!(!d.mouse_in_window(), "new DragState must not claim the mouse is in window");
+        assert!(
+            !d.mouse_in_window(),
+            "new DragState must not claim the mouse is in window"
+        );
     }
 
     #[test]

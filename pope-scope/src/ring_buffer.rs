@@ -193,8 +193,7 @@ impl RingBuffer {
             }
         }
 
-        self.write_pos
-            .store(pos + samples.len(), Ordering::Relaxed);
+        self.write_pos.store(pos + samples.len(), Ordering::Relaxed);
     }
 
     /// Read the most recent `count` samples into `out`.

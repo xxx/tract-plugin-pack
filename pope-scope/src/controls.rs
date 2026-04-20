@@ -9,10 +9,10 @@ use tiny_skia_widgets as widgets;
 /// Hit region action from a control strip.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ControlAction {
-    CycleColor(usize),   // slot index
-    ToggleSolo(usize),   // slot index
-    ToggleMute(usize),   // slot index
-    HoverName(usize),    // slot index — for tooltip on truncated names
+    CycleColor(usize), // slot index
+    ToggleSolo(usize), // slot index
+    ToggleMute(usize), // slot index
+    HoverName(usize),  // slot index — for tooltip on truncated names
 }
 
 /// A rectangular hit region with an action.
@@ -95,20 +95,46 @@ pub fn draw_control_strip(
         let btn_y = y + pad;
 
         widgets::draw_outline_button(
-            pixmap, tr, solo_x, btn_y, btn_w, btn_h, "S", solo,
-            border_c, text_c, active_border_c, active_fill_c,
+            pixmap,
+            tr,
+            solo_x,
+            btn_y,
+            btn_w,
+            btn_h,
+            "S",
+            solo,
+            border_c,
+            text_c,
+            active_border_c,
+            active_fill_c,
         );
         regions.push(ControlHitRegion {
-            x: solo_x, y: btn_y, w: btn_w, h: btn_h,
+            x: solo_x,
+            y: btn_y,
+            w: btn_w,
+            h: btn_h,
             action: ControlAction::ToggleSolo(slot_index),
         });
 
         widgets::draw_outline_button(
-            pixmap, tr, mute_x, btn_y, btn_w, btn_h, "M", mute,
-            border_c, text_c, active_border_c, active_fill_c,
+            pixmap,
+            tr,
+            mute_x,
+            btn_y,
+            btn_w,
+            btn_h,
+            "M",
+            mute,
+            border_c,
+            text_c,
+            active_border_c,
+            active_fill_c,
         );
         regions.push(ControlHitRegion {
-            x: mute_x, y: btn_y, w: btn_w, h: btn_h,
+            x: mute_x,
+            y: btn_y,
+            w: btn_w,
+            h: btn_h,
             action: ControlAction::ToggleMute(slot_index),
         });
 
@@ -119,12 +145,19 @@ pub fn draw_control_strip(
         let (display_name, truncated) = truncate_name(&full_name, max_text_w, font_size, tr);
         let name_y = y + (h - font_size) / 2.0;
         tr.draw_text(
-            pixmap, name_x, name_y + font_size,
-            &display_name, font_size, theme::to_color(color),
+            pixmap,
+            name_x,
+            name_y + font_size,
+            &display_name,
+            font_size,
+            theme::to_color(color),
         );
         if truncated {
             regions.push(ControlHitRegion {
-                x, y, w: solo_x - x, h,
+                x,
+                y,
+                w: solo_x - x,
+                h,
                 action: ControlAction::HoverName(slot_index),
             });
         }
@@ -132,7 +165,10 @@ pub fn draw_control_strip(
         // Color swatch: thin vertical bar on far left
         tiny_skia_widgets::draw_rect(pixmap, x, y, swatch_w, h, theme::to_color(color));
         regions.push(ControlHitRegion {
-            x, y, w: swatch_w + pad, h,
+            x,
+            y,
+            w: swatch_w + pad,
+            h,
             action: ControlAction::CycleColor(slot_index),
         });
     } else {
@@ -165,7 +201,10 @@ pub fn draw_control_strip(
         );
         if truncated {
             regions.push(ControlHitRegion {
-                x, y: name_y, w, h: font_size + pad,
+                x,
+                y: name_y,
+                w,
+                h: font_size + pad,
                 action: ControlAction::HoverName(slot_index),
             });
         }
@@ -174,11 +213,18 @@ pub fn draw_control_strip(
         // Color swatch (clickable)
         let swatch_x = x + (w - swatch_size) / 2.0;
         tiny_skia_widgets::draw_rect(
-            pixmap, swatch_x, cy, swatch_size, swatch_size,
+            pixmap,
+            swatch_x,
+            cy,
+            swatch_size,
+            swatch_size,
             theme::to_color(color),
         );
         regions.push(ControlHitRegion {
-            x: swatch_x, y: cy, w: swatch_size, h: swatch_size,
+            x: swatch_x,
+            y: cy,
+            w: swatch_size,
+            h: swatch_size,
             action: ControlAction::CycleColor(slot_index),
         });
         cy += swatch_size + pad;
@@ -194,21 +240,47 @@ pub fn draw_control_strip(
         let btn_x = x + (w - total_btn_w) / 2.0;
 
         widgets::draw_outline_button(
-            pixmap, tr, btn_x, cy, btn_w, btn_h, "S", solo,
-            border_c, text_c, active_border_c, active_fill_c,
+            pixmap,
+            tr,
+            btn_x,
+            cy,
+            btn_w,
+            btn_h,
+            "S",
+            solo,
+            border_c,
+            text_c,
+            active_border_c,
+            active_fill_c,
         );
         regions.push(ControlHitRegion {
-            x: btn_x, y: cy, w: btn_w, h: btn_h,
+            x: btn_x,
+            y: cy,
+            w: btn_w,
+            h: btn_h,
             action: ControlAction::ToggleSolo(slot_index),
         });
 
         let mute_x = btn_x + btn_w + 4.0 * scale;
         widgets::draw_outline_button(
-            pixmap, tr, mute_x, cy, btn_w, btn_h, "M", mute,
-            border_c, text_c, active_border_c, active_fill_c,
+            pixmap,
+            tr,
+            mute_x,
+            cy,
+            btn_w,
+            btn_h,
+            "M",
+            mute,
+            border_c,
+            text_c,
+            active_border_c,
+            active_fill_c,
         );
         regions.push(ControlHitRegion {
-            x: mute_x, y: cy, w: btn_w, h: btn_h,
+            x: mute_x,
+            y: cy,
+            w: btn_w,
+            h: btn_h,
             action: ControlAction::ToggleMute(slot_index),
         });
     }

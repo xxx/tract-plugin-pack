@@ -138,26 +138,19 @@ impl View for ParamDial {
                 let pixels_per_full_range = 200.0 / cx.scale_factor();
 
                 if cx.modifiers().shift() {
-                    let status =
-                        *self
-                            .granular_drag_status
-                            .get_or_insert(GranularDragStatus {
-                                starting_y_coordinate: *y,
-                                starting_value: self
-                                    .param_base
-                                    .unmodulated_normalized_value(),
-                            });
+                    let status = *self.granular_drag_status.get_or_insert(GranularDragStatus {
+                        starting_y_coordinate: *y,
+                        starting_value: self.param_base.unmodulated_normalized_value(),
+                    });
                     let delta_y = status.starting_y_coordinate - *y;
-                    let delta_value =
-                        (delta_y / pixels_per_full_range) * GRANULAR_DRAG_MULTIPLIER;
+                    let delta_value = (delta_y / pixels_per_full_range) * GRANULAR_DRAG_MULTIPLIER;
                     let new_value = (status.starting_value + delta_value).clamp(0.0, 1.0);
                     self.param_base.set_normalized_value(cx, new_value);
                 } else {
                     self.granular_drag_status = None;
                     let delta_y = self.drag_start_y - *y;
                     let delta_value = delta_y / pixels_per_full_range;
-                    let new_value =
-                        (self.drag_start_value + delta_value).clamp(0.0, 1.0);
+                    let new_value = (self.drag_start_value + delta_value).clamp(0.0, 1.0);
                     self.param_base.set_normalized_value(cx, new_value);
                 }
             }
@@ -219,7 +212,14 @@ impl View for ParamDial {
 
         // --- Draw background arc (full 270deg track) ---
         let mut bg_path = vg::Path::new();
-        bg_path.arc(arc_cx, arc_cy, radius, START_ANGLE, END_ANGLE, vg::Solidity::Hole);
+        bg_path.arc(
+            arc_cx,
+            arc_cy,
+            radius,
+            START_ANGLE,
+            END_ANGLE,
+            vg::Solidity::Hole,
+        );
         let bg_paint = vg::Paint::color(vg::Color::rgb(64, 64, 64))
             .with_line_width(stroke_width)
             .with_line_cap(vg::LineCap::Round);
@@ -250,10 +250,7 @@ impl View for ParamDial {
             let dot_y = arc_cy + radius * value_angle.sin();
             let mut dot_path = vg::Path::new();
             dot_path.circle(dot_x, dot_y, 4.0);
-            canvas.fill_path(
-                &dot_path,
-                &vg::Paint::color(vg::Color::rgb(79, 195, 247)),
-            );
+            canvas.fill_path(&dot_path, &vg::Paint::color(vg::Color::rgb(79, 195, 247)));
         }
 
         // --- Draw modulation indicator (arc from unmodulated to modulated value) ---
@@ -262,7 +259,7 @@ impl View for ParamDial {
             let mod_angle = Self::value_to_angle(modulated);
             // Draw arc from unmodulated to modulated; use Solidity to control direction
             let solidity = if modulated >= unmod {
-                vg::Solidity::Hole  // clockwise (positive modulation)
+                vg::Solidity::Hole // clockwise (positive modulation)
             } else {
                 vg::Solidity::Solid // counter-clockwise (negative modulation)
             };

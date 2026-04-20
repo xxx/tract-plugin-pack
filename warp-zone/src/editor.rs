@@ -4,12 +4,12 @@
 //! - Top strip (~60px): Title, bypass toggle, Shift/Stretch/Mix dials
 //! - Main area: Scrolling spectral waterfall
 
+use crate::{SpectralDisplay, WarpZoneParams, DISPLAY_BINS, DISPLAY_COLUMNS};
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use crate::{SpectralDisplay, WarpZoneParams, DISPLAY_BINS, DISPLAY_COLUMNS};
 use tiny_skia_widgets as widgets;
 
 const WINDOW_WIDTH: u32 = 600;
@@ -43,7 +43,6 @@ enum ParamId {
 enum ButtonAction {
     Freeze,
 }
-
 
 // ── Waterfall color LUT ────────────────────────────────────────────────
 
@@ -193,7 +192,9 @@ impl WarpZoneWindow {
         let Some((action, text)) = self.text_edit.commit() else {
             return;
         };
-        let HitAction::Dial(param_id) = action else { return };
+        let HitAction::Dial(param_id) = action else {
+            return;
+        };
         let p = self.float_param(param_id);
         let norm = p.string_to_normalized_value(&text);
         let Some(norm) = norm else { return };
@@ -284,7 +285,13 @@ impl WarpZoneWindow {
             freeze_on,
             false,
         );
-        self.drag.push_region(freeze_x, freeze_y, freeze_btn_w, freeze_btn_h, HitAction::Button(ButtonAction::Freeze));
+        self.drag.push_region(
+            freeze_x,
+            freeze_y,
+            freeze_btn_w,
+            freeze_btn_h,
+            HitAction::Button(ButtonAction::Freeze),
+        );
 
         let dial_area_start = freeze_x + freeze_btn_w + 8.0 * s;
         let dial_cy = y + dial_row_h * 0.5;
@@ -313,7 +320,13 @@ impl WarpZoneWindow {
                 editing_buf.as_deref(),
                 caret,
             );
-            self.drag.push_region(dial_area_start + timbre_spacing * i as f32, y, timbre_spacing, dial_row_h, HitAction::Dial(*param_id));
+            self.drag.push_region(
+                dial_area_start + timbre_spacing * i as f32,
+                y,
+                timbre_spacing,
+                dial_row_h,
+                HitAction::Dial(*param_id),
+            );
         }
 
         // Mix dial on the right
@@ -339,7 +352,13 @@ impl WarpZoneWindow {
                 caret,
             );
             let mix_hit_w = (w - dial_area_start - timbre_area_w) * 0.8;
-            self.drag.push_region(mix_cx - mix_hit_w * 0.5, y, mix_hit_w, dial_row_h, HitAction::Dial(param_id));
+            self.drag.push_region(
+                mix_cx - mix_hit_w * 0.5,
+                y,
+                mix_hit_w,
+                dial_row_h,
+                HitAction::Dial(param_id),
+            );
         }
 
         y += dial_row_h;
@@ -370,7 +389,13 @@ impl WarpZoneWindow {
                 editing_buf.as_deref(),
                 caret,
             );
-            self.drag.push_region(dial_area_start + row2_spacing * i as f32, y, row2_spacing, row2_h, HitAction::Dial(*param_id));
+            self.drag.push_region(
+                dial_area_start + row2_spacing * i as f32,
+                y,
+                row2_spacing,
+                row2_h,
+                HitAction::Dial(*param_id),
+            );
         }
 
         y += row2_h;
@@ -442,7 +467,10 @@ impl WarpZoneWindow {
         // Border
         widgets::draw_rect_outline(
             &mut self.surface.pixmap,
-            x, y, w, h,
+            x,
+            y,
+            w,
+            h,
             widgets::color_border(),
             1.0,
         );
@@ -473,7 +501,6 @@ impl WarpZoneWindow {
         self.surface.resize(pw, ph);
         self.params.editor_state.store_size(pw, ph);
     }
-
 }
 
 impl baseview::WindowHandler for WarpZoneWindow {
@@ -545,7 +572,8 @@ impl baseview::WindowHandler for WarpZoneWindow {
                             if is_double {
                                 self.reset_param_to_default(&setter, param_id);
                             } else {
-                                let norm = self.float_param(param_id).unmodulated_normalized_value();
+                                let norm =
+                                    self.float_param(param_id).unmodulated_normalized_value();
                                 let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
                                 self.drag.begin_drag(HitAction::Dial(param_id), norm, shift);
                                 self.begin_set_param(&setter, param_id);
@@ -710,7 +738,9 @@ mod text_entry_tests {
     #[test]
     fn text_edit_roundtrip_for_shift_action() {
         let mut text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Shift)).is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Shift))
+            .is_none());
 
         text_edit.begin(HitAction::Dial(ParamId::Shift), "-12");
         assert_eq!(
@@ -727,17 +757,31 @@ mod text_entry_tests {
         let (action, buffer) = text_edit.commit().unwrap();
         assert_eq!(action, HitAction::Dial(ParamId::Shift));
         assert_eq!(buffer, "-125");
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Shift)).is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Shift))
+            .is_none());
     }
 
     #[test]
     fn state_starts_inactive() {
         let text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Shift)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Stretch)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Mix)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::Feedback)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::LowFreq)).is_none());
-        assert!(text_edit.active_for(&HitAction::Dial(ParamId::HighFreq)).is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Shift))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Stretch))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Mix))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::Feedback))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::LowFreq))
+            .is_none());
+        assert!(text_edit
+            .active_for(&HitAction::Dial(ParamId::HighFreq))
+            .is_none());
     }
 }

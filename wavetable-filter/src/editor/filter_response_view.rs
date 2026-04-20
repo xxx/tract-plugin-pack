@@ -112,9 +112,10 @@ impl FilterResponseView {
         };
 
         let fft = cache.planner.plan_fft_forward(frame_n);
-        cache
-            .spectrum
-            .resize(frame_n / 2 + 1, rustfft::num_complex::Complex::new(0.0, 0.0));
+        cache.spectrum.resize(
+            frame_n / 2 + 1,
+            rustfft::num_complex::Complex::new(0.0, 0.0),
+        );
         for c in cache.spectrum.iter_mut() {
             *c = rustfft::num_complex::Complex::new(0.0, 0.0);
         }
@@ -156,7 +157,14 @@ impl FilterResponseView {
 
     /// Precompute the log-frequency table and response curve Y-coordinates.
     /// Called from draw() — only recomputes when display width or parameters change.
-    fn update_response_curve(&self, num_points: usize, cutoff_hz: f32, resonance: f32, height: f32, y0: f32) {
+    fn update_response_curve(
+        &self,
+        num_points: usize,
+        cutoff_hz: f32,
+        resonance: f32,
+        height: f32,
+        y0: f32,
+    ) {
         let mut cache = self.fft_cache.borrow_mut();
 
         // Rebuild frequency table if display width changed
@@ -221,8 +229,7 @@ impl FilterResponseView {
 
 /// Convert a frequency in Hz to an x position in [0, 1] on a log scale.
 fn freq_to_x(freq_hz: f32) -> f32 {
-    ((freq_hz.max(FREQ_MIN).ln() - FREQ_MIN.ln()) / (FREQ_MAX.ln() - FREQ_MIN.ln()))
-        .clamp(0.0, 1.0)
+    ((freq_hz.max(FREQ_MIN).ln() - FREQ_MIN.ln()) / (FREQ_MAX.ln() - FREQ_MIN.ln())).clamp(0.0, 1.0)
 }
 
 impl View for FilterResponseView {
@@ -335,24 +342,27 @@ impl View for FilterResponseView {
             // Compute shadow Y-coordinates while holding the cache borrow, then draw after releasing
             let shadow_ys: Vec<f32> = {
                 let cache = self.fft_cache.borrow();
-                let bin_hz = cache.cached_input_sr / (2.0 * (cache.cached_input_mags.len() - 1) as f32);
+                let bin_hz =
+                    cache.cached_input_sr / (2.0 * (cache.cached_input_mags.len() - 1) as f32);
                 let input_mags = &cache.cached_input_mags;
-                (0..=num_points).map(|i| {
-                    let freq = cache.freq_table[i];
-                    let bin = freq / bin_hz;
-                    let mag = if bin >= (input_mags.len() - 1) as f32 {
-                        0.0
-                    } else if bin <= 0.0 {
-                        input_mags[0]
-                    } else {
-                        let lo = bin.floor() as usize;
-                        let frac = bin - lo as f32;
-                        input_mags[lo] * (1.0 - frac) + input_mags[lo + 1] * frac
-                    };
-                    let db = 20.0 * mag.max(1e-6).log10();
-                    let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
-                    y0 + height - y_norm * height
-                }).collect()
+                (0..=num_points)
+                    .map(|i| {
+                        let freq = cache.freq_table[i];
+                        let bin = freq / bin_hz;
+                        let mag = if bin >= (input_mags.len() - 1) as f32 {
+                            0.0
+                        } else if bin <= 0.0 {
+                            input_mags[0]
+                        } else {
+                            let lo = bin.floor() as usize;
+                            let frac = bin - lo as f32;
+                            input_mags[lo] * (1.0 - frac) + input_mags[lo + 1] * frac
+                        };
+                        let db = 20.0 * mag.max(1e-6).log10();
+                        let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
+                        y0 + height - y_norm * height
+                    })
+                    .collect()
             };
 
             let mut shadow_path = vg::Path::new();

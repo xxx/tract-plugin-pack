@@ -615,11 +615,7 @@ mod tests {
         );
 
         // a[0] should be 1.0 (product of two normalized filters)
-        assert!(
-            approx_eq(a[0], 1.0, 1e-10),
-            "a[0] = {}, expected 1.0",
-            a[0]
-        );
+        assert!(approx_eq(a[0], 1.0, 1e-10), "a[0] = {}, expected 1.0", a[0]);
 
         // a[1] is the convolution of pa[1] and ra[1] (4th-order combined filter).
         // Actual value at 48kHz: ≈ -3.6807067480
@@ -649,12 +645,7 @@ mod tests {
         // Roundtrip: loudness_to_energy(energy_to_loudness(e)) == e
         let e = 0.5;
         let rt = loudness_to_energy(energy_to_loudness(e));
-        assert!(
-            approx_eq(rt, e, 1e-10),
-            "roundtrip: {} != {}",
-            rt,
-            e
-        );
+        assert!(approx_eq(rt, e, 1e-10), "roundtrip: {} != {}", rt, e);
     }
 
     #[test]
@@ -867,7 +858,10 @@ mod tests {
         }
         // Per EBU spec, short-term should return -inf until the full 3s window is filled
         let st_1s = meter.short_term_lufs();
-        assert!(st_1s.is_infinite(), "short-term at 1s should be -inf (window not full)");
+        assert!(
+            st_1s.is_infinite(),
+            "short-term at 1s should be -inf (window not full)"
+        );
 
         // At 4 seconds, should be fully valid
         let n_more = (SAMPLE_RATE * 3.0) as usize;

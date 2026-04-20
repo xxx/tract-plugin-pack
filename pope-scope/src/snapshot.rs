@@ -139,7 +139,12 @@ impl HoldBuffer {
     /// accumulates from previous frames as the playhead advances through the bar.
     ///
     /// Returns an Arc to the front buffer (pointer-sized clone), or None.
-    fn update(&self, current_data: &[Vec<f32>], frac: f64, valid_count: usize) -> Option<Arc<Vec<Vec<f32>>>> {
+    fn update(
+        &self,
+        current_data: &[Vec<f32>],
+        frac: f64,
+        valid_count: usize,
+    ) -> Option<Arc<Vec<Vec<f32>>>> {
         let frac_u = (frac * 1_000_000.0) as usize;
         let prev_frac = self.last_frac.load(Ordering::Relaxed);
 
@@ -179,7 +184,10 @@ impl HoldBuffer {
         self.last_frac.store(frac_u, Ordering::Relaxed);
 
         // Return Arc clone of front (pointer-sized, no data copy)
-        self.front.lock().ok().and_then(|f| f.as_ref().map(Arc::clone))
+        self.front
+            .lock()
+            .ok()
+            .and_then(|f| f.as_ref().map(Arc::clone))
     }
 
     /// Promote a complete bar directly to the front buffer.
@@ -531,8 +539,7 @@ pub fn build_snapshots_free(
                         audio_data.push(out);
                     }
                     1 => {
-                        let num_blocks =
-                            total_samples / crate::ring_buffer::BLOCK_SIZE;
+                        let num_blocks = total_samples / crate::ring_buffer::BLOCK_SIZE;
                         let mut blocks = vec![MinMax::default(); num_blocks];
                         let n = buf.read_most_recent_l1(&mut blocks);
                         let mut flat = Vec::with_capacity(n * 2);
@@ -544,8 +551,7 @@ pub fn build_snapshots_free(
                         audio_data.push(flat);
                     }
                     _ => {
-                        let num_blocks =
-                            total_samples / crate::ring_buffer::SUPER_BLOCK_SIZE;
+                        let num_blocks = total_samples / crate::ring_buffer::SUPER_BLOCK_SIZE;
                         let mut blocks = vec![MinMax::default(); num_blocks];
                         let n = buf.read_most_recent_l2(&mut blocks);
                         let mut flat = Vec::with_capacity(n * 2);
@@ -627,29 +633,44 @@ pub fn build_snapshots_beat_sync(
     }
 
     // Read transport info from the FIRST active slot and use it for ALL slots.
-    let first_active = slots[..slot_count].iter().copied().find(|&i| !slot_stale[i]);
-    let (global_is_playing, global_bpm, global_beats_per_bar, global_ppq, global_bar_start, global_spb) =
-        if let Some(fi) = first_active {
-            let fs = store::slot(fi);
-            let playing = fs.playhead.is_playing.load(Ordering::Relaxed);
-            let bpm = f64::from_bits(fs.playhead.bpm.load(Ordering::Relaxed));
-            let bpb = fs.playhead.time_sig_num.load(Ordering::Relaxed);
-            let ppq = f64::from_bits(fs.playhead.ppq_position.load(Ordering::Relaxed));
-            let bar_start = f64::from_bits(fs.playhead.bar_start_ppq.load(Ordering::Relaxed));
-            let spb = if bpm > 0.0 { (60.0 / bpm) * sample_rate as f64 } else { 0.0 };
-            (playing, bpm, bpb, ppq, bar_start, spb)
+    let first_active = slots[..slot_count]
+        .iter()
+        .copied()
+        .find(|&i| !slot_stale[i]);
+    let (
+        global_is_playing,
+        global_bpm,
+        global_beats_per_bar,
+        global_ppq,
+        global_bar_start,
+        global_spb,
+    ) = if let Some(fi) = first_active {
+        let fs = store::slot(fi);
+        let playing = fs.playhead.is_playing.load(Ordering::Relaxed);
+        let bpm = f64::from_bits(fs.playhead.bpm.load(Ordering::Relaxed));
+        let bpb = fs.playhead.time_sig_num.load(Ordering::Relaxed);
+        let ppq = f64::from_bits(fs.playhead.ppq_position.load(Ordering::Relaxed));
+        let bar_start = f64::from_bits(fs.playhead.bar_start_ppq.load(Ordering::Relaxed));
+        let spb = if bpm > 0.0 {
+            (60.0 / bpm) * sample_rate as f64
         } else {
-            (false, 120.0, 4, 0.0, 0.0, 0.0)
+            0.0
         };
+        (playing, bpm, bpb, ppq, bar_start, spb)
+    } else {
+        (false, 120.0, 4, 0.0, 0.0, 0.0)
+    };
     let global_samples_per_bar = global_spb * global_beats_per_bar as f64;
 
     // Compute the global playhead fraction ONCE for consistent bar latch/hold
     // triggering across all slots.
     let global_window_ppq = sync_bars * global_beats_per_bar as f64;
     let global_ppq_offset = global_ppq.rem_euclid(global_window_ppq);
-    let global_frac = if global_window_ppq > 0.0 { global_ppq_offset / global_window_ppq } else { 0.0 };
-
-
+    let global_frac = if global_window_ppq > 0.0 {
+        global_ppq_offset / global_window_ppq
+    } else {
+        0.0
+    };
 
     // Read ALL time_mapping snapshots in a tight loop BEFORE any other
     // per-slot work. This prevents the audio thread from advancing one
@@ -731,7 +752,8 @@ pub fn build_snapshots_beat_sync(
             // slots trigger bar boundaries on the same frame.
             let playhead_fraction = global_frac;
             // Latch rb_start at bar boundaries to eliminate per-buffer PPQ jitter
-            let (rb_start, bar_boundary) = BAR_LATCHES[idx].update(computed_rb_start, playhead_fraction);
+            let (rb_start, bar_boundary) =
+                BAR_LATCHES[idx].update(computed_rb_start, playhead_fraction);
 
             // Read the full beat-aligned window from the ring buffer
             let mut raw_data = Vec::with_capacity(num_channels);
@@ -772,15 +794,16 @@ pub fn build_snapshots_beat_sync(
                 // Hold mode: use the double buffer to show the last complete bar.
                 // Only the valid portion is copied into the back buffer each frame;
                 // samples accumulate across frames as the playhead advances.
-                if let Some(front_arc) = HOLD_BUFFERS[idx].update(&raw_data, playhead_fraction, valid_count) {
+                if let Some(front_arc) =
+                    HOLD_BUFFERS[idx].update(&raw_data, playhead_fraction, valid_count)
+                {
                     data_points = front_arc.first().map_or(0, |ch| ch.len());
                     // Unwrap the Arc if we're the only holder, otherwise clone
                     audio_data = Arc::try_unwrap(front_arc).unwrap_or_else(|arc| (*arc).clone());
                 } else {
                     // No complete bar yet — show partial data with sweep mask
                     // so user sees something while waiting for first bar
-                    let end_valid =
-                        (playhead_fraction * window_len as f64).round() as usize;
+                    let end_valid = (playhead_fraction * window_len as f64).round() as usize;
                     let end_valid = end_valid.min(window_len);
                     let fade_len = 16.min(window_len.saturating_sub(end_valid));
                     for out in &mut raw_data {
@@ -799,8 +822,7 @@ pub fn build_snapshots_beat_sync(
                 }
             } else {
                 // Sweep mode (original behavior): mask stale data ahead of playhead
-                let end_valid =
-                    (playhead_fraction * window_len as f64).round() as usize;
+                let end_valid = (playhead_fraction * window_len as f64).round() as usize;
                 let end_valid = end_valid.min(window_len);
                 let fade_len = 16.min(window_len.saturating_sub(end_valid));
                 for out in &mut raw_data {
@@ -1067,7 +1089,7 @@ mod tests {
         // Two pairs: (min=-0.2, max=0.7) and (min=-0.9, max=0.1)
         snap.audio_data = vec![vec![-0.2, 0.7, -0.9, 0.1]];
         snap.data_points = 2; // number of pairs
-        // First pair: |max| > |min|, so should return max (0.7)
+                              // First pair: |max| > |min|, so should return max (0.7)
         assert!((snap.sample_at_normalized_x(0.0, false) - 0.7).abs() < 1e-6);
         // Second pair: |min| > |max|, so should return min (-0.9)
         assert!((snap.sample_at_normalized_x(0.75, false) + 0.9).abs() < 1e-6);
@@ -1096,8 +1118,7 @@ mod tests {
     #[test]
     fn test_peak_at_column_matches_decimate_on_raw_l0() {
         // Construct a buffer longer than num_cols to force decimation.
-        let samples: Vec<f32> =
-            (0..20).map(|i| ((i as f32 * 0.37).sin()) * 0.9).collect();
+        let samples: Vec<f32> = (0..20).map(|i| ((i as f32 * 0.37).sin()) * 0.9).collect();
         let mut snap = empty_snap();
         snap.audio_data = vec![samples.clone()];
         snap.data_points = samples.len();

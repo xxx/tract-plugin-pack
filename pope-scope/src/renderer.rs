@@ -10,13 +10,7 @@ use std::borrow::Cow;
 /// - `max_db`: top of visible dB range (e.g. 0.0)
 /// - `centre_y`: pixel Y coordinate of the center line (silence)
 /// - `half_height`: half the available height in pixels
-pub fn sample_to_y(
-    sample: f32,
-    min_db: f32,
-    max_db: f32,
-    centre_y: f32,
-    half_height: f32,
-) -> f32 {
+pub fn sample_to_y(sample: f32, min_db: f32, max_db: f32, centre_y: f32, half_height: f32) -> f32 {
     let sign = if sample >= 0.0 { 1.0 } else { -1.0 };
     let abs_amp = sample.abs().clamp(0.0, 2.0); // reject spikes
     let db = if abs_amp > 0.0 {
@@ -100,14 +94,7 @@ pub fn draw_amplitude_grid(
     };
 
     // Center line (silence)
-    tiny_skia_widgets::draw_rect(
-        pixmap,
-        x,
-        centre_y - 0.5,
-        w,
-        1.0,
-        grid_bright_c,
-    );
+    tiny_skia_widgets::draw_rect(pixmap, x, centre_y - 0.5, w, 1.0, grid_bright_c);
 
     // dB grid lines above and below center
     let db_range = max_db - min_db;
@@ -119,14 +106,7 @@ pub fn draw_amplitude_grid(
         // Above center
         let y_above = centre_y - offset;
         if y_above > y {
-            tiny_skia_widgets::draw_rect(
-                pixmap,
-                x,
-                y_above - 0.5,
-                w,
-                1.0,
-                grid_c,
-            );
+            tiny_skia_widgets::draw_rect(pixmap, x, y_above - 0.5, w, 1.0, grid_c);
             // dB label on right
             let label = format!("{}", (min_db + db) as i32);
             text_renderer.draw_text(
@@ -142,14 +122,7 @@ pub fn draw_amplitude_grid(
         // Below center (mirror)
         let y_below = centre_y + offset;
         if y_below < y + h {
-            tiny_skia_widgets::draw_rect(
-                pixmap,
-                x,
-                y_below - 0.5,
-                w,
-                1.0,
-                grid_c,
-            );
+            tiny_skia_widgets::draw_rect(pixmap, x, y_below - 0.5, w, 1.0, grid_c);
         }
 
         db += division;
@@ -472,14 +445,7 @@ pub fn draw_time_grid(
         let frac = (div_ms * i as f32) / timebase_ms;
         let px = x + frac * w;
         if px < x + w {
-            tiny_skia_widgets::draw_rect(
-                pixmap,
-                px - 0.5,
-                y,
-                1.0,
-                h,
-                theme::to_color(theme::GRID),
-            );
+            tiny_skia_widgets::draw_rect(pixmap, px - 0.5, y, 1.0, h, theme::to_color(theme::GRID));
             if show_labels {
                 let label = if div_ms * i as f32 >= 1000.0 {
                     format!("{:.1}s", div_ms * i as f32 / 1000.0)
@@ -563,25 +529,13 @@ pub fn draw_beat_grid(
         if show_labels && is_bar {
             let bar = (i / 4) as u32 / beats_per_bar + 1;
             let label = format!("{}", bar);
-            text_renderer.draw_text(
-                pixmap,
-                px + 2.0,
-                y + h - 2.0,
-                &label,
-                font_size,
-                label_c,
-            );
+            text_renderer.draw_text(pixmap, px + 2.0, y + h - 2.0, &label, font_size, label_c);
         }
     }
 }
 
 /// Draw a vertical cursor line at the given X position.
-pub fn draw_cursor(
-    pixmap: &mut tiny_skia::Pixmap,
-    cursor_x: f32,
-    y: f32,
-    h: f32,
-) {
+pub fn draw_cursor(pixmap: &mut tiny_skia::Pixmap, cursor_x: f32, y: f32, h: f32) {
     tiny_skia_widgets::draw_rect(
         pixmap,
         cursor_x - 0.5,
@@ -725,15 +679,7 @@ pub fn draw_cursor_tooltip(
         tooltip_h,
         theme::to_color_alpha(theme::BG, 0.95),
     );
-    tiny_skia_widgets::draw_rect_outline(
-        pixmap,
-        tx,
-        ty,
-        tooltip_w,
-        tooltip_h,
-        outline_color,
-        1.0,
-    );
+    tiny_skia_widgets::draw_rect_outline(pixmap, tx, ty, tooltip_w, tooltip_h, outline_color, 1.0);
 
     // Time header (cyan)
     let mut y = ty + padding + font_size;
@@ -945,8 +891,18 @@ mod tests {
     fn test_draw_waveform_dispatch_line() {
         let mut pm = make_test_pixmap(200, 100);
         let samples = sine_samples(400);
-        draw_waveform(&mut pm, &samples, 0.0, 0.0, 200.0, 100.0, -48.0, 0.0,
-            theme::CYAN, crate::DrawStyle::Line);
+        draw_waveform(
+            &mut pm,
+            &samples,
+            0.0,
+            0.0,
+            200.0,
+            100.0,
+            -48.0,
+            0.0,
+            theme::CYAN,
+            crate::DrawStyle::Line,
+        );
         assert!(pixmap_has_nonzero(&pm));
     }
 
@@ -954,8 +910,18 @@ mod tests {
     fn test_draw_waveform_dispatch_filled() {
         let mut pm = make_test_pixmap(200, 100);
         let samples = sine_samples(400);
-        draw_waveform(&mut pm, &samples, 0.0, 0.0, 200.0, 100.0, -48.0, 0.0,
-            theme::CYAN, crate::DrawStyle::Filled);
+        draw_waveform(
+            &mut pm,
+            &samples,
+            0.0,
+            0.0,
+            200.0,
+            100.0,
+            -48.0,
+            0.0,
+            theme::CYAN,
+            crate::DrawStyle::Filled,
+        );
         assert!(pixmap_has_nonzero(&pm));
     }
 
@@ -963,8 +929,18 @@ mod tests {
     fn test_draw_waveform_dispatch_both() {
         let mut pm = make_test_pixmap(200, 100);
         let samples = sine_samples(400);
-        draw_waveform(&mut pm, &samples, 0.0, 0.0, 200.0, 100.0, -48.0, 0.0,
-            theme::CYAN, crate::DrawStyle::Both);
+        draw_waveform(
+            &mut pm,
+            &samples,
+            0.0,
+            0.0,
+            200.0,
+            100.0,
+            -48.0,
+            0.0,
+            theme::CYAN,
+            crate::DrawStyle::Both,
+        );
         assert!(pixmap_has_nonzero(&pm));
     }
 
@@ -991,7 +967,9 @@ mod tests {
         let mut pm = make_test_pixmap(200, 100);
         let font_data = include_bytes!("fonts/DejaVuSans.ttf");
         let mut tr = tiny_skia_widgets::TextRenderer::new(font_data);
-        draw_beat_grid(&mut pm, 0.0, 0.0, 200.0, 100.0, 4, 4.0, &mut tr, 1.0, true, None);
+        draw_beat_grid(
+            &mut pm, 0.0, 0.0, 200.0, 100.0, 4, 4.0, &mut tr, 1.0, true, None,
+        );
         assert!(pixmap_has_nonzero(&pm));
     }
 
@@ -1000,7 +978,9 @@ mod tests {
         let mut pm = make_test_pixmap(200, 100);
         let font_data = include_bytes!("fonts/DejaVuSans.ttf");
         let mut tr = tiny_skia_widgets::TextRenderer::new(font_data);
-        draw_beat_grid(&mut pm, 0.0, 0.0, 200.0, 100.0, 4, 0.0, &mut tr, 1.0, true, None);
+        draw_beat_grid(
+            &mut pm, 0.0, 0.0, 200.0, 100.0, 4, 0.0, &mut tr, 1.0, true, None,
+        );
         // Should not panic and should not draw
         assert!(!pixmap_has_nonzero(&pm));
     }
@@ -1010,7 +990,9 @@ mod tests {
         let mut pm = make_test_pixmap(200, 100);
         let font_data = include_bytes!("fonts/DejaVuSans.ttf");
         let mut tr = tiny_skia_widgets::TextRenderer::new(font_data);
-        draw_amplitude_grid(&mut pm, 0.0, 0.0, 200.0, 100.0, -48.0, 0.0, &mut tr, 1.0, None);
+        draw_amplitude_grid(
+            &mut pm, 0.0, 0.0, 200.0, 100.0, -48.0, 0.0, &mut tr, 1.0, None,
+        );
         assert!(pixmap_has_nonzero(&pm));
     }
 
@@ -1068,8 +1050,7 @@ mod tests {
     #[test]
     fn test_cursor_tooltip_rect_fits_right_of_cursor() {
         // area = (0, 0, 800, 500) with cursor at (100, 200)
-        let (tx, ty) =
-            cursor_tooltip_rect(100.0, 200.0, 140.0, 60.0, 0.0, 0.0, 800.0, 500.0, 1.0);
+        let (tx, ty) = cursor_tooltip_rect(100.0, 200.0, 140.0, 60.0, 0.0, 0.0, 800.0, 500.0, 1.0);
         // Right of cursor + 15px offset
         assert!((tx - 115.0).abs() < 0.001);
         // Vertically centred on cursor
@@ -1079,8 +1060,7 @@ mod tests {
     #[test]
     fn test_cursor_tooltip_rect_flips_off_right_edge() {
         // Cursor near right edge — tooltip won't fit to the right, should flip
-        let (tx, _) =
-            cursor_tooltip_rect(780.0, 200.0, 140.0, 60.0, 0.0, 0.0, 800.0, 500.0, 1.0);
+        let (tx, _) = cursor_tooltip_rect(780.0, 200.0, 140.0, 60.0, 0.0, 0.0, 800.0, 500.0, 1.0);
         // Flipped: cursor_x - tooltip_w - 15
         assert!((tx - (780.0 - 140.0 - 15.0)).abs() < 0.001);
     }
@@ -1094,18 +1074,21 @@ mod tests {
         let cursor_y = 5.0;
         let tooltip_h = 60.0;
         let pre_clamp_y = cursor_y - tooltip_h / 2.0;
-        assert!(pre_clamp_y < 0.0, "test setup must put tooltip above the area");
+        assert!(
+            pre_clamp_y < 0.0,
+            "test setup must put tooltip above the area"
+        );
 
-        let (_, ty) =
-            cursor_tooltip_rect(100.0, cursor_y, 140.0, tooltip_h, 0.0, 0.0, 800.0, 500.0, 1.0);
+        let (_, ty) = cursor_tooltip_rect(
+            100.0, cursor_y, 140.0, tooltip_h, 0.0, 0.0, 800.0, 500.0, 1.0,
+        );
         assert_eq!(ty, 0.0);
     }
 
     #[test]
     fn test_cursor_tooltip_rect_clamps_bottom() {
         // Cursor near bottom — tooltip would spill below area bottom
-        let (_, ty) =
-            cursor_tooltip_rect(100.0, 495.0, 140.0, 60.0, 0.0, 0.0, 800.0, 500.0, 1.0);
+        let (_, ty) = cursor_tooltip_rect(100.0, 495.0, 140.0, 60.0, 0.0, 0.0, 800.0, 500.0, 1.0);
         assert!((ty - (500.0 - 60.0)).abs() < 0.001);
     }
 
@@ -1120,7 +1103,15 @@ mod tests {
         let area_h = 300.0;
         // Cursor near the top of the area: clamp should use area_y, not 0.
         let (_, ty) = cursor_tooltip_rect(
-            200.0, area_y + 5.0, 140.0, 60.0, area_x, area_y, area_w, area_h, 1.0,
+            200.0,
+            area_y + 5.0,
+            140.0,
+            60.0,
+            area_x,
+            area_y,
+            area_w,
+            area_h,
+            1.0,
         );
         assert_eq!(ty, area_y);
         // Cursor near the area's right edge should flip to the left of
@@ -1151,17 +1142,7 @@ mod tests {
             },
         ];
         draw_cursor_tooltip(
-            &mut pm,
-            &mut tr,
-            200.0,
-            150.0,
-            "12.3 ms",
-            &readings,
-            0.0,
-            0.0,
-            400.0,
-            300.0,
-            1.0,
+            &mut pm, &mut tr, 200.0, 150.0, "12.3 ms", &readings, 0.0, 0.0, 400.0, 300.0, 1.0,
         );
         assert!(pixmap_has_nonzero(&pm));
     }
@@ -1200,17 +1181,7 @@ mod tests {
             db: -3.0,
         }];
         draw_cursor_tooltip(
-            &mut pm,
-            &mut tr,
-            200.0,
-            150.0,
-            "1.2 ms",
-            &readings,
-            0.0,
-            0.0,
-            400.0,
-            300.0,
-            1.0,
+            &mut pm, &mut tr, 200.0, 150.0, "1.2 ms", &readings, 0.0, 0.0, 400.0, 300.0, 1.0,
         );
         assert!(pixmap_has_nonzero(&pm));
     }

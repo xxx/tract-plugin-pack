@@ -155,17 +155,10 @@ impl WarpZoneParams {
             .with_unit(" st")
             .with_value_to_string(formatters::v2s_f32_rounded(1)),
 
-            stretch: FloatParam::new(
-                "Stretch",
-                1.0,
-                FloatRange::Linear {
-                    min: 0.5,
-                    max: 2.0,
-                },
-            )
-            .with_smoother(SmoothingStyle::Linear(50.0))
-            .with_unit("x")
-            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            stretch: FloatParam::new("Stretch", 1.0, FloatRange::Linear { min: 0.5, max: 2.0 })
+                .with_smoother(SmoothingStyle::Linear(50.0))
+                .with_unit("x")
+                .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
             mix: FloatParam::new(
                 "Mix",
@@ -370,8 +363,22 @@ impl Plugin for WarpZone {
             self.dry_delay_pos = (self.dry_delay_pos + 1) % self.dry_delay_l.len();
 
             // Phase vocoder
-            let wet_l = self.shifter_l.process_sample(in_l, final_shift, final_stretch, freeze, low_bin, high_bin);
-            let wet_r = self.shifter_r.process_sample(in_r, final_shift, final_stretch, freeze, low_bin, high_bin);
+            let wet_l = self.shifter_l.process_sample(
+                in_l,
+                final_shift,
+                final_stretch,
+                freeze,
+                low_bin,
+                high_bin,
+            );
+            let wet_r = self.shifter_r.process_sample(
+                in_r,
+                final_shift,
+                final_stretch,
+                freeze,
+                low_bin,
+                high_bin,
+            );
 
             // Store for feedback (clip to prevent runaway)
             self.feedback_l = wet_l.clamp(-4.0, 4.0);
@@ -393,7 +400,10 @@ impl Plugin for WarpZone {
         }
 
         const TAIL_LEN: u32 = FFT_SIZE as u32;
-        let input_peak = left.iter().chain(right.iter()).fold(0.0_f32, |a, &s| a.max(s.abs()));
+        let input_peak = left
+            .iter()
+            .chain(right.iter())
+            .fold(0.0_f32, |a, &s| a.max(s.abs()));
         if input_peak < 1e-6 {
             self.silent_input_samples += num_samples as u32;
         } else {
@@ -414,8 +424,11 @@ impl ClapPlugin for WarpZone {
     const CLAP_DESCRIPTION: Option<&'static str> = Some("A psychedelic spectral shifter/stretcher");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] =
-        &[ClapFeature::AudioEffect, ClapFeature::PitchShifter, ClapFeature::Stereo];
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::AudioEffect,
+        ClapFeature::PitchShifter,
+        ClapFeature::Stereo,
+    ];
 }
 
 impl Vst3Plugin for WarpZone {

@@ -11,7 +11,11 @@
 pub fn gain_computer_db(input_db: f32, knee_db: f32) -> f32 {
     if knee_db < 0.01 {
         // Hard knee: no reduction below 0, full limiting above
-        if input_db <= 0.0 { 0.0 } else { -input_db }
+        if input_db <= 0.0 {
+            0.0
+        } else {
+            -input_db
+        }
     } else {
         let half_knee = knee_db / 2.0;
         if input_db < -half_knee {
@@ -38,7 +42,11 @@ pub struct EnvelopeFilter {
 
 impl EnvelopeFilter {
     pub fn new(sample_rate: f32, attack_ms: f32, release_ms: f32) -> Self {
-        let mut env = Self { state: 0.0, alpha_attack: 0.0, alpha_release: 0.0 };
+        let mut env = Self {
+            state: 0.0,
+            alpha_attack: 0.0,
+            alpha_release: 0.0,
+        };
         env.set_params(sample_rate, attack_ms, release_ms);
         env
     }
@@ -106,8 +114,16 @@ impl DualStageEnvelope {
         // Mix but never allow output to be less negative than either stage
         // (brickwall guarantee): clamp to each stage weighted by mix
         let mixed = transient_mix * tr + (1.0 - transient_mix) * dy;
-        let clamped = if transient_mix < 1.0 { mixed.min(dy) } else { mixed };
-        if transient_mix > 0.0 { clamped.min(tr) } else { clamped }
+        let clamped = if transient_mix < 1.0 {
+            mixed.min(dy)
+        } else {
+            mixed
+        };
+        if transient_mix > 0.0 {
+            clamped.min(tr)
+        } else {
+            clamped
+        }
     }
 
     pub fn reset(&mut self) {
@@ -139,8 +155,8 @@ pub fn apply_lookahead_backward_pass(gr: &mut [f32], lookahead_samples: usize) {
 
     // Track the "ramp target" — the deepest gain reduction we need to ramp toward.
     // Start from the end and work backward.
-    let mut ramp_target = 0.0_f32;  // deepest GR we're ramping toward
-    let mut ramp_remaining = 0_usize;  // samples remaining in the current ramp
+    let mut ramp_target = 0.0_f32; // deepest GR we're ramping toward
+    let mut ramp_remaining = 0_usize; // samples remaining in the current ramp
 
     for i in (0..len).rev() {
         if gr[i] < ramp_target || ramp_remaining == 0 {
@@ -195,8 +211,7 @@ impl Limiter {
     ///
     /// `max_lookahead_ms` determines the maximum delay line length and GR buffer size.
     pub fn new(sample_rate: f32, max_lookahead_ms: f32) -> Self {
-        let max_lookahead_samples =
-            (max_lookahead_ms / 1000.0 * sample_rate).ceil() as usize;
+        let max_lookahead_samples = (max_lookahead_ms / 1000.0 * sample_rate).ceil() as usize;
         // Default delay length is the max; set_params can reduce it.
         let delay_len = max_lookahead_samples;
         Self {
@@ -216,8 +231,7 @@ impl Limiter {
     /// Reconfigure for a new sample rate. Reallocates delay lines if needed.
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate;
-        let new_max =
-            (self.max_lookahead_ms / 1000.0 * sample_rate).ceil() as usize;
+        let new_max = (self.max_lookahead_ms / 1000.0 * sample_rate).ceil() as usize;
         self.max_lookahead_samples = new_max;
         self.delay_line_l.resize(new_max, 0.0);
         self.delay_line_r.resize(new_max, 0.0);
@@ -231,7 +245,8 @@ impl Limiter {
     ///
     /// The lookahead delay equals the attack time (clamped to max_lookahead_samples).
     pub fn set_params(&mut self, attack_ms: f32, release_ms: f32) {
-        self.envelope.set_params(self.sample_rate, attack_ms, release_ms);
+        self.envelope
+            .set_params(self.sample_rate, attack_ms, release_ms);
         let attack_samples = (attack_ms / 1000.0 * self.sample_rate).ceil() as usize;
         self.delay_len = attack_samples.min(self.max_lookahead_samples).max(1);
     }
@@ -403,8 +418,8 @@ mod tests {
     fn test_gc_soft_in_knee() {
         // At threshold (0 dB) with 6 dB knee — partial reduction
         let gr = gain_computer_db(0.0, 6.0);
-        assert!(gr < 0.0);         // some reduction
-        assert!(gr > -3.0);        // but not full
+        assert!(gr < 0.0); // some reduction
+        assert!(gr > -3.0); // but not full
     }
 
     #[test]
@@ -435,7 +450,10 @@ mod tests {
         for i in -100..200 {
             let db = i as f32 / 10.0;
             let gr = gain_computer_db(db, 6.0);
-            assert!(gr <= prev_gr + 0.001, "non-monotonic at {db} dB: {gr} > {prev_gr}");
+            assert!(
+                gr <= prev_gr + 0.001,
+                "non-monotonic at {db} dB: {gr} > {prev_gr}"
+            );
             prev_gr = gr;
         }
     }
@@ -461,7 +479,8 @@ mod tests {
         }
         // Release (input 0)
         let mut val = 0.0;
-        for _ in 0..9600 { // 200ms
+        for _ in 0..9600 {
+            // 200ms
             val = env.process(0.0);
         }
         // After one time constant, should have recovered ~63% (from -10 to ~-3.7)
@@ -491,7 +510,8 @@ mod tests {
         }
         // Release — transient stage should release fast (5ms = attack time)
         let mut val = 0.0;
-        for _ in 0..480 { // 10ms — 2x the transient release time
+        for _ in 0..480 {
+            // 10ms — 2x the transient release time
             val = dual.process(0.0, 1.0);
         }
         // Should have mostly recovered
@@ -541,11 +561,20 @@ mod tests {
     fn test_lookahead_ramps_before_peak() {
         let lookahead = 10;
         let mut gr = vec![0.0_f32; 100];
-        gr[50] = -10.0;  // peak at sample 50
+        gr[50] = -10.0; // peak at sample 50
         apply_lookahead_backward_pass(&mut gr, lookahead);
         // Gain reduction should start ramping before sample 50
-        assert!(gr[40] < 0.0, "ramp should start at sample 40, got {}", gr[40]);
-        assert!(gr[41] < gr[40], "ramp should deepen: {} vs {}", gr[41], gr[40]);
+        assert!(
+            gr[40] < 0.0,
+            "ramp should start at sample 40, got {}",
+            gr[40]
+        );
+        assert!(
+            gr[41] < gr[40],
+            "ramp should deepen: {} vs {}",
+            gr[41],
+            gr[40]
+        );
         // Before the ramp start, should be 0
         assert_eq!(gr[39], 0.0);
     }
@@ -564,8 +593,8 @@ mod tests {
     fn test_lookahead_deeper_peak_overrides() {
         let lookahead = 20;
         let mut gr = vec![0.0_f32; 100];
-        gr[50] = -5.0;   // shallow peak
-        gr[60] = -10.0;  // deeper peak later
+        gr[50] = -5.0; // shallow peak
+        gr[60] = -10.0; // deeper peak later
         apply_lookahead_backward_pass(&mut gr, lookahead);
         // The deeper peak's ramp should override the shallower one
         // At sample 50, the -10 ramp from sample 60 should be active
@@ -582,21 +611,24 @@ mod tests {
         for i in 41..50 {
             let diff = gr[i + 1] - gr[i];
             // Should be approximately -1 dB per sample (total -10 over 10 samples)
-            assert!((diff - (-1.0)).abs() < 0.2, "non-linear at {i}: diff={diff}");
+            assert!(
+                (diff - (-1.0)).abs() < 0.2,
+                "non-linear at {i}: diff={diff}"
+            );
         }
     }
 
     #[test]
     fn test_lookahead_empty_buffer() {
         let mut gr: Vec<f32> = vec![];
-        apply_lookahead_backward_pass(&mut gr, 10);  // should not panic
+        apply_lookahead_backward_pass(&mut gr, 10); // should not panic
     }
 
     #[test]
     fn test_lookahead_peak_at_start() {
         let lookahead = 10;
         let mut gr = vec![0.0_f32; 20];
-        gr[0] = -10.0;  // peak at very start
+        gr[0] = -10.0; // peak at very start
         apply_lookahead_backward_pass(&mut gr, lookahead);
         // Peak at start — no room to ramp, but should not panic
         assert!((gr[0] - (-10.0)).abs() < 0.01);
@@ -606,7 +638,7 @@ mod tests {
     fn test_lookahead_peak_at_end() {
         let lookahead = 10;
         let mut gr = vec![0.0_f32; 20];
-        gr[19] = -10.0;  // peak at very end
+        gr[19] = -10.0; // peak at very end
         apply_lookahead_backward_pass(&mut gr, lookahead);
         // Ramp should extend backward from sample 19
         assert!(gr[9] < 0.0, "ramp should reach sample 9");
@@ -682,15 +714,7 @@ mod tests {
         let ceiling_linear = 10.0_f32.powf(-3.0 / 20.0); // -3 dBFS
         let mut left = vec![2.0_f32; 1024];
         let mut right = vec![2.0_f32; 1024];
-        limiter.process_block(
-            &mut left,
-            &mut right,
-            0.0,
-            0.5,
-            1.0,
-            ceiling_linear,
-            None,
-        );
+        limiter.process_block(&mut left, &mut right, 0.0, 0.5, 1.0, ceiling_linear, None);
         let la = (48000.0_f32 * 0.005) as usize + 10;
         for &s in &left[la..] {
             assert!(

@@ -279,7 +279,10 @@ impl Plugin for Satch {
         }
 
         const TAIL_LEN: u32 = 2048;
-        let input_peak = left.iter().chain(right.iter()).fold(0.0_f32, |a, &s| a.max(s.abs()));
+        let input_peak = left
+            .iter()
+            .chain(right.iter())
+            .fold(0.0_f32, |a, &s| a.max(s.abs()));
         if input_peak < 1e-6 {
             self.silent_input_samples += num_samples as u32;
         } else {
@@ -300,8 +303,11 @@ impl ClapPlugin for Satch {
     const CLAP_DESCRIPTION: Option<&'static str> = Some("A detail-preserving spectral saturator");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] =
-        &[ClapFeature::AudioEffect, ClapFeature::Distortion, ClapFeature::Stereo];
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::AudioEffect,
+        ClapFeature::Distortion,
+        ClapFeature::Stereo,
+    ];
 }
 
 impl Vst3Plugin for Satch {

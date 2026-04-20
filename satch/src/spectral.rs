@@ -232,7 +232,13 @@ impl SpectralClipper {
     }
 
     /// Like `process_sample` but allows skipping FFT frame processing.
-    pub fn process_sample_skip_fft(&mut self, input: f32, gain: f32, threshold: f32, knee: f32) -> f32 {
+    pub fn process_sample_skip_fft(
+        &mut self,
+        input: f32,
+        gain: f32,
+        threshold: f32,
+        knee: f32,
+    ) -> f32 {
         let inv_threshold = 1.0 / threshold;
         self.process_sample_inner(input, gain, threshold, inv_threshold, knee, true)
     }
@@ -648,7 +654,10 @@ mod tests {
         } else {
             f64::INFINITY
         };
-        assert!(snr > 20.0, "SNR {snr:.1} too low — reconstruction is broken");
+        assert!(
+            snr > 20.0,
+            "SNR {snr:.1} too low — reconstruction is broken"
+        );
     }
 
     #[test]
@@ -670,7 +679,10 @@ mod tests {
         let input = vec![0.0_f32; 16384];
         let output = run_spectral(&input, 1.0, 1.0);
         for (i, &s) in output.iter().enumerate() {
-            assert!(s.abs() < 1e-6, "silence should produce silence, got {s} at {i}");
+            assert!(
+                s.abs() < 1e-6,
+                "silence should produce silence, got {s} at {i}"
+            );
         }
     }
 
@@ -686,7 +698,10 @@ mod tests {
             total_diff += (output[i] as f64 - input[i] as f64).abs();
         }
         let avg_diff = total_diff / (input.len() - skip) as f64;
-        assert!(avg_diff > 0.01, "heavy gain should modify signal, avg diff = {avg_diff}");
+        assert!(
+            avg_diff > 0.01,
+            "heavy gain should modify signal, avg diff = {avg_diff}"
+        );
     }
 
     // ── Spectral clipper tests ────────────────────────────────────────────
@@ -724,7 +739,10 @@ mod tests {
         let mut sc = SpectralClipper::new(2048, 512);
         for &s in &input {
             let out = sc.process_sample(s, 10.0, threshold, 1.0);
-            assert!(out.abs() <= threshold * 1.5 + 0.01, "output {out} exceeds safety clip");
+            assert!(
+                out.abs() <= threshold * 1.5 + 0.01,
+                "output {out} exceeds safety clip"
+            );
         }
     }
 
@@ -774,12 +792,14 @@ mod tests {
         let input: Vec<f32> = (0..num)
             .map(|i| {
                 let t = i as f32 / sr;
-                0.8 * (2.0 * PI * 100.0 * t).sin()
-                    + 0.05 * (2.0 * PI * 5000.0 * t).sin()
+                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
             })
             .collect();
 
-        let td_output: Vec<f32> = input.iter().map(|&s| saturate_td(s, gain, threshold, 1.0)).collect();
+        let td_output: Vec<f32> = input
+            .iter()
+            .map(|&s| saturate_td(s, gain, threshold, 1.0))
+            .collect();
 
         let mut sc = SpectralClipper::new(2048, 512);
         let sp_output: Vec<f32> = input
@@ -798,9 +818,11 @@ mod tests {
                 let mut re_sum = 0.0_f64;
                 let mut im_sum = 0.0_f64;
                 for i in 0..fft_size {
-                    let w = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / fft_size as f64).cos());
+                    let w = 0.5
+                        * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / fft_size as f64).cos());
                     let s = signal[pos + i] as f64 * w;
-                    let angle = 2.0 * std::f64::consts::PI * bin as f64 * i as f64 / fft_size as f64;
+                    let angle =
+                        2.0 * std::f64::consts::PI * bin as f64 * i as f64 / fft_size as f64;
                     re_sum += s * angle.cos();
                     im_sum -= s * angle.sin();
                 }
@@ -834,8 +856,7 @@ mod tests {
             let input: Vec<f32> = (0..num)
                 .map(|i| {
                     let t = i as f32 / sr;
-                    0.8 * (2.0 * PI * 100.0 * t).sin()
-                        + 0.03 * (2.0 * PI * 3000.0 * t).sin()
+                    0.8 * (2.0 * PI * 100.0 * t).sin() + 0.03 * (2.0 * PI * 3000.0 * t).sin()
                 })
                 .collect();
 
@@ -882,7 +903,10 @@ mod tests {
             })
             .collect();
 
-        let td_output: Vec<f32> = input.iter().map(|&s| saturate_td(s, gain, threshold, 1.0)).collect();
+        let td_output: Vec<f32> = input
+            .iter()
+            .map(|&s| saturate_td(s, gain, threshold, 1.0))
+            .collect();
 
         let mut sc = SpectralClipper::new(2048, 512);
         let sp_output: Vec<f32> = input
@@ -901,9 +925,11 @@ mod tests {
                 let mut re = 0.0_f64;
                 let mut im = 0.0_f64;
                 for i in 0..fft_size {
-                    let w = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / fft_size as f64).cos());
+                    let w = 0.5
+                        * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / fft_size as f64).cos());
                     let s = signal[pos + i] as f64 * w;
-                    let angle = 2.0 * std::f64::consts::PI * bin as f64 * i as f64 / fft_size as f64;
+                    let angle =
+                        2.0 * std::f64::consts::PI * bin as f64 * i as f64 / fft_size as f64;
                     re += s * angle.cos();
                     im -= s * angle.sin();
                 }
@@ -994,8 +1020,7 @@ mod tests {
         let input: Vec<f32> = (0..num)
             .map(|i| {
                 let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin()
-                    + 0.05 * (2.0 * PI * 5000.0 * t).sin()
+                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
             })
             .collect();
 
@@ -1043,8 +1068,7 @@ mod tests {
         let input: Vec<f32> = (0..num)
             .map(|i| {
                 let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin()
-                    + 0.05 * (2.0 * PI * 5000.0 * t).sin()
+                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
             })
             .collect();
 
@@ -1089,8 +1113,7 @@ mod tests {
         let input: Vec<f32> = (0..num)
             .map(|i| {
                 let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin()
-                    + 0.05 * (2.0 * PI * 5000.0 * t).sin()
+                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
             })
             .collect();
 
@@ -1139,8 +1162,7 @@ mod tests {
         let input: Vec<f32> = (0..num)
             .map(|i| {
                 let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin()
-                    + 0.1 * (2.0 * PI * 5000.0 * t).sin()
+                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.1 * (2.0 * PI * 5000.0 * t).sin()
             })
             .collect();
 
@@ -1162,8 +1184,7 @@ mod tests {
         let input: Vec<f32> = (0..num)
             .map(|i| {
                 let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin()
-                    + 0.05 * (2.0 * PI * 5000.0 * t).sin()
+                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
             })
             .collect();
 
@@ -1191,8 +1212,7 @@ mod tests {
         let input: Vec<f32> = (0..num)
             .map(|i| {
                 let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin()
-                    + 0.05 * (2.0 * PI * 5000.0 * t).sin()
+                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
             })
             .collect();
 
@@ -1299,8 +1319,7 @@ mod tests {
         let input: Vec<f32> = (0..num)
             .map(|i| {
                 let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin()
-                    + 0.15 * (2.0 * PI * 1000.0 * t).sin()
+                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.15 * (2.0 * PI * 1000.0 * t).sin()
             })
             .collect();
 
@@ -1358,8 +1377,7 @@ mod tests {
         let input: Vec<f32> = (0..num)
             .map(|i| {
                 let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin()
-                    + 0.15 * (2.0 * PI * 1000.0 * t).sin()
+                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.15 * (2.0 * PI * 1000.0 * t).sin()
             })
             .collect();
 
@@ -1379,7 +1397,9 @@ mod tests {
         let blended = blend_with_clip_mask(&input, gain, threshold, 1.0);
 
         let skip = 8192;
-        let td_peak = td_output[skip..].iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
+        let td_peak = td_output[skip..]
+            .iter()
+            .fold(0.0_f32, |m, &s| m.max(s.abs()));
         let blended_peak = blended[skip..].iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
 
         let ratio = blended_peak / td_peak;
@@ -1405,8 +1425,7 @@ mod tests {
         let input: Vec<f32> = (0..num)
             .map(|i| {
                 let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin()
-                    + 0.05 * (2.0 * PI * 5000.0 * t).sin()
+                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
             })
             .collect();
 
@@ -1469,8 +1488,7 @@ mod tests {
         let input: Vec<f32> = (0..num)
             .map(|i| {
                 let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin()
-                    + 0.05 * (2.0 * PI * 5000.0 * t).sin()
+                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
             })
             .collect();
 
@@ -1552,8 +1570,7 @@ mod tests {
             dry_delay[dry_pos] = input[i];
             dry_pos = (dry_pos + 1) % latency;
 
-            let (td, tanh_val) =
-                saturate_td_with_tanh(dry, gain, threshold, knee);
+            let (td, tanh_val) = saturate_td_with_tanh(dry, gain, threshold, knee);
             let sp = spectral_out[i];
 
             let clip_mask = tanh_val * tanh_val;
@@ -1563,9 +1580,7 @@ mod tests {
         }
 
         let skip = latency + 4096;
-        let peak = output[skip..]
-            .iter()
-            .fold(0.0_f32, |m, &s| m.max(s.abs()));
+        let peak = output[skip..].iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
 
         // TD clips at threshold, spectral detail can ride slightly above
         assert!(
@@ -1613,8 +1628,7 @@ mod tests {
             dry_delay[dry_pos] = input[i];
             dry_pos = (dry_pos + 1) % latency;
 
-            let (td, tanh_val) =
-                saturate_td_with_tanh(dry, gain, threshold, knee);
+            let (td, tanh_val) = saturate_td_with_tanh(dry, gain, threshold, knee);
             let sp = spectral_out[i];
             let clip_mask = tanh_val * tanh_val;
 

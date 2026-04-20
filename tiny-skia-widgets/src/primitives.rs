@@ -138,13 +138,7 @@ pub fn fill_pixmap_opaque(pixmap: &mut Pixmap, color: Color) {
 /// to pixmap bounds. `color` must be an opaque tiny-skia color;
 /// it is flattened to 8-bit RGBA once, then written into each
 /// destination pixel.
-pub fn fill_column_opaque(
-    pixmap: &mut Pixmap,
-    col_x: f32,
-    y_top: f32,
-    y_bot: f32,
-    color: Color,
-) {
+pub fn fill_column_opaque(pixmap: &mut Pixmap, col_x: f32, y_top: f32, y_bot: f32, color: Color) {
     let width = pixmap.width() as i32;
     let height = pixmap.height() as i32;
     let cx = col_x.round() as i32;
