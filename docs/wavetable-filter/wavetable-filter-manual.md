@@ -67,9 +67,9 @@ Applies a comb-like emphasis at harmonic intervals of the cutoff frequency. At 0
 - Range: 0% to 100%
 - Default: 0%
 
-### Drive
+### Gain
 
-Output gain applied after the filter and dry/wet mix. Useful for compensating level drops from heavy filtering or pushing the filtered signal harder.
+Output gain applied after the filter and dry/wet mix. Useful for compensating level drops from heavy filtering.
 
 - Range: -20 dB to +20 dB
 - Default: 0 dB

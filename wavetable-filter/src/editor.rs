@@ -42,7 +42,7 @@ pub(crate) enum ParamId {
     Frame,
     Frequency,
     Resonance,
-    Drive,
+    Gain,
     Mix,
 }
 
@@ -151,7 +151,7 @@ impl WavetableFilterWindow {
             ParamId::Frame => &self.params.frame_position,
             ParamId::Frequency => &self.params.frequency,
             ParamId::Resonance => &self.params.resonance,
-            ParamId::Drive => &self.params.drive,
+            ParamId::Gain => &self.params.gain,
             ParamId::Mix => &self.params.mix,
         }
     }
@@ -466,7 +466,7 @@ impl WavetableFilterWindow {
         // Right-side dials, grouped as two pairs: (Freq, Res) | (Drive, Mix).
         let pairs: [[(ParamId, &str); 2]; 2] = [
             [(ParamId::Frequency, "Freq"), (ParamId::Resonance, "Res")],
-            [(ParamId::Drive, "Drive"), (ParamId::Mix, "Mix")],
+            [(ParamId::Gain, "Gain"), (ParamId::Mix, "Mix")],
         ];
         let pair_gap = 24.0 * s;
         let pair_w = (right_w - pair_gap) * 0.5;

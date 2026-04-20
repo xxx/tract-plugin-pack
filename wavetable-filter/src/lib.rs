@@ -154,8 +154,8 @@ struct WavetableFilterParams {
     #[id = "mix"]
     pub mix: FloatParam,
 
-    #[id = "drive"]
-    pub drive: FloatParam,
+    #[id = "gain"]
+    pub gain: FloatParam,
 
     #[id = "mode"]
     pub mode: EnumParam<FilterMode>,
@@ -799,7 +799,7 @@ impl WavetableFilterParams {
                 .with_unit("%")
                 .with_value_to_string(formatters::v2s_f32_percentage(0)),
 
-            drive: FloatParam::new(
+            gain: FloatParam::new(
                 "Gain",
                 util::db_to_gain(0.0),
                 FloatRange::Skewed {
@@ -1099,7 +1099,7 @@ impl Plugin for WavetableFilter {
                 let _ = self.params.frequency.smoothed.next();
                 let _ = self.params.resonance.smoothed.next();
                 let mix = self.params.mix.smoothed.next();
-                let drive = self.params.drive.smoothed.next();
+                let gain = self.params.gain.smoothed.next();
 
                 // Reset fade: smoothly ramp the filter output to zero before clearing history.
                 let reset_gain = if self.reset_fade_remaining > 0 {
@@ -1182,11 +1182,11 @@ impl Plugin for WavetableFilter {
                             hsum(acc)
                         };
 
-                        *sample = (input * (1.0 - mix) + filtered * mix * reset_gain) * drive;
+                        *sample = (input * (1.0 - mix) + filtered * mix * reset_gain) * gain;
                     } else {
                         self.stft_in[state_idx][self.stft_in_pos] = input;
                         let filtered = self.stft_out[state_idx][self.stft_out_pos];
-                        *sample = (input * (1.0 - mix) + filtered * mix * reset_gain) * drive;
+                        *sample = (input * (1.0 - mix) + filtered * mix * reset_gain) * gain;
                     }
                 }
 
