@@ -11,9 +11,15 @@ name = "wavetable-filter"
 path = "src/main.rs"
 
 [dependencies]
-nih-plug-widgets = { path = "../nih-plug-widgets" }
 nih_plug = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr", features = ["simd", "standalone", "assert_process_allocs"] }
-nih_plug_vizia = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr" }
+baseview = { git = "https://github.com/RustAudio/baseview.git", rev = "9a0b42c09d712777b2edb4c5e0cb6baf21e988f0", features = ["opengl"] }
+softbuffer = { version = "0.4", default-features = false, features = ["kms", "x11"] }
+raw-window-handle = "0.5"
+raw-window-handle-06 = { package = "raw-window-handle", version = "0.6" }
+tiny-skia = "0.12"
+tiny-skia-widgets = { path = "../tiny-skia-widgets" }
+keyboard-types = "0.6"
+crossbeam = "0.8"
 hound = "3.5"
 atomic_float = "1.0"
 rfd = "0.17.2"
