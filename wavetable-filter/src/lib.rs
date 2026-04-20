@@ -127,6 +127,10 @@ struct FilterState {
     write_pos: usize,
     len: usize,
     mask: usize,
+    /// `true` iff only zero-amplitude samples have been pushed since the last
+    /// `reset()`. When set, the convolution output is guaranteed to be zero and
+    /// the per-sample SIMD MAC loop can be skipped.
+    is_silent: bool,
 }
 
 #[derive(Params)]
@@ -674,12 +678,14 @@ impl FilterState {
             write_pos: 0,
             len: power_of_2_size,
             mask: power_of_2_size - 1,
+            is_silent: true,
         }
     }
 
     fn reset(&mut self) {
         self.history.fill(0.0);
         self.write_pos = 0;
+        self.is_silent = true;
     }
 
     #[inline(always)]
@@ -687,6 +693,17 @@ impl FilterState {
         self.history[self.write_pos] = sample;
         self.history[self.write_pos + self.len] = sample;
         self.write_pos = (self.write_pos + 1) & self.mask;
+        if sample.abs() > 1e-6 {
+            self.is_silent = false;
+        }
+    }
+
+    /// Returns true when the history is all-zero (no non-trivial sample pushed
+    /// since the last reset). Convolution output is guaranteed to be zero,
+    /// so callers may skip the MAC loop.
+    #[inline(always)]
+    fn is_silent(&self) -> bool {
+        self.is_silent
     }
 
     #[cfg(test)]
@@ -1132,7 +1149,13 @@ impl Plugin for WavetableFilter {
                         const SIMD_CHUNKS: usize = KERNEL_LEN / SIMD_LANES;
                         let history = self.filter_state[state_idx].history_slice();
 
-                        let filtered: f32 = if self.crossfade_active {
+                        let filtered: f32 = if self.filter_state[state_idx].is_silent() {
+                            // History is all-zero (filter cleared after 100 ms of
+                            // silence). Convolution output is zero; skip the
+                            // 128-chunk SIMD MAC loop that otherwise runs every
+                            // sample regardless of input level.
+                            0.0
+                        } else if self.crossfade_active {
                             let mut acc = f32x16::splat(0.0);
                             let mut acc2 = f32x16::splat(0.0);
                             for chunk_idx in 0..SIMD_CHUNKS {
