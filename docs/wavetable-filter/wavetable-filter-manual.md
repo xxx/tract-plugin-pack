@@ -22,25 +22,29 @@ The plugin supports two filtering modes:
 
 # Interface
 
-## Header
+The editor window is freely resizable — drag any edge or corner to change its size. The size is persisted with your DAW project. All on-screen elements scale proportionally; a minimum of ~700×500 keeps the layout intelligible.
 
-- **Wavetable Filter** — Plugin title.
-- **+/- buttons** — Scale the UI from 100% to 300% in 25% increments. The scale is saved with your DAW project.
+## Top strip
 
-## Wavetable Section
-
-- **Wavetable** — Displays the name of the currently loaded wavetable. Hover to see the full file path.
-- **Browse...** — Open a file dialog to load a `.wav` or `.wt` (Surge-compatible) wavetable file.
-- **Mode** — Switch between **Raw** and **Phaseless** filtering modes. Click to select.
+- **Browse** — Open a file dialog to load a `.wav` or `.wt` (Surge-compatible) wavetable file.
+- **Wavetable name** — The stem of the currently loaded wavetable file, shown between the Browse button and the mode selector.
+- **Mode** — Stepped selector with two segments: **Raw** and **Phaseless**. Click a segment to switch modes.
 
 ## Visualizations
 
-- **3D Wavetable View** (left) — Shows all frames of the loaded wavetable in an overhead perspective. The active frame is highlighted in orange. Click the view to toggle between the 3D overview and a 2D face-on view of the current interpolated frame.
-- **Filter Response** (right) — Shows the frequency response of the current filter kernel on a log-frequency/dB scale. A faint amber shadow shows the input audio spectrum when audio is playing, making it easier to set the cutoff by eye. The red vertical line marks the cutoff frequency.
+- **3D Wavetable View** (left) — Shows all frames of the loaded wavetable in an overhead perspective. The active frame is highlighted in orange. Click anywhere in the view to toggle between the 3D overview and a 2D face-on view of the current interpolated frame.
+- **Filter Response** (right) — Shows the frequency response of the current filter kernel on a log-frequency/dB scale. A faint amber shadow shows the input audio spectrum when audio is flowing, making it easier to set the cutoff by eye. The red vertical line marks the cutoff frequency.
 
 ## Controls
 
-All controls support vertical drag (up = increase, down = decrease), shift+drag for fine adjustment, double-click or right-click to reset to default, and scroll wheel for stepped changes.
+All dials support:
+
+- **Vertical drag** — up to increase, down to decrease.
+- **Shift+drag** — fine adjustment (finer pixels-per-unit).
+- **Double-click** — reset to default.
+- **Right-click** — open a text-entry field seeded with the current value (unit stripped). Press Enter to commit, Escape to cancel; clicking outside or starting a drag auto-commits.
+
+When the DAW is driving a parameter via modulation or automation, a secondary orange arc on the dial shows the modulated position relative to the underlying user-set value.
 
 ### Frame Position
 
@@ -63,9 +67,9 @@ Applies a comb-like emphasis at harmonic intervals of the cutoff frequency. At 0
 - Range: 0% to 100%
 - Default: 0%
 
-### Gain
+### Drive
 
-Output gain applied after the filter and dry/wet mix.
+Output gain applied after the filter and dry/wet mix. Useful for compensating level drops from heavy filtering or pushing the filtered signal harder.
 
 - Range: -20 dB to +20 dB
 - Default: 0 dB
