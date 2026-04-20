@@ -31,7 +31,6 @@ pub(crate) struct PendingReload {
 
 pub struct WavetableFilter {
     params: Arc<WavetableFilterParams>,
-    editor_state: Arc<editor::EditorState>,
     wavetable: Option<Wavetable>,
     sample_rate: f32,
     // Circular buffer for convolution (per channel)
@@ -136,6 +135,9 @@ struct WavetableFilterParams {
     #[persist = "wavetable_path"]
     pub wavetable_path: Arc<Mutex<String>>,
 
+    #[persist = "editor-state"]
+    pub editor_state: Arc<editor::EditorState>,
+
     #[id = "frequency"]
     pub frequency: FloatParam,
 
@@ -183,7 +185,6 @@ impl Default for WavetableFilter {
 
         Self {
             params: Arc::new(WavetableFilterParams::new(current_frame_count.clone())),
-            editor_state: editor::default_editor_state(),
             wavetable: Some(default_wt.clone()),
             sample_rate: 48000.0,
             filter_state: [FilterState::new(KERNEL_LEN), FilterState::new(KERNEL_LEN)],
@@ -738,6 +739,7 @@ impl WavetableFilterParams {
     fn new(frame_count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
         Self {
             wavetable_path: Arc::new(Mutex::new(String::new())),
+            editor_state: editor::default_editor_state(),
 
             frequency: FloatParam::new(
                 "Frequency",
@@ -1228,7 +1230,7 @@ impl Plugin for WavetableFilter {
         // Compute input spectrum for GUI visualization (non-blocking).
         // Only runs when the editor is open. Throttled to ~30 updates/sec.
         self.input_spectrum_countdown = self.input_spectrum_countdown.saturating_sub(host_samples);
-        if self.input_spectrum_countdown == 0 && self.editor_state.is_open() {
+        if self.input_spectrum_countdown == 0 && self.params.editor_state.is_open() {
             self.input_spectrum_countdown = (self.sample_rate / 30.0) as usize;
 
             // Reorder the ring buffer into a contiguous windowed buffer for FFT.
