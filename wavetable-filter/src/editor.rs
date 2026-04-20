@@ -376,8 +376,47 @@ impl WavetableFilterWindow {
 
         let h = self.physical_height as f32;
 
-        // ── Dial geometry ──
+        // ── Visualization area ──
         let dial_row_h = 60.0 * s;
+        let viz_top = strip_h;
+        let viz_bot = h - dial_row_h;
+        let viz_h = (viz_bot - viz_top).max(1.0);
+        let viz_pad = 10.0 * s;
+        let col_w = (w - viz_pad * 3.0) * 0.5;
+        let left_x = viz_pad;
+        let right_x = viz_pad * 2.0 + col_w;
+
+        wavetable_view::refresh_frame_cache(&mut self.frame_cache, &self.shared_wavetable, &self.wavetable_version);
+        use nih_plug::prelude::Param;
+        let current_frame_pos = self.params.frame_position.modulated_normalized_value();
+        wavetable_view::draw_wavetable_view(
+            &mut self.surface.pixmap,
+            &self.frame_cache,
+            left_x,
+            viz_top + viz_pad,
+            col_w,
+            viz_h - viz_pad * 2.0,
+            current_frame_pos,
+            self.show_2d,
+        );
+        self.drag.push_region(
+            left_x,
+            viz_top + viz_pad,
+            col_w,
+            viz_h - viz_pad * 2.0,
+            HitAction::Button(ButtonAction::WavetableToggle2D3D),
+        );
+        widgets::draw_rect_outline(
+            &mut self.surface.pixmap,
+            right_x,
+            viz_top + viz_pad,
+            col_w,
+            viz_h - viz_pad * 2.0,
+            widgets::color_border(),
+            1.0,
+        );
+
+        // ── Dial geometry ──
         let dial_radius = 22.0 * s;
 
         // Lower dial row: sits at the bottom of the window
