@@ -27,6 +27,8 @@ pub(crate) struct FftCache {
     freq_table: Vec<f32>,
     freq_table_size: usize,
     cached_response_ys: Vec<f32>,
+    cached_response_height: f32,
+    cached_response_y0: f32,
     cached_input_mags: Vec<f32>,
     cached_input_sr: f32,
 }
@@ -44,6 +46,8 @@ impl FftCache {
             freq_table: Vec::new(),
             freq_table_size: 0,
             cached_response_ys: Vec::new(),
+            cached_response_height: f32::NAN,
+            cached_response_y0: f32::NAN,
             cached_input_mags: Vec::new(),
             cached_input_sr: 0.0,
         }
@@ -143,7 +147,10 @@ fn ensure_freq_table(cache: &mut FftCache, num_points: usize) {
 
 fn ensure_response_ys(cache: &mut FftCache, cutoff_hz: f32, resonance: f32, height: f32, y0: f32) {
     let n = cache.freq_table_size;
-    if cache.cached_response_ys.len() == n + 1 || cache.cached_mags.is_empty() {
+    let already_valid = cache.cached_response_ys.len() == n + 1
+        && cache.cached_response_height == height
+        && cache.cached_response_y0 == y0;
+    if already_valid || cache.cached_mags.is_empty() {
         return;
     }
     let comb_exp = resonance * 8.0;
@@ -179,6 +186,8 @@ fn ensure_response_ys(cache: &mut FftCache, cutoff_hz: f32, resonance: f32, heig
         let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
         cached_response_ys[i] = y0 + height - y_norm * height;
     }
+    cache.cached_response_height = height;
+    cache.cached_response_y0 = y0;
 }
 
 fn freq_to_x(freq_hz: f32) -> f32 {
