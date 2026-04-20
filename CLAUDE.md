@@ -8,7 +8,7 @@ Tract Plugin Pack is a Cargo workspace containing multiple audio effect plugins 
 
 ### Plugins
 
-**Wavetable Filter** — uses wavetable frames as FIR filter kernels. Two modes: Raw (direct convolution, zero latency) and Phaseless (STFT magnitude-only filtering, no pre-ringing). GUI uses nih_plug_vizia.
+**Wavetable Filter** — uses wavetable frames as FIR filter kernels. Two modes: Raw (direct convolution, zero latency) and Phaseless (STFT magnitude-only filtering, no pre-ringing). GUI uses softbuffer + tiny-skia (CPU rendering). 3D wavetable background is cached into a viewport-sized pixmap and blitted with a raw row-wise `copy_from_slice` (not `draw_pixmap`) so per-frame cost stays flat as the wavetable grows. Convolution has a silence fast-path: when the filter state is all-zero and no non-trivial samples have been pushed since the last reset, the 2048-tap SIMD MAC loop is skipped entirely.
 
 **GS Meter** — lightweight loudness meter with gain utility for clip-to-zero workflows. dB mode: peak, true peak (ITU-R BS.1770-4), RMS integrated/momentary, crest factor. LUFS mode: EBU R128 integrated/short-term/momentary loudness, LRA, true peak. Per-mode gain and reference with gain-match buttons. GUI uses softbuffer + tiny-skia (CPU rendering, no GPU). Designed for 100+ instances per project.
 
@@ -26,14 +26,14 @@ Tract Plugin Pack is a Cargo workspace containing multiple audio effect plugins 
 
 ```
 tract-plugin-pack/
-├── wavetable-filter/       # Wavetable-based filter plugin (vizia GUI)
+├── wavetable-filter/       # Wavetable-based filter plugin (softbuffer GUI)
 ├── gs-meter/               # Loudness meter + gain utility (softbuffer GUI)
 ├── gain-brain/             # Gain utility with group linking (softbuffer GUI)
 ├── tinylimit/              # Wideband peak limiter (softbuffer GUI)
 ├── satch/                  # Spectral saturator with detail preservation (softbuffer GUI)
 ├── pope-scope/             # Multichannel oscilloscope with beat sync (softbuffer GUI)
 ├── warp-zone/              # Spectral shifter/stretcher with waterfall display (softbuffer GUI)
-├── nih-plug-widgets/       # Shared vizia widgets (ParamDial, CSS theme)
+├── nih-plug-widgets/       # Legacy vizia widgets (unused since wavetable-filter's tiny-skia port; kept for reference)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets (dial, slider, button)
 ├── docs/                   # Plugin manuals (markdown + PDF)
 └── xtask/                  # Build tooling
@@ -74,7 +74,7 @@ cargo build --bin warp-zone
 ## Testing & Linting
 
 ```bash
-cargo test --workspace                            # all tests (372)
+cargo test --workspace                            # all tests (407)
 cargo clippy --workspace -- -D warnings           # lint (CI uses -D warnings)
 cargo fmt --check
 ```
@@ -105,11 +105,12 @@ Tests are inline `#[cfg(test)]` modules:
 
 | File | Role |
 |------|------|
-| `wavetable-filter/src/lib.rs` | Plugin DSP: convolution, STFT, kernel synthesis, parameter smoothing |
+| `wavetable-filter/src/lib.rs` | Plugin DSP: convolution, STFT, kernel synthesis, parameter smoothing. `FilterState::is_silent` silence fast-path skips the per-sample SIMD MAC loop when history is all zero |
 | `wavetable-filter/src/wavetable.rs` | Wavetable I/O (`.wav`/`.wt`), frame interpolation |
-| `wavetable-filter/src/editor.rs` | Vizia UI layout, file browser, scaling controls |
-| `wavetable-filter/src/editor/wavetable_view.rs` | 2D/3D wavetable visualization |
-| `wavetable-filter/src/editor/filter_response_view.rs` | Frequency response + input spectrum graph |
+| `wavetable-filter/src/editor.rs` | Softbuffer + baseview editor: top strip (Browse + wavetable name + Raw/Phaseless stepped selector), two visualization columns, five dials (Frame / Frequency / Resonance / Gain / Mix) with modulation arcs and right-click text entry, free resize |
+| `wavetable-filter/src/editor/wavetable_view.rs` | 2D face-on + 3D overhead wavetable visualization. 3D strands are strided (max 48) and the full bg is cached into a viewport-sized pixmap + blitted per frame via a raw row-wise `copy_from_slice` (bypasses tiny-skia's raster pipeline) |
+| `wavetable-filter/src/editor/filter_response_view.rs` | Frequency response + input spectrum shadow. Response-curve Y coords cached with height/y0 keys to invalidate on vertical resize; shadow draw skipped when no bin exceeds the -48 dB floor (avoids tiny-skia's zero-height-polygon warning) |
+| `wavetable-filter/src/fonts/DejaVuSans.ttf` | Embedded font for CPU text rendering |
 
 ### GS Meter
 
@@ -180,15 +181,13 @@ Tests are inline `#[cfg(test)]` modules:
 | `tiny-skia-widgets/src/editor_base.rs` | Shared EditorState (size persistence), SurfaceState (pixmap + softbuffer) |
 | `tiny-skia-widgets/src/drag.rs` | DragState with hit regions, drag/shift-granular handling, `mouse_in_window()` tracking via CursorEntered/CursorLeft events |
 | `tiny-skia-widgets/src/text_edit.rs` | TextEditState<A> — right-click-to-type state machine shared by every softbuffer editor. Filtered numeric buffer (`0-9 . - + e E`), 16-char cap, 1000 ms caret blink |
-| `nih-plug-widgets/src/lib.rs` | Re-exports vizia ParamDial, provides `load_style()` for vizia CSS |
-| `nih-plug-widgets/src/param_dial.rs` | Vizia rotary knob widget with modulation indicator |
-| `nih-plug-widgets/src/style.css` | Dark theme CSS for vizia plugins |
+| `nih-plug-widgets/*` | Legacy vizia ParamDial + CSS theme. Unreferenced by any plugin since wavetable-filter's softbuffer port; retained for possible future reuse |
 
 ### Key Design Decisions
 
 - **GS Meter uses CPU rendering** (softbuffer + tiny-skia + fontdue) instead of vizia/OpenGL. This eliminates 25 MB of GPU driver overhead (Mesa/LLVM) per instance. At 300 instances (Bitwig, 48kHz/1024): 15% CPU, 560 MB RSS (~1.8 MB per instance).
 - **All softbuffer plugins are freely resizable.** Scale factor is derived from `physical_width / WINDOW_WIDTH` on resize. Window size is persisted via `EditorState`. Host-initiated resize uses a packed `AtomicU64` (`pending_resize`) consumed on the next frame.
-- **Right-click text entry on continuous dials/sliders** is shared across gain-brain, satch, tinylimit, pope-scope, and warp-zone via `tiny_skia_widgets::TextEditState<A>`. Right-click opens a highlighted edit field seeded with `Param::normalized_value_to_string(_, false)` (unit stripped). `Enter` commits through `Param::string_to_normalized_value` + `begin/set/end_set_parameter`; `Escape` cancels; click-outside or drag-start auto-commits; right-click during a drag is ignored. Key-up events are swallowed while editing so host DAW shortcuts don't fire on release. Stepped selectors, buttons, and toggles remain non-editable — right-click on them is a no-op.
+- **Right-click text entry on continuous dials/sliders** is shared across gain-brain, satch, tinylimit, pope-scope, warp-zone, and wavetable-filter via `tiny_skia_widgets::TextEditState<A>`. Right-click opens a highlighted edit field seeded with `Param::normalized_value_to_string(_, false)` (unit stripped). `Enter` commits through `Param::string_to_normalized_value` + `begin/set/end_set_parameter`; `Escape` cancels; click-outside or drag-start auto-commits; right-click during a drag is ignored. Key-up events are swallowed while editing so host DAW shortcuts don't fire on release. Stepped selectors, buttons, and toggles remain non-editable — right-click on them is a no-op.
 - **True peak uses exact ITU-R BS.1770-4 coefficients** (48-tap, 4-phase polyphase FIR). Double-buffered history for contiguous SIMD dot products. Sample-rate-aware: 4x OS at <96kHz, 2x at 96-192kHz, bypass at >=192kHz.
 - **Stereo RMS uses sum-of-power** (matches dpMeter5 SUM mode): `sqrt(ms_L + ms_R)`.
 - **Crest factor uses dpMeter5's convention** (peak_stereo vs rms_stereo), not the mathematically correct max(crest_L, crest_R). Documented for future "correct mode" toggle.

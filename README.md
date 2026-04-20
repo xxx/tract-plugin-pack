@@ -10,9 +10,9 @@ A wavetable-based audio filter that uses wavetable frames as FIR filter kernels.
 
 - **Raw Mode**: Direct time-domain convolution (zero latency)
 - **Phaseless Mode**: STFT magnitude-only filtering (no pre-ringing)
-- 3D/2D wavetable visualization, real-time filter response graph
-- Custom rotary knobs with DAW modulation indicators
-- SIMD-optimized convolution (`f32x16`)
+- 3D/2D wavetable visualization (click to toggle), real-time filter response with live input spectrum shadow
+- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable; rotary dials show DAW modulation arcs and support right-click text entry
+- SIMD-optimized convolution (`f32x16`) with silence fast-path — idle plugins use near-zero CPU
 - Inspired by [Kilohearts FilterTable](https://kilohearts.com/products/filter_table) and [EB-FreakyTable](https://ewanbristow.gumroad.com/l/freakytable)
 
 ### GS Meter
@@ -148,7 +148,7 @@ tract-plugin-pack/
 ├── satch/                  # Spectral saturator with detail preservation
 ├── pope-scope/             # Multichannel real-time oscilloscope
 ├── warp-zone/              # Spectral shifter/stretcher
-├── nih-plug-widgets/       # Shared vizia widgets (ParamDial, CSS theme)
+├── nih-plug-widgets/       # Legacy vizia widgets (no longer used; kept for reference)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets, editor base scaffolding
 ├── docs/                   # Plugin manuals
 │   ├── wavetable-filter/
@@ -163,7 +163,7 @@ tract-plugin-pack/
 ## Testing
 
 ```bash
-cargo test --workspace       # All tests (372)
+cargo test --workspace       # All tests (407)
 cargo clippy --workspace     # Lint check
 ```
 
