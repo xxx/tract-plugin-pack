@@ -221,23 +221,26 @@ impl WarpZoneWindow {
         self.surface.pixmap.fill(widgets::color_bg());
 
         // Timbre controls grouped left, Mix isolated right
-        let timbre_dials: [(ParamId, &str, f32, String); 3] = [
+        let timbre_dials: [(ParamId, &str, f32, f32, String); 3] = [
             (
                 ParamId::Shift,
                 "Shift",
                 self.params.shift.unmodulated_normalized_value(),
+                self.params.shift.modulated_normalized_value(),
                 self.format_value(ParamId::Shift),
             ),
             (
                 ParamId::Stretch,
                 "Stretch",
                 self.params.stretch.unmodulated_normalized_value(),
+                self.params.stretch.modulated_normalized_value(),
                 self.format_value(ParamId::Stretch),
             ),
             (
                 ParamId::Feedback,
                 "Feedback",
                 self.params.feedback.unmodulated_normalized_value(),
+                self.params.feedback.modulated_normalized_value(),
                 self.format_value(ParamId::Feedback),
             ),
         ];
@@ -245,19 +248,22 @@ impl WarpZoneWindow {
             ParamId::Mix,
             "Mix",
             self.params.mix.unmodulated_normalized_value(),
+            self.params.mix.modulated_normalized_value(),
             self.format_value(ParamId::Mix),
         );
-        let row2_dials: [(ParamId, &str, f32, String); 2] = [
+        let row2_dials: [(ParamId, &str, f32, f32, String); 2] = [
             (
                 ParamId::LowFreq,
                 "Low",
                 self.params.low_freq.unmodulated_normalized_value(),
+                self.params.low_freq.modulated_normalized_value(),
                 self.format_value(ParamId::LowFreq),
             ),
             (
                 ParamId::HighFreq,
                 "High",
                 self.params.high_freq.unmodulated_normalized_value(),
+                self.params.high_freq.modulated_normalized_value(),
                 self.format_value(ParamId::HighFreq),
             ),
         ];
@@ -300,7 +306,9 @@ impl WarpZoneWindow {
         let timbre_area_w = (w - dial_area_start - pad) * 0.65;
         let timbre_spacing = timbre_area_w / 3.0;
 
-        for (i, (param_id, label, normalized, value_text)) in timbre_dials.iter().enumerate() {
+        for (i, (param_id, label, normalized, modulated, value_text)) in
+            timbre_dials.iter().enumerate()
+        {
             let cx = dial_area_start + timbre_spacing * (i as f32 + 0.5);
             let editing_buf: Option<String> = self
                 .text_edit
@@ -316,7 +324,7 @@ impl WarpZoneWindow {
                 label,
                 value_text,
                 *normalized,
-                None,
+                Some(*modulated),
                 editing_buf.as_deref(),
                 caret,
             );
@@ -331,7 +339,7 @@ impl WarpZoneWindow {
 
         // Mix dial on the right
         {
-            let (param_id, label, normalized, ref value_text) = mix_dial;
+            let (param_id, label, normalized, modulated, ref value_text) = mix_dial;
             let mix_cx = w - pad - dial_radius - 10.0 * s;
             let editing_buf: Option<String> = self
                 .text_edit
@@ -347,7 +355,7 @@ impl WarpZoneWindow {
                 label,
                 value_text,
                 normalized,
-                None,
+                Some(modulated),
                 editing_buf.as_deref(),
                 caret,
             );
@@ -369,7 +377,9 @@ impl WarpZoneWindow {
         let row2_spacing = timbre_area_w / 2.0;
         let row2_cy = y + row2_h * 0.5;
 
-        for (i, (param_id, label, normalized, value_text)) in row2_dials.iter().enumerate() {
+        for (i, (param_id, label, normalized, modulated, value_text)) in
+            row2_dials.iter().enumerate()
+        {
             let cx = dial_area_start + row2_spacing * (i as f32 + 0.5);
             let editing_buf: Option<String> = self
                 .text_edit
@@ -385,7 +395,7 @@ impl WarpZoneWindow {
                 label,
                 value_text,
                 *normalized,
-                None,
+                Some(*modulated),
                 editing_buf.as_deref(),
                 caret,
             );
