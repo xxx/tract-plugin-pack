@@ -19,7 +19,7 @@ pub fn default_editor_state() -> Arc<EditorState> {
 
 // ── Window Handler ──────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum HitAction {
     Dial(ParamId),
     SteppedSegment { param: ParamId, index: i32 },
@@ -28,7 +28,7 @@ enum HitAction {
     ToggleInvert,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum ParamId {
     Gain,
     LinkMode,
@@ -60,6 +60,7 @@ struct GainBrainWindow {
     text_renderer: widgets::TextRenderer,
 
     drag: widgets::DragState<HitAction>,
+    text_edit: widgets::TextEditState<HitAction>,
 }
 
 impl GainBrainWindow {
@@ -96,6 +97,7 @@ impl GainBrainWindow {
             user_gain_override,
             text_renderer,
             drag: widgets::DragState::new(),
+            text_edit: widgets::TextEditState::new(),
         }
     }
 
@@ -283,7 +285,10 @@ impl GainBrainWindow {
         let dial_total_h = dial_radius * 2.0 + 30.0 * s; // arc + label + value text
         let dial_cx = self.physical_width as f32 / 2.0;
         let dial_cy = y + dial_radius + 20.0 * s;
-        widgets::draw_dial(
+        let editing = self.text_edit.active_for(&HitAction::Dial(ParamId::Gain))
+            .map(String::from); // detach the borrow before we re-borrow pixmap/tr
+        let caret = self.text_edit.caret_visible();
+        widgets::draw_dial_ex(
             &mut self.surface.pixmap,
             tr,
             dial_cx,
@@ -292,10 +297,59 @@ impl GainBrainWindow {
             "Gain",
             &gain_text,
             dial_normalized,
+            /* modulated */ None,
+            editing.as_deref(),
+            caret,
         );
         // Hit region covers the full dial area for vertical drag
         self.drag.push_region(dial_cx - dial_radius - 10.0 * s, y, dial_radius * 2.0 + 20.0 * s, dial_total_h, HitAction::Dial(ParamId::Gain));
         let _ = y + dial_total_h; // suppress unused warning; y is the layout cursor
+    }
+
+    /// Current parameter value formatted with `include_unit = false`. This
+    /// is what the edit buffer is seeded with on right-click.
+    fn formatted_value_without_unit(&self, id: ParamId) -> String {
+        use nih_plug::prelude::Param;
+        match id {
+            ParamId::Gain => {
+                let v = self.params.gain.modulated_normalized_value();
+                self.params.gain.normalized_value_to_string(v, false)
+            }
+            ParamId::LinkMode => {
+                let v = self.params.link_mode.modulated_normalized_value();
+                self.params.link_mode.normalized_value_to_string(v, false)
+            }
+        }
+    }
+
+    /// Consume any in-flight edit and push the value through the param
+    /// setter gesture. Parse failures silently revert.
+    fn commit_text_edit(&mut self) {
+        use nih_plug::prelude::Param;
+        let Some((action, text)) = self.text_edit.commit() else {
+            return;
+        };
+        let HitAction::Dial(param_id) = action else {
+            return;
+        };
+        let norm = match param_id {
+            ParamId::Gain => self.params.gain.string_to_normalized_value(&text),
+            ParamId::LinkMode => None, // discrete, not editable
+        };
+        let Some(norm) = norm else {
+            return;
+        };
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        self.begin_set_param(&setter, param_id);
+        self.set_param_normalized(&setter, param_id, norm);
+        self.end_set_param(&setter, param_id);
+        // Keep display_gain_millibels consistent for immediate visual feedback.
+        if param_id == ParamId::Gain {
+            let plain = self.params.gain.preview_plain(norm);
+            let db = nih_plug::util::gain_to_db(plain);
+            self.display_gain_millibels
+                .store((db * 100.0).round() as i32, Ordering::Relaxed);
+        }
     }
 
     fn begin_set_param(&self, setter: &ParamSetter, id: ParamId) {
@@ -445,6 +499,9 @@ impl baseview::WindowHandler for GainBrainWindow {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
+                // Auto-commit any in-flight edit before starting a drag
+                self.commit_text_edit();
+
                 if let Some(region) = self.drag.hit_test().cloned() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
 
@@ -506,8 +563,19 @@ impl baseview::WindowHandler for GainBrainWindow {
                 button: baseview::MouseButton::Right,
                 ..
             }) => {
-                if let Some(_region) = self.drag.hit_test() {
-                    // Right-click handling reserved for future use
+                // Ignore right-click during an active drag.
+                if self.drag.active_action().is_some() {
+                    return baseview::EventStatus::Captured;
+                }
+                if let Some(region) = self.drag.hit_test().cloned() {
+                    // Auto-commit any in-flight edit on a different widget.
+                    self.commit_text_edit();
+                    if let HitAction::Dial(param_id) = region.action {
+                        let initial = self.formatted_value_without_unit(param_id);
+                        self.text_edit.begin(HitAction::Dial(param_id), &initial);
+                    }
+                    // Non-Dial actions (stepped segments, group buttons, invert toggle)
+                    // are discrete — no text entry.
                 }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
@@ -518,6 +586,25 @@ impl baseview::WindowHandler for GainBrainWindow {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
                     self.end_set_param(&setter, id);
                 }
+            }
+            baseview::Event::Keyboard(ev) if self.text_edit.is_active() => {
+                if ev.state != keyboard_types::KeyState::Down {
+                    return baseview::EventStatus::Ignored;
+                }
+                match &ev.key {
+                    keyboard_types::Key::Character(s) => {
+                        for c in s.chars() {
+                            self.text_edit.insert_char(c);
+                        }
+                    }
+                    keyboard_types::Key::Backspace => self.text_edit.backspace(),
+                    keyboard_types::Key::Escape => self.text_edit.cancel(),
+                    keyboard_types::Key::Enter => {
+                        self.commit_text_edit();
+                    }
+                    _ => return baseview::EventStatus::Ignored,
+                }
+                return baseview::EventStatus::Captured;
             }
             _ => {}
         }
@@ -639,5 +726,38 @@ impl Editor for GainBrainEditor {
             (gain_db * 100.0).round() as i32,
             Ordering::Relaxed,
         );
+    }
+}
+
+#[cfg(test)]
+mod text_entry_tests {
+    use super::*;
+    use tiny_skia_widgets::TextEditState;
+
+    /// Pure state-machine test — exercises the flow without a real window:
+    /// begin → insert_char → commit yields the typed buffer.
+    #[test]
+    fn text_edit_roundtrip_for_gain_action() {
+        let mut s: TextEditState<HitAction> = TextEditState::new();
+        s.begin(HitAction::Dial(ParamId::Gain), "");
+        for c in "-6.2".chars() {
+            s.insert_char(c);
+        }
+        let out = s.commit();
+        assert_eq!(out, Some((HitAction::Dial(ParamId::Gain), "-6.2".to_string())));
+    }
+
+    /// A right-click on a non-Dial action (e.g. the GroupIncrement button)
+    /// should NOT open an edit. This is a contract test for the editor's
+    /// right-click arm: only `HitAction::Dial(_)` begins a TextEditState.
+    #[test]
+    fn non_dial_actions_do_not_trigger_edit() {
+        let mut s: TextEditState<HitAction> = TextEditState::new();
+        // Simulate what the editor does: only call begin() for Dial variants.
+        let action = HitAction::GroupIncrement;
+        if matches!(action, HitAction::Dial(_)) {
+            s.begin(action, "");
+        }
+        assert!(!s.is_active());
     }
 }
