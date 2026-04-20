@@ -1203,6 +1203,8 @@ impl PopeScopeWindow {
                 border_c,
                 active_text_c,
                 slider_fill_c,
+                None,
+                false,
             );
             self.drag.push_region(cx2, row2_y + label_gap, slider_w, row_h, HitAction::Dial(ParamId::Timebase));
 
@@ -1234,6 +1236,8 @@ impl PopeScopeWindow {
             border_c,
             active_text_c,
             slider_fill_c,
+            None,
+            false,
         );
         self.drag.push_region(cx2, row2_y + label_gap, slider_w, row_h, HitAction::Dial(ParamId::MinDb));
 
@@ -1264,6 +1268,8 @@ impl PopeScopeWindow {
             border_c,
             active_text_c,
             slider_fill_c,
+            None,
+            false,
         );
         self.drag.push_region(cx2, row2_y + label_gap, slider_w, row_h, HitAction::Dial(ParamId::MaxDb));
 

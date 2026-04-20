@@ -297,6 +297,8 @@ impl GsMeterWindow {
                     "",
                     $value_text,
                     $param.unmodulated_normalized_value(),
+                    None,
+                    false,
                 );
                 self.hit_regions.push(HitRegion {
                     x: sx,

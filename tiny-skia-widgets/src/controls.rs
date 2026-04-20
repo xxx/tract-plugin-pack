@@ -6,6 +6,15 @@ use crate::primitives::*;
 use crate::text::TextRenderer;
 
 // ---------------------------------------------------------------------------
+// Color helpers
+// ---------------------------------------------------------------------------
+
+/// Edit-mode highlight color — a brighter variant of the control background.
+fn color_edit_bg() -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(48, 52, 64, 255)
+}
+
+// ---------------------------------------------------------------------------
 // Composite widgets
 // ---------------------------------------------------------------------------
 
@@ -50,6 +59,10 @@ pub fn draw_button(
 /// right-aligned value string.
 ///
 /// `normalized_value` should be in 0.0..=1.0.
+///
+/// When `editing_text` is `Some(buf)`, the value readout is replaced with a
+/// highlighted edit field displaying the buffer, and a caret is drawn if
+/// `caret_on` is true.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_slider(
     pixmap: &mut Pixmap,
@@ -61,6 +74,8 @@ pub fn draw_slider(
     label: &str,
     value_text: &str,
     normalized_value: f32,
+    editing_text: Option<&str>,
+    caret_on: bool,
 ) {
     let nv = normalized_value.clamp(0.0, 1.0);
 
@@ -80,16 +95,37 @@ pub fn draw_slider(
     let pad = 6.0;
     text_renderer.draw_text(pixmap, x + pad, text_y, label, text_size, color_text());
 
-    // Value text (right-aligned)
-    let vw = text_renderer.text_width(value_text, text_size);
-    text_renderer.draw_text(
-        pixmap,
-        x + w - vw - pad,
-        text_y,
-        value_text,
-        text_size,
-        color_text(),
-    );
+    // Value readout: buffer + caret when editing, otherwise formatted value
+    if let Some(buf) = editing_text {
+        let ref_w = text_renderer.text_width("-999.99", text_size);
+        let box_w = ref_w + 12.0;
+        let box_h = text_size + 6.0;
+        let box_x = x + w - box_w - pad;
+        let box_y = y + (h - box_h) * 0.5;
+        draw_rect(pixmap, box_x, box_y, box_w, box_h, color_edit_bg());
+        draw_rect_outline(pixmap, box_x, box_y, box_w, box_h, color_accent(), 1.0);
+
+        let buf_x = box_x + 6.0;
+        text_renderer.draw_text(pixmap, buf_x, text_y, buf, text_size, color_text());
+
+        if caret_on {
+            let buf_w = text_renderer.text_width(buf, text_size);
+            let caret_x = buf_x + buf_w + 1.0;
+            let caret_y = box_y + 3.0;
+            let caret_h = box_h - 6.0;
+            draw_rect(pixmap, caret_x, caret_y, 1.0, caret_h, color_text());
+        }
+    } else {
+        let vw = text_renderer.text_width(value_text, text_size);
+        text_renderer.draw_text(
+            pixmap,
+            x + w - vw - pad,
+            text_y,
+            value_text,
+            text_size,
+            color_text(),
+        );
+    }
 }
 
 /// Draw a segmented control (stepped selector).
@@ -220,6 +256,10 @@ pub fn draw_outline_stepped_selector(
 }
 
 /// Draw an outline slider: transparent track with colored border and fill bar.
+///
+/// When `editing_text` is `Some(buf)`, the value readout is replaced with a
+/// highlighted edit field displaying the buffer, and a caret is drawn if
+/// `caret_on` is true.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_outline_slider(
     pixmap: &mut Pixmap,
@@ -234,6 +274,8 @@ pub fn draw_outline_slider(
     border_color: Color,
     text_color: Color,
     fill_color: Color,
+    editing_text: Option<&str>,
+    caret_on: bool,
 ) {
     let nv = normalized_value.clamp(0.0, 1.0);
 
@@ -251,8 +293,31 @@ pub fn draw_outline_slider(
     let text_y = y + (h + text_size) * 0.5 - 2.0;
     let pad = 6.0;
     text_renderer.draw_text(pixmap, x + pad, text_y, label, text_size, text_color);
-    let vw = text_renderer.text_width(value_text, text_size);
-    text_renderer.draw_text(pixmap, x + w - vw - pad, text_y, value_text, text_size, text_color);
+
+    // Value readout: buffer + caret when editing, otherwise formatted value
+    if let Some(buf) = editing_text {
+        let ref_w = text_renderer.text_width("-999.99", text_size);
+        let box_w = ref_w + 12.0;
+        let box_h = text_size + 6.0;
+        let box_x = x + w - box_w - pad;
+        let box_y = y + (h - box_h) * 0.5;
+        draw_rect(pixmap, box_x, box_y, box_w, box_h, color_edit_bg());
+        draw_rect_outline(pixmap, box_x, box_y, box_w, box_h, color_accent(), 1.0);
+
+        let buf_x = box_x + 6.0;
+        text_renderer.draw_text(pixmap, buf_x, text_y, buf, text_size, text_color);
+
+        if caret_on {
+            let buf_w = text_renderer.text_width(buf, text_size);
+            let caret_x = buf_x + buf_w + 1.0;
+            let caret_y = box_y + 3.0;
+            let caret_h = box_h - 6.0;
+            draw_rect(pixmap, caret_x, caret_y, 1.0, caret_h, text_color);
+        }
+    } else {
+        let vw = text_renderer.text_width(value_text, text_size);
+        text_renderer.draw_text(pixmap, x + w - vw - pad, text_y, value_text, text_size, text_color);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +596,8 @@ mod tests {
             "Gain",
             "-3.0 dB",
             0.5,
+            None,
+            false,
         );
         // Fill should cover roughly the left half of the slider track.
         let left_px = pixel_at(&pm, 10, 18);
@@ -553,8 +620,67 @@ mod tests {
             "X",
             "0",
             -0.5,
+            None,
+            false,
         );
-        draw_slider(&mut pm, &mut renderer, 0.0, 0.0, 200.0, 28.0, "X", "0", 1.5);
+        draw_slider(
+            &mut pm,
+            &mut renderer,
+            0.0,
+            0.0,
+            200.0,
+            28.0,
+            "X",
+            "0",
+            1.5,
+            None,
+            false,
+        );
+    }
+
+    #[test]
+    fn test_draw_slider_with_editing_text() {
+        let data = test_font_data();
+        let mut renderer = TextRenderer::new(&data);
+        let mut pm = Pixmap::new(300, 50).unwrap();
+        // Editing mode should render the highlight box and buffer without panic.
+        draw_slider(
+            &mut pm,
+            &mut renderer,
+            5.0,
+            5.0,
+            250.0,
+            28.0,
+            "Gain",
+            "-3.0 dB",
+            0.5,
+            Some("-6.2"),
+            true,
+        );
+    }
+
+    #[test]
+    fn test_draw_outline_slider_with_editing_text() {
+        let data = test_font_data();
+        let mut renderer = TextRenderer::new(&data);
+        let mut pm = Pixmap::new(300, 50).unwrap();
+        // Editing mode on outline slider should render without panic.
+        draw_outline_slider(
+            &mut pm,
+            &mut renderer,
+            5.0,
+            5.0,
+            250.0,
+            28.0,
+            "Gain",
+            "-3.0 dB",
+            0.5,
+            color_accent(),
+            color_text(),
+            color_accent(),
+            Some("-6.2"),
+            true,
+        );
     }
 
     #[test]
