@@ -265,8 +265,16 @@ pub(crate) fn draw_filter_response(
         stroke_line(pixmap, gx, y0, gx, y0 + height, (80, 80, 90, 100), 0.5);
     }
 
-    // Input spectrum shadow
-    if cache.cached_input_sr > 0.0 && !cache.cached_input_mags.is_empty() {
+    // Input spectrum shadow. When input is silent every bin sits at the -48 dB
+    // baseline, which produces a zero-height polygon that tiny-skia warns about
+    // on every call. Skip the draw when there's nothing to show.
+    let mag_floor = 10f32.powf(DB_FLOOR / 20.0); // mag corresponding to -48 dB
+    let has_audio = cache.cached_input_sr > 0.0
+        && cache
+            .cached_input_mags
+            .iter()
+            .any(|&m| m > mag_floor);
+    if has_audio {
         let bin_hz = cache.cached_input_sr / (2.0 * (cache.cached_input_mags.len() - 1) as f32);
         let mut pb = PathBuilder::new();
         pb.move_to(x0, y0 + height);
