@@ -285,8 +285,14 @@ impl GainBrainWindow {
         let dial_total_h = dial_radius * 2.0 + 30.0 * s; // arc + label + value text
         let dial_cx = self.physical_width as f32 / 2.0;
         let dial_cy = y + dial_radius + 20.0 * s;
-        let editing = self.text_edit.active_for(&HitAction::Dial(ParamId::Gain))
-            .map(String::from); // detach the borrow before we re-borrow pixmap/tr
+        // Detach the text_edit borrow into an owned String before we
+        // re-borrow self.surface.pixmap for the draw call — otherwise the
+        // shared immutable borrow of self.text_edit conflicts with the
+        // mutable borrow of self.surface below.
+        let editing_buf: Option<String> = self
+            .text_edit
+            .active_for(&HitAction::Dial(ParamId::Gain))
+            .map(str::to_owned);
         let caret = self.text_edit.caret_visible();
         widgets::draw_dial_ex(
             &mut self.surface.pixmap,
@@ -298,7 +304,7 @@ impl GainBrainWindow {
             &gain_text,
             dial_normalized,
             /* modulated */ None,
-            editing.as_deref(),
+            editing_buf.as_deref(),
             caret,
         );
         // Hit region covers the full dial area for vertical drag
@@ -589,7 +595,9 @@ impl baseview::WindowHandler for GainBrainWindow {
             }
             baseview::Event::Keyboard(ev) if self.text_edit.is_active() => {
                 if ev.state != keyboard_types::KeyState::Down {
-                    return baseview::EventStatus::Ignored;
+                    // Swallow key-up events while editing so the host DAW doesn't
+                    // process Enter/Escape releases as its own shortcuts.
+                    return baseview::EventStatus::Captured;
                 }
                 match &ev.key {
                     keyboard_types::Key::Character(s) => {
@@ -747,9 +755,14 @@ mod text_entry_tests {
         assert_eq!(out, Some((HitAction::Dial(ParamId::Gain), "-6.2".to_string())));
     }
 
-    /// A right-click on a non-Dial action (e.g. the GroupIncrement button)
-    /// should NOT open an edit. This is a contract test for the editor's
-    /// right-click arm: only `HitAction::Dial(_)` begins a TextEditState.
+    /// Regression guard for the TextEditState API: calling `begin` is
+    /// the only way to enter edit mode, so as long as the editor's
+    /// right-click arm (in `on_event`) gates on `HitAction::Dial(_)`,
+    /// non-Dial actions cannot trigger an edit. This test confirms the
+    /// state machine does not spontaneously activate — it does NOT
+    /// exercise the editor's right-click handler. (A full UI-driven
+    /// test would require a real baseview window, which we don't have
+    /// in unit tests.)
     #[test]
     fn non_dial_actions_do_not_trigger_edit() {
         let mut s: TextEditState<HitAction> = TextEditState::new();
