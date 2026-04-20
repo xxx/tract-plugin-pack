@@ -57,7 +57,7 @@ pub(crate) enum ButtonAction {
 
 // ── Constants and helpers ───────────────────────────────────────────────
 
-const TOP_STRIP_H: f32 = 32.0;
+const TOP_STRIP_H: f32 = 40.0;
 const STRIP_PAD: f32 = 8.0;
 
 fn format_wavetable_label(path: &str) -> String {
@@ -287,8 +287,8 @@ impl WavetableFilterWindow {
         let strip_h = TOP_STRIP_H * s;
         let pad = STRIP_PAD * s;
 
-        let browse_w = 72.0 * s;
-        let browse_h = 22.0 * s;
+        let browse_w = 84.0 * s;
+        let browse_h = 28.0 * s;
         let browse_x = pad;
         let browse_y = strip_y + (strip_h - browse_h) * 0.5;
 
@@ -312,8 +312,8 @@ impl WavetableFilterWindow {
         );
 
         // Mode selector (right-aligned)
-        let mode_w = 160.0 * s;
-        let mode_h = 22.0 * s;
+        let mode_w = 180.0 * s;
+        let mode_h = 28.0 * s;
         let mode_x = w - pad - mode_w;
         let mode_y = strip_y + (strip_h - mode_h) * 0.5;
         let active_idx = if self.params.mode.value() == crate::FilterMode::Raw {
@@ -354,7 +354,7 @@ impl WavetableFilterWindow {
                 .lock()
                 .map(|p| format_wavetable_label(&p))
                 .unwrap_or_else(|_| "(locked)".to_string());
-            let text_size = 13.0 * s;
+            let text_size = 15.0 * s;
             let text_y = strip_y + (strip_h + text_size) * 0.5 - 3.0 * s;
             self.text_renderer.draw_text(
                 &mut self.surface.pixmap,
@@ -379,9 +379,11 @@ impl WavetableFilterWindow {
         let h = self.physical_height as f32;
 
         // ── Visualization area ──
-        let dial_row_h = 60.0 * s;
+        let dial_row_h = 76.0 * s;
+        let dial_row_gap_top = 3.0 * s;
+        let dial_row_gap_bot = 5.0 * s;
         let viz_top = strip_h;
-        let viz_bot = h - dial_row_h;
+        let viz_bot = h - dial_row_h - dial_row_gap_top - dial_row_gap_bot;
         let viz_h = (viz_bot - viz_top).max(1.0);
         let viz_pad = 10.0 * s;
         let col_w = (w - viz_pad * 3.0) * 0.5;
@@ -440,10 +442,10 @@ impl WavetableFilterWindow {
         );
 
         // ── Dial geometry ──
-        let dial_radius = 22.0 * s;
+        let dial_radius = 28.0 * s;
 
         // Lower dial row: sits at the bottom of the window
-        let dial_row_y = h - dial_row_h;
+        let dial_row_y = h - dial_row_h - dial_row_gap_bot;
 
         // Frame dial takes the left half; Freq/Res/Drive/Mix share the right half
         let left_w = w * 0.5;

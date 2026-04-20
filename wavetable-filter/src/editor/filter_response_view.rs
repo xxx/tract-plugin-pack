@@ -357,9 +357,10 @@ pub(crate) fn draw_filter_response(
         2.0,
     );
 
-    // Frequency labels — centered under each tick
-    let text_size = 10.0;
-    let labels_y = y + h - 5.0;
+    // Frequency labels — centered under each tick.
+    // Size scales with view height so labels stay legible as the window grows.
+    let text_size = (h * 0.045).clamp(11.0, 24.0);
+    let labels_y = y + h - text_size * 0.5;
     for (freq, label) in [
         (50.0_f32, "50"),
         (200.0, "200"),
