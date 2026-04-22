@@ -4,28 +4,6 @@ A collection of audio effect plugins (VST3, CLAP, standalone) built with [nih-pl
 
 ## Plugins
 
-### Wavetable Filter
-
-A wavetable-based audio filter that uses wavetable frames as FIR filter kernels. Load any `.wav` or `.wt` wavetable file and use its spectral content to shape your audio.
-
-- **Raw Mode**: Direct time-domain convolution (zero latency)
-- **Phaseless Mode**: STFT magnitude-only filtering (no pre-ringing)
-- 3D/2D wavetable visualization (click to toggle), real-time filter response with live input spectrum shadow
-- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable; rotary dials show DAW modulation arcs and support right-click text entry
-- SIMD-optimized convolution (`f32x16`) with silence fast-path — idle plugins use near-zero CPU
-- Inspired by [Kilohearts FilterTable](https://kilohearts.com/products/filter_table) and [EB-FreakyTable](https://ewanbristow.gumroad.com/l/freakytable)
-
-### GS Meter
-
-A lightweight loudness meter with integrated gain utility, purpose-built for [clip-to-zero](#what-is-clip-to-zero) workflows. Designed to run 100+ instances per project without significant CPU or memory impact.
-
-- dB and LUFS modes with per-mode gain/reference and gain-match buttons
-- Peak max, true peak (ITU-R BS.1770-4), RMS, EBU R128 (integrated, short-term, momentary, LRA)
-- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable -- no GPU drivers loaded
-- SIMD-optimized metering (`f32x16`)
-- ~1.8 MB RSS and 0.05% CPU per instance (300 instances @ 15% CPU, 560 MB total)
-- Inspired by [TBProAudio dpMeter](https://www.tbproaudio.de/products/dpmeter)
-
 ### Gain Brain
 
 A lightweight gain utility with cross-instance group linking. Multiple instances can be assigned to the same group (1-16), and changing gain on any grouped instance applies that change to all others.
@@ -37,42 +15,16 @@ A lightweight gain utility with cross-instance group linking. Multiple instances
 - ~0.62 MB RSS and 0.03% CPU per instance (200 instances grouped @ 6.3% CPU, 123 MB total)
 - Inspired by [BlueCat's Gain Suite](https://www.bluecataudio.com/Products/Product_GainSuite/)
 
-### Tinylimit
+### GS Meter
 
-A low-latency wideband peak limiter for track-level use. Feed-forward topology with lookahead and dual-stage transient/dynamics handling.
+A lightweight loudness meter with integrated gain utility, purpose-built for [clip-to-zero](#what-is-clip-to-zero) workflows. Designed to run 100+ instances per project without significant CPU or memory impact.
 
-- Individual attack, release, knee, and transient controls
-- 7 built-in character presets (Transparent, Aggressive, Punchy, Smooth, Safe, Vocal, Loud)
-- Optional ISP (true peak targeting via ITU-R BS.1770-4)
-- Gain Link mode for auditioning limiting without loudness change
-- CPU-rendered GUI with input/output meters and GR readout (tiny-skia + softbuffer), freely resizable
-- ~1.0 MB RSS and 0.12% CPU per instance (50 instances @ 6.2% CPU, 50 MB total)
-- Inspired by [DMG Audio TrackLimit](https://dmgaudio.com/products_tracklimit.php)
-
-### Satch
-
-A detail-preserving spectral saturator. Uses FFT-based spectral analysis to preserve quiet frequency components through the clipping process, producing textured flat-top clipping instead of featureless flat tops.
-
-- Independent **Gain** (input boost) and **Threshold** (clip ceiling) controls
-- **Detail** knob preserves quiet harmonics through clipped regions via per-bin spectral magnitude saturation
-- **Knee** crossfades between hard clip (0%) and soft tanh saturation (100%)
-- Clip-aware detail blend — only affects clipped portions, unclipped material is unchanged
-- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable
-- ~0.82 MB RSS and 0.14% CPU per instance (100 instances @ 13.7% CPU, 82 MB total)
-- Inspired by [Newfangled Audio Saturate](https://www.newfangledaudio.com/saturate)
-
-### Warp Zone
-
-A psychedelic spectral shifter/stretcher that transforms audio in the frequency domain using a phase vocoder. Makes familiar sounds alien -- voices from another dimension, instruments with impossible harmonic structures.
-
-- **Shift** (-24 to +24 semitones) for pitch shifting without time stretching
-- **Stretch** (0.5x to 2.0x) warps harmonic spacing for inharmonic/metallic textures
-- **Freeze** captures the current spectrum as a sustained drone
-- **Feedback** compounds spectral shifts for rising/falling Shepard tone effects
-- **Low/High** frequency range limits for selective processing
-- Scrolling spectral waterfall display with psychedelic color palette
-- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable
-- 4096-point FFT phase vocoder with linear interpolation and phase-coherent bin remapping
+- dB and LUFS modes with per-mode gain/reference and gain-match buttons
+- Peak max, true peak (ITU-R BS.1770-4), RMS, EBU R128 (integrated, short-term, momentary, LRA)
+- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable -- no GPU drivers loaded
+- SIMD-optimized metering (`f32x16`)
+- ~1.8 MB RSS and 0.05% CPU per instance (300 instances @ 15% CPU, 560 MB total)
+- Inspired by [TBProAudio dpMeter](https://www.tbproaudio.de/products/dpmeter)
 
 ### Pope Scope
 
@@ -94,6 +46,54 @@ A multichannel real-time oscilloscope with beat sync. Multiple instances share a
 - Per-track solo/mute/color controls with DAW track name via CLAP track-info
 - Inspired by [PsyScope](https://fx23.net/free-vsts/) and [RusovDmitriy/oscilloscope](https://github.com/RusovDmitriy/oscilloscope)
 
+### Satch
+
+A detail-preserving spectral saturator. Uses FFT-based spectral analysis to preserve quiet frequency components through the clipping process, producing textured flat-top clipping instead of featureless flat tops.
+
+- Independent **Gain** (input boost) and **Threshold** (clip ceiling) controls
+- **Detail** knob preserves quiet harmonics through clipped regions via per-bin spectral magnitude saturation
+- **Knee** crossfades between hard clip (0%) and soft tanh saturation (100%)
+- Clip-aware detail blend — only affects clipped portions, unclipped material is unchanged
+- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable
+- ~0.82 MB RSS and 0.14% CPU per instance (100 instances @ 13.7% CPU, 82 MB total)
+- Inspired by [Newfangled Audio Saturate](https://www.newfangledaudio.com/saturate)
+
+### Tinylimit
+
+A low-latency wideband peak limiter for track-level use. Feed-forward topology with lookahead and dual-stage transient/dynamics handling.
+
+- Individual attack, release, knee, and transient controls
+- 7 built-in character presets (Transparent, Aggressive, Punchy, Smooth, Safe, Vocal, Loud)
+- Optional ISP (true peak targeting via ITU-R BS.1770-4)
+- Gain Link mode for auditioning limiting without loudness change
+- CPU-rendered GUI with input/output meters and GR readout (tiny-skia + softbuffer), freely resizable
+- ~1.0 MB RSS and 0.12% CPU per instance (50 instances @ 6.2% CPU, 50 MB total)
+- Inspired by [DMG Audio TrackLimit](https://dmgaudio.com/products_tracklimit.php)
+
+### Warp Zone
+
+A psychedelic spectral shifter/stretcher that transforms audio in the frequency domain using a phase vocoder. Makes familiar sounds alien -- voices from another dimension, instruments with impossible harmonic structures.
+
+- **Shift** (-24 to +24 semitones) for pitch shifting without time stretching
+- **Stretch** (0.5x to 2.0x) warps harmonic spacing for inharmonic/metallic textures
+- **Freeze** captures the current spectrum as a sustained drone
+- **Feedback** compounds spectral shifts for rising/falling Shepard tone effects
+- **Low/High** frequency range limits for selective processing
+- Scrolling spectral waterfall display with psychedelic color palette
+- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable
+- 4096-point FFT phase vocoder with linear interpolation and phase-coherent bin remapping
+
+### Wavetable Filter
+
+A wavetable-based audio filter that uses wavetable frames as FIR filter kernels. Load any `.wav` or `.wt` wavetable file and use its spectral content to shape your audio.
+
+- **Raw Mode**: Direct time-domain convolution (zero latency)
+- **Phaseless Mode**: STFT magnitude-only filtering (no pre-ringing)
+- 3D/2D wavetable visualization (click to toggle), real-time filter response with live input spectrum shadow
+- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable; rotary dials show DAW modulation arcs and support right-click text entry
+- SIMD-optimized convolution (`f32x16`) with silence fast-path — idle plugins use near-zero CPU
+- Inspired by [Kilohearts FilterTable](https://kilohearts.com/products/filter_table) and [EB-FreakyTable](https://ewanbristow.gumroad.com/l/freakytable)
+
 ## Build Requirements
 
 - Rust nightly toolchain (automatically configured via `rust-toolchain.toml`)
@@ -113,22 +113,22 @@ sudo apt install libxcb1-dev libxcb-icccm4-dev libxcb-dri2-0-dev libx11-xcb-dev 
 
 ```bash
 # Build all plugins (VST3 + CLAP)
-cargo nih-plug bundle wavetable-filter --release
-cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle gain-brain --release
-cargo nih-plug bundle tinylimit --release
-cargo nih-plug bundle satch --release
+cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle pope-scope --release
+cargo nih-plug bundle satch --release
+cargo nih-plug bundle tinylimit --release
 cargo nih-plug bundle warp-zone --release
+cargo nih-plug bundle wavetable-filter --release
 
 # Standalone binaries
-cargo build --bin wavetable-filter --release
-cargo build --bin gs-meter --release
 cargo build --bin gain-brain --release
-cargo build --bin tinylimit --release
-cargo build --bin satch --release
+cargo build --bin gs-meter --release
 cargo build --bin pope-scope --release
+cargo build --bin satch --release
+cargo build --bin tinylimit --release
 cargo build --bin warp-zone --release
+cargo build --bin wavetable-filter --release
 ```
 
 The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` file (you only need one -- use whichever your DAW supports) to your plugin directory:
@@ -141,22 +141,23 @@ The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` fil
 
 ```
 tract-plugin-pack/
-├── wavetable-filter/       # Wavetable-based filter plugin
-├── gs-meter/               # Loudness meter + gain utility
 ├── gain-brain/             # Gain utility with group linking
-├── tinylimit/              # Wideband peak limiter
-├── satch/                  # Spectral saturator with detail preservation
+├── gs-meter/               # Loudness meter + gain utility
 ├── pope-scope/             # Multichannel real-time oscilloscope
+├── satch/                  # Spectral saturator with detail preservation
+├── tinylimit/              # Wideband peak limiter
 ├── warp-zone/              # Spectral shifter/stretcher
+├── wavetable-filter/       # Wavetable-based filter plugin
 ├── nih-plug-widgets/       # Legacy vizia widgets (no longer used; kept for reference)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets, editor base scaffolding
 ├── docs/                   # Plugin manuals
-│   ├── wavetable-filter/
-│   ├── gs-meter/
 │   ├── gain-brain/
-│   ├── tinylimit/
+│   ├── gs-meter/
+│   ├── pope-scope/
 │   ├── satch/
-│   └── warp-zone/
+│   ├── tinylimit/
+│   ├── warp-zone/
+│   └── wavetable-filter/
 └── xtask/                  # Build tooling
 ```
 
@@ -169,13 +170,13 @@ cargo clippy --workspace     # Lint check
 
 ## Documentation
 
-- [Wavetable Filter Manual](docs/wavetable-filter/wavetable-filter-manual.md)
-- [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
 - [Gain Brain Manual](docs/gain-brain/gain-brain-manual.md)
-- [tinylimit Manual](docs/tinylimit/tinylimit-manual.md)
-- [satch Manual](docs/satch/satch-manual.md)
+- [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
 - [Pope Scope Manual](docs/pope-scope/pope-scope-manual.md)
+- [Satch Manual](docs/satch/satch-manual.md)
+- [Tinylimit Manual](docs/tinylimit/tinylimit-manual.md)
 - [Warp Zone Manual](docs/warp-zone/warp-zone-manual.md)
+- [Wavetable Filter Manual](docs/wavetable-filter/wavetable-filter-manual.md)
 
 ## What is Clip-to-Zero?
 
