@@ -37,7 +37,7 @@ A lightweight gain utility with cross-instance group linking. Multiple instances
 - ~0.62 MB RSS and 0.03% CPU per instance (200 instances grouped @ 6.3% CPU, 123 MB total)
 - Inspired by [BlueCat's Gain Suite](https://www.bluecataudio.com/Products/Product_GainSuite/)
 
-### tinylimit
+### Tinylimit
 
 A low-latency wideband peak limiter for track-level use. Feed-forward topology with lookahead and dual-stage transient/dynamics handling.
 
@@ -49,7 +49,7 @@ A low-latency wideband peak limiter for track-level use. Feed-forward topology w
 - ~1.0 MB RSS and 0.12% CPU per instance (50 instances @ 6.2% CPU, 50 MB total)
 - Inspired by [DMG Audio TrackLimit](https://dmgaudio.com/products_tracklimit.php)
 
-### satch
+### Satch
 
 A detail-preserving spectral saturator. Uses FFT-based spectral analysis to preserve quiet frequency components through the clipping process, producing textured flat-top clipping instead of featureless flat tops.
 

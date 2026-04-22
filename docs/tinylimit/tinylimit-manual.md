@@ -1,5 +1,5 @@
 ---
-title: "tinylimit"
+title: "Tinylimit"
 subtitle: "User Manual"
 author: "Michael Dungan"
 geometry: margin=2.5cm

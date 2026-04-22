@@ -132,7 +132,7 @@ impl SatchParams {
 // ── Plugin impl ────────────────────────────────────────────────────────────────
 
 impl Plugin for Satch {
-    const NAME: &'static str = "satch";
+    const NAME: &'static str = "Satch";
     const VENDOR: &'static str = "mpd";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";

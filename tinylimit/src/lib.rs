@@ -245,7 +245,7 @@ impl TinylimitParams {
 // ── Plugin impl ────────────────────────────────────────────────────────────────
 
 impl Plugin for Tinylimit {
-    const NAME: &'static str = "tinylimit";
+    const NAME: &'static str = "Tinylimit";
     const VENDOR: &'static str = "mpd";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";

@@ -1,5 +1,5 @@
 ---
-title: "satch"
+title: "Satch"
 subtitle: "User Manual"
 author: "Michael Dungan"
 geometry: margin=2.5cm

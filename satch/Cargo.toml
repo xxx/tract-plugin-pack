@@ -25,7 +25,7 @@ serde = { version = "1.0", features = ["derive"] }
 rustfft = "6"
 
 [package.metadata.bundler]
-name = "satch"
+name = "Satch"
 company = "mpd"
 description = "A detail-preserving spectral saturator"
 license = "GPL-3.0-or-later"

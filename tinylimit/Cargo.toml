@@ -23,7 +23,7 @@ keyboard-types = "0.6"
 serde = { version = "1.0", features = ["derive"] }
 
 [package.metadata.bundler]
-name = "tinylimit"
+name = "Tinylimit"
 company = "mpd"
 description = "A low-latency wideband peak limiter"
 license = "GPL-3.0-or-later"

@@ -14,9 +14,9 @@ Tract Plugin Pack is a Cargo workspace containing multiple audio effect plugins 
 
 **Gain Brain** — lightweight gain utility with cross-instance group linking via in-process static atomics. 16 groups, Absolute/Relative link modes, Invert toggle for mirrored gain movement. GUI uses softbuffer + tiny-skia (CPU rendering). ~0.62 MB RSS per instance. Inspired by BlueCat's Gain Suite.
 
-**tinylimit** — low-latency wideband peak limiter for track-level use. Feed-forward with lookahead, dual-stage transient/dynamics envelope, soft knee (Giannoulis 2012), optional ISP (ITU-1770 true peak). 7 built-in character presets. GUI uses softbuffer + tiny-skia (CPU rendering). 50 instances @ 6.2% CPU, 50 MB RSS (~1.0 MB, 0.12% CPU per instance). Inspired by DMG Audio TrackLimit.
+**Tinylimit** — low-latency wideband peak limiter for track-level use. Feed-forward with lookahead, dual-stage transient/dynamics envelope, soft knee (Giannoulis 2012), optional ISP (ITU-1770 true peak). 7 built-in character presets. GUI uses softbuffer + tiny-skia (CPU rendering). 50 instances @ 6.2% CPU, 50 MB RSS (~1.0 MB, 0.12% CPU per instance). Inspired by DMG Audio TrackLimit.
 
-**satch** — detail-preserving spectral saturator. FFT-based spectral analysis preserves quiet frequency components through clipping. Independent gain, threshold, knee, detail, and mix controls. CPU rendering via softbuffer + tiny-skia.
+**Satch** — detail-preserving spectral saturator. FFT-based spectral analysis preserves quiet frequency components through clipping. Independent gain, threshold, knee, detail, and mix controls. CPU rendering via softbuffer + tiny-skia.
 
 **Pope Scope** — multichannel real-time oscilloscope with beat sync. Static global store shares audio across up to 16 instances. Three display modes (Vertical/Overlay/Sum), three draw styles (Line/Filled/Both), beat-aligned grid, dB-scaled amplitude mapping. Ring buffer with hierarchical mipmap (L0 raw, L1 per-64, L2 per-256). CPU rendering via softbuffer + tiny-skia. Cursor tooltip on hover shows time (or bar position in beat-sync) and per-track dB readings; in Vertical mode the tooltip and cursor line restrict to the hovered lane. Waveform drawing bypasses tiny-skia's raster pipeline — direct pixel-write column fills with half-split envelope smoothing cut GUI CPU cost by ~52% vs the original path-based rasterizer.
 
@@ -130,7 +130,7 @@ Tests are inline `#[cfg(test)]` modules:
 | `gain-brain/src/editor.rs` | Softbuffer + baseview editor with rotary dial |
 | `gain-brain/src/fonts/DejaVuSans.ttf` | Embedded font for CPU text rendering |
 
-### tinylimit
+### Tinylimit
 
 | File | Role |
 |------|------|
@@ -140,7 +140,7 @@ Tests are inline `#[cfg(test)]` modules:
 | `tinylimit/src/editor.rs` | Softbuffer + baseview editor with meters, dials, presets |
 | `tinylimit/src/fonts/DejaVuSans.ttf` | Embedded font for CPU text rendering |
 
-### satch
+### Satch
 
 | File | Role |
 |------|------|
