@@ -23,6 +23,13 @@ crossbeam = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 rustfft = "6"
 
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "dsp"
+harness = false
+
 [package.metadata.bundler]
 name = "Warp Zone"
 company = "mpd"

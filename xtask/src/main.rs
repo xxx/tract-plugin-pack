@@ -10,6 +10,7 @@ fn main() -> Result<()> {
         Some("bundle") => bundle()?,
         Some("bundle-universal") => bundle_universal()?,
         Some("native") => run_native(&rest)?,
+        Some("bench-compare") => bench_compare()?,
         _ => print_help(),
     }
     Ok(())
@@ -23,10 +24,13 @@ fn print_help() {
   native <cargo args...>      Run `cargo <args>` with target-cpu auto-tuned to the build host.
                               On x86_64 with AVX2+FMA+BMI2 this sets -C target-cpu=haswell,
                               which lets tiny-skia and auto-vectorized code use AVX2 paths.
+  bench-compare               Run bench-suite twice (target-cpu=x86-64 vs haswell) and
+                              print criterion's delta report.
 
 Examples:
   cargo xtask native nih-plug bundle wavetable-filter --release
-  cargo xtask native build --release --bin gs-meter"
+  cargo xtask native build --release --bin gs-meter
+  cargo xtask bench-compare"
     );
 }
 
@@ -79,6 +83,51 @@ fn run_native(args: &[String]) -> Result<()> {
     if !status.success() {
         anyhow::bail!("cargo {} failed", args.join(" "));
     }
+    Ok(())
+}
+
+fn bench_compare() -> Result<()> {
+    // Each run rebuilds bench-suite with a different target-cpu. We pin the linker to
+    // mold explicitly because passing RUSTFLAGS via env fully overrides rustflags from
+    // ~/.cargo/config.toml, so we'd otherwise lose the mold setting for the duration
+    // of the run.
+    let linker = "-C link-arg=-fuse-ld=mold";
+
+    // (package, bench target name). Serial execution keeps the CPU from contending
+    // with itself and skips each package's lib/main libtest harnesses (which reject
+    // criterion's --save-baseline flag).
+    let bench_targets: &[(&str, &str)] = &[
+        ("bench-suite", "render"),
+        ("pope-scope", "dsp"),
+        ("wavetable-filter", "dsp"),
+        ("warp-zone", "dsp"),
+    ];
+
+    let run = |label: &str, cpu: &str, criterion_args: &[&str]| -> Result<()> {
+        let flags = format!("{linker} -C target-cpu={cpu}");
+        eprintln!("\n=== bench run: {label} (target-cpu={cpu}) ===");
+        for (pkg, bench) in bench_targets {
+            eprintln!("--- {pkg}::{bench} ---");
+            let mut args: Vec<&str> = vec!["bench", "-p", pkg, "--bench", bench, "--"];
+            args.extend_from_slice(criterion_args);
+            let status = Command::new("cargo")
+                .args(&args)
+                .env("RUSTFLAGS", &flags)
+                .status()?;
+            if !status.success() {
+                anyhow::bail!("bench run '{label}' ({pkg}::{bench}) failed");
+            }
+        }
+        Ok(())
+    };
+
+    run("baseline", "x86-64", &["--save-baseline", "baseline"])?;
+    run("haswell", "haswell", &["--save-baseline", "haswell"])?;
+
+    eprintln!("\n=== comparison: haswell vs baseline ===");
+    // Rerun with RUSTFLAGS matching the haswell build so the binary doesn't get
+    // rebuilt, and point criterion at the saved baseline for % deltas.
+    run("compare", "haswell", &["--baseline", "baseline"])?;
     Ok(())
 }
 

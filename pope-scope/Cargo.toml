@@ -22,6 +22,13 @@ tiny-skia-widgets = { path = "../tiny-skia-widgets" }
 keyboard-types = "0.6"
 crossbeam = "0.8"
 
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "dsp"
+harness = false
+
 [package.metadata.bundler]
 name = "Pope Scope"
 company = "mpd"

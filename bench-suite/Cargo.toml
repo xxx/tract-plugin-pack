@@ -1,0 +1,17 @@
+[package]
+name = "bench-suite"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+tiny-skia = "0.12"
+tiny-skia-widgets = { path = "../tiny-skia-widgets" }
+
+[[bench]]
+name = "render"
+harness = false
