@@ -74,10 +74,12 @@ cargo build --bin warp-zone
 ## Testing & Linting
 
 ```bash
-cargo test --workspace                            # all tests (407)
+cargo nextest run --workspace                     # all tests (407) -- parallel test runner
 cargo clippy --workspace -- -D warnings           # lint (CI uses -D warnings)
 cargo fmt --check
 ```
+
+Install the runner with `cargo install cargo-nextest --locked` if missing. Config lives in `.config/nextest.toml`; CI uses the `ci` profile (retries=1, full failure enumeration). No doctests in the workspace, so `cargo test --doc` isn't needed.
 
 Tests are inline `#[cfg(test)]` modules:
 - `wavetable-filter/src/lib.rs` and `wavetable-filter/src/wavetable.rs` — 30 DSP tests

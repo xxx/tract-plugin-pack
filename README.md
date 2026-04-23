@@ -175,9 +175,11 @@ tract-plugin-pack/
 ## Testing
 
 ```bash
-cargo test --workspace       # All tests (407)
-cargo clippy --workspace     # Lint check
+cargo nextest run --workspace   # All tests (407) -- parallel runner
+cargo clippy --workspace        # Lint check
 ```
+
+Install nextest via `cargo install cargo-nextest --locked`. Config lives in `.config/nextest.toml`.
 
 ## Documentation
 

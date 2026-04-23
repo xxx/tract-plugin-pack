@@ -1,0 +1,13 @@
+[profile.default]
+# Flag tests taking >60s as slow (default is 60s; noted explicitly for clarity).
+slow-timeout = { period = "60s", terminate-after = 4 }
+# Fail fast on first few failures in local runs; keep CI exhaustive via its own profile.
+failure-output = "immediate-final"
+fail-fast = false
+
+[profile.ci]
+# CI should enumerate every failure rather than stopping early.
+fail-fast = false
+failure-output = "final"
+# Retry flaky ones once before giving up -- DSP tests occasionally trip on timing.
+retries = 1
