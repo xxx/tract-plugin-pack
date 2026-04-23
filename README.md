@@ -131,6 +131,17 @@ cargo build --bin warp-zone --release
 cargo build --bin wavetable-filter --release
 ```
 
+### Host-optimized builds
+
+For local builds that exploit your CPU's SIMD (tiny-skia's AVX2 raster paths, auto-vectorized DSP code), wrap any cargo invocation with `cargo xtask native`. It detects AVX2+FMA+BMI2 on the build host and, when present, sets `RUSTFLAGS=-C target-cpu=haswell` for the child cargo process. On non-x86_64 or older x86_64 hosts it falls back to the default target-cpu.
+
+```bash
+cargo xtask native nih-plug bundle wavetable-filter --release
+cargo xtask native build --release --bin gs-meter
+```
+
+The resulting binaries are NOT portable to pre-Haswell machines -- use plain `cargo nih-plug bundle ...` for distributable bundles.
+
 The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` file (you only need one -- use whichever your DAW supports) to your plugin directory:
 
 - **Linux**: `~/.vst3/` or `~/.clap/`
