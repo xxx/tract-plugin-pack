@@ -792,12 +792,14 @@ impl WavetableFilterParams {
             resonance: FloatParam::new("Resonance", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(50.0))
                 .with_unit("%")
-                .with_value_to_string(formatters::v2s_f32_percentage(0)),
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
 
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(50.0))
                 .with_unit("%")
-                .with_value_to_string(formatters::v2s_f32_percentage(0)),
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
 
             gain: FloatParam::new(
                 "Gain",
