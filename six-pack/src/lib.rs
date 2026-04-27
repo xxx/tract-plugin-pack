@@ -11,6 +11,7 @@ pub mod spectrum;
 pub mod svf;
 
 use crate::bands::{BandState, ChannelMode, FilterShape};
+use crate::oversampling::StereoOversampler;
 use crate::saturation::Algorithm;
 
 const BAND_SHAPES: [FilterShape; 6] = [
@@ -150,6 +151,8 @@ pub struct SixPack {
     params: Arc<SixPackParams>,
     bands: [BandState; 6],
     sample_rate: f32,
+    os: StereoOversampler,
+    max_block: usize,
 }
 
 #[derive(Params)]
@@ -307,12 +310,15 @@ impl Default for SixPack {
                 BandState::new(BAND_SHAPES[5]),
             ],
             sample_rate: 48_000.0,
+            os: StereoOversampler::new(),
+            max_block: 1024,
         }
     }
 }
 
 impl SixPack {
-    fn recompute_band_coefs(&mut self) {
+    fn recompute_band_coefs_for_os(&mut self, factor: usize) {
+        let effective_sr = self.sample_rate * factor as f32;
         let p = &self.params;
         for (i, band) in self.bands.iter_mut().enumerate() {
             let bp = &p.bands[i];
@@ -323,8 +329,15 @@ impl SixPack {
             band.q = bp.q.smoothed.next();
             band.gain_db = bp.gain.smoothed.next();
             band.enable = if bp.enable.value() { 1.0 } else { 0.0 };
-            band.recompute_coefs(self.sample_rate);
+            band.recompute_coefs(effective_sr);
         }
+    }
+
+    /// Backward-compatible wrapper used by tests that don't go through the
+    /// oversampling path.
+    #[cfg(test)]
+    fn recompute_band_coefs(&mut self) {
+        self.recompute_band_coefs_for_os(1);
     }
 }
 
@@ -352,10 +365,14 @@ impl Plugin for SixPack {
         &mut self,
         _audio_io_layout: &AudioIOLayout,
         buffer_config: &BufferConfig,
-        _ctx: &mut impl InitContext<Self>,
+        ctx: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
-        self.recompute_band_coefs();
+        self.max_block = buffer_config.max_buffer_size as usize;
+        let factor = self.params.quality.value().factor();
+        self.os.set_factor(factor, self.max_block);
+        self.recompute_band_coefs_for_os(factor);
+        ctx.set_latency_samples(self.os.latency_samples() as u32);
         true
     }
 
@@ -363,15 +380,29 @@ impl Plugin for SixPack {
         for band in self.bands.iter_mut() {
             band.reset();
         }
+        self.os.reset();
     }
 
     fn process(
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _ctx: &mut impl ProcessContext<Self>,
+        ctx: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let p = self.params.clone();
+
+        // Handle Quality changes: re-allocate scratch (only at OS-factor boundary,
+        // which is a rare user-initiated event), reset filter state to avoid
+        // clicks, and report the new latency to the host.
+        let new_factor = p.quality.value().factor();
+        if new_factor != self.os.factor() {
+            self.os.set_factor(new_factor, self.max_block);
+            ctx.set_latency_samples(self.os.latency_samples() as u32);
+            self.recompute_band_coefs_for_os(new_factor);
+            for band in self.bands.iter_mut() {
+                band.reset();
+            }
+        }
 
         // Read smoothed scalars at block start.
         let input_gain = p.input_gain.smoothed.next();
@@ -391,10 +422,12 @@ impl Plugin for SixPack {
         };
 
         // Update per-band state every block (parameter automation/smoothing).
-        self.recompute_band_coefs();
+        // Use the OS-effective sample rate so SVF coefficients see the full
+        // oversampled bandwidth.
+        self.recompute_band_coefs_for_os(self.os.factor());
 
-        let dry_amp = dry_amp(mix);
-        let wet_amp = wet_amp(mix);
+        let dry_amp_v = dry_amp(mix);
+        let wet_amp_v = wet_amp(mix);
 
         let num_samples = buffer.samples();
         if num_samples == 0 {
@@ -410,9 +443,22 @@ impl Plugin for SixPack {
         let l = &mut l_chan[0][..num_samples];
         let r = &mut r_chan[0][..num_samples];
 
-        for i in 0..num_samples {
-            let dry_l = l[i] * input_gain;
-            let dry_r = r[i] * input_gain;
+        // Apply input_gain in place at native rate.
+        for s in l.iter_mut() {
+            *s *= input_gain;
+        }
+        for s in r.iter_mut() {
+            *s *= input_gain;
+        }
+
+        // Upsample to the OS scratch.
+        let (os_l, os_r) = self.os.upsample_block(l, r);
+        let len_os = os_l.len();
+
+        // Per-oversampled-sample DSP loop.
+        for i in 0..len_os {
+            let dry_l = os_l[i];
+            let dry_r = os_r[i];
 
             let mut wet_l = 0.0f32;
             let mut wet_r = 0.0f32;
@@ -430,8 +476,19 @@ impl Plugin for SixPack {
                 wet_r -= boost_r;
             }
 
-            l[i] = (dry_amp * dry_l + wet_amp * wet_l) * output_gain;
-            r[i] = (dry_amp * dry_r + wet_amp * wet_r) * output_gain;
+            os_l[i] = dry_amp_v * dry_l + wet_amp_v * wet_l;
+            os_r[i] = dry_amp_v * dry_r + wet_amp_v * wet_r;
+        }
+
+        // Downsample back to native rate.
+        self.os.downsample_block(l, r);
+
+        // Apply output_gain in place at native rate.
+        for s in l.iter_mut() {
+            *s *= output_gain;
+        }
+        for s in r.iter_mut() {
+            *s *= output_gain;
         }
 
         // Sanity: NaN guard in debug builds.
