@@ -123,3 +123,36 @@ mod test_diode {
         }
     }
 }
+
+/// Digital: hard clip at ±1 (after drive scaling).
+pub fn digital(x: f32, drive: f32) -> f32 {
+    (drive * x).clamp(-1.0, 1.0)
+}
+
+#[cfg(test)]
+mod test_digital {
+    use super::*;
+
+    #[test]
+    fn digital_at_zero() { assert_eq!(digital(0.0, 1.0), 0.0); }
+
+    #[test]
+    fn digital_is_symmetric() {
+        for x in [0.1, 0.5, 1.0, 1.5, 5.0] {
+            assert_eq!(digital(x, 1.0), -digital(-x, 1.0));
+        }
+    }
+
+    #[test]
+    fn digital_clips_at_unity() {
+        assert!((digital(2.0, 1.0) - 1.0).abs() < 1e-7);
+        assert!((digital(-2.0, 1.0) + 1.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn digital_below_threshold_is_linear() {
+        for x in [-0.5_f32, -0.1, 0.1, 0.5] {
+            assert!((digital(x, 1.0) - x).abs() < 1e-7);
+        }
+    }
+}
