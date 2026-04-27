@@ -689,6 +689,37 @@ mod plugin_tests {
     /// using `Digital` clip with a quiet input — the clip never triggers, so
     /// `saturate(x) == x`. With de-emph on, the boost cancels the wet.
     #[test]
+    fn sample_rate_sweep_stable() {
+        // Drive a chirp through the plugin at multiple sample rates; verify NaN-free.
+        for sr in [44_100.0_f32, 48_000.0, 96_000.0, 192_000.0] {
+            let mut plugin = SixPack::default();
+            plugin.sample_rate = sr;
+            plugin.recompute_band_coefs_for_os(1);
+            // Set band 4 to peak +12 dB at 1 kHz (just to get harmonics)
+            plugin.bands[3].gain_db = 12.0;
+            plugin.bands[3].recompute_coefs(sr);
+            for i in 0..(sr as usize / 10) {
+                let phase = (i as f32) / sr * std::f32::consts::TAU;
+                let dry = (phase * 1_000.0).sin() * 0.3;
+                let mut wet_l = 0.0;
+                let mut wet_r = 0.0;
+                let mut boost_l = 0.0;
+                let mut boost_r = 0.0;
+                for band in plugin.bands.iter_mut() {
+                    let out = band.process_sample(dry, dry, 1.0);
+                    wet_l += out.sat_l;
+                    wet_r += out.sat_r;
+                    boost_l += out.boost_l;
+                    boost_r += out.boost_r;
+                }
+                assert!(wet_l.is_finite(), "sr={sr} i={i} wet_l={wet_l}");
+                assert!(wet_r.is_finite(), "sr={sr} i={i} wet_r={wet_r}");
+                assert!(boost_l.is_finite() && boost_r.is_finite());
+            }
+        }
+    }
+
+    #[test]
     fn deemph_cancellation_per_channel_mode() {
         use crate::bands::{BandState, ChannelMode, FilterShape};
         use crate::saturation::Algorithm;
