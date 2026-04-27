@@ -103,14 +103,19 @@ mod test_diode {
     use super::*;
 
     #[test]
-    fn diode_at_zero() { assert_eq!(diode(0.0, 1.0), 0.0); }
+    fn diode_at_zero() {
+        assert_eq!(diode(0.0, 1.0), 0.0);
+    }
 
     #[test]
     fn diode_is_symmetric() {
         for x in [0.1, 0.3, 0.5, 0.9, 1.5, 5.0] {
             let p = diode(x, 1.0);
             let n = diode(-x, 1.0);
-            assert!((p + n).abs() < 1e-6, "diode({x}, 1)={p}, diode(-{x}, 1)={n}");
+            assert!(
+                (p + n).abs() < 1e-6,
+                "diode({x}, 1)={p}, diode(-{x}, 1)={n}"
+            );
         }
     }
 
@@ -134,7 +139,9 @@ mod test_digital {
     use super::*;
 
     #[test]
-    fn digital_at_zero() { assert_eq!(digital(0.0, 1.0), 0.0); }
+    fn digital_at_zero() {
+        assert_eq!(digital(0.0, 1.0), 0.0);
+    }
 
     #[test]
     fn digital_is_symmetric() {
@@ -177,14 +184,19 @@ mod test_class_b {
     use super::*;
 
     #[test]
-    fn class_b_at_zero() { assert_eq!(class_b(0.0, 1.0), 0.0); }
+    fn class_b_at_zero() {
+        assert_eq!(class_b(0.0, 1.0), 0.0);
+    }
 
     #[test]
     fn class_b_is_symmetric() {
         for x in [0.05, 0.1, 0.3, 0.5, 0.9, 1.5] {
             let p = class_b(x, 1.0);
             let n = class_b(-x, 1.0);
-            assert!((p + n).abs() < 1e-6, "class_b({x}, 1)={p}, class_b(-{x}, 1)={n}");
+            assert!(
+                (p + n).abs() < 1e-6,
+                "class_b({x}, 1)={p}, class_b(-{x}, 1)={n}"
+            );
         }
     }
 
@@ -193,7 +205,10 @@ mod test_class_b {
         let small = class_b(0.01, 1.0).abs();
         let mid = class_b(0.5, 1.0).abs();
         let ratio = small / mid;
-        assert!(ratio < 0.005, "class_b dead zone ratio: small={small} mid={mid} ratio={ratio}");
+        assert!(
+            ratio < 0.005,
+            "class_b dead zone ratio: small={small} mid={mid} ratio={ratio}"
+        );
     }
 
     #[test]
@@ -222,7 +237,9 @@ mod test_wavefold {
     use super::*;
 
     #[test]
-    fn wavefold_at_zero() { assert_eq!(wavefold(0.0, 1.0), 0.0); }
+    fn wavefold_at_zero() {
+        assert_eq!(wavefold(0.0, 1.0), 0.0);
+    }
 
     #[test]
     fn wavefold_is_symmetric() {
@@ -277,8 +294,14 @@ mod test_wavefold {
         let zc_low = count_zc(1.0);
         let zc_mid = count_zc(2.0);
         let zc_high = count_zc(4.0);
-        assert!(zc_low < zc_mid, "drive 1.0 -> {zc_low} zc; drive 2.0 -> {zc_mid} zc");
-        assert!(zc_mid < zc_high, "drive 2.0 -> {zc_mid} zc; drive 4.0 -> {zc_high} zc");
+        assert!(
+            zc_low < zc_mid,
+            "drive 1.0 -> {zc_low} zc; drive 2.0 -> {zc_mid} zc"
+        );
+        assert!(
+            zc_mid < zc_high,
+            "drive 2.0 -> {zc_mid} zc; drive 4.0 -> {zc_high} zc"
+        );
     }
 }
 
