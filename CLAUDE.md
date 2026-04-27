@@ -18,6 +18,8 @@ Tract Plugin Pack is a Cargo workspace containing multiple audio effect plugins 
 
 **Satch** — detail-preserving spectral saturator. FFT-based spectral analysis preserves quiet frequency components through clipping. Independent gain, threshold, knee, detail, and mix controls. CPU rendering via softbuffer + tiny-skia.
 
+**Six Pack** — six-band parallel "distort the difference" multiband saturator. 1 low-shelf + 4 peaks + 1 high-shelf, six saturation algorithms (Tube, Tape, Diode, Digital, Class B, Wavefold). Per-band Stereo/Mid/Side routing applied to the diff *before* saturation (linear SVF on L/R per channel; route diff to M/S; saturate; recombine to L/R). Linear-phase polyphase oversampling (Off / 4× / 8× / 16×). Global de-emphasis subtracts the linear EQ boost so only saturation harmonics remain audible. Spectrum analyzer overlay (audio-thread FFT, 1024-sample throttle, atomic bins). softbuffer + tiny-skia CPU rendering.
+
 **Pope Scope** — multichannel real-time oscilloscope with beat sync. Static global store shares audio across up to 16 instances. Three display modes (Vertical/Overlay/Sum), three draw styles (Line/Filled/Both), beat-aligned grid, dB-scaled amplitude mapping. Ring buffer with hierarchical mipmap (L0 raw, L1 per-64, L2 per-256). CPU rendering via softbuffer + tiny-skia. Cursor tooltip on hover shows time (or bar position in beat-sync) and per-track dB readings; in Vertical mode the tooltip and cursor line restrict to the hovered lane. Waveform drawing bypasses tiny-skia's raster pipeline — direct pixel-write column fills with half-split envelope smoothing cut GUI CPU cost by ~52% vs the original path-based rasterizer.
 
 **Warp Zone** — psychedelic spectral shifter/stretcher using a phase vocoder. Shift (-24 to +24 semitones) moves pitch, Stretch (0.5x to 2.0x) warps harmonic spacing for inharmonic textures. Freeze captures the current FFT frame as a sustained drone (transport-aware). Feedback feeds output back into input for compounding spectral effects. Low/High frequency range limits for selective processing. Scrolling spectral waterfall display with psychedelic color palette. 4096-point FFT, 1024 hop, ~85ms latency. CPU rendering via softbuffer + tiny-skia.
@@ -31,6 +33,7 @@ tract-plugin-pack/
 ├── gain-brain/             # Gain utility with group linking (softbuffer GUI)
 ├── tinylimit/              # Wideband peak limiter (softbuffer GUI)
 ├── satch/                  # Spectral saturator with detail preservation (softbuffer GUI)
+├── six-pack/               # Six-band parallel multiband saturator (softbuffer GUI)
 ├── pope-scope/             # Multichannel oscilloscope with beat sync (softbuffer GUI)
 ├── warp-zone/              # Spectral shifter/stretcher with waterfall display (softbuffer GUI)
 ├── nih-plug-widgets/       # Legacy vizia widgets (unused since wavetable-filter's tiny-skia port; kept for reference)
@@ -50,6 +53,7 @@ cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle gain-brain --release
 cargo nih-plug bundle tinylimit --release
 cargo nih-plug bundle satch --release
+cargo nih-plug bundle six-pack --release
 cargo nih-plug bundle pope-scope --release
 cargo nih-plug bundle warp-zone --release
 
@@ -59,6 +63,7 @@ cargo build --bin gs-meter --release
 cargo build --bin gain-brain --release
 cargo build --bin tinylimit --release
 cargo build --bin satch --release
+cargo build --bin six-pack --release
 cargo build --bin pope-scope --release
 cargo build --bin warp-zone --release
 
@@ -67,6 +72,7 @@ cargo build --bin gs-meter
 cargo build --bin gain-brain
 cargo build --bin tinylimit
 cargo build --bin satch
+cargo build --bin six-pack
 cargo build --bin pope-scope
 cargo build --bin warp-zone
 ```
@@ -74,7 +80,7 @@ cargo build --bin warp-zone
 ## Testing & Linting
 
 ```bash
-cargo nextest run --workspace                     # all tests (407) -- parallel test runner
+cargo nextest run --workspace                     # all tests (461) -- parallel test runner
 cargo clippy --workspace -- -D warnings           # lint (CI uses -D warnings)
 cargo fmt --check
 ```
@@ -88,6 +94,7 @@ Tests are inline `#[cfg(test)]` modules:
 - `tinylimit/src/limiter.rs` — 33 limiter tests (gain computer, envelope, lookahead, integration)
 - `satch/src/lib.rs` and `satch/src/spectral.rs` — 46 spectral saturator tests
 - `pope-scope/` — 113 tests (ring buffer, snapshot, time mapping, renderer, store, theme, cursor tooltip, peak_at_column parity)
+- `six-pack/` — 54 tests across `svf.rs`, `saturation.rs`, `bands.rs`, `spectrum.rs`, `oversampling.rs`, `lib.rs::plugin_tests` (bypass equivalence, harmonic structure, mix curve, de-emph cancellation, sample-rate sweep), and `editor/{curve_view,band_labels}.rs` (log-freq mapping, peak magnitude, label rendering)
 - `warp-zone/src/spectral.rs` and `warp-zone/src/lib.rs` — 17 tests (phase vocoder, bin remapping, shift/stretch accuracy, spectral display, band downsampling)
 - `tiny-skia-widgets/` — 29 widget rendering tests (dial, slider, button, text, drag state mouse-in-window)
 - Test fixtures: `wavetable-filter/tests/fixtures/`
@@ -150,6 +157,21 @@ Tests are inline `#[cfg(test)]` modules:
 | `satch/src/spectral.rs` | FFT spectral analysis, per-bin magnitude saturation, detail preservation |
 | `satch/src/editor.rs` | Softbuffer + baseview editor with dials and meters |
 
+### Six Pack
+
+| File | Role |
+|------|------|
+| `six-pack/src/lib.rs` | Plugin struct, params, process() with OS/spectrum integration |
+| `six-pack/src/svf.rs` | TPT SVF in mix-form; analytic unity at 0 dB (load-bearing for diff-trick) |
+| `six-pack/src/saturation.rs` | Six waveshaper functions + Algorithm enum + dispatch |
+| `six-pack/src/bands.rs` | Per-band SVF pair (L/R) + M/S routing applied to diff before saturation |
+| `six-pack/src/oversampling.rs` | Cascaded half-band linear-phase polyphase 4×/8×/16× |
+| `six-pack/src/spectrum.rs` | 2048-pt FFT analyzer (1024 hop, throttled, atomic 128 log-spaced bins) |
+| `six-pack/src/editor.rs` | softbuffer + baseview editor lifecycle, hit testing, drag, resize |
+| `six-pack/src/editor/curve_view.rs` | Composite EQ curve + spectrum overlay + 6 draggable dots |
+| `six-pack/src/editor/band_labels.rs` | Per-band 5-row label grid; right-click text entry |
+| `six-pack/src/editor/bottom_strip.rs` | Input/Output/Mix dials + Quality/Drive/De-Emphasis selectors |
+
 ### Pope Scope
 
 | File | Role |
@@ -206,6 +228,10 @@ Tests are inline `#[cfg(test)]` modules:
 - **Pope Scope freeze consistency** captures `sync_mode`, `timebase_ms`, and `sync_unit_bars` into `CachedViewParams` every frame the snapshot is rebuilt. When `freeze` is on, the grid rendering and tooltip time label both read from the cached params instead of live parameter values, so toggling sync mode or editing timebase while frozen can't desync the visible grid from the frozen waveform. All three display-mode grid call sites (Vertical/Overlay/Sum) thread the same `eff_sync_mode` / `eff_timebase_ms` / `eff_sync_bars` tuple.
 - **Pope Scope waveform rendering is a direct pixel-write pipeline**. The original path-based renderer (`stroke_path` / `fill_path`) spent ~42% of GUI CPU in tiny-skia's anti-aliased raster pipeline (`walk_edges`, `blit_anti_h`, `source_over_rgba_tail`, `lerp_u8`) whenever audio was playing. The current implementation calls `tiny_skia_widgets::fill_column_opaque` once per pixel column in the dense-samples branch. That helper writes directly into `Pixmap::pixels_mut()` via `chunks_exact_mut(width)` + indexed assignment, with the color pre-flattened to `PremultipliedColorU8` once per draw. No tiny-skia `Paint`, no `RasterPipelineBlitter`, no per-pixel blend. The filled variant pre-mixes its requested opacity with `theme::BG` via `theme::blend_u32`, so the rect is drawn fully opaque and `fill_column_opaque` can bypass source-over blending entirely. `tiny_skia_widgets::draw_rect` auto-detects opaque colors and switches to `BlendMode::Source` internally, giving existing opaque callers (cursor line, tooltip background, control bar rects, borders) the same fast path without code changes. Profile trajectory on a 2-track / cursor-motion / audio-playing scenario in Bitwig (10s @ 999 Hz): 8653 samples (paths) → 5585 (opaque rects) → 4367 (direct pixel write) → 4154 (half-split envelope) — a 52% reduction in total GUI CPU.
 - **Pope Scope half-split envelope smoothing**: each column's effective top/bot is `min(own_top, (prev_top + own_top)/2, (own_top + next_top)/2)` (and the symmetric `max` for bot), instead of the simpler full-bridge approach. This is equivalent to rasterizing the envelope polyline such that each segment between adjacent columns contributes half its vertical span to each endpoint column — dy=5 steps become two dy=2.5 steps. Cheaper than the full bridge (fewer pixels extended per column), smoother contour, and symmetric (preserves isolated peaks and valleys that the earlier asymmetric bridge-to-prev would flatten).
+- **Six Pack distorts the difference, not the signal.** Each band runs the dry input through a unity-when-flat SVF and computes `diff = svf_out − dry`. The diff *is* the EQ boost (and only the EQ boost) — at 0 dB the SVF is analytically unity so the diff is exactly zero and that band contributes silence. Saturation runs on the diff, so the band-gain knob effectively becomes the per-band drive. This requires the SVF to be exactly unity at 0 dB on every sample (no asymptotic approach, no transient bleed), which is why the SVF implementation is load-bearing for the entire architecture.
+- **Six Pack M/S routing happens before saturation.** The SVF runs on L/R (one pair per channel) so the filter response is identical regardless of routing. The diff is then routed: Stereo passes through, Mid uses `(L+R)/2` on both legs, Side uses `(L−R)/2` and `(R−L)/2`. The router output goes into the per-band saturator, and the result is recombined back to L/R additively before the next band. This keeps the EQ shape independent of routing while letting saturation harmonics live exclusively in the chosen channel space.
+- **Six Pack uses TPT SVF in `dry + (peak_gain − 1) · k · bandpass` mix form** for the four peak bands. The `k = 1/Q` factor cancels the `1/Q`-scaled peak height of the bandpass branch so the resulting peak magnitude at the center frequency is `peak_gain` independent of Q. Low-shelf and high-shelf use analogous mix forms with the lowpass / highpass branches. All three are analytically unity at 0 dB (the gain coefficient is exactly zero) — verified by `svf::tests::{peak,low_shelf,high_shelf}_unity_at_0db` and the `bands::tests::zero_db_band_produces_zero_diff` integration test.
+- **Six Pack de-emphasis cancels the linear EQ boost from the wet path.** The wet signal is `dry + Σ saturate(diff_i)`. The de-emphasis stage subtracts `Σ diff_i` (the linear EQ sum) so the wet output collapses to `dry + Σ (saturate(diff_i) − diff_i)` — i.e. only saturation harmonics remain audible. At the trivial-saturation limit (drive → 0, where `saturate(x) → x`) and mix ≤ 50% the output equals dry exactly, which is the "Spectre-style" property exercised by `plugin_tests::deemph_cancellation_per_channel_mode`.
 - **nih-plug dependency** currently points to `xxx/nih-plug` branch `finish-vst3-pr`. Fork adds: Editor::set_size() for host-initiated resize, Plugin::update_track_info() + TrackInfo struct for CLAP track-info, BYPASS_BUFFER_COPY const, nightly SIMD compatibility, VST3 license fix.
 
 ### Wavetable File Formats
