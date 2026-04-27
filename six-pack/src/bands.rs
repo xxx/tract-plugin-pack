@@ -143,6 +143,80 @@ impl BandState {
 mod tests {
     use super::*;
 
+    fn make_test_band(mode: ChannelMode, gain_db: f32) -> BandState {
+        let mut band = BandState::new(FilterShape::Peak);
+        band.mode = mode;
+        band.algo = Algorithm::Digital; // hard clip — easier to predict at small inputs
+        band.freq_hz = 1_000.0;
+        band.q = 0.71;
+        band.gain_db = gain_db;
+        band.recompute_coefs(48_000.0);
+        band
+    }
+
+    #[test]
+    fn stereo_routing_independent_per_channel() {
+        let mut band = make_test_band(ChannelMode::Stereo, 9.0);
+        // Drive a sine in L only — R should produce no boost.
+        for i in 0..1000 {
+            let phase = i as f32 / 1000.0 * std::f32::consts::TAU;
+            let l = phase.sin();
+            let r = 0.0;
+            let out = band.process_sample(l, r, 1.0);
+            assert!(
+                (out.boost_r).abs() < 1e-3,
+                "R-channel boost should be ~0 for R=0 input: {}",
+                out.boost_r
+            );
+        }
+    }
+
+    #[test]
+    fn mid_routing_outputs_equal_on_both_channels() {
+        let mut band = make_test_band(ChannelMode::Mid, 9.0);
+        for i in 0..200 {
+            let phase = i as f32 / 200.0 * std::f32::consts::TAU;
+            let l = phase.sin() * 0.5;
+            let r = (phase * 1.3).sin() * 0.5;
+            let out = band.process_sample(l, r, 1.0);
+            assert!(
+                (out.sat_l - out.sat_r).abs() < 1e-6,
+                "Mid: sat_l ({}) must equal sat_r ({})",
+                out.sat_l,
+                out.sat_r
+            );
+            assert!(
+                (out.boost_l - out.boost_r).abs() < 1e-6,
+                "Mid: boost_l ({}) must equal boost_r ({})",
+                out.boost_l,
+                out.boost_r
+            );
+        }
+    }
+
+    #[test]
+    fn side_routing_anti_phase_on_r() {
+        let mut band = make_test_band(ChannelMode::Side, 9.0);
+        for i in 0..200 {
+            let phase = i as f32 / 200.0 * std::f32::consts::TAU;
+            let l = phase.sin() * 0.5;
+            let r = (phase * 1.3).sin() * 0.5;
+            let out = band.process_sample(l, r, 1.0);
+            assert!(
+                (out.sat_l + out.sat_r).abs() < 1e-6,
+                "Side: sat_r ({}) must be -sat_l ({})",
+                out.sat_r,
+                out.sat_l
+            );
+            assert!(
+                (out.boost_l + out.boost_r).abs() < 1e-6,
+                "Side: boost_r ({}) must be -boost_l ({})",
+                out.boost_r,
+                out.boost_l
+            );
+        }
+    }
+
     /// At gain = 0 dB, every band must produce zero diff for any input.
     #[test]
     fn zero_db_band_produces_zero_diff() {
