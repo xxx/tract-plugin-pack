@@ -4,17 +4,274 @@ use nih_plug::prelude::*;
 use std::sync::Arc;
 
 pub mod bands;
+pub mod editor;
 pub mod oversampling;
 pub mod saturation;
 pub mod spectrum;
 pub mod svf;
 
+use crate::bands::ChannelMode;
+use crate::saturation::Algorithm;
+
+// ── Param-side enums ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum Quality {
+    #[id = "off"]
+    #[name = "Off"]
+    Off,
+    #[id = "x4"]
+    #[name = "4×"]
+    X4,
+    #[id = "x8"]
+    #[name = "8×"]
+    X8,
+    #[id = "x16"]
+    #[name = "16×"]
+    X16,
+}
+
+impl Quality {
+    pub fn factor(self) -> usize {
+        match self {
+            Quality::Off => 1,
+            Quality::X4 => 4,
+            Quality::X8 => 8,
+            Quality::X16 => 16,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum Drive {
+    #[id = "easy"]
+    #[name = "Easy"]
+    Easy,
+    #[id = "standard"]
+    #[name = "Standard"]
+    Standard,
+    #[id = "crush"]
+    #[name = "Crush"]
+    Crush,
+}
+
+impl Drive {
+    pub fn k(self) -> f32 {
+        match self {
+            Drive::Easy => 0.6,
+            Drive::Standard => 1.0,
+            Drive::Crush => 2.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum AlgoParam {
+    #[id = "tube"]
+    #[name = "Tube"]
+    Tube,
+    #[id = "tape"]
+    #[name = "Tape"]
+    Tape,
+    #[id = "diode"]
+    #[name = "Diode"]
+    Diode,
+    #[id = "digital"]
+    #[name = "Digital"]
+    Digital,
+    #[id = "class_b"]
+    #[name = "Class B"]
+    ClassB,
+    #[id = "wavefold"]
+    #[name = "Wavefold"]
+    Wavefold,
+}
+
+impl From<AlgoParam> for Algorithm {
+    fn from(v: AlgoParam) -> Self {
+        match v {
+            AlgoParam::Tube => Algorithm::Tube,
+            AlgoParam::Tape => Algorithm::Tape,
+            AlgoParam::Diode => Algorithm::Diode,
+            AlgoParam::Digital => Algorithm::Digital,
+            AlgoParam::ClassB => Algorithm::ClassB,
+            AlgoParam::Wavefold => Algorithm::Wavefold,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+pub enum ChannelParam {
+    #[id = "stereo"]
+    #[name = "Stereo"]
+    Stereo,
+    #[id = "mid"]
+    #[name = "Mid"]
+    Mid,
+    #[id = "side"]
+    #[name = "Side"]
+    Side,
+}
+
+impl From<ChannelParam> for ChannelMode {
+    fn from(v: ChannelParam) -> Self {
+        match v {
+            ChannelParam::Stereo => ChannelMode::Stereo,
+            ChannelParam::Mid => ChannelMode::Mid,
+            ChannelParam::Side => ChannelMode::Side,
+        }
+    }
+}
+
+// ── Plugin params ──────────────────────────────────────────────────────────────
+
+const BAND_DEFAULT_FREQS: [f32; 6] = [60.0, 180.0, 540.0, 1_600.0, 4_800.0, 12_000.0];
+
 pub struct SixPack {
     params: Arc<SixPackParams>,
 }
 
-#[derive(Default, Params)]
-pub struct SixPackParams {}
+#[derive(Params)]
+pub struct SixPackParams {
+    #[persist = "editor-state"]
+    pub editor_state: Arc<editor::EditorState>,
+
+    #[id = "input"]
+    pub input_gain: FloatParam,
+    #[id = "output"]
+    pub output_gain: FloatParam,
+    #[id = "io_link"]
+    pub io_link: BoolParam,
+    #[id = "mix"]
+    pub mix: FloatParam,
+    #[id = "quality"]
+    pub quality: EnumParam<Quality>,
+    #[id = "drive"]
+    pub drive: EnumParam<Drive>,
+    #[id = "deemphasis"]
+    pub deemphasis: BoolParam,
+
+    #[nested(array, group = "Band")]
+    pub bands: [BandParams; 6],
+}
+
+#[derive(Params)]
+pub struct BandParams {
+    #[id = "freq"]
+    pub freq: FloatParam,
+    #[id = "gain"]
+    pub gain: FloatParam,
+    #[id = "q"]
+    pub q: FloatParam,
+    #[id = "algo"]
+    pub algo: EnumParam<AlgoParam>,
+    #[id = "channel"]
+    pub channel: EnumParam<ChannelParam>,
+    #[id = "enable"]
+    pub enable: BoolParam,
+}
+
+fn make_band_params(slot: usize) -> BandParams {
+    let freq_hz = BAND_DEFAULT_FREQS[slot];
+    BandParams {
+        freq: FloatParam::new(
+            "Freq",
+            freq_hz,
+            FloatRange::Skewed {
+                min: 20.0,
+                max: 20_000.0,
+                factor: FloatRange::skew_factor(-2.0),
+            },
+        )
+        .with_smoother(SmoothingStyle::Linear(20.0))
+        .with_unit(" Hz")
+        .with_value_to_string(formatters::v2s_f32_hz_then_khz(1))
+        .with_string_to_value(formatters::s2v_f32_hz_then_khz()),
+
+        gain: FloatParam::new(
+            "Gain",
+            0.0,
+            FloatRange::Linear {
+                min: 0.0,
+                max: 18.0,
+            },
+        )
+        .with_smoother(SmoothingStyle::Linear(20.0))
+        .with_unit(" dB"),
+
+        q: FloatParam::new(
+            "Q",
+            0.71,
+            FloatRange::Skewed {
+                min: 0.1,
+                max: 10.0,
+                factor: FloatRange::skew_factor(-1.0),
+            },
+        )
+        .with_smoother(SmoothingStyle::Linear(20.0)),
+
+        algo: EnumParam::new("Algo", AlgoParam::Tube),
+        channel: EnumParam::new("Channel", ChannelParam::Stereo),
+        enable: BoolParam::new("Enable", true),
+    }
+}
+
+impl Default for SixPackParams {
+    fn default() -> Self {
+        Self {
+            editor_state: editor::default_editor_state(),
+
+            input_gain: FloatParam::new(
+                "Input",
+                util::db_to_gain(0.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(-24.0),
+                    max: util::db_to_gain(24.0),
+                    factor: FloatRange::gain_skew_factor(-24.0, 24.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+
+            output_gain: FloatParam::new(
+                "Output",
+                util::db_to_gain(0.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(-24.0),
+                    max: util::db_to_gain(24.0),
+                    factor: FloatRange::gain_skew_factor(-24.0, 24.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+
+            io_link: BoolParam::new("I/O Link", false),
+
+            mix: FloatParam::new("Mix", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_smoother(SmoothingStyle::Linear(50.0))
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+
+            quality: EnumParam::new("Quality", Quality::Off),
+            drive: EnumParam::new("Drive", Drive::Standard),
+            deemphasis: BoolParam::new("De-Emphasis", true),
+
+            bands: [
+                make_band_params(0),
+                make_band_params(1),
+                make_band_params(2),
+                make_band_params(3),
+                make_band_params(4),
+                make_band_params(5),
+            ],
+        }
+    }
+}
 
 impl Default for SixPack {
     fn default() -> Self {
