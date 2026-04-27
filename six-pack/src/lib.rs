@@ -299,12 +299,21 @@ impl Default for SixPackParams {
     }
 }
 
-/// Floor on the oversampler scratch capacity. Some hosts (and the standalone
-/// JACK backend in particular) report `max_buffer_size == 0` to `initialize()`,
-/// which would leave the oversampler scratches at length zero. We always
-/// pre-allocate at least this many native samples so the first `process()`
-/// block can never panic on an out-of-range slice.
-const MIN_MAX_BLOCK: usize = 4096;
+/// Floor on the oversampler scratch capacity.
+///
+/// Two host behaviors force this to be generous:
+/// 1. The standalone JACK backend reports `max_buffer_size == 0` to
+///    `initialize()` — without a floor the scratches end up zero-length.
+/// 2. Bitwig (and likely other VST3 hosts) can change the engine buffer
+///    size at runtime via "IO buses or latency changed" restarts that do
+///    NOT round-trip through `initialize()`, so the scratch we sized in
+///    `initialize()` can later be undersized for a much larger block.
+///
+/// 16384 covers Bitwig's typical engine buffers (up to 8192) plus headroom
+/// and uses ~64 KB of scratch per channel at factor=1, ~1 MB per channel at
+/// factor=16. The `assert_process_allocs` feature forbids growing this
+/// inside `process()`, so the floor must be set high once at construction.
+const MIN_MAX_BLOCK: usize = 16384;
 
 impl Default for SixPack {
     fn default() -> Self {
