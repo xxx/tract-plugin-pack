@@ -156,3 +156,52 @@ mod test_digital {
         }
     }
 }
+
+/// Class B: crossover distortion — symmetric soft clip with a small dead zone
+/// near zero. Adds harmonics on transients (drum/percussion character).
+pub fn class_b(x: f32, drive: f32) -> f32 {
+    let driven = drive * x;
+    let dead_zone = 0.05;
+    let s = driven.signum();
+    let mag = driven.abs();
+    if mag <= dead_zone {
+        s * (mag * mag) / dead_zone * 0.5
+    } else {
+        let above = mag - dead_zone;
+        s * (dead_zone * 0.5 + above.tanh())
+    }
+}
+
+#[cfg(test)]
+mod test_class_b {
+    use super::*;
+
+    #[test]
+    fn class_b_at_zero() { assert_eq!(class_b(0.0, 1.0), 0.0); }
+
+    #[test]
+    fn class_b_is_symmetric() {
+        for x in [0.05, 0.1, 0.3, 0.5, 0.9, 1.5] {
+            let p = class_b(x, 1.0);
+            let n = class_b(-x, 1.0);
+            assert!((p + n).abs() < 1e-6, "class_b({x}, 1)={p}, class_b(-{x}, 1)={n}");
+        }
+    }
+
+    #[test]
+    fn class_b_has_dead_zone() {
+        let small = class_b(0.01, 1.0).abs();
+        let mid = class_b(0.5, 1.0).abs();
+        let ratio = small / mid;
+        assert!(ratio < 0.005, "class_b dead zone ratio: small={small} mid={mid} ratio={ratio}");
+    }
+
+    #[test]
+    fn class_b_is_finite() {
+        for x in [0.0, 1.0, -1.0, 10.0, 1e9, -1e9] {
+            for d in [0.5, 1.0, 2.0, 8.0] {
+                assert!(class_b(x, d).is_finite());
+            }
+        }
+    }
+}
