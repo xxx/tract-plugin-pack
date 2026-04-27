@@ -462,3 +462,61 @@ impl Vst3Plugin for SixPack {
 
 nih_export_clap!(SixPack);
 nih_export_vst3!(SixPack);
+
+#[cfg(test)]
+mod plugin_tests {
+    use super::*;
+
+    /// All bands at 0 dB, mix ≤ 50%: output equals input (both channels)
+    /// regardless of de-emphasis.
+    #[test]
+    fn all_bands_zero_db_passes_dry_at_low_mix() {
+        for mix in [0.0_f32, 0.25, 0.5] {
+            for deemph in [false, true] {
+                let mut plugin = SixPack::default();
+                plugin.sample_rate = 48_000.0;
+                plugin.recompute_band_coefs();
+
+                let mut wet_l_total: f32 = 0.0;
+                let mut wet_r_total: f32 = 0.0;
+                let mut dry_total: f32 = 0.0;
+                let n = 4_000;
+                for i in 0..n {
+                    let phase = i as f32 / 100.0 * std::f32::consts::TAU;
+                    let dry_l = phase.sin() * 0.3;
+                    let dry_r = (phase * 0.7).cos() * 0.3;
+
+                    let mut wet_l = 0.0;
+                    let mut wet_r = 0.0;
+                    let mut boost_l = 0.0;
+                    let mut boost_r = 0.0;
+                    for band in plugin.bands.iter_mut() {
+                        let out = band.process_sample(dry_l, dry_r, 1.0);
+                        wet_l += out.sat_l;
+                        wet_r += out.sat_r;
+                        boost_l += out.boost_l;
+                        boost_r += out.boost_r;
+                    }
+                    if deemph {
+                        wet_l -= boost_l;
+                        wet_r -= boost_r;
+                    }
+                    let dry_a = super::dry_amp(mix);
+                    let wet_a = super::wet_amp(mix);
+                    let out_l = dry_a * dry_l + wet_a * wet_l;
+                    let out_r = dry_a * dry_r + wet_a * wet_r;
+
+                    wet_l_total += (out_l - dry_l).abs();
+                    wet_r_total += (out_r - dry_r).abs();
+                    dry_total += dry_l.abs() + dry_r.abs();
+                }
+                // Output must equal input within tight float epsilon.
+                let normalized = (wet_l_total + wet_r_total) / dry_total.max(1e-9);
+                assert!(
+                    normalized < 1e-3,
+                    "deemph={deemph}, mix={mix}: total deviation = {wet_l_total} + {wet_r_total} ({normalized} relative)"
+                );
+            }
+        }
+    }
+}
