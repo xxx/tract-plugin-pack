@@ -299,8 +299,17 @@ impl Default for SixPackParams {
     }
 }
 
+/// Floor on the oversampler scratch capacity. Some hosts (and the standalone
+/// JACK backend in particular) report `max_buffer_size == 0` to `initialize()`,
+/// which would leave the oversampler scratches at length zero. We always
+/// pre-allocate at least this many native samples so the first `process()`
+/// block can never panic on an out-of-range slice.
+const MIN_MAX_BLOCK: usize = 4096;
+
 impl Default for SixPack {
     fn default() -> Self {
+        let mut os = StereoOversampler::new();
+        os.set_factor(1, MIN_MAX_BLOCK);
         Self {
             params: Arc::new(SixPackParams::default()),
             bands: [
@@ -312,8 +321,8 @@ impl Default for SixPack {
                 BandState::new(BAND_SHAPES[5]),
             ],
             sample_rate: 48_000.0,
-            os: StereoOversampler::new(),
-            max_block: 1024,
+            os,
+            max_block: MIN_MAX_BLOCK,
             spectrum: SpectrumAnalyzer::new(rand_seed()),
         }
     }
@@ -383,7 +392,10 @@ impl Plugin for SixPack {
         ctx: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
-        self.max_block = buffer_config.max_buffer_size as usize;
+        // Some standalone backends report `max_buffer_size == 0`; fall back to
+        // `MIN_MAX_BLOCK` so the oversampler scratch is never sized below a
+        // realistic JACK period.
+        self.max_block = (buffer_config.max_buffer_size as usize).max(MIN_MAX_BLOCK);
         let factor = self.params.quality.value().factor();
         self.os.set_factor(factor, self.max_block);
         self.recompute_band_coefs_for_os(factor);
