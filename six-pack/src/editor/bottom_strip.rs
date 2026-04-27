@@ -28,9 +28,11 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
     );
 
     // Layout: 3 dials + link button on the left half, steppers + de-emph on
-    // the right.
-    let dial_radius = (h * 0.32).clamp(20.0, 36.0 * s);
-    let dial_row_cy = y + h * 0.45;
+    // the right. The dial center sits at ~55% of the strip's height so the
+    // "Input"/"Output"/"Mix" name labels (drawn above the arc) have room
+    // above the dial without crossing the panel's top border.
+    let dial_radius = (h * 0.30).clamp(18.0, 32.0 * s);
+    let dial_row_cy = y + h * 0.55;
 
     // Left cluster: Input — link button — Output — Mix.
     let cluster_w = w * 0.55;
