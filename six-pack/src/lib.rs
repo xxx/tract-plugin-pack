@@ -562,7 +562,95 @@ mod plugin_tests {
         // Tube is symmetric: odd harmonics dominate. 3rd should exceed 2nd by
         // some margin.
         assert!(e_3rd > 0.001, "3rd harmonic energy too low: {}", e_3rd);
-        assert!(e_3rd > e_2nd * 0.5, "3rd should be comparable to 2nd: {} vs {}", e_3rd, e_2nd);
-        assert!(e_fundamental > 0.001, "fundamental energy too low: {}", e_fundamental);
+        assert!(
+            e_3rd > e_2nd * 0.5,
+            "3rd should be comparable to 2nd: {} vs {}",
+            e_3rd,
+            e_2nd
+        );
+        assert!(
+            e_fundamental > 0.001,
+            "fundamental energy too low: {}",
+            e_fundamental
+        );
+    }
+
+    #[test]
+    fn mix_curve_endpoints() {
+        assert_eq!(super::dry_amp(0.0), 1.0);
+        assert_eq!(super::wet_amp(0.0), 0.0);
+        assert_eq!(super::dry_amp(0.5), 1.0);
+        assert_eq!(super::wet_amp(0.5), 1.0);
+        assert_eq!(super::dry_amp(1.0), 0.0);
+        assert_eq!(super::wet_amp(1.0), 1.0);
+    }
+
+    #[test]
+    fn mix_curve_monotone() {
+        let mut prev_d = 1.0_f32;
+        let mut prev_w = 0.0_f32;
+        for i in 0..=100 {
+            let m = i as f32 / 100.0;
+            let d = super::dry_amp(m);
+            let w = super::wet_amp(m);
+            assert!(
+                d <= prev_d + 1e-7,
+                "dry_amp must be non-increasing: {} vs {}",
+                d,
+                prev_d
+            );
+            assert!(
+                w >= prev_w - 1e-7,
+                "wet_amp must be non-decreasing: {} vs {}",
+                w,
+                prev_w
+            );
+            prev_d = d;
+            prev_w = w;
+        }
+    }
+
+    /// Trivial-saturation limit: replace `Algorithm::apply` semantically by
+    /// using `Digital` clip with a quiet input — the clip never triggers, so
+    /// `saturate(x) == x`. With de-emph on, the boost cancels the wet.
+    #[test]
+    fn deemph_cancellation_per_channel_mode() {
+        use crate::bands::{BandState, ChannelMode, FilterShape};
+        use crate::saturation::Algorithm;
+        let sr = 48_000.0;
+        for mode in [ChannelMode::Stereo, ChannelMode::Mid, ChannelMode::Side] {
+            let mut band = BandState::new(FilterShape::Peak);
+            band.algo = Algorithm::Digital; // x.clamp(-1, 1)
+            band.mode = mode;
+            band.freq_hz = 1_000.0;
+            band.q = 0.71;
+            band.gain_db = 6.0;
+            band.recompute_coefs(sr);
+
+            for i in 0..200 {
+                let phase = i as f32 / 200.0 * std::f32::consts::TAU;
+                // Quiet input: |x| << 1, so digital clip never engages.
+                let dry_l = phase.sin() * 0.05;
+                let dry_r = (phase * 1.3).sin() * 0.05;
+                let out = band.process_sample(dry_l, dry_r, 1.0);
+                // wet_l - boost_l should be 0 (per-channel cancellation in trivial-sat).
+                assert!(
+                    (out.sat_l - out.boost_l).abs() < 1e-5,
+                    "{:?} sat_l-boost_l mismatch: {} - {} = {}",
+                    mode,
+                    out.sat_l,
+                    out.boost_l,
+                    out.sat_l - out.boost_l
+                );
+                assert!(
+                    (out.sat_r - out.boost_r).abs() < 1e-5,
+                    "{:?} sat_r-boost_r mismatch: {} - {} = {}",
+                    mode,
+                    out.sat_r,
+                    out.boost_r,
+                    out.sat_r - out.boost_r
+                );
+            }
+        }
     }
 }
