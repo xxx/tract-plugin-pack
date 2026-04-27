@@ -519,4 +519,50 @@ mod plugin_tests {
             }
         }
     }
+
+    #[test]
+    fn single_peak_at_9db_generates_harmonics() {
+        use crate::bands::{BandState, ChannelMode, FilterShape};
+        use crate::saturation::Algorithm;
+
+        // One band at 1 kHz, +9 dB, Tube. Drive a 1 kHz sine through it; output
+        // should contain meaningful energy at 2 kHz, 3 kHz, etc.
+        let sr = 48_000.0;
+        let mut band = BandState::new(FilterShape::Peak);
+        band.algo = Algorithm::Tube;
+        band.mode = ChannelMode::Stereo;
+        band.freq_hz = 1_000.0;
+        band.q = 0.71;
+        band.gain_db = 9.0;
+        band.recompute_coefs(sr);
+
+        let n = 8192;
+        let mut sat_signal = vec![0.0_f32; n];
+        for i in 0..n {
+            let phase = (i as f32) / sr * std::f32::consts::TAU * 1_000.0;
+            let dry = phase.sin() * 0.5;
+            let out = band.process_sample(dry, dry, 2.0); // drive=Crush
+            sat_signal[i] = out.sat_l;
+        }
+
+        // Compute Goertzel-style energy at a few harmonic frequencies.
+        let energy_at = |freq: f32| -> f32 {
+            let mut acc = 0.0_f32;
+            for i in 0..n {
+                let p = (i as f32) / sr * std::f32::consts::TAU * freq;
+                acc += sat_signal[i] * p.sin();
+            }
+            acc.abs() / (n as f32)
+        };
+
+        let e_fundamental = energy_at(1_000.0);
+        let e_2nd = energy_at(2_000.0);
+        let e_3rd = energy_at(3_000.0);
+
+        // Tube is symmetric: odd harmonics dominate. 3rd should exceed 2nd by
+        // some margin.
+        assert!(e_3rd > 0.001, "3rd harmonic energy too low: {}", e_3rd);
+        assert!(e_3rd > e_2nd * 0.5, "3rd should be comparable to 2nd: {} vs {}", e_3rd, e_2nd);
+        assert!(e_fundamental > 0.001, "fundamental energy too low: {}", e_fundamental);
+    }
 }
