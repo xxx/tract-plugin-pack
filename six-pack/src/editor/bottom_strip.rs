@@ -161,7 +161,7 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
         dyl,
         right_w,
         stepper_h,
-        &["Easy", "Std", "Crush"],
+        &["Carve", "Color", "Crush"],
         drive_idx,
         HitAction::DriveSeg,
     );

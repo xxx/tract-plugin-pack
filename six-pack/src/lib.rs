@@ -63,14 +63,28 @@ impl Quality {
     }
 }
 
+/// Drive selector. With de-emphasis on (the default), each setting produces
+/// a structurally different effect — not just three intensities of the same
+/// thing. The labels reflect the *character*:
+///
+/// - **Carve** (`k = 0.6`): the saturator runs gently so its linear-domain
+///   contribution is below the boost; the de-emph subtract removes more
+///   than the wet provides, leaving a phase-inverted residue that *carves
+///   a notch* in the band's frequency range, plus quiet harmonics.
+/// - **Color** (`k = 1.0`): clean cancellation. The wet path's linear part
+///   is exactly the boost, so the subtract zeroes it. Output gets only the
+///   saturator's harmonics — pure tonal coloring with no EQ shape.
+/// - **Crush** (`k = 2.0`): the saturator is pushed hard; its linear part
+///   exceeds the boost. The de-emph subtract under-cancels, so the boost
+///   shape stays in the band *and* loud harmonics ride on top.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
 pub enum Drive {
-    #[id = "easy"]
-    #[name = "Easy"]
-    Easy,
-    #[id = "standard"]
-    #[name = "Standard"]
-    Standard,
+    #[id = "carve"]
+    #[name = "Carve"]
+    Carve,
+    #[id = "color"]
+    #[name = "Color"]
+    Color,
     #[id = "crush"]
     #[name = "Crush"]
     Crush,
@@ -79,8 +93,8 @@ pub enum Drive {
 impl Drive {
     pub fn k(self) -> f32 {
         match self {
-            Drive::Easy => 0.6,
-            Drive::Standard => 1.0,
+            Drive::Carve => 0.6,
+            Drive::Color => 1.0,
             Drive::Crush => 2.0,
         }
     }
@@ -294,7 +308,7 @@ impl Default for SixPackParams {
                 .with_string_to_value(formatters::s2v_f32_percentage()),
 
             quality: EnumParam::new("Quality", Quality::Off),
-            drive: EnumParam::new("Drive", Drive::Standard),
+            drive: EnumParam::new("Drive", Drive::Color),
             deemphasis: BoolParam::new("De-Emphasis", true),
 
             bands: [
@@ -574,6 +588,16 @@ impl Plugin for SixPack {
                 band_sumsq[b] += out.sat_l * out.sat_l + out.sat_r * out.sat_r;
             }
             if deemph {
+                // Subtract the *linear EQ boost* (Spectre's original
+                // formulation). At drive=Color (k=1.0) this is an exact
+                // analytical cancellation, leaving only saturator harmonics.
+                // At drive=Carve (k<1) the wet under-shoots boost and the
+                // subtraction over-shoots → a notch is carved in the band.
+                // At drive=Crush (k>1) the wet over-shoots boost and the
+                // subtraction under-shoots → boost stays in plus harmonics.
+                // The three drives become structurally different effects
+                // rather than three intensities of the same effect; the
+                // label set is named to reflect that.
                 wet_l -= boost_l;
                 wet_r -= boost_r;
             }
