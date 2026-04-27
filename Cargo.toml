@@ -1,6 +1,10 @@
 [workspace]
-members = ["nih-plug-widgets", "wavetable-filter", "gs-meter", "gain-brain", "tinylimit", "satch", "pope-scope", "warp-zone", "six-pack", "tiny-skia-widgets", "xtask", "bench-suite"]
-exclude = ["nih-plug"]
+members = ["wavetable-filter", "gs-meter", "gain-brain", "tinylimit", "satch", "pope-scope", "warp-zone", "six-pack", "tiny-skia-widgets", "xtask", "bench-suite"]
+# `nih-plug-widgets` is the legacy vizia widget crate — unreferenced since
+# wavetable-filter's tiny-skia port. Excluded so its old transitive deps
+# (xcb 0.9.0 in particular, which trips a future-incompat lint) don't enter
+# the workspace lock file. The source is kept on disk for reference only.
+exclude = ["nih-plug", "nih-plug-widgets"]
 resolver = "2"
 
 [profile.release]

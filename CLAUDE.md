@@ -36,7 +36,7 @@ tract-plugin-pack/
 ├── six-pack/               # Six-band parallel multiband saturator (softbuffer GUI)
 ├── pope-scope/             # Multichannel oscilloscope with beat sync (softbuffer GUI)
 ├── warp-zone/              # Spectral shifter/stretcher with waterfall display (softbuffer GUI)
-├── nih-plug-widgets/       # Legacy vizia widgets (unused since wavetable-filter's tiny-skia port; kept for reference)
+├── nih-plug-widgets/       # Legacy vizia widgets (kept for reference; workspace-excluded so its old transitive deps don't enter the lock file)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets (dial, slider, button)
 ├── docs/                   # Plugin manuals (markdown + PDF)
 └── xtask/                  # Build tooling
@@ -205,7 +205,7 @@ Tests are inline `#[cfg(test)]` modules:
 | `tiny-skia-widgets/src/editor_base.rs` | Shared EditorState (size persistence), SurfaceState (pixmap + softbuffer) |
 | `tiny-skia-widgets/src/drag.rs` | DragState with hit regions, drag/shift-granular handling, `mouse_in_window()` tracking via CursorEntered/CursorLeft events |
 | `tiny-skia-widgets/src/text_edit.rs` | TextEditState<A> — right-click-to-type state machine shared by every softbuffer editor. Filtered numeric buffer (`0-9 . - + e E`), 16-char cap, 1000 ms caret blink |
-| `nih-plug-widgets/*` | Legacy vizia ParamDial + CSS theme. Unreferenced by any plugin since wavetable-filter's softbuffer port; retained for possible future reuse |
+| `nih-plug-widgets/*` | Legacy vizia ParamDial + CSS theme. Unreferenced by any plugin since wavetable-filter's softbuffer port; retained on disk for possible future reuse but excluded from the workspace build (the root `Cargo.toml`'s `exclude = [..., "nih-plug-widgets"]`) so its xcb 0.9.0 dependency stays out of the lock file |
 
 ### Key Design Decisions
 

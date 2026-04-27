@@ -174,7 +174,7 @@ tract-plugin-pack/
 ├── tinylimit/              # Wideband peak limiter
 ├── warp-zone/              # Spectral shifter/stretcher
 ├── wavetable-filter/       # Wavetable-based filter plugin
-├── nih-plug-widgets/       # Legacy vizia widgets (no longer used; kept for reference)
+├── nih-plug-widgets/       # Legacy vizia widgets (no longer used; kept on disk for reference, excluded from the workspace build)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets, editor base scaffolding
 ├── docs/                   # Plugin manuals
 │   ├── gain-brain/
