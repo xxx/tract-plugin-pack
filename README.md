@@ -58,6 +58,18 @@ A detail-preserving spectral saturator. Uses FFT-based spectral analysis to pres
 - ~0.82 MB RSS and 0.14% CPU per instance (100 instances @ 13.7% CPU, 82 MB total)
 - Inspired by [Newfangled Audio Saturate](https://www.newfangledaudio.com/saturate)
 
+### Six Pack
+
+A six-band parallel multiband saturator inspired by Wavesfactory Spectre. Each band's EQ boost is computed against dry as a difference, then run through a per-band saturation algorithm — so a band at 0 dB contributes silence and gain effectively becomes the per-band drive.
+
+- 1 low-shelf + 4 peaks + 1 high-shelf, each with frequency / gain / Q controls
+- Six saturation algorithms per band: **Tube**, **Tape**, **Diode**, **Digital**, **Class B**, **Wavefold**
+- Per-band **Stereo / Mid / Side** routing applied to the diff before saturation
+- Linear-phase polyphase oversampling: **Off / 4× / 8× / 16×**
+- Global de-emphasis subtracts the linear EQ boost so only saturation harmonics remain audible
+- CPU-rendered GUI with EQ curve display + live spectrum analyzer overlay (tiny-skia + softbuffer), freely resizable
+- Inspired by [Wavesfactory Spectre](https://www.wavesfactory.com/audio-plugins/spectre/)
+
 ### Tinylimit
 
 A low-latency wideband peak limiter for track-level use. Feed-forward topology with lookahead and dual-stage transient/dynamics handling.
@@ -117,6 +129,7 @@ cargo nih-plug bundle gain-brain --release
 cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle pope-scope --release
 cargo nih-plug bundle satch --release
+cargo nih-plug bundle six-pack --release
 cargo nih-plug bundle tinylimit --release
 cargo nih-plug bundle warp-zone --release
 cargo nih-plug bundle wavetable-filter --release
@@ -126,6 +139,7 @@ cargo build --bin gain-brain --release
 cargo build --bin gs-meter --release
 cargo build --bin pope-scope --release
 cargo build --bin satch --release
+cargo build --bin six-pack --release
 cargo build --bin tinylimit --release
 cargo build --bin warp-zone --release
 cargo build --bin wavetable-filter --release
@@ -156,6 +170,7 @@ tract-plugin-pack/
 ├── gs-meter/               # Loudness meter + gain utility
 ├── pope-scope/             # Multichannel real-time oscilloscope
 ├── satch/                  # Spectral saturator with detail preservation
+├── six-pack/               # Six-band parallel multiband saturator
 ├── tinylimit/              # Wideband peak limiter
 ├── warp-zone/              # Spectral shifter/stretcher
 ├── wavetable-filter/       # Wavetable-based filter plugin
@@ -175,7 +190,7 @@ tract-plugin-pack/
 ## Testing
 
 ```bash
-cargo nextest run --workspace   # All tests (407) -- parallel runner
+cargo nextest run --workspace   # All tests (461) -- parallel runner
 cargo clippy --workspace        # Lint check
 ```
 

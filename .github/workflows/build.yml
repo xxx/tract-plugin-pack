@@ -62,6 +62,9 @@ jobs:
       - name: Build pope-scope
         run: cargo nih-plug bundle pope-scope --release
 
+      - name: Build six-pack
+        run: cargo nih-plug bundle six-pack --release
+
       - name: Build warp-zone
         run: cargo nih-plug bundle warp-zone --release
 
@@ -73,6 +76,7 @@ jobs:
           cargo build --bin tinylimit --release
           cargo build --bin satch --release
           cargo build --bin pope-scope --release
+          cargo build --bin six-pack --release
           cargo build --bin warp-zone --release
 
       - name: Upload artifacts
