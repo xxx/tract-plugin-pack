@@ -240,7 +240,7 @@ fn make_band_params(slot: usize) -> BandParams {
             0.71,
             FloatRange::Skewed {
                 min: 0.1,
-                max: 10.0,
+                max: 30.0,
                 factor: FloatRange::skew_factor(-1.0),
             },
         )

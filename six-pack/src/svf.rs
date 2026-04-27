@@ -29,7 +29,7 @@ impl Svf {
     pub fn set_peak(&mut self, freq_hz: f32, q: f32, gain_db: f32, sample_rate: f32) {
         let nyquist = sample_rate * 0.5;
         let freq_hz = freq_hz.clamp(20.0, nyquist * 0.98);
-        let q = q.clamp(0.1, 10.0);
+        let q = q.clamp(0.1, 30.0);
         let gain_db = gain_db.clamp(0.0, 18.0);
         let g = (PI * freq_hz / sample_rate).tan();
         let k = 1.0 / q;
@@ -67,7 +67,7 @@ impl Svf {
     pub fn set_low_shelf(&mut self, freq_hz: f32, q: f32, gain_db: f32, sample_rate: f32) {
         let nyquist = sample_rate * 0.5;
         let freq_hz = freq_hz.clamp(20.0, nyquist * 0.98);
-        let q = q.clamp(0.1, 10.0);
+        let q = q.clamp(0.1, 30.0);
         let gain_db = gain_db.clamp(0.0, 18.0);
         let a = 10.0_f32.powf(gain_db / 40.0);
         let g = (PI * freq_hz / sample_rate).tan() / a.sqrt();
@@ -94,7 +94,7 @@ impl Svf {
     pub fn set_high_shelf(&mut self, freq_hz: f32, q: f32, gain_db: f32, sample_rate: f32) {
         let nyquist = sample_rate * 0.5;
         let freq_hz = freq_hz.clamp(20.0, nyquist * 0.98);
-        let q = q.clamp(0.1, 10.0);
+        let q = q.clamp(0.1, 30.0);
         let gain_db = gain_db.clamp(0.0, 18.0);
         let a = 10.0_f32.powf(gain_db / 40.0);
         let g = (PI * freq_hz / sample_rate).tan() * a.sqrt();
@@ -188,7 +188,7 @@ mod tests {
     fn peak_stable_under_noise() {
         let sr = 48_000.0;
         for &freq in &[60.0, 1_000.0, 8_000.0] {
-            for &q in &[0.1, 0.71, 5.0, 10.0] {
+            for &q in &[0.1, 0.71, 5.0, 10.0, 30.0] {
                 for &gain in &[0.0, 9.0, 18.0] {
                     let mut svf = Svf::default();
                     svf.set_peak(freq, q, gain, sr);
