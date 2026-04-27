@@ -202,6 +202,7 @@ Install nextest via `cargo install cargo-nextest --locked`. Config lives in `.co
 - [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
 - [Pope Scope Manual](docs/pope-scope/pope-scope-manual.md)
 - [Satch Manual](docs/satch/satch-manual.md)
+- [Six Pack Manual](docs/six-pack/six-pack-manual.md)
 - [Tinylimit Manual](docs/tinylimit/tinylimit-manual.md)
 - [Warp Zone Manual](docs/warp-zone/warp-zone-manual.md)
 - [Wavetable Filter Manual](docs/wavetable-filter/wavetable-filter-manual.md)
