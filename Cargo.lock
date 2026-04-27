@@ -3848,6 +3848,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38b58827f4464d87d377d175e90bf58eb00fd8716ff0a62f80356b5e61555d0d"
 
 [[package]]
+name = "six-pack"
+version = "0.1.0"
+dependencies = [
+ "baseview 0.1.0 (git+https://github.com/RustAudio/baseview.git?rev=9a0b42c09d712777b2edb4c5e0cb6baf21e988f0)",
+ "crossbeam",
+ "keyboard-types",
+ "nih_plug",
+ "raw-window-handle 0.5.2",
+ "raw-window-handle 0.6.2",
+ "rustfft",
+ "serde",
+ "softbuffer",
+ "tiny-skia",
+ "tiny-skia-widgets",
+]
+
+[[package]]
 name = "skrifa"
 version = "0.22.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
