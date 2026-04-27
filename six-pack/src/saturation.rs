@@ -89,3 +89,37 @@ mod test_tape {
         }
     }
 }
+
+/// Diode: symmetric soft clip with extra high-frequency content.
+/// Similar to tube but generates more odd-order harmonics, brighter.
+pub fn diode(x: f32, drive: f32) -> f32 {
+    let driven = drive * x;
+    let abs_cubed = driven * driven * driven.abs();
+    driven / (1.0 + abs_cubed).powf(1.0 / 3.0)
+}
+
+#[cfg(test)]
+mod test_diode {
+    use super::*;
+
+    #[test]
+    fn diode_at_zero() { assert_eq!(diode(0.0, 1.0), 0.0); }
+
+    #[test]
+    fn diode_is_symmetric() {
+        for x in [0.1, 0.3, 0.5, 0.9, 1.5, 5.0] {
+            let p = diode(x, 1.0);
+            let n = diode(-x, 1.0);
+            assert!((p + n).abs() < 1e-6, "diode({x}, 1)={p}, diode(-{x}, 1)={n}");
+        }
+    }
+
+    #[test]
+    fn diode_is_finite() {
+        for x in [0.0, 1.0, -1.0, 10.0, 1e9, -1e9] {
+            for d in [0.5, 1.0, 2.0, 8.0] {
+                assert!(diode(x, d).is_finite());
+            }
+        }
+    }
+}
