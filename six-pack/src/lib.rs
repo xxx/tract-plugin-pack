@@ -10,8 +10,27 @@ pub mod saturation;
 pub mod spectrum;
 pub mod svf;
 
-use crate::bands::ChannelMode;
+use crate::bands::{BandState, ChannelMode, FilterShape};
 use crate::saturation::Algorithm;
+
+const BAND_SHAPES: [FilterShape; 6] = [
+    FilterShape::LowShelf,
+    FilterShape::Peak,
+    FilterShape::Peak,
+    FilterShape::Peak,
+    FilterShape::Peak,
+    FilterShape::HighShelf,
+];
+
+#[inline]
+fn dry_amp(mix: f32) -> f32 {
+    (2.0 * (1.0 - mix)).clamp(0.0, 1.0)
+}
+
+#[inline]
+fn wet_amp(mix: f32) -> f32 {
+    (2.0 * mix).clamp(0.0, 1.0)
+}
 
 // ── Param-side enums ───────────────────────────────────────────────────────────
 
@@ -129,6 +148,8 @@ const BAND_DEFAULT_FREQS: [f32; 6] = [60.0, 180.0, 540.0, 1_600.0, 4_800.0, 12_0
 
 pub struct SixPack {
     params: Arc<SixPackParams>,
+    bands: [BandState; 6],
+    sample_rate: f32,
 }
 
 #[derive(Params)]
@@ -277,6 +298,32 @@ impl Default for SixPack {
     fn default() -> Self {
         Self {
             params: Arc::new(SixPackParams::default()),
+            bands: [
+                BandState::new(BAND_SHAPES[0]),
+                BandState::new(BAND_SHAPES[1]),
+                BandState::new(BAND_SHAPES[2]),
+                BandState::new(BAND_SHAPES[3]),
+                BandState::new(BAND_SHAPES[4]),
+                BandState::new(BAND_SHAPES[5]),
+            ],
+            sample_rate: 48_000.0,
+        }
+    }
+}
+
+impl SixPack {
+    fn recompute_band_coefs(&mut self) {
+        let p = &self.params;
+        for (i, band) in self.bands.iter_mut().enumerate() {
+            let bp = &p.bands[i];
+            band.shape = BAND_SHAPES[i];
+            band.algo = bp.algo.value().into();
+            band.mode = bp.channel.value().into();
+            band.freq_hz = bp.freq.smoothed.next();
+            band.q = bp.q.smoothed.next();
+            band.gain_db = bp.gain.smoothed.next();
+            band.enable = if bp.enable.value() { 1.0 } else { 0.0 };
+            band.recompute_coefs(self.sample_rate);
         }
     }
 }
@@ -301,12 +348,96 @@ impl Plugin for SixPack {
         self.params.clone()
     }
 
+    fn initialize(
+        &mut self,
+        _audio_io_layout: &AudioIOLayout,
+        buffer_config: &BufferConfig,
+        _ctx: &mut impl InitContext<Self>,
+    ) -> bool {
+        self.sample_rate = buffer_config.sample_rate;
+        self.recompute_band_coefs();
+        true
+    }
+
+    fn reset(&mut self) {
+        for band in self.bands.iter_mut() {
+            band.reset();
+        }
+    }
+
     fn process(
         &mut self,
-        _buffer: &mut Buffer,
+        buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
         _ctx: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        let p = self.params.clone();
+
+        // Read smoothed scalars at block start.
+        let input_gain = p.input_gain.smoothed.next();
+        let mix = p.mix.smoothed.next();
+        let drive_k = p.drive.value().k();
+        let deemph = p.deemphasis.value();
+        let io_link = p.io_link.value();
+        let output_gain = if io_link {
+            // -input_gain in dB → invert linearly: 1 / input_gain
+            if input_gain.abs() > 1e-12 {
+                1.0 / input_gain
+            } else {
+                1.0
+            }
+        } else {
+            p.output_gain.smoothed.next()
+        };
+
+        // Update per-band state every block (parameter automation/smoothing).
+        self.recompute_band_coefs();
+
+        let dry_amp = dry_amp(mix);
+        let wet_amp = wet_amp(mix);
+
+        let num_samples = buffer.samples();
+        if num_samples == 0 {
+            return ProcessStatus::Normal;
+        }
+
+        // Stereo only.
+        let channel_slices = buffer.as_slice();
+        if channel_slices.len() < 2 {
+            return ProcessStatus::Normal;
+        }
+        let (l_chan, r_chan) = channel_slices.split_at_mut(1);
+        let l = &mut l_chan[0][..num_samples];
+        let r = &mut r_chan[0][..num_samples];
+
+        for i in 0..num_samples {
+            let dry_l = l[i] * input_gain;
+            let dry_r = r[i] * input_gain;
+
+            let mut wet_l = 0.0f32;
+            let mut wet_r = 0.0f32;
+            let mut boost_l = 0.0f32;
+            let mut boost_r = 0.0f32;
+            for band in self.bands.iter_mut() {
+                let out = band.process_sample(dry_l, dry_r, drive_k);
+                wet_l += out.sat_l;
+                wet_r += out.sat_r;
+                boost_l += out.boost_l;
+                boost_r += out.boost_r;
+            }
+            if deemph {
+                wet_l -= boost_l;
+                wet_r -= boost_r;
+            }
+
+            l[i] = (dry_amp * dry_l + wet_amp * wet_l) * output_gain;
+            r[i] = (dry_amp * dry_r + wet_amp * wet_r) * output_gain;
+        }
+
+        // Sanity: NaN guard in debug builds.
+        debug_assert!(l.iter().all(|s| s.is_finite()), "NaN in L output");
+        debug_assert!(r.iter().all(|s| s.is_finite()), "NaN in R output");
+
         ProcessStatus::Normal
     }
 }
