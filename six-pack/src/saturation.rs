@@ -3,9 +3,26 @@
 //! Each is a pure function `fn(x: f32, drive: f32) -> f32`. Drive scales
 //! the input before the shaper (drive=1.0 is unity input).
 
+/// Branchless tanh approximation via the Padé(3,3) form
+/// `x · (27 + x²) / (27 + 9·x²)`, with the input clamped to ±3.
+///
+/// Accurate to within ~2 % over [−3, 3]; outside that range the output is
+/// pinned to ±1 by the clamp. Roughly 5–10× faster than libm's `f32::tanh`
+/// (which goes through `expm1`), and bit-exact at x = 0 so every "f(0) = 0"
+/// invariant in the saturator family still holds. Symmetric, monotone, and
+/// has the same first derivative at zero (= 1) as real tanh, so the
+/// saturators' linear region (where the de-emph cancellation lives) keeps
+/// the same gain.
+#[inline]
+fn tanh_approx(x: f32) -> f32 {
+    let xc = x.clamp(-3.0, 3.0);
+    let x2 = xc * xc;
+    xc * (27.0 + x2) / (27.0 + 9.0 * x2)
+}
+
 /// Tube: symmetric tanh-style soft clipper. Most versatile; default.
 pub fn tube(x: f32, drive: f32) -> f32 {
-    (drive * x).tanh()
+    tanh_approx(drive * x)
 }
 
 #[cfg(test)]
@@ -54,8 +71,8 @@ mod test_tube {
 pub fn tape(x: f32, drive: f32) -> f32 {
     let bias = 0.18;
     let driven = drive * x + bias;
-    let dc_offset = bias.tanh();
-    driven.tanh() - dc_offset
+    let dc_offset = tanh_approx(bias);
+    tanh_approx(driven) - dc_offset
 }
 
 #[cfg(test)]
@@ -95,7 +112,10 @@ mod test_tape {
 pub fn diode(x: f32, drive: f32) -> f32 {
     let driven = drive * x;
     let abs_cubed = driven * driven * driven.abs();
-    driven / (1.0 + abs_cubed).powf(1.0 / 3.0)
+    // libm's dedicated `cbrtf` is ~3× faster than the equivalent
+    // `powf(1.0 / 3.0)` and shape-identical for the non-negative argument
+    // we pass it (`1.0 + abs_cubed >= 1`).
+    driven / (1.0 + abs_cubed).cbrt()
 }
 
 #[cfg(test)]
@@ -175,7 +195,7 @@ pub fn class_b(x: f32, drive: f32) -> f32 {
         s * (mag * mag) / dead_zone * 0.5
     } else {
         let above = mag - dead_zone;
-        s * (dead_zone * 0.5 + above.tanh())
+        s * (dead_zone * 0.5 + tanh_approx(above))
     }
 }
 

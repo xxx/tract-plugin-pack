@@ -32,7 +32,12 @@ fn compute_halfband_taps() -> [f32; HALFBAND_TAPS] {
 #[derive(Clone)]
 pub struct HalfBandStage {
     taps: [f32; HALFBAND_TAPS],
-    state: [f32; HALFBAND_TAPS],
+    /// Double-buffered ring of the last `HALFBAND_TAPS` input samples.
+    /// `push` writes the new value to both `state[pos]` and
+    /// `state[pos + HALFBAND_TAPS]`, so `state[pos..pos + HALFBAND_TAPS]`
+    /// is always a contiguous chronological window. That lets the inner
+    /// dot-product loops auto-vectorize without modulo arithmetic.
+    state: [f32; 2 * HALFBAND_TAPS],
     pos: usize,
 }
 
@@ -40,49 +45,73 @@ impl Default for HalfBandStage {
     fn default() -> Self {
         Self {
             taps: compute_halfband_taps(),
-            state: [0.0; HALFBAND_TAPS],
+            state: [0.0; 2 * HALFBAND_TAPS],
             pos: 0,
         }
     }
 }
 
 impl HalfBandStage {
-    /// Push one sample, return two upsampled samples.
-    pub fn upsample(&mut self, x: f32) -> (f32, f32) {
-        // Two-sample output via polyphase decomposition (insert zero between
-        // samples and convolve; even output uses center tap of original signal,
-        // odd output uses the windowed sinc).
+    /// Push one input sample into the double-buffered history. After
+    /// returning, `self.state[self.pos..self.pos + HALFBAND_TAPS]` is the
+    /// last `HALFBAND_TAPS` samples in chronological order (oldest first).
+    /// Writing the same value to two slots makes that contiguous slice
+    /// available without ring-buffer modulo arithmetic in the inner loop.
+    #[inline]
+    fn push(&mut self, x: f32) {
         self.state[self.pos] = x;
-        self.pos = (self.pos + 1) % HALFBAND_TAPS;
-        let mut sum_a = 0.0;
-        let mut sum_b = 0.0;
-        for i in 0..HALFBAND_TAPS {
-            let s = self.state[(self.pos + HALFBAND_TAPS - 1 - i) % HALFBAND_TAPS];
-            let t = self.taps[i];
-            if i % 2 == 0 {
-                sum_a += s * t;
-            } else {
-                sum_b += s * t;
-            }
+        self.state[self.pos + HALFBAND_TAPS] = x;
+        self.pos += 1;
+        if self.pos == HALFBAND_TAPS {
+            self.pos = 0;
         }
-        // sum_a captures the inserted-zero positions; sum_b captures the
-        // direct-pass positions. Multiply by 2 to compensate for energy loss
-        // at the inserted zeros.
-        (2.0 * sum_a, 2.0 * sum_b)
+    }
+
+    /// Push one sample, return two upsampled samples.
+    ///
+    /// Half-band efficiency: by construction the only non-zero odd-indexed
+    /// tap is the center one (`taps[15] = 0.5`). The polyphase split makes
+    /// one output a 15-sample-delayed pass-through (just the center tap)
+    /// and the other a dot product over the 16 non-zero even-indexed taps.
+    pub fn upsample(&mut self, x: f32) -> (f32, f32) {
+        self.push(x);
+        let history = &self.state[self.pos..self.pos + HALFBAND_TAPS];
+
+        // Filtered phase: sum the 16 non-zero even-indexed taps. Contiguous
+        // strided access; the compiler vectorizes this cleanly.
+        let mut sum_filtered = 0.0_f32;
+        let mut i = 0;
+        while i < HALFBAND_TAPS {
+            sum_filtered += history[i] * self.taps[i];
+            i += 2;
+        }
+
+        // Pass-through phase: only `taps[15] = 0.5` contributes among odd
+        // taps, and `2.0 * 0.5 = 1.0`, so the polyphase output is just the
+        // mid-history sample (a clean 15-sample delay).
+        let pass_through = history[HALFBAND_GROUP_DELAY];
+
+        (2.0 * sum_filtered, pass_through)
     }
 
     /// Push two samples, return one downsampled sample.
+    ///
+    /// Half-band efficiency: 16 non-zero even-indexed taps + the single
+    /// non-zero odd center tap. Sum the even-tap contributions in a tight
+    /// vectorizable loop, then add the center contribution separately.
     pub fn downsample(&mut self, a: f32, b: f32) -> f32 {
-        // Mirrored decimating polyphase. Push both samples, output filtered.
-        self.state[self.pos] = a;
-        self.pos = (self.pos + 1) % HALFBAND_TAPS;
-        self.state[self.pos] = b;
-        self.pos = (self.pos + 1) % HALFBAND_TAPS;
-        let mut sum = 0.0;
-        for i in 0..HALFBAND_TAPS {
-            let s = self.state[(self.pos + HALFBAND_TAPS - 1 - i) % HALFBAND_TAPS];
-            sum += s * self.taps[i];
+        self.push(a);
+        self.push(b);
+        let history = &self.state[self.pos..self.pos + HALFBAND_TAPS];
+
+        let mut sum = 0.0_f32;
+        let mut i = 0;
+        while i < HALFBAND_TAPS {
+            sum += history[i] * self.taps[i];
+            i += 2;
         }
+        sum += history[HALFBAND_GROUP_DELAY] * 0.5;
+
         sum
     }
 
