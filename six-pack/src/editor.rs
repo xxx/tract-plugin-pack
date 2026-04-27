@@ -79,14 +79,17 @@ pub(crate) enum BandLabelField {
 
 // ── Per-band palette ────────────────────────────────────────────────────
 
-/// Six band colors — magenta-to-cyan gradient on a deep navy background.
+/// Six band colors following the rainbow (ROYGBV) on a deep navy background.
+/// Indigo is skipped so each step is clearly distinguishable; the natural
+/// left-to-right ordering makes it easier to tell which dot belongs to which
+/// frequency slot.
 pub(crate) const BAND_COLORS: [(u8, u8, u8); 6] = [
-    (0xff, 0x4a, 0xa8), // band 0 — magenta
-    (0xff, 0x7a, 0x6e), // band 1 — coral
-    (0xff, 0xc1, 0x4a), // band 2 — amber
-    (0x9f, 0xe2, 0x4a), // band 3 — lime
-    (0x4a, 0xd5, 0xc8), // band 4 — teal
-    (0x6a, 0x9c, 0xff), // band 5 — periwinkle
+    (0xff, 0x4a, 0x4a), // band 0 — red    (low-shelf, ~60 Hz)
+    (0xff, 0x9b, 0x3a), // band 1 — orange (~180 Hz)
+    (0xff, 0xe0, 0x3a), // band 2 — yellow (~540 Hz)
+    (0x4a, 0xd5, 0x4a), // band 3 — green  (~1.6 kHz)
+    (0x4a, 0x8c, 0xff), // band 4 — blue   (~4.8 kHz)
+    (0xb5, 0x6a, 0xff), // band 5 — violet (high-shelf, ~12 kHz)
 ];
 
 #[inline]

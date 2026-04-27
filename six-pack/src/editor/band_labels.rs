@@ -122,12 +122,15 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
             let cw = col_w - 2.0 * s;
             let ch = row_h - 2.0 * s;
 
-            // Cell background — subtle band-color tint.
+            // Cell background — subtle band-color tint. Multiplicative dim
+            // (not subtractive) so the hue survives even for bright channels
+            // close to 0xff (yellow/green/blue/violet would otherwise turn
+            // into muddy olive/brown).
             let bg = band_color(band);
             let bg_dim = tiny_skia::Color::from_rgba8(
-                ((bg.red() * 255.0) as u8).saturating_sub(150),
-                ((bg.green() * 255.0) as u8).saturating_sub(150),
-                ((bg.blue() * 255.0) as u8).saturating_sub(150),
+                (bg.red() * 255.0 * 0.18) as u8,
+                (bg.green() * 255.0 * 0.18) as u8,
+                (bg.blue() * 255.0 * 0.18) as u8,
                 0xff,
             );
             widgets::draw_rect(&mut win.surface.pixmap, cx, cy, cw, ch, bg_dim);
@@ -194,7 +197,7 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
                     value_y,
                     &cell.value_text,
                     value_size,
-                    widgets::color_text(),
+                    band_color(band),
                 );
             }
         }
@@ -220,7 +223,7 @@ fn algo_short(a: crate::AlgoParam) -> &'static str {
 fn mode_short(m: crate::ChannelParam) -> &'static str {
     use crate::ChannelParam::*;
     match m {
-        Stereo => "St",
+        Stereo => "Stereo",
         Mid => "Mid",
         Side => "Side",
     }
@@ -239,7 +242,7 @@ mod tests {
 
     #[test]
     fn mode_short_covers_all_variants() {
-        assert_eq!(mode_short(crate::ChannelParam::Stereo), "St");
+        assert_eq!(mode_short(crate::ChannelParam::Stereo), "Stereo");
         assert_eq!(mode_short(crate::ChannelParam::Mid), "Mid");
         assert_eq!(mode_short(crate::ChannelParam::Side), "Side");
     }
