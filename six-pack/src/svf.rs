@@ -27,6 +27,10 @@ pub struct Svf {
 impl Svf {
     /// Configure as a peak filter at center freq with Q and gain (in dB).
     pub fn set_peak(&mut self, freq_hz: f32, q: f32, gain_db: f32, sample_rate: f32) {
+        let nyquist = sample_rate * 0.5;
+        let freq_hz = freq_hz.clamp(20.0, nyquist * 0.98);
+        let q = q.clamp(0.1, 10.0);
+        let gain_db = gain_db.clamp(0.0, 18.0);
         let g = (PI * freq_hz / sample_rate).tan();
         let k = 1.0 / q;
         let a1 = 1.0 / (1.0 + g * (g + k));
@@ -61,6 +65,10 @@ impl Svf {
     /// Mix-form: output = high + sqrt(A) · band + A · low, where A = 10^(gain/40).
     /// At gain = 0 dB → A = 1 → output = high + band + low = dry. (Unity.)
     pub fn set_low_shelf(&mut self, freq_hz: f32, q: f32, gain_db: f32, sample_rate: f32) {
+        let nyquist = sample_rate * 0.5;
+        let freq_hz = freq_hz.clamp(20.0, nyquist * 0.98);
+        let q = q.clamp(0.1, 10.0);
+        let gain_db = gain_db.clamp(0.0, 18.0);
         let a = 10.0_f32.powf(gain_db / 40.0);
         let g = (PI * freq_hz / sample_rate).tan() / a.sqrt();
         let k = 1.0 / q;
@@ -84,6 +92,10 @@ impl Svf {
     /// Mix-form: output = A · high + sqrt(A) · band + low, where A = 10^(gain/40).
     /// At gain = 0 dB → A = 1 → output = high + band + low = dry. (Unity.)
     pub fn set_high_shelf(&mut self, freq_hz: f32, q: f32, gain_db: f32, sample_rate: f32) {
+        let nyquist = sample_rate * 0.5;
+        let freq_hz = freq_hz.clamp(20.0, nyquist * 0.98);
+        let q = q.clamp(0.1, 10.0);
+        let gain_db = gain_db.clamp(0.0, 18.0);
         let a = 10.0_f32.powf(gain_db / 40.0);
         let g = (PI * freq_hz / sample_rate).tan() * a.sqrt();
         let k = 1.0 / q;
@@ -198,6 +210,26 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn coefs_clamped_at_extreme_freq_q() {
+        let sr = 48_000.0;
+        let mut svf = Svf::default();
+
+        // Freq above clamp (should clamp to 0.49 × Nyquist)
+        svf.set_peak(40_000.0, 5.0, 18.0, sr);
+        for _ in 0..1000 {
+            let y = svf.process_peak(0.1);
+            assert!(y.is_finite());
+        }
+
+        // Q at lower bound
+        svf.set_peak(1_000.0, 0.05, 18.0, sr);
+        for _ in 0..1000 {
+            let y = svf.process_peak(0.1);
+            assert!(y.is_finite());
         }
     }
 
