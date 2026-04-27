@@ -207,6 +207,42 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
                 );
             }
         }
+
+        // ── "Harmonics added" overlay (wet spectrum) ───────────────────
+        // Same column-fill pass but reading display_wet_bins and drawn in a
+        // bright warm accent so it pops over the cool input fill. The wet
+        // path is what Six Pack contributes on top of dry — at low drive
+        // it'll be subtle, at high drive it lights up the bands clearly.
+        let wet_color = tiny_skia::Color::from_rgba8(0xff, 0xb0, 0x40, 0xff);
+        for col in 0..n_cols {
+            let xnorm = (col as f32 + 0.5) / plot_w;
+            let f = norm_x_to_freq(xnorm);
+            let mut best_idx = 0usize;
+            let mut best_diff = f32::INFINITY;
+            for b in 0..N_BINS {
+                let bf = bin_center_freq(b, sample_rate);
+                let d = (bf - f).abs() / f.max(1.0);
+                if d < best_diff {
+                    best_diff = d;
+                    best_idx = b;
+                }
+            }
+            let mag = win.display_wet_bins[best_idx];
+            let db = 20.0 * mag.max(1e-4).log10();
+            let snorm = ((db + 60.0) / 70.0).clamp(0.0, 1.0);
+            let bar_h = snorm * plot_h * 0.85;
+            if bar_h > 0.5 {
+                let bar_y = plot_y + plot_h - bar_h;
+                let cx = plot_x + col as f32 + 0.5;
+                widgets::fill_column_opaque(
+                    &mut win.surface.pixmap,
+                    cx,
+                    bar_y,
+                    plot_y + plot_h,
+                    wet_color,
+                );
+            }
+        }
     }
 
     // ── Composite EQ curve ─────────────────────────────────────────────
@@ -273,16 +309,44 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
         let cx = plot_x + xnorm * plot_w;
         let cy = plot_y + plot_h - yn * plot_h;
 
+        // Activity glow (0..1). The audio thread publishes per-band post-
+        // saturation RMS in `band_activity_bins`; the editor EMAs it into
+        // `display_band_activity`. RMS values are typically small, so we
+        // multiply before clamping to make the glow visible at musical
+        // levels. Disabled bands don't glow even if state is non-zero from
+        // a recent toggle.
+        let glow = if bp.enable.value() {
+            (win.display_band_activity[i] * 8.0).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // Outer halo — translucent ring fading outward, sized by glow.
+        if glow > 0.01 {
+            let halo_r = dot_radius * (1.5 + 1.4 * glow);
+            let halo_alpha = (90.0 * glow) as u8;
+            draw_dot(
+                &mut win.surface.pixmap,
+                cx,
+                cy,
+                halo_r,
+                band_color_alpha(i, halo_alpha),
+            );
+        }
+
         let fill = if bp.enable.value() {
             band_color(i)
         } else {
             band_color_alpha(i, 80)
         };
         let hi = band_color_alpha(i, 200);
+        // Slightly inflate the dot itself with activity so the visual cue
+        // is unmistakable even on a dim halo.
+        let active_radius = dot_radius * (1.0 + 0.25 * glow);
         // Filled circle approximated by stacked rect rows for speed.
-        draw_dot(&mut win.surface.pixmap, cx, cy, dot_radius, fill);
+        draw_dot(&mut win.surface.pixmap, cx, cy, active_radius, fill);
         // Outline.
-        draw_dot_outline(&mut win.surface.pixmap, cx, cy, dot_radius, hi);
+        draw_dot_outline(&mut win.surface.pixmap, cx, cy, active_radius, hi);
 
         let hit_r = dot_radius * 1.7;
         win.drag.push_region(

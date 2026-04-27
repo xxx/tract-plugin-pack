@@ -155,6 +155,16 @@ pub struct SixPack {
     os: StereoOversampler,
     max_block: usize,
     pub spectrum: SpectrumAnalyzer,
+    /// Spectrum of the wet path — what Six Pack is *adding* to the dry
+    /// signal, sampled at native rate from inside the OS loop. Drives the
+    /// "harmonics added" overlay so users can see the plugin's contribution
+    /// even at low drive where the output spectrum looks indistinguishable
+    /// from the input.
+    pub spectrum_wet: SpectrumAnalyzer,
+    /// Per-band post-saturation RMS, updated once per block. The GUI reads
+    /// this lock-free to glow each band dot proportionally to how much
+    /// harmonic content that band is currently producing.
+    pub band_activity: Arc<[std::sync::atomic::AtomicU32; 6]>,
 }
 
 #[derive(Params)]
@@ -333,6 +343,10 @@ impl Default for SixPack {
             os,
             max_block: MIN_MAX_BLOCK,
             spectrum: SpectrumAnalyzer::new(rand_seed()),
+            spectrum_wet: SpectrumAnalyzer::new(rand_seed().wrapping_add(0x5A5A_5A5A)),
+            band_activity: Arc::new(std::array::from_fn(|_| {
+                std::sync::atomic::AtomicU32::new(0)
+            })),
         }
     }
 }
@@ -346,7 +360,15 @@ fn rand_seed() -> u32 {
 }
 
 impl SixPack {
-    fn recompute_band_coefs_for_os(&mut self, factor: usize) {
+    /// Update each band's coefficients from the smoothed parameter values.
+    ///
+    /// `smoother_steps` is the number of native-rate samples the parameter
+    /// smoothers should advance in this call. Pass the block size from
+    /// `process()` so a 20 ms ramp settles in 20 ms wall-clock time;
+    /// `Smoother::next()` only advances by 1 sample, which when called
+    /// once per block makes the apparent ramp time `block_size`× longer.
+    /// Pass 0 from `initialize()` (no advance, just read current value).
+    fn recompute_band_coefs_for_os(&mut self, factor: usize, smoother_steps: u32) {
         let effective_sr = self.sample_rate * factor as f32;
         let p = &self.params;
         for (i, band) in self.bands.iter_mut().enumerate() {
@@ -354,9 +376,21 @@ impl SixPack {
             band.shape = BAND_SHAPES[i];
             band.algo = bp.algo.value().into();
             band.mode = bp.channel.value().into();
-            band.freq_hz = bp.freq.smoothed.next();
-            band.q = bp.q.smoothed.next();
-            band.gain_db = bp.gain.smoothed.next();
+            band.freq_hz = if smoother_steps == 0 {
+                bp.freq.value()
+            } else {
+                bp.freq.smoothed.next_step(smoother_steps)
+            };
+            band.q = if smoother_steps == 0 {
+                bp.q.value()
+            } else {
+                bp.q.smoothed.next_step(smoother_steps)
+            };
+            band.gain_db = if smoother_steps == 0 {
+                bp.gain.value()
+            } else {
+                bp.gain.smoothed.next_step(smoother_steps)
+            };
             band.enable = if bp.enable.value() { 1.0 } else { 0.0 };
             band.recompute_coefs(effective_sr);
         }
@@ -366,7 +400,7 @@ impl SixPack {
     /// oversampling path.
     #[cfg(test)]
     fn recompute_band_coefs(&mut self) {
-        self.recompute_band_coefs_for_os(1);
+        self.recompute_band_coefs_for_os(1, 0);
     }
 }
 
@@ -391,7 +425,12 @@ impl Plugin for SixPack {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        editor::create(self.params.clone(), self.spectrum.bins.clone())
+        editor::create(
+            self.params.clone(),
+            self.spectrum.bins.clone(),
+            self.spectrum_wet.bins.clone(),
+            self.band_activity.clone(),
+        )
     }
 
     fn initialize(
@@ -407,7 +446,10 @@ impl Plugin for SixPack {
         self.max_block = (buffer_config.max_buffer_size as usize).max(MIN_MAX_BLOCK);
         let factor = self.params.quality.value().factor();
         self.os.set_factor(factor, self.max_block);
-        self.recompute_band_coefs_for_os(factor);
+        // 0 step count: don't advance any smoothers, just take their current
+        // value (defaults at first construction, persisted values on session
+        // load).
+        self.recompute_band_coefs_for_os(factor, 0);
         ctx.set_latency_samples(self.os.latency_samples() as u32);
         true
     }
@@ -427,6 +469,12 @@ impl Plugin for SixPack {
     ) -> ProcessStatus {
         let p = self.params.clone();
 
+        let num_samples = buffer.samples();
+        if num_samples == 0 {
+            return ProcessStatus::Normal;
+        }
+        let smoother_steps = num_samples as u32;
+
         // Handle Quality changes: re-allocate scratch (only at OS-factor boundary,
         // which is a rare user-initiated event), reset filter state to avoid
         // clicks, and report the new latency to the host.
@@ -434,15 +482,21 @@ impl Plugin for SixPack {
         if new_factor != self.os.factor() {
             self.os.set_factor(new_factor, self.max_block);
             ctx.set_latency_samples(self.os.latency_samples() as u32);
-            self.recompute_band_coefs_for_os(new_factor);
+            // Don't advance smoothers here — the per-band recompute below
+            // owns the per-block step.
+            self.recompute_band_coefs_for_os(new_factor, 0);
             for band in self.bands.iter_mut() {
                 band.reset();
             }
         }
 
-        // Read smoothed scalars at block start.
-        let input_gain = p.input_gain.smoothed.next();
-        let mix = p.mix.smoothed.next();
+        // Advance smoothers by the actual block size so 20–50 ms ramp times
+        // settle in 20–50 ms wall-clock. `Smoother::next()` only advances
+        // by 1 sample per call; calling it once per block makes the apparent
+        // ramp time (block_size)× longer, so a dot drag back to 0 dB would
+        // leave audible (and visible) residue for many seconds.
+        let input_gain = p.input_gain.smoothed.next_step(smoother_steps);
+        let mix = p.mix.smoothed.next_step(smoother_steps);
         let drive_k = p.drive.value().k();
         let deemph = p.deemphasis.value();
         let io_link = p.io_link.value();
@@ -454,21 +508,16 @@ impl Plugin for SixPack {
                 1.0
             }
         } else {
-            p.output_gain.smoothed.next()
+            p.output_gain.smoothed.next_step(smoother_steps)
         };
 
         // Update per-band state every block (parameter automation/smoothing).
         // Use the OS-effective sample rate so SVF coefficients see the full
         // oversampled bandwidth.
-        self.recompute_band_coefs_for_os(self.os.factor());
+        self.recompute_band_coefs_for_os(self.os.factor(), smoother_steps);
 
         let dry_amp_v = dry_amp(mix);
         let wet_amp_v = wet_amp(mix);
-
-        let num_samples = buffer.samples();
-        if num_samples == 0 {
-            return ProcessStatus::Normal;
-        }
 
         // Stereo only.
         let channel_slices = buffer.as_slice();
@@ -494,9 +543,18 @@ impl Plugin for SixPack {
             self.spectrum.push_sample(m);
         }
 
+        // Capture the OS factor before the upsample call returns mutable
+        // refs into `self.os.scratch_*` — those refs hold the borrow open
+        // through the rest of the loop, blocking any later self.os reads.
+        let factor = self.os.factor().max(1);
+
         // Upsample to the OS scratch.
         let (os_l, os_r) = self.os.upsample_block(l, r);
         let len_os = os_l.len();
+
+        // Per-band post-saturation sum-of-squares for the GUI activity glow.
+        // Stored at block end; not used by the audio path itself.
+        let mut band_sumsq = [0.0f32; 6];
 
         // Per-oversampled-sample DSP loop.
         for i in 0..len_os {
@@ -507,20 +565,40 @@ impl Plugin for SixPack {
             let mut wet_r = 0.0f32;
             let mut boost_l = 0.0f32;
             let mut boost_r = 0.0f32;
-            for band in self.bands.iter_mut() {
+            for (b, band) in self.bands.iter_mut().enumerate() {
                 let out = band.process_sample(dry_l, dry_r, drive_k);
                 wet_l += out.sat_l;
                 wet_r += out.sat_r;
                 boost_l += out.boost_l;
                 boost_r += out.boost_r;
+                band_sumsq[b] += out.sat_l * out.sat_l + out.sat_r * out.sat_r;
             }
             if deemph {
                 wet_l -= boost_l;
                 wet_r -= boost_r;
             }
 
+            // Feed the "harmonics added" spectrum at native rate. Sampling
+            // every Nth OS sample without an explicit anti-alias filter is
+            // intentional for a visualization — the polyphase chain has
+            // already band-limited dry, and the saturator's harmonics live
+            // mostly within native Nyquist; any tiny residual aliasing in
+            // the display is not audible (the audio path stays oversampled).
+            if i % factor == 0 {
+                self.spectrum_wet.push_sample((wet_l + wet_r) * 0.5);
+            }
+
             os_l[i] = dry_amp_v * dry_l + wet_amp_v * wet_l;
             os_r[i] = dry_amp_v * dry_r + wet_amp_v * wet_r;
+        }
+
+        // Publish per-band RMS for the GUI to read.
+        if len_os > 0 {
+            let inv = 1.0 / (2.0 * len_os as f32);
+            for (b, sumsq) in band_sumsq.iter().enumerate() {
+                let rms = (sumsq * inv).sqrt();
+                self.band_activity[b].store(rms.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            }
         }
 
         // Downsample back to native rate.
@@ -719,7 +797,7 @@ mod plugin_tests {
         for sr in [44_100.0_f32, 48_000.0, 96_000.0, 192_000.0] {
             let mut plugin = SixPack::default();
             plugin.sample_rate = sr;
-            plugin.recompute_band_coefs_for_os(1);
+            plugin.recompute_band_coefs_for_os(1, 0);
             // Set band 4 to peak +12 dB at 1 kHz (just to get harmonics)
             plugin.bands[3].gain_db = 12.0;
             plugin.bands[3].recompute_coefs(sr);

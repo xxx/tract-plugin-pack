@@ -119,6 +119,17 @@ struct SixPackWindow {
     spectrum_bins: Arc<[AtomicU32; N_BINS]>,
     /// EMA-smoothed display magnitudes, GUI-thread-only.
     display_bins: [f32; N_BINS],
+    /// Cloned from `SixPack::spectrum_wet.bins`. Spectrum of just the wet
+    /// path — what Six Pack adds to dry. Drives the "harmonics added"
+    /// overlay so users can see the plugin's contribution at any drive.
+    pub(crate) spectrum_wet_bins: Arc<[AtomicU32; N_BINS]>,
+    pub(crate) display_wet_bins: [f32; N_BINS],
+    /// Cloned from `SixPack::band_activity`. Audio thread stores per-band
+    /// post-saturation RMS each block; GUI reads it lock-free.
+    pub(crate) band_activity_bins: Arc<[AtomicU32; 6]>,
+    /// EMA-smoothed display values, GUI-thread-only. Used to glow each
+    /// band dot proportionally to its current saturation activity.
+    pub(crate) display_band_activity: [f32; 6],
 
     text_renderer: widgets::TextRenderer,
     drag: widgets::DragState<HitAction>,
@@ -130,11 +141,14 @@ struct SixPackWindow {
 }
 
 impl SixPackWindow {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         window: &mut baseview::Window<'_>,
         gui_context: Arc<dyn GuiContext>,
         params: Arc<SixPackParams>,
         spectrum_bins: Arc<[AtomicU32; N_BINS]>,
+        spectrum_wet_bins: Arc<[AtomicU32; N_BINS]>,
+        band_activity_bins: Arc<[AtomicU32; 6]>,
         pending_resize: Arc<AtomicU64>,
         scale_factor: f32,
     ) -> Self {
@@ -156,6 +170,10 @@ impl SixPackWindow {
             params,
             spectrum_bins,
             display_bins: [0.0; N_BINS],
+            spectrum_wet_bins,
+            display_wet_bins: [0.0; N_BINS],
+            band_activity_bins,
+            display_band_activity: [0.0; 6],
             text_renderer,
             drag: widgets::DragState::new(),
             text_edit: widgets::TextEditState::new(),
@@ -174,6 +192,34 @@ impl SixPackWindow {
             let prev = self.display_bins[i];
             let alpha = if raw > prev { ATTACK } else { RELEASE };
             self.display_bins[i] = prev + alpha * (raw - prev);
+        }
+
+        // Faster release on the wet overlay than on the input. The wet path
+        // is sparse and transient (filter warmup, brief automation moves can
+        // produce blips that the input spectrum would never show), so a
+        // 0.5 s tail at the input's release rate looks like persistent
+        // activity even when boost is back at 0 dB. ~0.2 s feels right.
+        const WET_ATTACK: f32 = 0.65;
+        const WET_RELEASE: f32 = 0.32;
+        for (i, slot) in self.spectrum_wet_bins.iter().enumerate() {
+            let raw = f32::from_bits(slot.load(Ordering::Relaxed));
+            let prev = self.display_wet_bins[i];
+            let alpha = if raw > prev { WET_ATTACK } else { WET_RELEASE };
+            self.display_wet_bins[i] = prev + alpha * (raw - prev);
+        }
+    }
+
+    fn update_band_activity_smoothing(&mut self) {
+        // EMA the published per-band RMS into a frame-rate display value.
+        // Faster attack so transients show up immediately, slower release so
+        // the glow doesn't flicker between blocks.
+        const ATTACK: f32 = 0.55;
+        const RELEASE: f32 = 0.12;
+        for (i, slot) in self.band_activity_bins.iter().enumerate() {
+            let raw = f32::from_bits(slot.load(Ordering::Relaxed));
+            let prev = self.display_band_activity[i];
+            let alpha = if raw > prev { ATTACK } else { RELEASE };
+            self.display_band_activity[i] = prev + alpha * (raw - prev);
         }
     }
 
@@ -262,6 +308,7 @@ impl SixPackWindow {
 
         // Pre-update display bins (lock-free atomic reads + EMA).
         self.update_spectrum_smoothing();
+        self.update_band_activity_smoothing();
 
         // ── Filter icons row ────────────────────────────────────────────
         self.draw_filter_icons(pad, pad, w - 2.0 * pad, icons_h);
@@ -689,16 +736,22 @@ impl SixPackWindow {
 pub(crate) struct SixPackEditor {
     params: Arc<SixPackParams>,
     spectrum_bins: Arc<[AtomicU32; N_BINS]>,
+    spectrum_wet_bins: Arc<[AtomicU32; N_BINS]>,
+    band_activity_bins: Arc<[AtomicU32; 6]>,
     pending_resize: Arc<AtomicU64>,
 }
 
 pub(crate) fn create(
     params: Arc<SixPackParams>,
     spectrum_bins: Arc<[AtomicU32; N_BINS]>,
+    spectrum_wet_bins: Arc<[AtomicU32; N_BINS]>,
+    band_activity_bins: Arc<[AtomicU32; 6]>,
 ) -> Option<Box<dyn Editor>> {
     Some(Box::new(SixPackEditor {
         params,
         spectrum_bins,
+        spectrum_wet_bins,
+        band_activity_bins,
         pending_resize: Arc::new(AtomicU64::new(0)),
     }))
 }
@@ -715,6 +768,8 @@ impl Editor for SixPackEditor {
         let gui_context = Arc::clone(&context);
         let params = Arc::clone(&self.params);
         let spectrum_bins = Arc::clone(&self.spectrum_bins);
+        let spectrum_wet_bins = Arc::clone(&self.spectrum_wet_bins);
+        let band_activity_bins = Arc::clone(&self.band_activity_bins);
         let pending_resize = Arc::clone(&self.pending_resize);
 
         let window = baseview::Window::open_parented(
@@ -731,6 +786,8 @@ impl Editor for SixPackEditor {
                     gui_context,
                     params,
                     spectrum_bins,
+                    spectrum_wet_bins,
+                    band_activity_bins,
                     pending_resize,
                     sf,
                 )
