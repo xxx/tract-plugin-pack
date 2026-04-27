@@ -13,6 +13,7 @@ pub mod svf;
 use crate::bands::{BandState, ChannelMode, FilterShape};
 use crate::oversampling::StereoOversampler;
 use crate::saturation::Algorithm;
+use crate::spectrum::SpectrumAnalyzer;
 
 const BAND_SHAPES: [FilterShape; 6] = [
     FilterShape::LowShelf,
@@ -153,6 +154,7 @@ pub struct SixPack {
     sample_rate: f32,
     os: StereoOversampler,
     max_block: usize,
+    pub spectrum: SpectrumAnalyzer,
 }
 
 #[derive(Params)]
@@ -312,8 +314,17 @@ impl Default for SixPack {
             sample_rate: 48_000.0,
             os: StereoOversampler::new(),
             max_block: 1024,
+            spectrum: SpectrumAnalyzer::new(rand_seed()),
         }
     }
+}
+
+fn rand_seed() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0)
 }
 
 impl SixPack {
@@ -449,6 +460,13 @@ impl Plugin for SixPack {
         }
         for s in r.iter_mut() {
             *s *= input_gain;
+        }
+
+        // Feed the spectrum analyzer at native rate (post-input-gain, pre-OS).
+        let n = num_samples;
+        for i in 0..n {
+            let m = (l[i] + r[i]) * 0.5;
+            self.spectrum.push_sample(m);
         }
 
         // Upsample to the OS scratch.
