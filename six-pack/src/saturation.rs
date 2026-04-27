@@ -48,3 +48,44 @@ mod test_tube {
         );
     }
 }
+
+/// Tape: asymmetric soft clip. Slightly biased toward the negative rail —
+/// punchier on bass, naturally rolls off highs. Not for high frequencies.
+pub fn tape(x: f32, drive: f32) -> f32 {
+    let bias = 0.18;
+    let driven = drive * x + bias;
+    let dc_offset = bias.tanh();
+    driven.tanh() - dc_offset
+}
+
+#[cfg(test)]
+mod test_tape {
+    use super::*;
+
+    #[test]
+    fn tape_at_zero() {
+        let y = tape(0.0, 1.0);
+        assert!(y.abs() < 1e-6, "tape(0, 1) = {y}");
+    }
+
+    #[test]
+    fn tape_is_asymmetric() {
+        let pos = tape(0.5, 1.0);
+        let neg = tape(-0.5, 1.0);
+        let asymmetry = (pos + neg).abs();
+        assert!(
+            asymmetry > 0.001,
+            "tape must be visibly asymmetric: f(0.5)={pos} f(-0.5)={neg}"
+        );
+    }
+
+    #[test]
+    fn tape_is_finite_for_extreme() {
+        for x in [0.0, 1.0, -1.0, 10.0, -10.0, 1e9, -1e9] {
+            for d in [0.5, 1.0, 2.0, 8.0] {
+                let y = tape(x, d);
+                assert!(y.is_finite(), "tape({x}, {d}) = {y}");
+            }
+        }
+    }
+}
