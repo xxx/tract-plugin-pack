@@ -281,3 +281,48 @@ mod test_wavefold {
         assert!(zc_mid < zc_high, "drive 2.0 -> {zc_mid} zc; drive 4.0 -> {zc_high} zc");
     }
 }
+
+/// All saturation algorithms shipped by Six Pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Algorithm {
+    Tube,
+    Tape,
+    Diode,
+    Digital,
+    ClassB,
+    Wavefold,
+}
+
+impl Algorithm {
+    /// Apply the selected algorithm to a sample.
+    pub fn apply(self, x: f32, drive: f32) -> f32 {
+        match self {
+            Algorithm::Tube => tube(x, drive),
+            Algorithm::Tape => tape(x, drive),
+            Algorithm::Diode => diode(x, drive),
+            Algorithm::Digital => digital(x, drive),
+            Algorithm::ClassB => class_b(x, drive),
+            Algorithm::Wavefold => wavefold(x, drive),
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_dispatch {
+    use super::*;
+
+    #[test]
+    fn dispatch_each_algo() {
+        for algo in [
+            Algorithm::Tube,
+            Algorithm::Tape,
+            Algorithm::Diode,
+            Algorithm::Digital,
+            Algorithm::ClassB,
+            Algorithm::Wavefold,
+        ] {
+            let y = algo.apply(0.0, 1.0);
+            assert!(y.abs() < 1e-6, "{:?}: f(0, 1) = {y}", algo);
+        }
+    }
+}
