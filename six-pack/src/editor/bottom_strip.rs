@@ -51,22 +51,34 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
         (GlobalDialId::Output, "", 0.0, String::new(), None),
         (GlobalDialId::Mix, "", 0.0, String::new(), None),
     ];
+    // When I/O Link is on, the audio path uses `output_gain = 1 / input_gain`
+    // (i.e. `output_dB = -input_dB`) directly and ignores the Output param's
+    // stored value. Mirror the Output dial's display to match: same magnitude,
+    // opposite sign in dB, which by symmetry of the gain skew is exactly
+    // `1 − input_normalized` on the dial.
+    let io_linked = win.params.io_link.value();
+    let input_norm = win.params.input_gain.unmodulated_normalized_value();
+    let input_db = nih_plug::util::gain_to_db(win.params.input_gain.value());
+
     for (i, &(id, label)) in dials.iter().enumerate() {
         let (text, normalized) = match id {
             GlobalDialId::Input => (
-                format!(
-                    "{:+.1} dB",
-                    nih_plug::util::gain_to_db(win.params.input_gain.value())
-                ),
-                win.params.input_gain.unmodulated_normalized_value(),
+                format!("{:+.1} dB", input_db),
+                input_norm,
             ),
-            GlobalDialId::Output => (
-                format!(
-                    "{:+.1} dB",
-                    nih_plug::util::gain_to_db(win.params.output_gain.value())
-                ),
-                win.params.output_gain.unmodulated_normalized_value(),
-            ),
+            GlobalDialId::Output => {
+                if io_linked {
+                    (format!("{:+.1} dB", -input_db), 1.0 - input_norm)
+                } else {
+                    (
+                        format!(
+                            "{:+.1} dB",
+                            nih_plug::util::gain_to_db(win.params.output_gain.value())
+                        ),
+                        win.params.output_gain.unmodulated_normalized_value(),
+                    )
+                }
+            }
             GlobalDialId::Mix => (
                 format!("{:.0}%", win.params.mix.value() * 100.0),
                 win.params.mix.unmodulated_normalized_value(),
@@ -80,6 +92,20 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
     }
 
     let caret = win.text_edit.caret_visible();
+
+    // Link button geometry — tucked between Input (i=0) and Output (i=1).
+    // Push the hit region BEFORE the dial regions so DragState::hit_test
+    // (which returns the first match) picks the button when the cursor is
+    // over it. The dial hit regions span the full column width and would
+    // otherwise swallow clicks on the button.
+    let link_active = win.params.io_link.value();
+    let link_w = 24.0 * s;
+    let link_h = 16.0 * s;
+    let link_x = x + col_spacing - link_w * 0.5;
+    let link_y = dial_row_cy - link_h * 0.5;
+    win.drag
+        .push_region(link_x, link_y, link_w, link_h, HitAction::IoLink);
+
     let tr = &mut win.text_renderer;
 
     for (i, &(id, label, normalized, ref text, ref editing)) in dial_data.iter().enumerate() {
@@ -108,12 +134,8 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
         );
     }
 
-    // Link button — tucked between Input (i=0) and Output (i=1).
-    let link_active = win.params.io_link.value();
-    let link_w = 24.0 * s;
-    let link_h = 16.0 * s;
-    let link_x = x + col_spacing - link_w * 0.5;
-    let link_y = dial_row_cy - link_h * 0.5;
+    // Render the link button after the dials so it draws on top. (Hit
+    // region was already pushed above.)
     widgets::draw_button(
         &mut win.surface.pixmap,
         tr,
@@ -125,8 +147,6 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
         link_active,
         false,
     );
-    win.drag
-        .push_region(link_x, link_y, link_w, link_h, HitAction::IoLink);
 
     // Right cluster: Quality + Drive steppers, De-Emphasis toggle.
     let right_x = x + cluster_w + 4.0 * s;
