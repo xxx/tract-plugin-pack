@@ -181,6 +181,7 @@ tract-plugin-pack/
 │   ├── gs-meter/
 │   ├── pope-scope/
 │   ├── satch/
+│   ├── six-pack/
 │   ├── tinylimit/
 │   ├── warp-zone/
 │   └── wavetable-filter/
