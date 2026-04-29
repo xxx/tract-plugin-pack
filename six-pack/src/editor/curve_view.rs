@@ -370,6 +370,161 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
             tiny_skia::Color::from_rgba8(0x10, 0x10, 0x12, 0xff),
         );
     }
+
+    // ── Cursor tooltip ──────────────────────────────────────────────────
+    // When the mouse is inside the plot rect, draw a vertical cursor line
+    // and a small readout next to it: frequency at the cursor + the
+    // current dry-spectrum and wet-spectrum levels at that frequency.
+    // Skipped when the cursor isn't in the window (so the tooltip doesn't
+    // latch a phantom hover at the last known position) or while a drag
+    // is active (keeps the readout from fighting the drag UI).
+    if win.drag.mouse_in_window() && win.drag.active_action().is_none() {
+        let (mx, my) = win.drag.mouse_pos();
+        if mx >= plot_x && mx < plot_x + plot_w && my >= plot_y && my < plot_y + plot_h {
+            draw_cursor_tooltip(win, mx, my, plot_x, plot_y, plot_w, plot_h, s);
+        }
+    }
+}
+
+/// Draws the vertical cursor line + readout box when the mouse is over
+/// the plot area. Pulls dry/wet magnitudes from the same display bins
+/// the spectrum overlay uses, so the readings line up with what's drawn.
+#[allow(clippy::too_many_arguments)]
+fn draw_cursor_tooltip(
+    win: &mut SixPackWindow,
+    mx: f32,
+    my: f32,
+    plot_x: f32,
+    plot_y: f32,
+    plot_w: f32,
+    plot_h: f32,
+    s: f32,
+) {
+    // Frequency at cursor.
+    let xnorm = ((mx - plot_x) / plot_w).clamp(0.0, 1.0);
+    let freq = norm_x_to_freq(xnorm);
+
+    // Find the spectrum bin nearest the cursor frequency. The analyzer is
+    // sample-rate-agnostic at the bin level; nominal 48 kHz keeps the
+    // mapping consistent with the overlay rendering.
+    let sample_rate = 48_000.0_f32;
+    let mut best_idx = 0usize;
+    let mut best_diff = f32::INFINITY;
+    for b in 0..N_BINS {
+        let bf = bin_center_freq(b, sample_rate);
+        let d = (bf - freq).abs() / freq.max(1.0);
+        if d < best_diff {
+            best_diff = d;
+            best_idx = b;
+        }
+    }
+    let dry_mag = win.display_bins[best_idx];
+    let wet_mag = win.display_wet_bins[best_idx];
+
+    // Vertical cursor line through the plot at the mouse x.
+    widgets::draw_rect(
+        &mut win.surface.pixmap,
+        mx,
+        plot_y,
+        1.0,
+        plot_h,
+        tiny_skia::Color::from_rgba8(0xc0, 0xe0, 0xff, 0x80),
+    );
+
+    // Three lines: freq / dry / wet.
+    let freq_text = if freq >= 1000.0 {
+        format!("{:.2} kHz", freq / 1000.0)
+    } else {
+        format!("{:.0} Hz", freq)
+    };
+    let fmt_db = |mag: f32| -> String {
+        let db = 20.0 * mag.max(1e-6).log10();
+        if db < -90.0 {
+            String::from("—")
+        } else {
+            format!("{:+.1} dB", db)
+        }
+    };
+    let dry_text = format!("Dry: {}", fmt_db(dry_mag));
+    let wet_text = format!("Wet: {}", fmt_db(wet_mag));
+
+    // Tooltip box geometry. Width is the longest text line plus padding.
+    let font_size = (10.0 * s).max(9.0);
+    let line_h = font_size + 4.0 * s;
+    let pad = 6.0 * s;
+    let tr = &mut win.text_renderer;
+    let tw = tr
+        .text_width(&freq_text, font_size)
+        .max(tr.text_width(&dry_text, font_size))
+        .max(tr.text_width(&wet_text, font_size));
+    let tooltip_w = tw + pad * 2.0;
+    let tooltip_h = pad * 2.0 + line_h * 3.0;
+
+    // Position next to the cursor; flip to the left if it would overflow,
+    // and clamp inside the plot rect vertically.
+    let offset = 12.0 * s;
+    let mut tx = mx + offset;
+    if tx + tooltip_w > plot_x + plot_w {
+        tx = mx - tooltip_w - offset;
+    }
+    if tx < plot_x {
+        tx = plot_x;
+    }
+    let mut ty = my - tooltip_h / 2.0;
+    if ty < plot_y {
+        ty = plot_y;
+    }
+    if ty + tooltip_h > plot_y + plot_h {
+        ty = (plot_y + plot_h - tooltip_h).max(plot_y);
+    }
+
+    // Background + border.
+    widgets::draw_rect(
+        &mut win.surface.pixmap,
+        tx,
+        ty,
+        tooltip_w,
+        tooltip_h,
+        tiny_skia::Color::from_rgba8(0x10, 0x14, 0x1c, 0xf2),
+    );
+    widgets::draw_rect_outline(
+        &mut win.surface.pixmap,
+        tx,
+        ty,
+        tooltip_w,
+        tooltip_h,
+        tiny_skia::Color::from_rgba8(0xc0, 0xe0, 0xff, 0xff),
+        1.0,
+    );
+
+    // Three lines, top to bottom.
+    let mut y = ty + pad + font_size;
+    tr.draw_text(
+        &mut win.surface.pixmap,
+        tx + pad,
+        y,
+        &freq_text,
+        font_size,
+        tiny_skia::Color::from_rgba8(0xc0, 0xe0, 0xff, 0xff),
+    );
+    y += line_h;
+    tr.draw_text(
+        &mut win.surface.pixmap,
+        tx + pad,
+        y,
+        &dry_text,
+        font_size,
+        tiny_skia::Color::from_rgba8(0x90, 0xa8, 0xc8, 0xff),
+    );
+    y += line_h;
+    tr.draw_text(
+        &mut win.surface.pixmap,
+        tx + pad,
+        y,
+        &wet_text,
+        font_size,
+        tiny_skia::Color::from_rgba8(0xff, 0xb0, 0x40, 0xff),
+    );
 }
 
 fn draw_dot(pixmap: &mut tiny_skia::Pixmap, cx: f32, cy: f32, r: f32, color: tiny_skia::Color) {
