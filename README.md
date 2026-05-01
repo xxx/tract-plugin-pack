@@ -117,8 +117,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Ubuntu / Debian
 sudo apt install libxcb1-dev libx11-xcb-dev libx11-dev libxcursor-dev \
-  libasound2-dev libgl-dev libdrm-dev libjack-jackd2-dev \
-  libwayland-dev libegl-dev
+  libasound2-dev libgl-dev libjack-jackd2-dev
 ```
 
 ## Building
