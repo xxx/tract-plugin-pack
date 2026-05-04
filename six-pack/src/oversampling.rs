@@ -156,8 +156,17 @@ fn downsample_one_stage(stage: &mut HalfBandStage, src: &[f32], dst: &mut [f32])
 /// Real-time-safe: all working buffers (`stage_scratch_*`, `down_scratch_*`,
 /// `scratch_*`) are pre-allocated by `set_factor`. `upsample_block` /
 /// `downsample_block` perform zero allocations on the hot path.
+/// Maximum number of half-band stages (16x oversampling).
+pub const MAX_STAGES: usize = 4;
+/// Maximum oversampling factor.
+pub const MAX_FACTOR: usize = 16;
+
 pub struct StereoOversampler {
     factor: usize, // 1, 4, 8, or 16
+    /// Active stage count (0/2/3/4 for factor 1/4/8/16). The Vec fields below
+    /// are sized for `MAX_STAGES`; only the first `n_stages` slots are used
+    /// by `upsample_block` / `downsample_block`.
+    n_stages: usize,
     up_l: Vec<HalfBandStage>,
     up_r: Vec<HalfBandStage>,
     down_l: Vec<HalfBandStage>,
@@ -173,12 +182,17 @@ pub struct StereoOversampler {
     /// `down_scratch_*[i]` holds the signal *after* downsample stage `i`.
     down_scratch_l: Vec<Vec<f32>>,
     down_scratch_r: Vec<Vec<f32>>,
+    /// `max_block` value the buffers above were sized for. `set_factor`
+    /// only allocates when this changes (or on the first call); the audio
+    /// thread reuses the existing heap on every factor change.
+    sized_for_max_block: usize,
 }
 
 impl StereoOversampler {
     pub fn new() -> Self {
         Self {
             factor: 1,
+            n_stages: 0,
             up_l: Vec::new(),
             up_r: Vec::new(),
             down_l: Vec::new(),
@@ -189,9 +203,20 @@ impl StereoOversampler {
             scratch_r: Vec::new(),
             down_scratch_l: Vec::new(),
             down_scratch_r: Vec::new(),
+            sized_for_max_block: 0,
         }
     }
 
+    /// Set the active oversampling factor and the maximum block size the
+    /// internal buffers must accommodate.
+    ///
+    /// The first call (typically from `Plugin::initialize` on the main
+    /// thread) — and any later call where `max_block` has grown — allocates
+    /// buffers sized for `MAX_FACTOR=16` regardless of the requested
+    /// `factor`. After that, every subsequent call (including audio-thread
+    /// calls from `process` when the user changes the Quality parameter)
+    /// reuses the existing heap and never allocates: only the active stage
+    /// count and the filter state are updated.
     pub fn set_factor(&mut self, factor: usize, max_block: usize) {
         let n_stages = match factor {
             1 => 0,
@@ -201,27 +226,62 @@ impl StereoOversampler {
             _ => panic!("unsupported factor {}", factor),
         };
         self.factor = factor;
-        self.up_l = (0..n_stages).map(|_| HalfBandStage::default()).collect();
-        self.up_r = (0..n_stages).map(|_| HalfBandStage::default()).collect();
-        self.down_l = (0..n_stages).map(|_| HalfBandStage::default()).collect();
-        self.down_r = (0..n_stages).map(|_| HalfBandStage::default()).collect();
+        self.n_stages = n_stages;
 
-        // Pre-allocate stage scratch: stage i holds 2^(i+1) * max_block samples.
-        self.stage_scratch_l.clear();
-        self.stage_scratch_r.clear();
-        self.down_scratch_l.clear();
-        self.down_scratch_r.clear();
-        let mut size = max_block;
-        for _ in 0..n_stages {
-            size *= 2;
-            self.stage_scratch_l.push(vec![0.0; size]);
-            self.stage_scratch_r.push(vec![0.0; size]);
-            self.down_scratch_l.push(vec![0.0; size]);
-            self.down_scratch_r.push(vec![0.0; size]);
+        if max_block > self.sized_for_max_block {
+            // First call, or max_block grew. Always runs on the main thread
+            // (Plugin::initialize); allocating here is fine.
+            self.up_l = (0..MAX_STAGES).map(|_| HalfBandStage::default()).collect();
+            self.up_r = (0..MAX_STAGES).map(|_| HalfBandStage::default()).collect();
+            self.down_l = (0..MAX_STAGES).map(|_| HalfBandStage::default()).collect();
+            self.down_r = (0..MAX_STAGES).map(|_| HalfBandStage::default()).collect();
+
+            self.stage_scratch_l = Vec::with_capacity(MAX_STAGES);
+            self.stage_scratch_r = Vec::with_capacity(MAX_STAGES);
+            self.down_scratch_l = Vec::with_capacity(MAX_STAGES);
+            self.down_scratch_r = Vec::with_capacity(MAX_STAGES);
+            let mut size = max_block;
+            for _ in 0..MAX_STAGES {
+                size *= 2;
+                self.stage_scratch_l.push(vec![0.0; size]);
+                self.stage_scratch_r.push(vec![0.0; size]);
+                self.down_scratch_l.push(vec![0.0; size]);
+                self.down_scratch_r.push(vec![0.0; size]);
+            }
+
+            let max_cap = max_block * MAX_FACTOR;
+            self.scratch_l = vec![0.0; max_cap];
+            self.scratch_r = vec![0.0; max_cap];
+            self.sized_for_max_block = max_block;
+        } else {
+            // Reuse path. No allocations — safe to call from the audio thread.
+            for s in self.up_l.iter_mut() {
+                *s = HalfBandStage::default();
+            }
+            for s in self.up_r.iter_mut() {
+                *s = HalfBandStage::default();
+            }
+            for s in self.down_l.iter_mut() {
+                *s = HalfBandStage::default();
+            }
+            for s in self.down_r.iter_mut() {
+                *s = HalfBandStage::default();
+            }
+            for v in self.stage_scratch_l.iter_mut() {
+                v.fill(0.0);
+            }
+            for v in self.stage_scratch_r.iter_mut() {
+                v.fill(0.0);
+            }
+            for v in self.down_scratch_l.iter_mut() {
+                v.fill(0.0);
+            }
+            for v in self.down_scratch_r.iter_mut() {
+                v.fill(0.0);
+            }
+            self.scratch_l.fill(0.0);
+            self.scratch_r.fill(0.0);
         }
-        let cap = max_block * factor.max(1);
-        self.scratch_l.resize(cap, 0.0);
-        self.scratch_r.resize(cap, 0.0);
     }
 
     pub fn factor(&self) -> usize {
@@ -231,9 +291,8 @@ impl StereoOversampler {
     /// Total round-trip latency in native samples (estimate; will be refined
     /// against measurements).
     pub fn latency_samples(&self) -> usize {
-        let n_stages = self.up_l.len();
         let mut latency = 0usize;
-        for stage in 0..n_stages {
+        for stage in 0..self.n_stages {
             latency += HALFBAND_GROUP_DELAY >> stage;
         }
         latency * 2
@@ -278,15 +337,16 @@ impl StereoOversampler {
             return (&mut self.scratch_l[..n], &mut self.scratch_r[..n]);
         }
 
+        let ns = self.n_stages;
         upsample_channel(
-            &mut self.up_l,
-            &mut self.stage_scratch_l,
+            &mut self.up_l[..ns],
+            &mut self.stage_scratch_l[..ns],
             input_l,
             &mut self.scratch_l,
         );
         upsample_channel(
-            &mut self.up_r,
-            &mut self.stage_scratch_r,
+            &mut self.up_r[..ns],
+            &mut self.stage_scratch_r[..ns],
             input_r,
             &mut self.scratch_r,
         );
@@ -305,17 +365,18 @@ impl StereoOversampler {
             return;
         }
 
+        let ns = self.n_stages;
         let total_os = n * self.factor;
         downsample_channel(
-            &mut self.down_l,
+            &mut self.down_l[..ns],
             &self.scratch_l[..total_os],
-            &mut self.down_scratch_l,
+            &mut self.down_scratch_l[..ns],
             output_l,
         );
         downsample_channel(
-            &mut self.down_r,
+            &mut self.down_r[..ns],
             &self.scratch_r[..total_os],
-            &mut self.down_scratch_r,
+            &mut self.down_scratch_r[..ns],
             output_r,
         );
     }
