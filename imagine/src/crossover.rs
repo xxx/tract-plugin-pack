@@ -285,6 +285,374 @@ impl CrossoverIir {
     }
 }
 
+// ============================================================================
+// Linear-phase FIR variant
+// ============================================================================
+
+/// Single linear-phase windowed-sinc lowpass FIR.
+/// Length is fixed at construction; coefficients are redesigned in place.
+pub struct FirLowpass {
+    taps_a: Vec<f32>, // current
+    taps_b: Vec<f32>, // pending (filled during redesign)
+    delay_line: Vec<f32>,
+    write_idx: usize,
+    using_a: bool, // true = process from taps_a
+}
+
+impl FirLowpass {
+    pub fn new(length: usize) -> Self {
+        Self {
+            taps_a: vec![0.0; length],
+            taps_b: vec![0.0; length],
+            delay_line: vec![0.0; length],
+            write_idx: 0,
+            using_a: true,
+        }
+    }
+
+    pub fn length(&self) -> usize {
+        self.taps_a.len()
+    }
+
+    pub fn latency_samples(&self) -> usize {
+        self.taps_a.len() / 2
+    }
+
+    /// Design windowed-sinc lowpass into the *pending* tap array.
+    pub fn redesign_pending(&mut self, fc: f32, sr: f32) {
+        let target = if self.using_a {
+            &mut self.taps_b
+        } else {
+            &mut self.taps_a
+        };
+        Self::design(target, fc, sr);
+    }
+
+    fn design(taps: &mut [f32], fc: f32, sr: f32) {
+        let n = taps.len();
+        let center = (n - 1) as f32 / 2.0;
+        let cutoff_norm = (fc / sr).clamp(0.001, 0.499);
+        let mut sum = 0.0_f32;
+        for (i, t) in taps.iter_mut().enumerate() {
+            let k = i as f32 - center;
+            let raw = if k.abs() < 1e-9 {
+                2.0 * cutoff_norm
+            } else {
+                (2.0 * std::f32::consts::PI * cutoff_norm * k).sin() / (std::f32::consts::PI * k)
+            };
+            // Hann window
+            let w = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (n - 1) as f32).cos();
+            *t = raw * w;
+            sum += *t;
+        }
+        // Normalize for unit DC gain.
+        if sum.abs() > 1e-9 {
+            for t in taps.iter_mut() {
+                *t /= sum;
+            }
+        }
+    }
+
+    /// Swap pending → active (call after a crossfade completes).
+    pub fn promote_pending(&mut self) {
+        self.using_a = !self.using_a;
+    }
+
+    /// Process one sample using the current taps. Used during the crossfade,
+    /// caller will compute (1-α)·current + α·pending separately.
+    #[inline]
+    pub fn process_current(&mut self, x: f32) -> f32 {
+        let n = self.taps_a.len();
+        self.delay_line[self.write_idx] = x;
+        let taps = if self.using_a {
+            &self.taps_a
+        } else {
+            &self.taps_b
+        };
+        let mut acc = 0.0;
+        let mut idx = self.write_idx;
+        for &tap in taps {
+            acc += tap * self.delay_line[idx];
+            idx = if idx == 0 { n - 1 } else { idx - 1 };
+        }
+        self.write_idx = if self.write_idx + 1 == n {
+            0
+        } else {
+            self.write_idx + 1
+        };
+        acc
+    }
+
+    /// Process one sample using the *pending* taps (for crossfading).
+    /// Does NOT advance the delay line; call `process_current` first.
+    #[inline]
+    pub fn process_pending(&self) -> f32 {
+        let n = self.taps_a.len();
+        let pending = if self.using_a {
+            &self.taps_b
+        } else {
+            &self.taps_a
+        };
+        // After process_current advanced write_idx, the most recent sample is at write_idx - 1.
+        let read_start = if self.write_idx == 0 {
+            n - 1
+        } else {
+            self.write_idx - 1
+        };
+        let mut acc = 0.0;
+        let mut idx = read_start;
+        for &tap in pending {
+            acc += tap * self.delay_line[idx];
+            idx = if idx == 0 { n - 1 } else { idx - 1 };
+        }
+        acc
+    }
+
+    pub fn reset(&mut self) {
+        self.delay_line.fill(0.0);
+        self.write_idx = 0;
+    }
+}
+
+/// 4-band linear-phase FIR crossover. Bands are derived from a single LP per split:
+///   low  = LP1
+///   mid_low  = LP2 - LP1
+///   mid_high = LP3 - LP2
+///   high     = input - LP3
+/// Sum = input — perfect reconstruction (modulo group-delay alignment).
+pub struct CrossoverFir {
+    lp1: FirLowpass,
+    lp2: FirLowpass,
+    lp3: FirLowpass,
+    /// Input delay line so the "high" branch (input - LP3) aligns with the FIR group delay.
+    input_delay: Vec<f32>,
+    input_delay_idx: usize,
+    /// Crossfade state when a redesign is in flight.
+    crossfade_pending_lp: [bool; 3],
+    crossfade_counter: usize,
+    crossfade_total: usize,
+}
+
+impl CrossoverFir {
+    pub fn new(length: usize) -> Self {
+        let half = length / 2;
+        Self {
+            lp1: FirLowpass::new(length),
+            lp2: FirLowpass::new(length),
+            lp3: FirLowpass::new(length),
+            input_delay: vec![0.0; half + 1],
+            input_delay_idx: 0,
+            crossfade_pending_lp: [false; 3],
+            crossfade_counter: 0,
+            crossfade_total: 0,
+        }
+    }
+
+    pub fn length(&self) -> usize {
+        self.lp1.length()
+    }
+
+    pub fn latency_samples(&self) -> usize {
+        self.lp1.latency_samples()
+    }
+
+    /// Redesign all three lowpasses into the pending arrays. Schedules a crossfade.
+    pub fn redesign(&mut self, f1: f32, f2: f32, f3: f32, sr: f32, crossfade_len: usize) {
+        let f1 = f1.clamp(20.0, sr * 0.5 - 100.0);
+        let f2 = f2.clamp(f1 + 50.0, sr * 0.5 - 50.0);
+        let f3 = f3.clamp(f2 + 50.0, sr * 0.5 - 50.0);
+
+        self.lp1.redesign_pending(f1, sr);
+        self.lp2.redesign_pending(f2, sr);
+        self.lp3.redesign_pending(f3, sr);
+
+        self.crossfade_pending_lp = [true; 3];
+        self.crossfade_counter = crossfade_len;
+        self.crossfade_total = crossfade_len.max(1);
+    }
+
+    /// Initial design — bypass crossfade, place coefficients in active slots immediately.
+    pub fn initialize(&mut self, f1: f32, f2: f32, f3: f32, sr: f32) {
+        self.redesign(f1, f2, f3, sr, 1);
+        self.lp1.promote_pending();
+        self.lp2.promote_pending();
+        self.lp3.promote_pending();
+        self.crossfade_pending_lp = [false; 3];
+        self.crossfade_counter = 0;
+    }
+
+    pub fn reset(&mut self) {
+        self.lp1.reset();
+        self.lp2.reset();
+        self.lp3.reset();
+        self.input_delay.fill(0.0);
+        self.input_delay_idx = 0;
+    }
+
+    /// Returns (low, mid_low, mid_high, high).
+    #[inline]
+    pub fn process(&mut self, x: f32) -> [f32; 4] {
+        // Push to input delay
+        self.input_delay[self.input_delay_idx] = x;
+        let read_idx = if self.input_delay_idx + 1 == self.input_delay.len() {
+            0
+        } else {
+            self.input_delay_idx + 1
+        };
+        let x_delayed = self.input_delay[read_idx];
+        self.input_delay_idx = read_idx;
+
+        // Run each LP. During crossfade, blend current and pending outputs.
+        let lp1 = self.run_lp_with_crossfade(0, x);
+        let lp2 = self.run_lp_with_crossfade(1, x);
+        let lp3 = self.run_lp_with_crossfade(2, x);
+
+        if self.crossfade_counter > 0 {
+            self.crossfade_counter -= 1;
+            if self.crossfade_counter == 0 {
+                if self.crossfade_pending_lp[0] {
+                    self.lp1.promote_pending();
+                }
+                if self.crossfade_pending_lp[1] {
+                    self.lp2.promote_pending();
+                }
+                if self.crossfade_pending_lp[2] {
+                    self.lp3.promote_pending();
+                }
+                self.crossfade_pending_lp = [false; 3];
+            }
+        }
+
+        [
+            lp1,             // low
+            lp2 - lp1,       // mid_low
+            lp3 - lp2,       // mid_high
+            x_delayed - lp3, // high
+        ]
+    }
+
+    #[inline]
+    fn run_lp_with_crossfade(&mut self, idx: usize, x: f32) -> f32 {
+        let lp = match idx {
+            0 => &mut self.lp1,
+            1 => &mut self.lp2,
+            _ => &mut self.lp3,
+        };
+        let cur = lp.process_current(x);
+        if self.crossfade_pending_lp[idx] && self.crossfade_total > 0 {
+            let pend = lp.process_pending();
+            let alpha = 1.0 - (self.crossfade_counter as f32 / self.crossfade_total as f32);
+            (1.0 - alpha) * cur + alpha * pend
+        } else {
+            cur
+        }
+    }
+}
+
+#[cfg(test)]
+mod fir_tests {
+    use super::*;
+
+    #[test]
+    fn fir_band_sum_equals_delayed_input() {
+        let sr = 48_000.0;
+        let n_taps = 511; // odd length, integer half-delay
+        let mut x = CrossoverFir::new(n_taps);
+        x.initialize(120.0, 1000.0, 8000.0, sr);
+
+        let input: Vec<f32> = (0..4096).map(|i| (i as f32 * 0.013).sin()).collect();
+        let mut summed = vec![0.0_f32; input.len()];
+        for (i, &s) in input.iter().enumerate() {
+            let bands = x.process(s);
+            summed[i] = bands.iter().sum();
+        }
+
+        let lat = x.latency_samples();
+        for i in lat + 256..input.len() {
+            let err = (summed[i] - input[i - lat]).abs();
+            assert!(err < 1e-3, "i={i}: err {err:e}");
+        }
+    }
+
+    #[test]
+    fn fir_crossfade_no_discontinuity() {
+        let sr = 48_000.0;
+        let mut x = CrossoverFir::new(511);
+        x.initialize(120.0, 1000.0, 8000.0, sr);
+
+        let input: Vec<f32> = (0..2048)
+            .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr).sin())
+            .collect();
+        let mut prev_summed = 0.0_f32;
+        for &s in &input[..1024] {
+            let bands = x.process(s);
+            prev_summed = bands.iter().sum();
+        }
+
+        x.redesign(150.0, 1500.0, 9000.0, sr, 256);
+
+        let mut max_jump = 0.0_f32;
+        for &s in &input[1024..] {
+            let bands = x.process(s);
+            let summed: f32 = bands.iter().sum();
+            let jump = (summed - prev_summed).abs();
+            if jump > max_jump {
+                max_jump = jump;
+            }
+            prev_summed = summed;
+        }
+        assert!(max_jump < 0.20, "max jump {max_jump:.4} suggests a click");
+    }
+
+    #[test]
+    fn fir_redesign_no_alloc() {
+        let mut x = CrossoverFir::new(255);
+        x.initialize(120.0, 1000.0, 8000.0, 48_000.0);
+        let len_before = (x.lp1.taps_a.len(), x.lp1.taps_b.len(), x.input_delay.len());
+        for f1 in [80.0, 200.0, 500.0, 100.0_f32] {
+            x.redesign(f1, 1000.0, 8000.0, 48_000.0, 64);
+            for _ in 0..128 {
+                let _ = x.process(0.1);
+            }
+        }
+        let len_after = (x.lp1.taps_a.len(), x.lp1.taps_b.len(), x.input_delay.len());
+        assert_eq!(len_before, len_after);
+    }
+
+    #[test]
+    fn fir_latency_matches_kernel_half() {
+        let x = CrossoverFir::new(513);
+        assert_eq!(x.latency_samples(), 256);
+    }
+
+    #[test]
+    fn fir_each_band_peaks_in_its_passband() {
+        let sr = 48_000.0;
+        let probes: [(f32, usize); 4] = [(60.0, 0), (400.0, 1), (3000.0, 2), (12000.0, 3)];
+        for (f, expected) in probes {
+            let mut x = CrossoverFir::new(511);
+            x.initialize(120.0, 1000.0, 8000.0, sr);
+            let input: Vec<f32> = (0..4096)
+                .map(|i| (2.0 * std::f32::consts::PI * f * i as f32 / sr).sin())
+                .collect();
+            let mut acc = [0.0_f32; 4];
+            for &s in &input[1024..] {
+                let bands = x.process(s);
+                for i in 0..4 {
+                    acc[i] += bands[i] * bands[i];
+                }
+            }
+            let max_idx = acc
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .unwrap()
+                .0;
+            assert_eq!(max_idx, expected, "f={f}: acc={acc:?}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
