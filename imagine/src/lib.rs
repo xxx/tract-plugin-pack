@@ -1,5 +1,7 @@
 //! Imagine: multiband stereo imager modeled on Ozone Imager.
 
+#![feature(portable_simd)]
+
 use nih_plug::prelude::*;
 use std::sync::Arc;
 
@@ -61,8 +63,11 @@ impl ClapPlugin for Imagine {
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Multiband stereo imager");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] =
-        &[ClapFeature::AudioEffect, ClapFeature::Stereo, ClapFeature::Utility];
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::AudioEffect,
+        ClapFeature::Stereo,
+        ClapFeature::Utility,
+    ];
 }
 
 impl Vst3Plugin for Imagine {
