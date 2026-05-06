@@ -4,7 +4,18 @@ use crate::spectrum::NUM_LOG_BINS;
 use crate::theme;
 use crate::ImagineParams;
 use std::sync::Arc;
-use tiny_skia::{BlendMode, Color, Paint, PixmapMut, Rect, Transform};
+use tiny_skia::{BlendMode, Color, Paint, Pixmap, PixmapMut, Rect, Transform};
+use tiny_skia_widgets::TextRenderer;
+
+/// Format a frequency in Hz as a short display string.
+/// Examples: 80 -> "80 Hz", 1000 -> "1.0 kHz", 8400 -> "8.4 kHz".
+pub(crate) fn format_freq(hz: f32) -> String {
+    if hz < 1000.0 {
+        format!("{:.0} Hz", hz)
+    } else {
+        format!("{:.1} kHz", hz / 1000.0)
+    }
+}
 
 const F_MIN: f32 = 20.0;
 const F_MAX: f32 = 20_000.0;
@@ -61,86 +72,129 @@ fn stroke_rect_i(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: i32, h: i32, col
 }
 
 pub fn draw(
-    pixmap: &mut PixmapMut<'_>,
+    pixmap: &mut Pixmap,
     x: i32,
     y: i32,
     w: i32,
     h: i32,
     params: &Arc<ImagineParams>,
+    text_renderer: &mut TextRenderer,
 ) {
-    // Panel background + border.
-    fill_rect_i(pixmap, x, y, w, h, theme::spectrum_bg());
-    stroke_rect_i(pixmap, x, y, w, h, theme::border());
-
-    // |M| spectrum bars (one per log bin, scaled to panel height).
-    let bar_w = (w as f32 / NUM_LOG_BINS as f32).max(1.0);
-    let bar_h_max = (h as f32 - 8.0).max(1.0);
-    for i in 0..NUM_LOG_BINS {
-        let mag = params.spectrum_display.read_mag_m(i);
-        // Convert linear magnitude to pseudo-dB display
-        // (-60 dBFS = 0, 0 dBFS = full).
-        let db = 20.0_f32 * mag.max(1e-9).log10();
-        let h_norm = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-        let bar_height = (h_norm * bar_h_max) as i32;
-        if bar_height <= 0 {
-            continue;
-        }
-        let bar_x = x + (i as f32 * bar_w) as i32;
-        let bar_y = y + h - 4 - bar_height;
-        fill_rect_i(
-            pixmap,
-            bar_x,
-            bar_y,
-            bar_w as i32,
-            bar_height,
-            theme::cyan_to_pink(0.5),
-        );
-    }
-
-    // 3 draggable split lines.
     let f1 = params.xover_1.value();
     let f2 = params.xover_2.value();
     let f3 = params.xover_3.value();
+
+    {
+        let mut pm = pixmap.as_mut();
+
+        // Panel background + border.
+        fill_rect_i(&mut pm, x, y, w, h, theme::spectrum_bg());
+        stroke_rect_i(&mut pm, x, y, w, h, theme::border());
+
+        // |M| spectrum bars (one per log bin, scaled to panel height).
+        let bar_w = (w as f32 / NUM_LOG_BINS as f32).max(1.0);
+        let bar_h_max = (h as f32 - 8.0).max(1.0);
+        for i in 0..NUM_LOG_BINS {
+            let mag = params.spectrum_display.read_mag_m(i);
+            // Convert linear magnitude to pseudo-dB display
+            // (-60 dBFS = 0, 0 dBFS = full).
+            let db = 20.0_f32 * mag.max(1e-9).log10();
+            let h_norm = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+            let bar_height = (h_norm * bar_h_max) as i32;
+            if bar_height <= 0 {
+                continue;
+            }
+            let bar_x = x + (i as f32 * bar_w) as i32;
+            let bar_y = y + h - 4 - bar_height;
+            fill_rect_i(
+                &mut pm,
+                bar_x,
+                bar_y,
+                bar_w as i32,
+                bar_height,
+                theme::cyan_to_pink(0.5),
+            );
+        }
+
+        // 3 draggable split lines.
+        for hz in [f1, f2, f3] {
+            let lx = split_pixel_x(x, w, hz);
+            // Vertical line
+            fill_rect_i(&mut pm, lx, y + 2, 2, (h - 4).max(0), theme::split_line());
+            // Handle (small filled square at the top)
+            fill_rect_i(&mut pm, lx - 4, y + 2, 9, 8, theme::accent());
+        }
+    }
+
+    // Frequency labels above each split handle.
+    let label_size = 10.0_f32;
     for hz in [f1, f2, f3] {
         let lx = split_pixel_x(x, w, hz);
-        // Vertical line
-        fill_rect_i(pixmap, lx, y + 2, 2, (h - 4).max(0), theme::split_line());
-        // Handle (small filled square at the top)
-        fill_rect_i(pixmap, lx - 4, y + 2, 9, 8, theme::accent());
+        let txt = format_freq(hz);
+        let tw = text_renderer.text_width(&txt, label_size);
+        // Center on the handle, just above the panel's top edge.
+        let mut tx = lx as f32 - tw * 0.5;
+        // Keep label inside the panel horizontally.
+        let min_x = x as f32 + 2.0;
+        let max_x = (x + w) as f32 - tw - 2.0;
+        if tx < min_x {
+            tx = min_x;
+        }
+        if tx > max_x {
+            tx = max_x;
+        }
+        let ty = y as f32 + label_size + 1.0;
+        text_renderer.draw_text(pixmap, tx, ty, &txt, label_size, theme::text());
     }
 }
 
 pub fn draw_coherence(
-    pixmap: &mut PixmapMut<'_>,
+    pixmap: &mut Pixmap,
     x: i32,
     y: i32,
     w: i32,
     h: i32,
     params: &Arc<ImagineParams>,
+    text_renderer: &mut TextRenderer,
 ) {
-    fill_rect_i(pixmap, x, y, w, h, theme::spectrum_bg());
-    stroke_rect_i(pixmap, x, y, w, h, theme::border());
+    {
+        let mut pm = pixmap.as_mut();
+        fill_rect_i(&mut pm, x, y, w, h, theme::spectrum_bg());
+        stroke_rect_i(&mut pm, x, y, w, h, theme::border());
 
-    // Per-bin: read coherence (1 - γ²), use as both height and color t.
-    let bar_w = (w as f32 / NUM_LOG_BINS as f32).max(1.0);
-    let bar_h_max = (h as f32 - 8.0).max(1.0);
-    for i in 0..NUM_LOG_BINS {
-        let v = params.spectrum_display.read_coherence(i).clamp(0.0, 1.0);
-        let bar_height = (v * bar_h_max) as i32;
-        if bar_height <= 0 {
-            continue;
+        // Per-bin: read coherence (1 - γ²), use as both height and color t.
+        let bar_w = (w as f32 / NUM_LOG_BINS as f32).max(1.0);
+        let bar_h_max = (h as f32 - 8.0).max(1.0);
+        for i in 0..NUM_LOG_BINS {
+            let v = params.spectrum_display.read_coherence(i).clamp(0.0, 1.0);
+            let bar_height = (v * bar_h_max) as i32;
+            if bar_height <= 0 {
+                continue;
+            }
+            let bar_x = x + (i as f32 * bar_w) as i32;
+            let bar_y = y + h - 4 - bar_height;
+            fill_rect_i(
+                &mut pm,
+                bar_x,
+                bar_y,
+                bar_w as i32,
+                bar_height,
+                theme::cyan_to_pink(v),
+            );
         }
-        let bar_x = x + (i as f32 * bar_w) as i32;
-        let bar_y = y + h - 4 - bar_height;
-        fill_rect_i(
-            pixmap,
-            bar_x,
-            bar_y,
-            bar_w as i32,
-            bar_height,
-            theme::cyan_to_pink(v),
-        );
     }
+
+    // Small "Coherence" caption inside the top-left corner.
+    let label_size = 10.0_f32;
+    let caption = "Coherence";
+    text_renderer.draw_text(
+        pixmap,
+        x as f32 + 4.0,
+        y as f32 + label_size + 1.0,
+        caption,
+        label_size,
+        theme::text_dim(),
+    );
 }
 
 #[cfg(test)]
@@ -185,8 +239,17 @@ mod tests {
     fn render_at_min_size_no_panic() {
         let params = Arc::new(ImagineParams::default());
         let mut pixmap = tiny_skia::Pixmap::new(720, 580).unwrap();
-        let mut pmut = pixmap.as_mut();
-        draw(&mut pmut, 290, 0, 430, 350, &params);
-        draw_coherence(&mut pmut, 290, 480, 430, 100, &params);
+        let font_data = include_bytes!("../fonts/DejaVuSans.ttf");
+        let mut tr = TextRenderer::new(font_data);
+        draw(&mut pixmap, 290, 0, 430, 350, &params, &mut tr);
+        draw_coherence(&mut pixmap, 290, 480, 430, 100, &params, &mut tr);
+    }
+
+    #[test]
+    fn format_freq_examples() {
+        assert_eq!(format_freq(80.0), "80 Hz");
+        assert_eq!(format_freq(120.0), "120 Hz");
+        assert_eq!(format_freq(1000.0), "1.0 kHz");
+        assert_eq!(format_freq(8400.0), "8.4 kHz");
     }
 }

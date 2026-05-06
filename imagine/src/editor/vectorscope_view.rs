@@ -6,7 +6,8 @@ use crate::vectorscope::VectorConsumer;
 use crate::ImagineParams;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tiny_skia::{Color, Paint, PixmapMut, Rect, Transform};
+use tiny_skia::{Color, Paint, Pixmap, PixmapMut, Rect, Transform};
+use tiny_skia_widgets::TextRenderer;
 
 const SAMPLE_BUDGET: usize = 4096;
 
@@ -67,7 +68,7 @@ fn put_pixel(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, color: Color) {
 
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
-    pixmap: &mut PixmapMut<'_>,
+    pixmap: &mut Pixmap,
     x: i32,
     y: i32,
     w: i32,
@@ -76,61 +77,107 @@ pub fn draw(
     vec: &Arc<VectorConsumer>,
     vec_l: &mut Vec<f32>,
     vec_r: &mut Vec<f32>,
+    text_renderer: &mut TextRenderer,
 ) {
-    fill_rect_i(pixmap, x, y, w, h, theme::panel_bg());
-    stroke_rect_i(pixmap, x, y, w, h, theme::border());
-
-    // Reserve bottom 36 px for correlation + balance bars.
-    let scope_h = h - 36;
-    let scope_x = x + 6;
-    let scope_y = y + 6;
-    let scope_w = w - 12;
-
-    // Snapshot up to SAMPLE_BUDGET samples.
-    if vec_l.len() < SAMPLE_BUDGET {
-        vec_l.resize(SAMPLE_BUDGET, 0.0);
-        vec_r.resize(SAMPLE_BUDGET, 0.0);
-    }
-    let n = vec.snapshot(SAMPLE_BUDGET, vec_l, vec_r);
     let mode = VectorMode::from_u32(params.vector_mode.load(Ordering::Relaxed));
+    let corr = f32::from_bits(params.correlation.load(Ordering::Relaxed));
+    let bal = f32::from_bits(params.balance.load(Ordering::Relaxed));
 
-    let cx = scope_x + scope_w / 2;
-    let cy = scope_y + scope_h / 2;
-    let r = scope_w.min(scope_h) / 2 - 6;
+    {
+        let mut pm = pixmap.as_mut();
+        fill_rect_i(&mut pm, x, y, w, h, theme::panel_bg());
+        stroke_rect_i(&mut pm, x, y, w, h, theme::border());
 
-    // Background grid (a faint cross).
-    fill_rect_i(
-        pixmap,
-        scope_x,
-        scope_y + scope_h / 2,
-        scope_w,
-        1,
-        theme::text_dim(),
-    );
-    fill_rect_i(
-        pixmap,
-        scope_x + scope_w / 2,
-        scope_y,
-        1,
-        scope_h,
-        theme::text_dim(),
-    );
+        // Reserve bottom 36 px for correlation + balance bars.
+        let scope_h = h - 36;
+        let scope_x = x + 6;
+        let scope_y = y + 6;
+        let scope_w = w - 12;
 
-    match mode {
-        VectorMode::Polar => draw_polar(pixmap, cx, cy, r, &vec_l[..n], &vec_r[..n]),
-        VectorMode::Lissajous => draw_lissajous(pixmap, cx, cy, r, &vec_l[..n], &vec_r[..n]),
+        // Snapshot up to SAMPLE_BUDGET samples.
+        if vec_l.len() < SAMPLE_BUDGET {
+            vec_l.resize(SAMPLE_BUDGET, 0.0);
+            vec_r.resize(SAMPLE_BUDGET, 0.0);
+        }
+        let n = vec.snapshot(SAMPLE_BUDGET, vec_l, vec_r);
+
+        let cx = scope_x + scope_w / 2;
+        let cy = scope_y + scope_h / 2;
+        let r = scope_w.min(scope_h) / 2 - 6;
+
+        // Background grid (a faint cross).
+        fill_rect_i(
+            &mut pm,
+            scope_x,
+            scope_y + scope_h / 2,
+            scope_w,
+            1,
+            theme::text_dim(),
+        );
+        fill_rect_i(
+            &mut pm,
+            scope_x + scope_w / 2,
+            scope_y,
+            1,
+            scope_h,
+            theme::text_dim(),
+        );
+
+        match mode {
+            VectorMode::Polar => draw_polar(&mut pm, cx, cy, r, &vec_l[..n], &vec_r[..n]),
+            VectorMode::Lissajous => draw_lissajous(&mut pm, cx, cy, r, &vec_l[..n], &vec_r[..n]),
+        }
+
+        // Correlation bar at the bottom
+        let bar_y = y + h - 28;
+        let corr_color = theme::cyan_to_pink(if corr > 0.0 { 0.0 } else { 1.0 });
+        draw_meter_bar(&mut pm, x + 6, bar_y, w - 12, 8, corr, corr_color);
+
+        // Balance bar
+        let bal_y = y + h - 16;
+        draw_meter_bar(&mut pm, x + 6, bal_y, w - 12, 8, bal, theme::accent());
     }
 
-    // Correlation bar at the bottom
-    let corr = f32::from_bits(params.correlation.load(Ordering::Relaxed));
-    let bar_y = y + h - 28;
-    let corr_color = theme::cyan_to_pink(if corr > 0.0 { 0.0 } else { 1.0 });
-    draw_meter_bar(pixmap, x + 6, bar_y, w - 12, 8, corr, corr_color);
+    // Text labels.
+    let label_size = 10.0_f32;
+    let mode_label = match mode {
+        VectorMode::Polar => "Polar",
+        VectorMode::Lissajous => "Lissajous",
+    };
+    // Mode toggle area is the bottom-left corner above the meter bars
+    // (matches the hit region in the editor: 80×16 px starting at +6 px from
+    // the panel's left edge, ending 36 px above the bottom).
+    let toggle_y1 = (y + h) as f32 - 36.0;
+    let toggle_y0 = toggle_y1 - 16.0;
+    text_renderer.draw_text(
+        pixmap,
+        x as f32 + 6.0,
+        toggle_y0 + (toggle_y1 - toggle_y0) * 0.5 + label_size * 0.35,
+        mode_label,
+        label_size,
+        theme::text(),
+    );
 
-    // Balance bar
-    let bal = f32::from_bits(params.balance.load(Ordering::Relaxed));
-    let bal_y = y + h - 16;
-    draw_meter_bar(pixmap, x + 6, bal_y, w - 12, 8, bal, theme::accent());
+    // Correlation / Balance captions and values.
+    let small_size = 9.0_f32;
+    let corr_text = format!("Corr {:+.2}", corr);
+    text_renderer.draw_text(
+        pixmap,
+        x as f32 + 6.0,
+        (y + h - 28) as f32 - 2.0,
+        &corr_text,
+        small_size,
+        theme::text_dim(),
+    );
+    let bal_text = format!("Bal {:+.2}", bal);
+    text_renderer.draw_text(
+        pixmap,
+        x as f32 + 6.0,
+        (y + h - 16) as f32 - 2.0,
+        &bal_text,
+        small_size,
+        theme::text_dim(),
+    );
 }
 
 /// Polar-sample dot cloud, 45°-rotated so mono = vertical axis.
@@ -204,10 +251,22 @@ mod tests {
         let (_, cons) = ring_pair();
         let cons = Arc::new(cons);
         let mut pixmap = tiny_skia::Pixmap::new(300, 400).unwrap();
-        let mut pmut = pixmap.as_mut();
         let mut vl = vec![0.0; SAMPLE_BUDGET];
         let mut vr = vec![0.0; SAMPLE_BUDGET];
-        draw(&mut pmut, 0, 0, 300, 400, &params, &cons, &mut vl, &mut vr);
+        let font_data = include_bytes!("../fonts/DejaVuSans.ttf");
+        let mut tr = TextRenderer::new(font_data);
+        draw(
+            &mut pixmap,
+            0,
+            0,
+            300,
+            400,
+            &params,
+            &cons,
+            &mut vl,
+            &mut vr,
+            &mut tr,
+        );
     }
 
     #[test]
@@ -220,9 +279,21 @@ mod tests {
             prod.push(phase * 0.5, phase * 0.6);
         }
         let mut pixmap = tiny_skia::Pixmap::new(300, 400).unwrap();
-        let mut pmut = pixmap.as_mut();
         let mut vl = vec![0.0; SAMPLE_BUDGET];
         let mut vr = vec![0.0; SAMPLE_BUDGET];
-        draw(&mut pmut, 0, 0, 300, 400, &params, &cons, &mut vl, &mut vr);
+        let font_data = include_bytes!("../fonts/DejaVuSans.ttf");
+        let mut tr = TextRenderer::new(font_data);
+        draw(
+            &mut pixmap,
+            0,
+            0,
+            300,
+            400,
+            &params,
+            &cons,
+            &mut vl,
+            &mut vr,
+            &mut tr,
+        );
     }
 }

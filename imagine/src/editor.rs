@@ -104,6 +104,10 @@ struct ImagineWindow {
     vec_l: Vec<f32>,
     vec_r: Vec<f32>,
 
+    /// Glyph cache for CPU text rendering. Owned by the window; passed by
+    /// `&mut` reference into each view's draw function.
+    text_renderer: widgets::TextRenderer,
+
     // ── Mouse / keyboard state ───────────────────────────────────────
     drag: widgets::DragState<HitAction>,
     text_edit: widgets::TextEditState<HitAction>,
@@ -137,6 +141,9 @@ impl ImagineWindow {
     ) -> Self {
         let surface = widgets::SoftbufferSurface::new(window, physical_width, physical_height);
 
+        let font_data = include_bytes!("fonts/DejaVuSans.ttf");
+        let text_renderer = widgets::TextRenderer::new(font_data);
+
         Self {
             gui_context,
             surface,
@@ -148,6 +155,7 @@ impl ImagineWindow {
             vectorscope,
             vec_l: Vec::with_capacity(2048),
             vec_r: Vec::with_capacity(2048),
+            text_renderer,
             drag: widgets::DragState::new(),
             text_edit: widgets::TextEditState::new(),
             link_baseline: LinkBaseline::default(),
@@ -209,10 +217,11 @@ impl ImagineWindow {
 
         let layout = self.compute_layout();
 
-        // Dispatch to view modules.
-        let mut pm = self.surface.pixmap.as_mut();
+        // Dispatch to view modules. Each view receives `&mut Pixmap` (so it
+        // can call into TextRenderer::draw_text) plus `&mut TextRenderer`.
+        let pm = &mut self.surface.pixmap;
         vectorscope_view::draw(
-            &mut pm,
+            pm,
             layout.vectorscope.0,
             layout.vectorscope.1,
             layout.vectorscope.2,
@@ -221,38 +230,43 @@ impl ImagineWindow {
             &self.vectorscope,
             &mut self.vec_l,
             &mut self.vec_r,
+            &mut self.text_renderer,
         );
         spectrum_view::draw(
-            &mut pm,
+            pm,
             layout.spectrum.0,
             layout.spectrum.1,
             layout.spectrum.2,
             layout.spectrum.3,
             &self.params,
+            &mut self.text_renderer,
         );
         band_strip::draw(
-            &mut pm,
+            pm,
             layout.band.0,
             layout.band.1,
             layout.band.2,
             layout.band.3,
             &self.params,
+            &mut self.text_renderer,
         );
         spectrum_view::draw_coherence(
-            &mut pm,
+            pm,
             layout.coherence.0,
             layout.coherence.1,
             layout.coherence.2,
             layout.coherence.3,
             &self.params,
+            &mut self.text_renderer,
         );
         global_strip::draw(
-            &mut pm,
+            pm,
             layout.global.0,
             layout.global.1,
             layout.global.2,
             layout.global.3,
             &self.params,
+            &mut self.text_renderer,
         );
     }
 
