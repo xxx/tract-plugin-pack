@@ -148,6 +148,13 @@ pub struct ImagineParams {
     /// the host re-querying. Users change it once when loading the plugin.
     #[id = "quality"]
     pub quality: EnumParam<Quality>,
+
+    /// Lock-free spectrum display sink shared between the audio-thread
+    /// `Analyzer` and the editor's `spectrum_view`. Not a parameter — kept
+    /// inside `ImagineParams` because the editor only receives the params
+    /// `Arc`, and threading another `Arc` separately would duplicate
+    /// plumbing for every display sink.
+    pub spectrum_display: Arc<SpectrumDisplay>,
 }
 
 impl Default for ImagineParams {
@@ -220,6 +227,8 @@ impl Default for ImagineParams {
             link_bands: BoolParam::new("Link Bands", false),
 
             quality: EnumParam::new("Quality", Quality::Linear).non_automatable(),
+
+            spectrum_display: SpectrumDisplay::new(),
         }
     }
 }
@@ -298,8 +307,6 @@ pub struct Imagine {
     /// FFT analyzer. Reset in `initialize` to update sample-rate-dependent log
     /// bin tables.
     spectrum: Option<Analyzer>,
-    /// Display sink shared with the editor (Task 12).
-    pub spectrum_display: Arc<SpectrumDisplay>,
 
     /// Lock-free correlation publish (audio thread → GUI). Bit pattern of f32.
     pub correlation: Arc<AtomicU32>,
@@ -350,7 +357,6 @@ impl Default for Imagine {
             vector_consumer: None,
 
             spectrum: None,
-            spectrum_display: SpectrumDisplay::new(),
 
             correlation: Arc::new(AtomicU32::new(0)),
             balance: Arc::new(AtomicU32::new(0)),
@@ -464,7 +470,7 @@ impl Plugin for Imagine {
         // log-bin table is correct.
         self.spectrum = Some(Analyzer::new(
             self.sample_rate,
-            self.spectrum_display.clone(),
+            self.params.spectrum_display.clone(),
         ));
 
         // Create the vectorscope ring fresh on every initialize so the GUI
