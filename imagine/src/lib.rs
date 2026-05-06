@@ -12,12 +12,13 @@
 #![feature(portable_simd)]
 
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub mod bands;
 pub mod crossover;
 pub mod decorrelator;
+pub mod editor;
 pub mod hilbert;
 pub mod midside;
 pub mod spectrum;
@@ -317,6 +318,11 @@ pub struct Imagine {
     last_xover_1: f32,
     last_xover_2: f32,
     last_xover_3: f32,
+
+    /// Host-initiated resize request (packed `(width << 32) | height`),
+    /// consumed on the next `on_frame` of the editor window. Shared with
+    /// the editor so `Editor::set_size` can publish into it.
+    pending_resize: Arc<AtomicU64>,
 }
 
 impl Default for Imagine {
@@ -355,6 +361,8 @@ impl Default for Imagine {
             last_xover_1: f32::NAN,
             last_xover_2: f32::NAN,
             last_xover_3: f32::NAN,
+
+            pending_resize: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -408,8 +416,12 @@ impl Plugin for Imagine {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        // Editor wiring is Task 12.
-        None
+        let vc = self.vector_consumer.clone()?;
+        Some(Box::new(editor::ImagineEditor {
+            params: self.params.clone(),
+            vectorscope: vc,
+            pending_resize: self.pending_resize.clone(),
+        }))
     }
 
     fn initialize(
