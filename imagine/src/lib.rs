@@ -162,10 +162,23 @@ pub struct ImagineParams {
     pub correlation: Arc<AtomicU32>,
     /// Lock-free balance publish (audio thread → GUI). Bit pattern of f32.
     pub balance: Arc<AtomicU32>,
+
+    /// Vectorscope SPSC ring (consumer end). Lives on `ImagineParams` because
+    /// `Plugin::editor()` is invoked during plugin construction (before
+    /// `initialize()` runs), and the editor only receives the params `Arc`.
+    /// The producer half lives on `Imagine` for the audio thread. Constructed
+    /// eagerly in `Imagine::default()` and overwrites the placeholder set
+    /// here.
+    pub vector_consumer: Arc<VectorConsumer>,
 }
 
 impl Default for ImagineParams {
     fn default() -> Self {
+        // Placeholder consumer — `Imagine::default()` overwrites this with the
+        // real consumer that's paired with the producer it keeps. The dropped
+        // dummy producer here is harmless: nobody ever pushes into it.
+        let (_dummy_prod, dummy_cons) = ring_pair();
+
         Self {
             editor_state: tiny_skia_widgets::EditorState::from_size(960, 640),
             vector_mode: Arc::new(AtomicU32::new(0)),
@@ -239,6 +252,8 @@ impl Default for ImagineParams {
 
             correlation: Arc::new(AtomicU32::new(0)),
             balance: Arc::new(AtomicU32::new(0)),
+
+            vector_consumer: Arc::new(dummy_cons),
         }
     }
 }
@@ -308,11 +323,11 @@ pub struct Imagine {
     /// `params.balance` every `MeterAccum::WINDOW` samples.
     meter_accumulator: MeterAccum,
 
-    /// Vectorscope SPSC ring (audio-side producer). Allocated in `initialize`.
-    vector_producer: Option<VectorProducer>,
-    /// Consumer end stored on the plugin so `Plugin::editor()` (Task 12) can
-    /// hand it to the editor. `Arc` because the editor takes ownership.
-    pub vector_consumer: Option<Arc<VectorConsumer>>,
+    /// Vectorscope SPSC ring (audio-side producer). Constructed eagerly in
+    /// `Default::default()` and paired with the consumer stored on
+    /// `ImagineParams::vector_consumer`. The editor reads the consumer through
+    /// the params handle, so the producer doesn't need to be optional.
+    vector_producer: VectorProducer,
 
     /// FFT analyzer. Reset in `initialize` to update sample-rate-dependent log
     /// bin tables.
@@ -341,8 +356,20 @@ impl Default for Imagine {
     fn default() -> Self {
         let hilbert = HilbertFir::new(FIR_HILBERT_LENGTH);
         let hilbert_lat = hilbert.latency_samples();
+
+        // Build the SPSC vectorscope ring eagerly — `Plugin::editor()` is
+        // called during plugin construction (before `initialize()`), so the
+        // consumer must already be reachable through `params.vector_consumer`
+        // by then. The placeholder consumer set in `ImagineParams::default()`
+        // is overwritten here with the matching half of `vector_producer`.
+        let (vector_producer, vector_consumer) = ring_pair();
+        let params = ImagineParams {
+            vector_consumer: Arc::new(vector_consumer),
+            ..ImagineParams::default()
+        };
+
         Self {
-            params: Arc::new(ImagineParams::default()),
+            params: Arc::new(params),
 
             crossover_iir_m: CrossoverIir::default(),
             crossover_iir_s: CrossoverIir::default(),
@@ -358,8 +385,7 @@ impl Default for Imagine {
 
             meter_accumulator: MeterAccum::default(),
 
-            vector_producer: None,
-            vector_consumer: None,
+            vector_producer,
 
             spectrum: None,
 
@@ -424,10 +450,9 @@ impl Plugin for Imagine {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        let vc = self.vector_consumer.clone()?;
         Some(Box::new(editor::ImagineEditor {
             params: self.params.clone(),
-            vectorscope: vc,
+            vectorscope: self.params.vector_consumer.clone(),
             pending_resize: self.pending_resize.clone(),
         }))
     }
@@ -474,12 +499,6 @@ impl Plugin for Imagine {
             self.sample_rate,
             self.params.spectrum_display.clone(),
         ));
-
-        // Create the vectorscope ring fresh on every initialize so the GUI
-        // doesn't see stale data after host buffer-size changes.
-        let (prod, cons) = ring_pair();
-        self.vector_producer = Some(prod);
-        self.vector_consumer = Some(Arc::new(cons));
 
         ctx.set_latency_samples(self.latency_samples_total());
         true
@@ -660,9 +679,7 @@ impl Plugin for Imagine {
             r[i] = r_out;
 
             // Display sinks.
-            if let Some(prod) = &self.vector_producer {
-                prod.push(l_out, r_out);
-            }
+            self.vector_producer.push(l_out, r_out);
             if let Some((correlation, balance)) = self.meter_accumulator.push(l_out, r_out) {
                 self.params
                     .correlation
