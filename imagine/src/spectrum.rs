@@ -62,6 +62,8 @@ pub struct Analyzer {
 
     /// Scratch buffer for FFT input/output.
     scratch: Vec<Complex32>,
+    /// Pre-allocated scratch buffer for `Fft::process_with_scratch` — avoids audio-thread alloc.
+    fft_scratch: Vec<Complex32>,
 
     /// Smoothed auto/cross spectra for coherence (one bin per FFT bin we use).
     sxx: Vec<f32>,
@@ -84,6 +86,7 @@ impl Analyzer {
     pub fn new(sample_rate: f32, display: Arc<SpectrumDisplay>) -> Self {
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(FFT_SIZE);
+        let scratch_len = fft.get_inplace_scratch_len();
         let window = (0..FFT_SIZE)
             .map(|i| {
                 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE - 1) as f32).cos()
@@ -115,6 +118,7 @@ impl Analyzer {
             ring_s: vec![0.0; FFT_SIZE],
             ring_idx: 0,
             scratch: vec![Complex32::default(); FFT_SIZE],
+            fft_scratch: vec![Complex32::default(); scratch_len],
             sxx: vec![0.0; n_useful],
             syy: vec![0.0; n_useful],
             sxy_re: vec![0.0; n_useful],
@@ -135,6 +139,12 @@ impl Analyzer {
         self.sxy_re.fill(0.0);
         self.sxy_im.fill(0.0);
         self.samples_since_last_fft = 0;
+        for atom in &self.display.mag_m {
+            atom.store(0_f32.to_bits(), Ordering::Relaxed);
+        }
+        for atom in &self.display.coherence {
+            atom.store(0_f32.to_bits(), Ordering::Relaxed);
+        }
     }
 
     /// Push one (M, S) pair. Triggers FFT every `HOP` samples.
@@ -154,6 +164,8 @@ impl Analyzer {
         }
     }
 
+    // Allocation-free per audio-thread invariant: process_with_scratch uses pre-allocated buffers.
+    // Verified by `assert_process_allocs` once the analyzer is wired into Imagine::process.
     fn compute_and_publish(&mut self) {
         // Fill scratch with windowed M + jS, in chronological order.
         for i in 0..FFT_SIZE {
@@ -162,7 +174,8 @@ impl Analyzer {
             self.scratch[i] = Complex32::new(self.ring_m[r] * w, self.ring_s[r] * w);
         }
 
-        self.fft.process(&mut self.scratch);
+        self.fft
+            .process_with_scratch(&mut self.scratch, &mut self.fft_scratch);
 
         // Decode |M|, |S|, and cross-spectrum from the two-real-in-one-complex FFT.
         const ALPHA: f32 = 0.3;
