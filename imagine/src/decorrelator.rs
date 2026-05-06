@@ -18,15 +18,14 @@ pub struct Decorrelator {
 struct AllpassDelayStage {
     buffer: Vec<f32>,
     write_idx: usize,
-    delay: usize,
 }
 
 impl AllpassDelayStage {
     fn new(delay: usize) -> Self {
+        let len = delay.max(1);
         Self {
-            buffer: vec![0.0; delay.max(1)],
+            buffer: vec![0.0; len],
             write_idx: 0,
-            delay: delay.max(1),
         }
     }
 
@@ -41,8 +40,9 @@ impl AllpassDelayStage {
         //   v = buffer[read]   (this is x[n-D] + g·y[n-D] from prior write)
         //   y = -g·x + v
         //   buffer[write] = x + g·y
-        let read_idx = (self.write_idx + self.buffer.len() - self.delay) % self.buffer.len();
-        let v = self.buffer[read_idx];
+        // The buffer is sized exactly to the delay D, so read_idx == write_idx
+        // (the wraparound modulo collapses to identity). No `%` on the audio path.
+        let v = self.buffer[self.write_idx];
         let y = -FEEDBACK * x + v;
         self.buffer[self.write_idx] = x + FEEDBACK * y;
         self.write_idx = if self.write_idx + 1 == self.buffer.len() {
@@ -77,6 +77,11 @@ impl Decorrelator {
             y = s.process(y);
         }
         y
+    }
+
+    /// All-pass cascade has no group delay at DC (frequency-dependent phase only); reported as 0 for PDC purposes.
+    pub fn latency_samples(&self) -> usize {
+        0
     }
 }
 
@@ -165,9 +170,8 @@ mod tests {
     }
 
     #[test]
-    fn prime_delays_dont_resonate() {
-        // Hit the decorrelator with white noise; check no per-band resonance peak in the
-        // output power spectrum > 6 dB above the mean.
+    fn peak_amplitude_bounded() {
+        // Output peak amplitude is bounded — catches gross instability.
         let mut d = Decorrelator::new(48000.0);
         let x = noise(8192);
         let y: Vec<f32> = x.iter().map(|&s| d.process(s)).collect();
