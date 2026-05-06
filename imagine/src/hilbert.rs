@@ -14,7 +14,12 @@
 
 pub struct HilbertFir {
     taps: Vec<f32>,
+    /// Double-buffered history: `2 * taps.len()` elements. Each sample is
+    /// written at both `write_idx` and `write_idx + length`, so a contiguous
+    /// `length`-element slice starting at any position is always available
+    /// for the dot product (no per-tap wraparound branch).
     history: Vec<f32>,
+    /// Write position in `[0, length)`.
     write_idx: usize,
 }
 
@@ -22,11 +27,15 @@ impl HilbertFir {
     /// Construct a Type-IV anti-symmetric Hilbert FIR with Hann window.
     /// Pass an odd length for proper symmetry.
     pub fn new(length: usize) -> Self {
+        debug_assert!(
+            length % 2 == 1,
+            "HilbertFir requires odd length for Type-IV symmetry; got {length}"
+        );
         let mut taps = vec![0.0; length];
         Self::design_taps(&mut taps);
         Self {
             taps,
-            history: vec![0.0; length],
+            history: vec![0.0; 2 * length],
             write_idx: 0,
         }
     }
@@ -46,27 +55,39 @@ impl HilbertFir {
         }
     }
 
+    #[inline]
     pub fn reset(&mut self) {
         self.history.fill(0.0);
         self.write_idx = 0;
     }
 
     /// Group delay in samples.
+    #[inline]
     pub fn latency_samples(&self) -> usize {
         self.taps.len() / 2
     }
 
+    /// Returns the 90°-rotated input sample, delayed by `latency_samples()`.
     #[inline]
     pub fn process(&mut self, x: f32) -> f32 {
         let n = self.taps.len();
+        // Mirror-write into both halves so the dot-product can read a
+        // contiguous slice regardless of wraparound.
         self.history[self.write_idx] = x;
+        self.history[self.write_idx + n] = x;
+        let next = if self.write_idx + 1 == n {
+            0
+        } else {
+            self.write_idx + 1
+        };
+        // Slice [next .. next + n] holds the last `n` samples in oldest→newest
+        // order; zipping taps with the reversed slice gives sum(taps[k] · x[n−k]).
+        let hist = &self.history[next..next + n];
         let mut acc = 0.0;
-        let mut idx = self.write_idx;
-        for &tap in &self.taps {
-            acc += tap * self.history[idx];
-            idx = if idx == 0 { n - 1 } else { idx - 1 };
+        for (&tap, &h) in self.taps.iter().zip(hist.iter().rev()) {
+            acc += tap * h;
         }
-        self.write_idx = (self.write_idx + 1) % n;
+        self.write_idx = next;
         acc
     }
 }
@@ -84,7 +105,11 @@ mod tests {
     fn xcorr(a: &[f32], b: &[f32]) -> f32 {
         let mean_a = a.iter().sum::<f32>() / a.len() as f32;
         let mean_b = b.iter().sum::<f32>() / b.len() as f32;
-        let cov: f32 = a.iter().zip(b).map(|(x, y)| (x - mean_a) * (y - mean_b)).sum();
+        let cov: f32 = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| (x - mean_a) * (y - mean_b))
+            .sum();
         let var_a: f32 = a.iter().map(|x| (x - mean_a).powi(2)).sum();
         let var_b: f32 = b.iter().map(|x| (x - mean_b).powi(2)).sum();
         cov / (var_a.sqrt() * var_b.sqrt() + 1e-12)
@@ -94,9 +119,6 @@ mod tests {
         (x.iter().map(|s| s * s).sum::<f32>() / x.len() as f32).sqrt()
     }
 
-    /// FIR magnitude is approximately unity across the design band.
-    /// Hann-windowed sinc with length 65 has slight magnitude roll-off near
-    /// DC and Nyquist; we test mid-band behavior.
     /// FIR magnitude is approximately unity across the design band.
     /// A length-65 Hann-windowed Hilbert FIR has substantial roll-off below
     /// ~1 kHz at 48 kHz (transition band of the windowed sinc), and very
