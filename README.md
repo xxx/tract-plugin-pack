@@ -26,6 +26,19 @@ A lightweight loudness meter with integrated gain utility, purpose-built for [cl
 - ~1.8 MB RSS and 0.05% CPU per instance (300 instances @ 15% CPU, 560 MB total)
 - Inspired by [TBProAudio dpMeter](https://www.tbproaudio.de/products/dpmeter)
 
+### Imagine
+
+A multiband stereo imager modeled on iZotope Ozone Imager. Four fixed bands with switchable linear-phase FIR or Linkwitz-Riley IIR (Lipshitz/Vanderkooy compensated) crossovers. Per-band constant-power **Width** (M² + S² = 2 invariant — no +6 dB side spike at full-wide), two **Stereoize** modes (Mode I = Haas mid-into-side delay, Mode II = Schroeder/Gerzon all-pass decorrelator), and a global **Recover Sides** that folds a Hilbert-rotated residue of removed-side energy back into mid for perceptual width retention when narrowing.
+
+- 4 fixed bands with 3 draggable crossover splits, log-frequency display
+- Constant-power Width law (no +6 dB side energy spike at full-wide)
+- Stereoize Mode I (Haas mid → side delay) + Mode II (real Schroeder/Gerzon decorrelator, xcorr < 0.3 on broadband noise)
+- Global Recover Sides for narrowing-without-energy-loss workflows
+- Vectorscope (polar / Lissajous toggle) with correlation + balance bars
+- Spectrum + magnitude-squared coherence γ²(k) display via single complex M+jS FFT
+- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable, pink/cyan duo-tone palette
+- Inspired by [iZotope Ozone Imager](https://www.izotope.com/en/products/ozone/features/imager.html)
+
 ### Pope Scope
 
 A multichannel real-time oscilloscope with beat sync. Multiple instances share audio data through a global store, allowing one window to display waveforms from up to 16 tracks simultaneously.
@@ -126,6 +139,7 @@ sudo apt install libxcb1-dev libx11-xcb-dev libx11-dev libxcursor-dev \
 # Build all plugins (VST3 + CLAP)
 cargo nih-plug bundle gain-brain --release
 cargo nih-plug bundle gs-meter --release
+cargo nih-plug bundle imagine --release
 cargo nih-plug bundle pope-scope --release
 cargo nih-plug bundle satch --release
 cargo nih-plug bundle six-pack --release
@@ -136,6 +150,7 @@ cargo nih-plug bundle wavetable-filter --release
 # Standalone binaries
 cargo build --bin gain-brain --release
 cargo build --bin gs-meter --release
+cargo build --bin imagine --release
 cargo build --bin pope-scope --release
 cargo build --bin satch --release
 cargo build --bin six-pack --release
@@ -167,6 +182,7 @@ The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` fil
 tract-plugin-pack/
 ├── gain-brain/             # Gain utility with group linking
 ├── gs-meter/               # Loudness meter + gain utility
+├── imagine/                # Multiband stereo imager modeled on Ozone Imager
 ├── pope-scope/             # Multichannel real-time oscilloscope
 ├── satch/                  # Spectral saturator with detail preservation
 ├── six-pack/               # Six-band parallel multiband saturator
@@ -178,6 +194,7 @@ tract-plugin-pack/
 ├── docs/                   # Plugin manuals
 │   ├── gain-brain/
 │   ├── gs-meter/
+│   ├── imagine/
 │   ├── pope-scope/
 │   ├── satch/
 │   ├── six-pack/
@@ -200,6 +217,7 @@ Install nextest via `cargo install cargo-nextest --locked`. Config lives in `.co
 
 - [Gain Brain Manual](docs/gain-brain/gain-brain-manual.md)
 - [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
+- [Imagine Manual](docs/imagine/imagine-manual.md)
 - [Pope Scope Manual](docs/pope-scope/pope-scope-manual.md)
 - [Satch Manual](docs/satch/satch-manual.md)
 - [Six Pack Manual](docs/six-pack/six-pack-manual.md)

@@ -24,6 +24,8 @@ Tract Plugin Pack is a Cargo workspace containing multiple audio effect plugins 
 
 **Warp Zone** — psychedelic spectral shifter/stretcher using a phase vocoder. Shift (-24 to +24 semitones) moves pitch, Stretch (0.5x to 2.0x) warps harmonic spacing for inharmonic textures. Freeze captures the current FFT frame as a sustained drone (transport-aware). Feedback feeds output back into input for compounding spectral effects. Low/High frequency range limits for selective processing. Scrolling spectral waterfall display with psychedelic color palette. 4096-point FFT, 1024 hop, ~85ms latency. CPU rendering via softbuffer + tiny-skia.
 
+**Imagine** — multiband stereo imager modeled on iZotope Ozone Imager. 4 fixed bands with Lipshitz/Vanderkooy compensated Linkwitz-Riley IIR or linear-phase FIR crossovers (switchable Quality). Per-band constant-power Width law (M²+S² = 2 invariant), two Stereoize modes (Mode I = Haas mid-into-side delay, Mode II = Schroeder/Gerzon all-pass decorrelator). Global Recover Sides folds a Hilbert-rotated residue of removed-side energy back into mid for perceptual width retention when narrowing. Spectrum + coherence display via single complex M+jS FFT. Vectorscope (polar/Lissajous) on left, spectrum + 4-band strip + coherence on right. Pink/cyan duo-tone palette.
+
 ## Workspace Structure
 
 ```
@@ -36,6 +38,7 @@ tract-plugin-pack/
 ├── six-pack/               # Six-band parallel multiband saturator (softbuffer GUI)
 ├── pope-scope/             # Multichannel oscilloscope with beat sync (softbuffer GUI)
 ├── warp-zone/              # Spectral shifter/stretcher with waterfall display (softbuffer GUI)
+├── imagine/                # Multiband stereo imager modeled on Ozone Imager (softbuffer GUI)
 ├── nih-plug-widgets/       # Legacy vizia widgets (kept for reference; workspace-excluded so its old transitive deps don't enter the lock file)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets (dial, slider, button)
 ├── docs/                   # Plugin manuals (markdown + PDF)
@@ -56,6 +59,7 @@ cargo nih-plug bundle satch --release
 cargo nih-plug bundle six-pack --release
 cargo nih-plug bundle pope-scope --release
 cargo nih-plug bundle warp-zone --release
+cargo nih-plug bundle imagine --release
 
 # Standalone binaries
 cargo build --bin wavetable-filter --release
@@ -66,6 +70,7 @@ cargo build --bin satch --release
 cargo build --bin six-pack --release
 cargo build --bin pope-scope --release
 cargo build --bin warp-zone --release
+cargo build --bin imagine --release
 
 # Debug standalone (for GUI testing without DAW)
 cargo build --bin gs-meter
@@ -75,12 +80,13 @@ cargo build --bin satch
 cargo build --bin six-pack
 cargo build --bin pope-scope
 cargo build --bin warp-zone
+cargo build --bin imagine
 ```
 
 ## Testing & Linting
 
 ```bash
-cargo nextest run --workspace                     # all tests (461) -- parallel test runner
+cargo nextest run --workspace                     # all tests (554) -- parallel test runner
 cargo clippy --workspace -- -D warnings           # lint (CI uses -D warnings)
 cargo fmt --check
 ```
@@ -96,6 +102,7 @@ Tests are inline `#[cfg(test)]` modules:
 - `pope-scope/` — 113 tests (ring buffer, snapshot, time mapping, renderer, store, theme, cursor tooltip, peak_at_column parity)
 - `six-pack/` — 54 tests across `svf.rs`, `saturation.rs`, `bands.rs`, `spectrum.rs`, `oversampling.rs`, `lib.rs::plugin_tests` (bypass equivalence, harmonic structure, mix curve, de-emph cancellation, sample-rate sweep), and `editor/{curve_view,band_labels}.rs` (log-freq mapping, peak magnitude, label rendering)
 - `warp-zone/src/spectral.rs` and `warp-zone/src/lib.rs` — 17 tests (phase vocoder, bin remapping, shift/stretch accuracy, spectral display, band downsampling)
+- `imagine/` — 80 tests across `midside.rs`, `crossover.rs` (IIR + FIR crossfade, redesign-during-crossfade, band sum flatness), `hilbert.rs`, `decorrelator.rs`, `bands.rs` (constant-power width, stereoize, S_removed gating), `spectrum.rs`, `vectorscope.rs` (SPSC concurrent writer/reader), `theme.rs`, and `lib.rs::plugin_tests` (no-op default passes signal, recover-sides bypass)
 - `tiny-skia-widgets/` — 29 widget rendering tests (dial, slider, button, text, drag state mouse-in-window)
 - Test fixtures: `wavetable-filter/tests/fixtures/`
 
@@ -194,6 +201,25 @@ Tests are inline `#[cfg(test)]` modules:
 | `warp-zone/src/spectral.rs` | Phase vocoder: STFT analysis, bin remapping with linear interpolation, phase accumulation, freeze, frequency range |
 | `warp-zone/src/editor.rs` | Softbuffer + baseview editor with dials, freeze button, spectral waterfall display |
 
+### Imagine
+
+| File | Role |
+|------|------|
+| `imagine/src/lib.rs` | Plugin orchestration: 22 params, lifecycle, process loop. Encode → crossover → bands → Recover → decode. Dry-delay aligns M/S sums with HilbertFir's group delay on the recover path. Quality is non-automatable. |
+| `imagine/src/midside.rs` | M/S encode/decode (scalar + f32x16 SIMD). |
+| `imagine/src/crossover.rs` | 4-band split: `CrossoverIir` (Linkwitz-Riley + Lipshitz/Vanderkooy compensation, magnitude-flat sum within ±0.05 dB), `CrossoverFir` (windowed-sinc with double-buffered taps + sample-wise crossfade on coefficient swap). FIR redesign is gated on >0.5 Hz frequency change. |
+| `imagine/src/hilbert.rs` | 90° phase rotator. FIR-only (Type-IV anti-symmetric, length 65 = ~32 samples latency). Used by Recover Sides. |
+| `imagine/src/decorrelator.rs` | Schroeder/Gerzon 6-stage all-pass cascade with prime-spaced delays. Used by Stereoize Mode II — genuinely lowers cross-correlation (xcorr<0.3 on broadband noise) vs the original Hilbert-90 design which left correlation near +0.8. |
+| `imagine/src/bands.rs` | Per-band processor: constant-power M/S Width gain, Stereoize Mode I (Haas) / Mode II (decorrelator), gated S_removed accumulator (zero for width≥0). |
+| `imagine/src/spectrum.rs` | Complex M+jS FFT trick yields \|M\| and \|S\| spectra in one transform. Magnitude-squared coherence γ²(k) computed audio-side via smoothed auto/cross spectra; published as 1−γ² per log-spaced bin. |
+| `imagine/src/vectorscope.rs` | SPSC ring buffer of (L, R) samples. Per-sample `AtomicU32` storage (no `unsafe`), Acquire/Release ordering on write_pos. 32k-pair capacity. |
+| `imagine/src/theme.rs` | Pink/cyan duo-tone palette (function accessors). |
+| `imagine/src/editor.rs` | Softbuffer + baseview lifecycle; mouse/keyboard wiring; layout B coordination (vectorscope on left, spectrum + band strip + coherence on right, global strip at bottom). |
+| `imagine/src/editor/spectrum_view.rs` | Crossover spectrum + 3 draggable splits + coherence bar. Log-frequency mapping helpers. |
+| `imagine/src/editor/vectorscope_view.rs` | Polar (L vs R, 45°-rotated) + Lissajous render with mode toggle. Direct-pixel writes. |
+| `imagine/src/editor/band_strip.rs` | Per-band: vertical Width slider + Stereoize knob + Mode I/II toggle + Solo. |
+| `imagine/src/editor/global_strip.rs` | Recover Sides bar + Link Bands toggle + Quality 2-segment selector. |
+
 ### Shared
 
 | File | Role |
@@ -232,6 +258,13 @@ Tests are inline `#[cfg(test)]` modules:
 - **Six Pack M/S routing happens before saturation.** The SVF runs on L/R (one pair per channel) so the filter response is identical regardless of routing. The diff is then routed: Stereo passes through, Mid uses `(L+R)/2` on both legs, Side uses `(L−R)/2` and `(R−L)/2`. The router output goes into the per-band saturator, and the result is recombined back to L/R additively before the next band. This keeps the EQ shape independent of routing while letting saturation harmonics live exclusively in the chosen channel space.
 - **Six Pack uses TPT SVF in `dry + (peak_gain − 1) · k · bandpass` mix form** for the four peak bands. The `k = 1/Q` factor cancels the `1/Q`-scaled peak height of the bandpass branch so the resulting peak magnitude at the center frequency is `peak_gain` independent of Q. Low-shelf and high-shelf use analogous mix forms with the lowpass / highpass branches. All three are analytically unity at 0 dB (the gain coefficient is exactly zero) — verified by `svf::tests::{peak,low_shelf,high_shelf}_unity_at_0db` and the `bands::tests::zero_db_band_produces_zero_diff` integration test.
 - **Six Pack de-emphasis cancels the linear EQ boost from the wet path.** The wet signal is `dry + Σ saturate(diff_i)`. The de-emphasis stage subtracts `Σ diff_i` (the linear EQ sum) so the wet output collapses to `dry + Σ (saturate(diff_i) − diff_i)` — i.e. only saturation harmonics remain audible. At the trivial-saturation limit (drive → 0, where `saturate(x) → x`) and mix ≤ 50% the output equals dry exactly, which is the "Spectre-style" property exercised by `plugin_tests::deemph_cancellation_per_channel_mode`.
+- **Imagine uses a constant-power M/S Width law** instead of the naive `S_gain = 1 + width/100`. The unmuted channel is boosted by √2 (~+3 dB) at extremes so total power `M_gain² + S_gain² = 2` stays constant. Avoids the +6 dB side-energy spike at full-wide that users' downstream limiters would otherwise hit.
+- **Imagine's Stereoize Mode II is a real Schroeder/Gerzon decorrelator**, not a phase rotator. The original spec used Hilbert-90 but xcorr stayed near +0.8 — adding a phase-shifted copy of mid into side doesn't actually decorrelate. The 6-stage all-pass cascade with mutually-prime delays {41, 53, 67, 79, 97, 113} (sample-rate-scaled) drops xcorr below 0.3 on broadband noise.
+- **Imagine's Recover Sides is gated per-band by Width sign**. Only bands with width<0 contribute to S_removed_total. The Hilbert FIR rotates the aggregate residue; recover_amount mixes it into mid. With constant-power Width already preserving energy, Recover Sides is a *perceptual* control (phase-decorrelated residue retains spatial impression when narrowing) rather than literal energy compensation.
+- **Imagine's IIR crossover uses Lipshitz/Vanderkooy delay-matched cascade** so the 4-band sum is true allpass-equivalent (magnitude-flat to ±0.05 dB across 20 Hz–20 kHz). Each band passes through compensating allpasses for splits it didn't traverse, so `Σ bands = AP3 ∘ AP2 ∘ AP1 (input)`.
+- **Imagine's FIR crossover uses double-buffered tap arrays + sample-wise crossfade** on coefficient swap to eliminate clicks during crossover-frequency automation. The redesign is gated on >0.5 Hz change so static-parameter workloads don't pay for a continuous crossfade.
+- **Imagine's Hilbert is FIR-only** (length 65, ~32 samples latency at 48 kHz). The plan originally specified an IIR all-pass cascade for zero-latency Recover Sides, but a single all-pass cascade can't produce 90° at low frequencies and the Niemitalo analytic-pair design produces an `(real, imag)` pair where `imag` is rotated relative to `real`, not relative to the input. The FIR is mathematically exact and ~0.7 ms latency is below human perception threshold.
+- **Imagine's vectorscope ring buffer uses per-sample `AtomicU32` storage** (f32 stored as bit-pattern) to avoid `unsafe` while remaining lock-free SPSC. Acquire/Release ordering on `write_pos` synchronizes slot writes with the GUI consumer's reads. Per-sample (L, R) pair can tear under contention but the vectorscope decimates thousands of points/frame so a single torn pair is sub-pixel. Same general pattern as Warp Zone's spectral display and Pope Scope's ring buffer atomics, applied here to per-sample (L, R) pairs.
 - **nih-plug dependency** currently points to `xxx/nih-plug` branch `finish-vst3-pr`. Fork adds: Editor::set_size() for host-initiated resize, Plugin::update_track_info() + TrackInfo struct for CLAP track-info, BYPASS_BUFFER_COPY const, nightly SIMD compatibility, VST3 license fix.
 
 ### Wavetable File Formats
