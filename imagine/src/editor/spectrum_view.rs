@@ -38,6 +38,10 @@ pub fn hz_to_x(hz: f32) -> f32 {
     ((log_hz - log_min) / (log_max - log_min)).clamp(0.0, 1.0)
 }
 
+/// Reserved height at the top of the spectrum panel for frequency labels above
+/// each split handle. Spectrum bars and split handles are inset below this.
+pub const LABEL_H: i32 = 14;
+
 /// Pixel x for a split at given frequency, given the panel's left edge and width.
 pub fn split_pixel_x(panel_x: i32, panel_w: i32, hz: f32) -> i32 {
     panel_x + (hz_to_x(hz) * panel_w as f32) as i32
@@ -84,6 +88,12 @@ pub fn draw(
     let f2 = params.xover_2.value();
     let f3 = params.xover_3.value();
 
+    // Spectrum bars, split lines, and split handles are all inset below the
+    // top LABEL_H reserve so the frequency labels can sit at y=2..LABEL_H
+    // without overlapping the bars.
+    let bars_top = y + LABEL_H;
+    let bars_h = (h - LABEL_H).max(1);
+
     {
         let mut pm = pixmap.as_mut();
 
@@ -91,9 +101,9 @@ pub fn draw(
         fill_rect_i(&mut pm, x, y, w, h, theme::spectrum_bg());
         stroke_rect_i(&mut pm, x, y, w, h, theme::border());
 
-        // |M| spectrum bars (one per log bin, scaled to panel height).
+        // |M| spectrum bars (one per log bin, scaled to bars_h).
         let bar_w = (w as f32 / NUM_LOG_BINS as f32).max(1.0);
-        let bar_h_max = (h as f32 - 8.0).max(1.0);
+        let bar_h_max = (bars_h as f32 - 8.0).max(1.0);
         for i in 0..NUM_LOG_BINS {
             let mag = params.spectrum_display.read_mag_m(i);
             // Convert linear magnitude to pseudo-dB display
@@ -116,17 +126,21 @@ pub fn draw(
             );
         }
 
-        // 3 draggable split lines.
+        // 3 draggable split lines + handles. Handles sit just below the label
+        // strip (y = LABEL_H + 2 from the panel top).
+        let handle_y = bars_top + 2;
+        let line_y = bars_top;
+        let line_h = (y + h - line_y - 2).max(0);
         for hz in [f1, f2, f3] {
             let lx = split_pixel_x(x, w, hz);
             // Vertical line
-            fill_rect_i(&mut pm, lx, y + 2, 2, (h - 4).max(0), theme::split_line());
-            // Handle (small filled square at the top)
-            fill_rect_i(&mut pm, lx - 4, y + 2, 9, 8, theme::accent());
+            fill_rect_i(&mut pm, lx, line_y, 2, line_h, theme::split_line());
+            // Handle (small filled square at the top of the bars region)
+            fill_rect_i(&mut pm, lx - 4, handle_y, 9, 8, theme::accent());
         }
     }
 
-    // Frequency labels above each split handle.
+    // Frequency labels above each split handle, inside the LABEL_H strip.
     let label_size = 10.0_f32;
     for hz in [f1, f2, f3] {
         let lx = split_pixel_x(x, w, hz);

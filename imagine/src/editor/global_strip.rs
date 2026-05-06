@@ -6,6 +6,10 @@ use std::sync::Arc;
 use tiny_skia::{Color, Paint, Pixmap, PixmapMut, Rect, Transform};
 use tiny_skia_widgets::TextRenderer;
 
+/// Reserved height for the section caption row at the top of the strip
+/// ("Recover Sides", "Link", "Quality").
+pub const HEADER_H: i32 = 14;
+
 pub struct GlobalLayout {
     pub recover_rect: (i32, i32, i32, i32),
     pub link_rect: (i32, i32, i32, i32),
@@ -13,13 +17,17 @@ pub struct GlobalLayout {
 }
 
 pub fn compute_layout(x: i32, y: i32, w: i32, h: i32) -> GlobalLayout {
-    // Three sections, equal-ish width.
+    // Three sections, equal-ish width. The top HEADER_H pixels are reserved
+    // for the section captions ("Recover Sides", "Link", "Quality") and the
+    // remaining height is the control body.
     let pad = 8;
     let section_w = (w - 4 * pad) / 3;
+    let body_top = HEADER_H + 2;
+    let body_h = (h - body_top - 4).max(1);
     GlobalLayout {
-        recover_rect: (x + pad, y + 4, section_w, h - 8),
-        link_rect: (x + pad * 2 + section_w, y + 4, section_w, h - 8),
-        quality_rect: (x + pad * 3 + section_w * 2, y + 4, section_w, h - 8),
+        recover_rect: (x + pad, y + body_top, section_w, body_h),
+        link_rect: (x + pad * 2 + section_w, y + body_top, section_w, body_h),
+        quality_rect: (x + pad * 3 + section_w * 2, y + body_top, section_w, body_h),
     }
 }
 
@@ -104,30 +112,39 @@ pub fn draw(
         fill_rect_i(&mut pm, active_x, qy, half_w, qh, theme::accent());
     }
 
-    // Text pass — labels for each section.
+    // Text pass — section captions in the HEADER_H row at the top of the
+    // strip, value labels inside their respective bodies.
     let label_size = 11.0_f32;
     let value_size = 10.5_f32;
+    // Baseline for header captions: drop label_size into the HEADER_H row.
+    let header_y = y as f32 + label_size + 1.0;
 
-    // "Recover Sides" caption and current value (e.g. "50") inside the bar.
+    // "Recover Sides" caption above the bar; current value sits inside the bar.
     let (rx, ry, rw, rh) = layout.recover_rect;
-    let caption = "Recover Sides";
-    let cap_w = text_renderer.text_width(caption, label_size);
-    let cap_x = rx as f32 + (rw as f32 - cap_w) * 0.5;
-    let cap_y = ry as f32 + (rh as f32) * 0.5 + label_size * 0.35;
-    text_renderer.draw_text(pixmap, cap_x, cap_y, caption, label_size, theme::text());
+    let recover_caption = "Recover Sides";
+    let rcap_w = text_renderer.text_width(recover_caption, label_size);
+    text_renderer.draw_text(
+        pixmap,
+        rx as f32 + (rw as f32 - rcap_w) * 0.5,
+        header_y,
+        recover_caption,
+        label_size,
+        theme::text(),
+    );
     let v = params.recover_sides.value();
     let value_text = format!("{:.0}", v);
     let vw = text_renderer.text_width(&value_text, value_size);
+    let val_y = ry as f32 + (rh as f32) * 0.5 + value_size * 0.35;
     text_renderer.draw_text(
         pixmap,
         rx as f32 + rw as f32 - vw - 6.0,
-        cap_y,
+        val_y,
         &value_text,
         value_size,
         theme::text_dim(),
     );
 
-    // "Link" inside the toggle.
+    // "Link" caption above the toggle; the toggle body itself shows on/off.
     let (lx, ly, lw, lh) = layout.link_rect;
     let link_label = "Link";
     let lw_text = text_renderer.text_width(link_label, label_size);
@@ -139,19 +156,40 @@ pub fn draw(
     text_renderer.draw_text(
         pixmap,
         lx as f32 + lw as f32 * 0.5 - lw_text * 0.5,
-        ly as f32 + lh as f32 * 0.5 + label_size * 0.35,
+        header_y,
         link_label,
         label_size,
         link_color,
     );
+    // State indicator inside the toggle ("On" / "Off").
+    let link_state = if link_on { "On" } else { "Off" };
+    let lsw = text_renderer.text_width(link_state, value_size);
+    text_renderer.draw_text(
+        pixmap,
+        lx as f32 + lw as f32 * 0.5 - lsw * 0.5,
+        ly as f32 + lh as f32 * 0.5 + value_size * 0.35,
+        link_state,
+        value_size,
+        link_color,
+    );
 
-    // Quality halves.
+    // "Quality" caption above the selector; halves labelled inside.
     let (qx, qy, qw, qh) = layout.quality_rect;
+    let quality_caption = "Quality";
+    let qcap_w = text_renderer.text_width(quality_caption, label_size);
+    text_renderer.draw_text(
+        pixmap,
+        qx as f32 + (qw as f32 - qcap_w) * 0.5,
+        header_y,
+        quality_caption,
+        label_size,
+        theme::text(),
+    );
     let half_w = qw / 2;
     let lin_label = "Linear";
     let iir_label = "IIR";
-    let lin_w = text_renderer.text_width(lin_label, label_size);
-    let iir_w = text_renderer.text_width(iir_label, label_size);
+    let lin_w = text_renderer.text_width(lin_label, value_size);
+    let iir_w = text_renderer.text_width(iir_label, value_size);
     let lin_active = matches!(quality_v, Quality::Linear);
     let lin_color = if lin_active {
         theme::text()
@@ -163,13 +201,13 @@ pub fn draw(
     } else {
         theme::text()
     };
-    let q_y = qy as f32 + qh as f32 * 0.5 + label_size * 0.35;
+    let q_y = qy as f32 + qh as f32 * 0.5 + value_size * 0.35;
     text_renderer.draw_text(
         pixmap,
         qx as f32 + half_w as f32 * 0.5 - lin_w * 0.5,
         q_y,
         lin_label,
-        label_size,
+        value_size,
         lin_color,
     );
     text_renderer.draw_text(
@@ -177,7 +215,7 @@ pub fn draw(
         qx as f32 + half_w as f32 + half_w as f32 * 0.5 - iir_w * 0.5,
         q_y,
         iir_label,
-        label_size,
+        value_size,
         iir_color,
     );
 }
@@ -188,9 +226,19 @@ mod tests {
 
     #[test]
     fn layout_three_sections() {
-        let l = compute_layout(0, 0, 600, 36);
+        let l = compute_layout(0, 0, 600, 52);
         assert!(l.recover_rect.0 < l.link_rect.0);
         assert!(l.link_rect.0 < l.quality_rect.0);
+    }
+
+    #[test]
+    fn layout_reserves_header_row() {
+        // Body rects must start strictly below the HEADER_H reserve so the
+        // section captions never overlap the control bodies.
+        let l = compute_layout(0, 0, 600, 52);
+        assert!(l.recover_rect.1 >= HEADER_H);
+        assert!(l.link_rect.1 >= HEADER_H);
+        assert!(l.quality_rect.1 >= HEADER_H);
     }
 
     #[test]
@@ -199,6 +247,6 @@ mod tests {
         let mut pixmap = tiny_skia::Pixmap::new(720, 580).unwrap();
         let font_data = include_bytes!("../fonts/DejaVuSans.ttf");
         let mut tr = TextRenderer::new(font_data);
-        draw(&mut pixmap, 0, 544, 720, 36, &params, &mut tr);
+        draw(&mut pixmap, 0, 528, 720, 52, &params, &mut tr);
     }
 }

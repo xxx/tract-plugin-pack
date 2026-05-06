@@ -39,7 +39,10 @@ pub const MIN_WIDTH: u32 = 720;
 pub const MIN_HEIGHT: u32 = 580;
 
 /// Bottom strip height in logical pixels (scaled by `scale_factor`).
-const BOTTOM_STRIP_H: f32 = 36.0;
+/// 52 px is enough room for a 14 px header label row plus the 30+ px control
+/// bodies (Recover bar, Link toggle, Quality selector) and a couple of pixels
+/// of padding above and below.
+const BOTTOM_STRIP_H: f32 = 52.0;
 
 /// Hit/drag tolerance around split lines, in physical pixels.
 const SPLIT_HIT_TOL_PX: f32 = 5.0;
@@ -188,8 +191,8 @@ impl ImagineWindow {
         let right_x = left_w;
         let right_w = (w - left_w).max(1);
 
-        let spectrum_h = ((main_h as f32) * 0.55).round() as i32;
-        let band_h = ((main_h as f32) * 0.30).round() as i32;
+        let spectrum_h = ((main_h as f32) * 0.50).round() as i32;
+        let band_h = ((main_h as f32) * 0.35).round() as i32;
         let coherence_h = (main_h - spectrum_h - band_h).max(1);
 
         let spectrum_y = 0;

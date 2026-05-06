@@ -7,6 +7,13 @@ use std::sync::Arc;
 use tiny_skia::{Color, Paint, Pixmap, PixmapMut, Rect, Transform};
 use tiny_skia_widgets::TextRenderer;
 
+/// Reserved height for the band header row ("B1"–"B4") at the top of each panel.
+pub const HEADER_H: i32 = 14;
+/// Reserved height for sub-control captions ("Width", "Stz") above each control.
+pub const LABEL_H: i32 = 12;
+/// Reserved height for value readouts placed beneath their control.
+pub const VALUE_H: i32 = 11;
+
 pub struct BandStripLayout {
     pub band_x: [i32; 4],
     pub band_w: i32,
@@ -27,13 +34,32 @@ pub fn compute_layout(x: i32, y: i32, w: i32, h: i32) -> BandStripLayout {
     let band_w = w / 4;
     let band_x = [x, x + band_w, x + 2 * band_w, x + 3 * band_w];
 
-    // Inside a band: Width slider on left half (vertical, narrow), knob + buttons on right.
+    // Inside a band:
+    //   y = 0..HEADER_H            : band header ("B1"–"B4")
+    //   y = HEADER_H..HEADER_H+LABEL_H : "Width" caption above the slider slot
+    //   Width slider runs from y=HEADER_H+LABEL_H down to leave VALUE_H at the
+    //   bottom for the value readout text.
     let pad = 6;
-    let width_rect = (pad, pad, 24, h - 2 * pad);
-    let stz_center = (band_w / 2 + 12, h / 2 - 16);
-    let stz_radius = (band_w / 4).min(h / 4) - 4;
-    let mode_rect = (band_w - 38, h / 2 + 8, 32, 14);
-    let solo_rect = (band_w - 38, h / 2 + 26, 32, 14);
+    let width_top = HEADER_H + LABEL_H; // 26
+    let width_bottom_reserve = VALUE_H + 2; // value text + a little padding
+    let width_h = (h - width_top - width_bottom_reserve).max(1);
+    let width_rect = (pad, width_top, 24, width_h);
+
+    // Stereoize knob: place its center below "Stz" label (header + label).
+    // Center vertically in the upper region; clamp radius to fit alongside
+    // the mode/solo buttons stacked below.
+    let stz_center_y = HEADER_H + LABEL_H + 18;
+    let stz_center = (band_w / 2 + 12, stz_center_y);
+    // Reserve room for two stacked 14 px bars (Mode + Solo) with a 12 px gap
+    // between them, then 4 px panel padding.
+    let buttons_h = 14 + 12 + 14 + 4;
+    let max_radius_h = (h - stz_center_y - buttons_h).max(2);
+    let stz_radius = (band_w / 4).min(max_radius_h).max(4) - 2;
+
+    // Mode toggle / Solo button stack below the knob with 12 px gaps.
+    let stack_top = stz_center_y + stz_radius + 8;
+    let mode_rect = (band_w - 38, stack_top, 32, 14);
+    let solo_rect = (band_w - 38, stack_top + 14 + 12, 32, 14);
 
     BandStripLayout {
         band_x,
@@ -219,15 +245,16 @@ pub fn draw(
             theme::text(),
         );
 
-        // Width value text (e.g. "+50") near the marker.
+        // Width value text (e.g. "+50") below the slider in its reserved row.
         let (wx, wy, ww, wh) = layout.width_rect;
         let slot_x = bx + wx;
         let slot_y = layout.y + wy;
         let width_val = widths[i];
         let width_text = format!("{:+.0}", width_val);
-        // Place it just to the right of the slider slot.
-        let wt_x = (slot_x + ww + 4) as f32;
-        let wt_y = (slot_y + wh / 2) as f32 + small_size * 0.4;
+        let wt_w = text_renderer.text_width(&width_text, small_size);
+        let wt_x = (slot_x + ww / 2) as f32 - wt_w * 0.5;
+        // Baseline sits inside the VALUE_H reserve below the slot.
+        let wt_y = (slot_y + wh) as f32 + small_size + 1.0;
         text_renderer.draw_text(
             pixmap,
             wt_x,
@@ -237,7 +264,7 @@ pub fn draw(
             theme::text_dim(),
         );
 
-        // "Width" caption above the slider.
+        // "Width" caption above the slider, in the LABEL_H row.
         let caption = "Width";
         let cw = text_renderer.text_width(caption, small_size);
         text_renderer.draw_text(

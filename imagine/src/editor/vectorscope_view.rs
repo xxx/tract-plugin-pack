@@ -11,6 +11,11 @@ use tiny_skia_widgets::TextRenderer;
 
 const SAMPLE_BUDGET: usize = 4096;
 
+/// Reserved footer height beneath the scope dot cloud for the mode label
+/// ("Polar"/"Lissajous"). Sits between the scope and the correlation/balance
+/// bars (which themselves occupy the bottom 36 px).
+const MODE_LABEL_FOOTER_H: i32 = 16;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum VectorMode {
     Polar = 0,
@@ -88,8 +93,10 @@ pub fn draw(
         fill_rect_i(&mut pm, x, y, w, h, theme::panel_bg());
         stroke_rect_i(&mut pm, x, y, w, h, theme::border());
 
-        // Reserve bottom 36 px for correlation + balance bars.
-        let scope_h = h - 36;
+        // Reserve bottom 36 px for correlation + balance bars, plus an
+        // additional MODE_LABEL_FOOTER_H above them for the mode label so it
+        // doesn't overlap the dot cloud.
+        let scope_h = h - 36 - MODE_LABEL_FOOTER_H;
         let scope_x = x + 6;
         let scope_y = y + 6;
         let scope_w = w - 12;
