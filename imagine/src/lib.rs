@@ -21,6 +21,7 @@ pub mod decorrelator;
 pub mod hilbert;
 pub mod midside;
 pub mod spectrum;
+pub mod theme;
 pub mod vectorscope;
 
 use crate::bands::{Band, StereoizeMode};
