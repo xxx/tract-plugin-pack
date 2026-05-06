@@ -155,6 +155,13 @@ pub struct ImagineParams {
     /// `Arc`, and threading another `Arc` separately would duplicate
     /// plumbing for every display sink.
     pub spectrum_display: Arc<SpectrumDisplay>,
+
+    /// Lock-free correlation publish (audio thread → GUI). Bit pattern of f32.
+    /// Not a parameter — lives on `ImagineParams` so the editor's vectorscope
+    /// view can read it without separate plumbing.
+    pub correlation: Arc<AtomicU32>,
+    /// Lock-free balance publish (audio thread → GUI). Bit pattern of f32.
+    pub balance: Arc<AtomicU32>,
 }
 
 impl Default for ImagineParams {
@@ -229,6 +236,9 @@ impl Default for ImagineParams {
             quality: EnumParam::new("Quality", Quality::Linear).non_automatable(),
 
             spectrum_display: SpectrumDisplay::new(),
+
+            correlation: Arc::new(AtomicU32::new(0)),
+            balance: Arc::new(AtomicU32::new(0)),
         }
     }
 }
@@ -308,11 +318,6 @@ pub struct Imagine {
     /// bin tables.
     spectrum: Option<Analyzer>,
 
-    /// Lock-free correlation publish (audio thread → GUI). Bit pattern of f32.
-    pub correlation: Arc<AtomicU32>,
-    /// Lock-free balance publish (audio thread → GUI). Bit pattern of f32.
-    pub balance: Arc<AtomicU32>,
-
     sample_rate: f32,
 
     /// Frozen at `initialize()` since Quality is non-automatable.
@@ -357,9 +362,6 @@ impl Default for Imagine {
             vector_consumer: None,
 
             spectrum: None,
-
-            correlation: Arc::new(AtomicU32::new(0)),
-            balance: Arc::new(AtomicU32::new(0)),
 
             sample_rate: 48_000.0,
             active_quality: Quality::Linear,
@@ -662,9 +664,12 @@ impl Plugin for Imagine {
                 prod.push(l_out, r_out);
             }
             if let Some((correlation, balance)) = self.meter_accumulator.push(l_out, r_out) {
-                self.correlation
+                self.params
+                    .correlation
                     .store(correlation.to_bits(), Ordering::Relaxed);
-                self.balance.store(balance.to_bits(), Ordering::Relaxed);
+                self.params
+                    .balance
+                    .store(balance.to_bits(), Ordering::Relaxed);
             }
             if let Some(spec) = &mut self.spectrum {
                 // (m_final, s_final) are equivalent to encode(l_out, r_out)
