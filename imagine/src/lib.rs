@@ -308,6 +308,14 @@ pub struct Imagine {
 
     /// Frozen at `initialize()` since Quality is non-automatable.
     active_quality: Quality,
+
+    /// Last crossover frequencies passed to `redesign`. Used to gate per-block
+    /// redesigns: if smoothed values haven't moved, we skip the windowed-sinc
+    /// design + crossfade kickoff entirely. NaN sentinel forces a first-block
+    /// redesign after `Default`/`reset`.
+    last_xover_1: f32,
+    last_xover_2: f32,
+    last_xover_3: f32,
 }
 
 impl Default for Imagine {
@@ -342,6 +350,10 @@ impl Default for Imagine {
 
             sample_rate: 48_000.0,
             active_quality: Quality::Linear,
+
+            last_xover_1: f32::NAN,
+            last_xover_2: f32::NAN,
+            last_xover_3: f32::NAN,
         }
     }
 }
@@ -420,6 +432,9 @@ impl Plugin for Imagine {
             .initialize(f1, f2, f3, self.sample_rate);
         self.crossover_fir_s
             .initialize(f1, f2, f3, self.sample_rate);
+        self.last_xover_1 = f1;
+        self.last_xover_2 = f2;
+        self.last_xover_3 = f3;
 
         for band in &mut self.bands {
             band.set_sample_rate(self.sample_rate, HAAS_DEFAULT_MS);
@@ -465,6 +480,11 @@ impl Plugin for Imagine {
         if let Some(spec) = &mut self.spectrum {
             spec.reset();
         }
+        // Force the first post-reset block to redesign the crossover so any
+        // state that depends on the current frequencies is rebuilt.
+        self.last_xover_1 = f32::NAN;
+        self.last_xover_2 = f32::NAN;
+        self.last_xover_3 = f32::NAN;
     }
 
     fn process(
@@ -484,18 +504,43 @@ impl Plugin for Imagine {
         let f2 = self.params.xover_2.smoothed.next_step(smoother_steps);
         let f3 = self.params.xover_3.smoothed.next_step(smoother_steps);
 
-        // Redesign only the active crossover variant.
-        match self.active_quality {
-            Quality::Linear => {
-                self.crossover_fir_m
-                    .redesign(f1, f2, f3, self.sample_rate, FIR_CROSSFADE_DEFAULT);
-                self.crossover_fir_s
-                    .redesign(f1, f2, f3, self.sample_rate, FIR_CROSSFADE_DEFAULT);
+        // Redesign only the active crossover variant — and only when the
+        // smoothed crossover frequencies have actually moved. Calling
+        // `CrossoverFir::redesign` every block would kick off a fresh
+        // 1024-sample crossfade and force `process_pending` to run in
+        // lockstep with `process_current` (an extra 511-tap dot product per
+        // LP per channel) for static-parameter workloads.
+        const REDESIGN_EPSILON_HZ: f32 = 0.5;
+        let xover_changed = self.last_xover_1.is_nan()
+            || (f1 - self.last_xover_1).abs() > REDESIGN_EPSILON_HZ
+            || (f2 - self.last_xover_2).abs() > REDESIGN_EPSILON_HZ
+            || (f3 - self.last_xover_3).abs() > REDESIGN_EPSILON_HZ;
+        if xover_changed {
+            match self.active_quality {
+                Quality::Linear => {
+                    self.crossover_fir_m.redesign(
+                        f1,
+                        f2,
+                        f3,
+                        self.sample_rate,
+                        FIR_CROSSFADE_DEFAULT,
+                    );
+                    self.crossover_fir_s.redesign(
+                        f1,
+                        f2,
+                        f3,
+                        self.sample_rate,
+                        FIR_CROSSFADE_DEFAULT,
+                    );
+                }
+                Quality::Iir => {
+                    self.crossover_iir_m.redesign(f1, f2, f3, self.sample_rate);
+                    self.crossover_iir_s.redesign(f1, f2, f3, self.sample_rate);
+                }
             }
-            Quality::Iir => {
-                self.crossover_iir_m.redesign(f1, f2, f3, self.sample_rate);
-                self.crossover_iir_s.redesign(f1, f2, f3, self.sample_rate);
-            }
+            self.last_xover_1 = f1;
+            self.last_xover_2 = f2;
+            self.last_xover_3 = f3;
         }
 
         // Per-band smoothed Width / Stereoize / mode / solo.
@@ -603,13 +648,17 @@ impl Plugin for Imagine {
                 self.balance.store(balance.to_bits(), Ordering::Relaxed);
             }
             if let Some(spec) = &mut self.spectrum {
-                let (m_post, s_post) = midside::encode(l_out, r_out);
-                spec.push(m_post, s_post);
+                // (m_final, s_final) are equivalent to encode(l_out, r_out)
+                // modulo numerical roundoff, so feed them directly to skip
+                // the redundant L/R → M/S re-encode.
+                spec.push(m_final, s_final);
             }
         }
 
         match self.active_quality {
-            Quality::Linear => ProcessStatus::Tail(self.crossover_fir_m.latency_samples() as u32),
+            Quality::Linear => ProcessStatus::Tail(
+                (self.crossover_fir_m.latency_samples() + self.hilbert.latency_samples()) as u32,
+            ),
             Quality::Iir => ProcessStatus::Normal,
         }
     }
