@@ -412,9 +412,11 @@ fn draw_half_polar(
     }
 }
 
-/// Faint half-circle outline + 7 angular spokes + baseline at the bottom.
+/// Faint half-circle outline + 3 angular spokes + baseline at the bottom.
 /// Uses a midpoint-circle algorithm for the arc (direct pixel writes —
-/// matches the existing dot-cloud rendering style).
+/// matches the existing dot-cloud rendering style). The spokes are drawn at
+/// 3π/4, π/2, and π/4 (upper-left 45°, vertical, upper-right 45°) and use a
+/// pre-mixed dimmed color so they don't visually divide the dot cloud.
 fn draw_half_disc_grid(
     pixmap: &mut PixmapMut<'_>,
     cx: i32,
@@ -451,17 +453,38 @@ fn draw_half_disc_grid(
         }
     }
 
-    // Angular spokes radiating from origin every π/8 (22.5°). Eight evenly
-    // spaced spokes from horizontal-left (π) → horizontal-right (0) gives 7
-    // *internal* divisions. We draw the 7 internal spokes (skip the
-    // endpoints, which coincide with the baseline).
+    // Three internal spokes at 3π/4 (upper-left 45°), π/2 (vertical), and
+    // π/4 (upper-right 45°). Drawn with a dimmed pre-mixed color so they
+    // recede behind the dot cloud rather than slicing it.
+    let spoke_color = dimmed_spoke_color();
     let r_f = radius as f32;
-    for i in 1..7 {
-        let angle = std::f32::consts::PI - std::f32::consts::PI * (i as f32) / 7.0;
+    let angles = [
+        3.0 * std::f32::consts::FRAC_PI_4,
+        std::f32::consts::FRAC_PI_2,
+        std::f32::consts::FRAC_PI_4,
+    ];
+    for angle in angles {
         let ex = cx + (r_f * angle.cos()) as i32;
         let ey = base_y - (r_f * angle.sin()) as i32;
-        draw_line(pixmap, cx, base_y, ex, ey, color);
+        draw_line(pixmap, cx, base_y, ex, ey, spoke_color);
     }
+}
+
+/// Pre-mix the dim text color with the panel background at 30% opacity. The
+/// `put_pixel` / Bresenham renderer writes pixels directly without
+/// source-over blending, so we have to do the alpha compositing ourselves and
+/// hand the result back as an opaque color.
+fn dimmed_spoke_color() -> Color {
+    let bg = theme::panel_bg();
+    let fg = theme::text_dim();
+    let a = 0.30_f32;
+    Color::from_rgba(
+        bg.red() * (1.0 - a) + fg.red() * a,
+        bg.green() * (1.0 - a) + fg.green() * a,
+        bg.blue() * (1.0 - a) + fg.blue() * a,
+        1.0,
+    )
+    .unwrap_or_else(theme::text_dim)
 }
 
 /// Bresenham line for the spokes. Direct pixel writes, no anti-aliasing —
