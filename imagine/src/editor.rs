@@ -128,6 +128,13 @@ struct ImagineWindow {
     vectorscope_rect: (i32, i32, i32, i32),
     /// Global strip rect.
     global_strip_rect: (i32, i32, i32, i32),
+
+    // ── Resize-grip drag state ──────────────────────────────────────
+    resize_dragging: bool,
+    resize_anchor_x: f32,
+    resize_anchor_y: f32,
+    resize_initial_w: u32,
+    resize_initial_h: u32,
 }
 
 impl ImagineWindow {
@@ -166,6 +173,11 @@ impl ImagineWindow {
             band_strip_rect: (0, 0, 0, 0),
             vectorscope_rect: (0, 0, 0, 0),
             global_strip_rect: (0, 0, 0, 0),
+            resize_dragging: false,
+            resize_anchor_x: 0.0,
+            resize_anchor_y: 0.0,
+            resize_initial_w: 0,
+            resize_initial_h: 0,
         }
     }
 
@@ -270,6 +282,17 @@ impl ImagineWindow {
             layout.global.3,
             &self.params,
             &mut self.text_renderer,
+        );
+
+        // Resize grip overlay (drawn last so it sits on top of any panel).
+        let mut pmut = self.surface.pixmap.as_mut();
+        widgets::ResizeGrip::draw(
+            &mut pmut,
+            0,
+            0,
+            self.physical_width as i32,
+            self.physical_height as i32,
+            crate::theme::accent(),
         );
     }
 
@@ -793,7 +816,7 @@ impl baseview::WindowHandler for ImagineWindow {
 
     fn on_event(
         &mut self,
-        _window: &mut baseview::Window,
+        window: &mut baseview::Window,
         event: baseview::Event,
     ) -> baseview::EventStatus {
         match &event {
@@ -806,6 +829,18 @@ impl baseview::WindowHandler for ImagineWindow {
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorMoved { position, .. }) => {
                 self.drag.set_mouse(position.x as f32, position.y as f32);
+                // Resize-grip drag takes priority over normal drag handling.
+                if self.resize_dragging {
+                    let (mx, my) = self.drag.mouse_pos();
+                    let dx = mx - self.resize_anchor_x;
+                    let dy = my - self.resize_anchor_y;
+                    let new_w =
+                        ((self.resize_initial_w as f32 + dx) as i32).max(MIN_WIDTH as i32) as u32;
+                    let new_h =
+                        ((self.resize_initial_h as f32 + dy) as i32).max(MIN_HEIGHT as i32) as u32;
+                    window.resize(baseview::Size::new(new_w as f64, new_h as f64));
+                    return baseview::EventStatus::Captured;
+                }
                 if let Some(active) = self.drag.active_action().copied() {
                     self.handle_drag(active);
                 }
@@ -823,6 +858,23 @@ impl baseview::WindowHandler for ImagineWindow {
                 // Click-outside auto-commits any in-flight text edit.
                 self.commit_text_edit();
                 let (mx, my) = self.drag.mouse_pos();
+                // Resize-grip hit-test runs BEFORE other hit-tests so a click in
+                // the bottom-right corner always starts a window resize.
+                if widgets::ResizeGrip::hit_test(
+                    0,
+                    0,
+                    self.physical_width as i32,
+                    self.physical_height as i32,
+                    mx,
+                    my,
+                ) {
+                    self.resize_dragging = true;
+                    self.resize_anchor_x = mx;
+                    self.resize_anchor_y = my;
+                    self.resize_initial_w = self.physical_width;
+                    self.resize_initial_h = self.physical_height;
+                    return baseview::EventStatus::Captured;
+                }
                 if let Some(action) = self.hit_test_at(mx, my) {
                     // End any prior drag (defensive — shouldn't normally happen).
                     if let Some(prev) = self.drag.end_drag() {
@@ -836,6 +888,10 @@ impl baseview::WindowHandler for ImagineWindow {
                 button: baseview::MouseButton::Left,
                 ..
             }) => {
+                if self.resize_dragging {
+                    self.resize_dragging = false;
+                    return baseview::EventStatus::Captured;
+                }
                 if let Some(active) = self.drag.end_drag() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
                     self.end_drag_for_action(&setter, active);
