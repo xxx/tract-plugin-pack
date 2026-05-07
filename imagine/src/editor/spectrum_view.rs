@@ -99,10 +99,12 @@ pub fn draw(
 
     // Spectrum bars, split lines, and split handles are all inset below the
     // top LABEL_H reserve so the frequency labels can sit at y=2..LABEL_H
-    // without overlapping the bars.
+    // without overlapping the bars. Add a small label_pad above the labels so
+    // they aren't cramped against the panel edge at large scales.
+    let label_pad = ((4.0_f32 * s).ceil()) as i32;
     let label_h_px = scaled(LABEL_H, s);
-    let bars_top = y + label_h_px;
-    let bars_h = (h - label_h_px).max(1);
+    let bars_top = y + label_pad + label_h_px;
+    let bars_h = (h - label_pad - label_h_px).max(1);
 
     {
         let mut pm = pixmap.as_mut();
@@ -163,6 +165,9 @@ pub fn draw(
 
     // Frequency labels above each split handle, inside the LABEL_H strip.
     let label_size = (10.0_f32 * s).max(6.0);
+    // Pad labels down a few pixels from the panel top edge so they aren't
+    // visually cramped against the window frame at large scales.
+    let label_pad = ((4.0_f32 * s).ceil()) as i32;
     for hz in [f1, f2, f3] {
         let lx = split_pixel_x(x, w, hz);
         let txt = format_freq(hz);
@@ -178,7 +183,7 @@ pub fn draw(
         if tx > max_x {
             tx = max_x;
         }
-        let ty = y as f32 + label_size + 1.0;
+        let ty = y as f32 + label_pad as f32 + label_size + 1.0;
         text_renderer.draw_text(pixmap, tx, ty, &txt, label_size, theme::text());
     }
 }
@@ -195,6 +200,11 @@ pub fn draw_coherence(
     scale_factor: f32,
 ) {
     let s = scale_factor.max(0.1);
+    // Reserve a header row at the top of the panel for the "Coherence" caption
+    // so the bars don't overlap the label at large scales.
+    let label_h_px = scaled(LABEL_H, s);
+    let bars_top = y + label_h_px;
+    let bars_h = (h - label_h_px).max(1);
     {
         let mut pm = pixmap.as_mut();
         fill_rect_i(&mut pm, x, y, w, h, theme::spectrum_bg());
@@ -202,7 +212,7 @@ pub fn draw_coherence(
 
         // Per-bin: read coherence (1 - γ²), use as both height and color t.
         let bar_w = (w as f32 / NUM_LOG_BINS as f32).max(1.0);
-        let bar_h_max = (h as f32 - 8.0).max(1.0);
+        let bar_h_max = (bars_h as f32 - 8.0).max(1.0);
         for i in 0..NUM_LOG_BINS {
             let v = params.spectrum_display.read_coherence(i).clamp(0.0, 1.0);
             let bar_height = (v * bar_h_max) as i32;
@@ -210,7 +220,7 @@ pub fn draw_coherence(
                 continue;
             }
             let bar_x = x + (i as f32 * bar_w) as i32;
-            let bar_y = y + h - 4 - bar_height;
+            let bar_y = bars_top + bars_h - 4 - bar_height;
             fill_rect_i(
                 &mut pm,
                 bar_x,

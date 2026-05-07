@@ -49,12 +49,11 @@ pub fn compute_layout(x: i32, y: i32, w: i32, h: i32, scale_factor: f32) -> Band
     let header_h = scaled(HEADER_H, s);
     let label_h = scaled(LABEL_H, s);
     let value_h = scaled(VALUE_H, s);
-    let slider_w = scaled(24, s);
+    let slider_w = scaled(32, s);
     let button_w = scaled(32, s);
     let button_h = scaled(14, s);
     let button_right_inset = scaled(38, s);
     let stack_gap = scaled(12, s);
-    let knob_top_offset = scaled(18, s);
     let knob_x_offset = scaled(12, s);
     let stack_above_pad = scaled(8, s);
 
@@ -63,16 +62,26 @@ pub fn compute_layout(x: i32, y: i32, w: i32, h: i32, scale_factor: f32) -> Band
     let width_h = (h - width_top - width_bottom_reserve).max(1);
     let width_rect = (pad, width_top, slider_w, width_h);
 
-    // Stereoize knob: place its center below "Stz" label (header + label).
-    // Center vertically in the upper region; clamp radius to fit alongside
-    // the mode/solo buttons stacked below.
-    let stz_center_y = header_h + label_h + knob_top_offset;
-    let stz_center = (band_w / 2 + knob_x_offset, stz_center_y);
+    // Stereoize knob: place its center clearly below the band header AND its
+    // own "Stz" caption row, so the two labels never visually collide into a
+    // single "B1Stz" blob at large scales. The knob center must leave radius
+    // worth of clearance above it for the caption + ring top.
+    let stz_label_top = header_h + label_h;
     // Reserve room for two stacked button-height bars (Mode + Solo) with a
     // gap between them, then panel padding.
     let buttons_h = button_h + stack_gap + button_h + scaled(4, s);
-    let max_radius_h = (h - stz_center_y - buttons_h).max(2);
-    let stz_radius = (band_w / 4).min(max_radius_h).max(scaled(4, s)) - scaled(2, s);
+    // Available vertical room for the knob (between the Stz caption row and
+    // the stacked Mode/Solo buttons at the bottom).
+    let knob_band_h = (h - stz_label_top - buttons_h - stack_above_pad).max(2);
+    // More generous radius than the original /4 formula so the knob occupies
+    // more of the panel at large scales. Clamp by the available vertical room
+    // so it can't push down into the Mode/Solo stack.
+    let stz_radius = ((band_w / 3).min(knob_band_h / 2)).max(scaled(4, s)) - scaled(4, s);
+    let stz_radius = stz_radius.max(scaled(3, s));
+    // Center the knob within the available vertical band, with its top edge
+    // (radius + caption pad) sitting below the Stz label row.
+    let stz_center_y = stz_label_top + stz_radius + scaled(4, s);
+    let stz_center = (band_w / 2 + knob_x_offset, stz_center_y);
 
     // Mode toggle / Solo button stack below the knob with stack_gap gaps.
     let stack_top = stz_center_y + stz_radius + stack_above_pad;
