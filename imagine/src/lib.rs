@@ -123,7 +123,9 @@ fn make_band_params() -> BandParams {
 pub struct ImagineParams {
     #[persist = "editor-state"]
     pub editor_state: Arc<tiny_skia_widgets::EditorState>,
-    /// Vectorscope display mode: 0 = Polar, 1 = Lissajous. Persisted across sessions.
+    /// Vectorscope display mode: 0 = HalfPolar (Ozone-style half-disc, default),
+    /// 1 = Polar (45°-rotated full square goniometer), 2 = Lissajous.
+    /// Persisted across sessions.
     #[persist = "vector-mode"]
     pub vector_mode: Arc<AtomicU32>,
 

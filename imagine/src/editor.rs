@@ -723,13 +723,11 @@ impl ImagineWindow {
                 }
             }
             HitAction::VectorMode => {
-                // Direct AtomicU32 toggle — vector_mode is not a Param.
+                // Direct AtomicU32 cycle — vector_mode is not a Param.
                 let cur = VectorMode::from_u32(self.params.vector_mode.load(Ordering::Relaxed));
-                let next = match cur {
-                    VectorMode::Polar => VectorMode::Lissajous as u32,
-                    VectorMode::Lissajous => VectorMode::Polar as u32,
-                };
-                self.params.vector_mode.store(next, Ordering::Release);
+                self.params
+                    .vector_mode
+                    .store(cur.next().as_u32(), Ordering::Release);
             }
         }
     }
