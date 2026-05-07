@@ -395,19 +395,30 @@ fn draw_half_polar(
     for i in 0..n {
         let l = samples_l[i].clamp(-1.0, 1.0);
         let rr = samples_r[i].clamp(-1.0, 1.0);
-        // Side: hard-left (L=1, R=0) → s = -0.5 → dot to LEFT of center.
-        let s_axis = (rr - l) * 0.5;
-        // Mid: |M| so anti-phase content stays on the baseline.
-        let m_axis = ((l + rr) * 0.5).abs();
-        // Clamp to disc: scale (s,m) so radius ≤ 1.
-        let mag = (s_axis * s_axis + m_axis * m_axis).sqrt();
-        let (s_unit, m_unit) = if mag > 1.0 {
-            (s_axis / mag, m_axis / mag)
-        } else {
-            (s_axis, m_axis)
-        };
-        let px = cx + (s_unit * r_f) as i32;
-        let py = base_y - (m_unit * r_f) as i32;
+        // Pan-vs-amplitude mapping (matches Ozone's polar):
+        //   angle = 2·atan2(L, R)  → 0 = right baseline corner,
+        //                            π/2 = top (mono),
+        //                            π   = left baseline corner.
+        //   radius = max(|L|, |R|) → loudness of the loudest channel.
+        //
+        // Anti-phase samples land below the baseline (angle ∈ (π, 2π))
+        // and we skip them. Negative half-cycles of a single-channel
+        // sine collapse onto the same corner as the positive half (e.g.
+        // L=-0.7, R=0 → angle = -π → cos=-1, sin=0 → left baseline),
+        // so a left-only sine traces a streak from origin out to the
+        // L corner without spurious right-side dots.
+        let amplitude = l.abs().max(rr.abs()).min(1.0);
+        if amplitude < 1e-6 {
+            continue;
+        }
+        let angle = 2.0 * l.atan2(rr);
+        let dx = angle.cos();
+        let dy = angle.sin();
+        if dy < 0.0 {
+            continue;
+        }
+        let px = cx + (amplitude * dx * r_f) as i32;
+        let py = base_y - (amplitude * dy * r_f) as i32;
         put_pixel(pixmap, px, py, color);
     }
 }
