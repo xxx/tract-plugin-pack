@@ -299,15 +299,23 @@ impl CrossoverIir {
 /// Single linear-phase windowed-sinc lowpass FIR.
 /// Length is fixed at construction; coefficients are redesigned in place.
 pub struct FirLowpass {
-    taps_a: Vec<f32>, // current
+    taps_a: Vec<f32>, // current (canonical order, used for redesign storage)
     taps_b: Vec<f32>, // pending (filled during redesign)
+    /// Pre-reversed copies of `taps_a` / `taps_b`. Maintained alongside the
+    /// canonical taps after every redesign so the per-sample dot product can
+    /// walk both `taps_rev` and `delay_line[next..next+n]` forward — the
+    /// compiler auto-vectorizes a forward zip far better than a forward-vs-
+    /// reversed zip, and the reversed iterator's bounds-checks were ~43% of
+    /// total CPU on a perf record (zip+rev+NonNull::eq overhead).
+    taps_a_rev: Vec<f32>,
+    taps_b_rev: Vec<f32>,
     /// Double-buffered history: `2 * length` elements. Each sample is written at both
     /// `write_idx` and `write_idx + length`, so a contiguous `length`-element slice
     /// starting at any position is always available for the dot product (no per-tap
     /// wraparound branch). Mirrors the pattern in `hilbert.rs`.
     delay_line: Vec<f32>,
     write_idx: usize,
-    using_a: bool, // true = process from taps_a
+    using_a: bool, // true = process from taps_a (and taps_a_rev)
 }
 
 impl FirLowpass {
@@ -315,6 +323,8 @@ impl FirLowpass {
         Self {
             taps_a: vec![0.0; length],
             taps_b: vec![0.0; length],
+            taps_a_rev: vec![0.0; length],
+            taps_b_rev: vec![0.0; length],
             delay_line: vec![0.0; 2 * length],
             write_idx: 0,
             using_a: true,
@@ -329,14 +339,23 @@ impl FirLowpass {
         self.taps_a.len() / 2
     }
 
-    /// Design windowed-sinc lowpass into the *pending* tap array.
+    /// Design windowed-sinc lowpass into the *pending* tap array, and refresh
+    /// the matching reversed copy so process_pending sees consistent state.
     pub fn redesign_pending(&mut self, fc: f32, sr: f32) {
-        let target = if self.using_a {
-            &mut self.taps_b
+        if self.using_a {
+            Self::design(&mut self.taps_b, fc, sr);
+            Self::fill_rev(&mut self.taps_b_rev, &self.taps_b);
         } else {
-            &mut self.taps_a
-        };
-        Self::design(target, fc, sr);
+            Self::design(&mut self.taps_a, fc, sr);
+            Self::fill_rev(&mut self.taps_a_rev, &self.taps_a);
+        }
+    }
+
+    fn fill_rev(out: &mut [f32], src: &[f32]) {
+        debug_assert_eq!(out.len(), src.len());
+        for (o, &v) in out.iter_mut().zip(src.iter().rev()) {
+            *o = v;
+        }
     }
 
     fn design(taps: &mut [f32], fc: f32, sr: f32) {
@@ -383,18 +402,13 @@ impl FirLowpass {
         } else {
             self.write_idx + 1
         };
-        let taps = if self.using_a {
-            &self.taps_a
+        let taps_rev = if self.using_a {
+            &self.taps_a_rev[..]
         } else {
-            &self.taps_b
+            &self.taps_b_rev[..]
         };
-        // Slice [next .. next + n] holds the last `n` samples in oldest→newest order;
-        // zipping taps with the reversed slice gives sum(taps[k] · x[n−1−k]).
         let hist = &self.delay_line[next..next + n];
-        let mut acc = 0.0;
-        for (&tap, &h) in taps.iter().zip(hist.iter().rev()) {
-            acc += tap * h;
-        }
+        let acc = dot_simd_f32x16(taps_rev, hist);
         self.write_idx = next;
         acc
     }
@@ -404,26 +418,52 @@ impl FirLowpass {
     #[inline]
     pub fn process_pending(&self) -> f32 {
         let n = self.taps_a.len();
-        let pending = if self.using_a {
-            &self.taps_b
+        let pending_rev = if self.using_a {
+            &self.taps_b_rev[..]
         } else {
-            &self.taps_a
+            &self.taps_a_rev[..]
         };
         // process_current already advanced write_idx so that [write_idx .. write_idx + n]
-        // is the oldest→newest contiguous window (with the wraparound absorbed by the
-        // mirror copy in the second half of the buffer).
+        // is the oldest→newest contiguous window.
         let hist = &self.delay_line[self.write_idx..self.write_idx + n];
-        let mut acc = 0.0;
-        for (&tap, &h) in pending.iter().zip(hist.iter().rev()) {
-            acc += tap * h;
-        }
-        acc
+        dot_simd_f32x16(pending_rev, hist)
     }
 
     pub fn reset(&mut self) {
         self.delay_line.fill(0.0);
         self.write_idx = 0;
     }
+}
+
+/// Forward dot product of two equal-length f32 slices using `f32x16` SIMD
+/// chunks. Both inputs are walked forward; the FIR's reversed-tap layout
+/// keeps the convolution math correct (caller pre-reverses one side).
+///
+/// Lanes-of-16 inner loop with a scalar tail. Five independent accumulator
+/// lanes get summed at the end via SIMD reduction. Used by both
+/// `process_current` and `process_pending` — the work and the access
+/// pattern are identical.
+#[inline]
+fn dot_simd_f32x16(a: &[f32], b: &[f32]) -> f32 {
+    use std::simd::{f32x16, num::SimdFloat};
+
+    debug_assert_eq!(a.len(), b.len());
+    let n = a.len();
+    let chunks = n / 16;
+    let mut acc = f32x16::splat(0.0);
+    let mut i = 0;
+    for _ in 0..chunks {
+        let av = f32x16::from_slice(&a[i..i + 16]);
+        let bv = f32x16::from_slice(&b[i..i + 16]);
+        acc += av * bv;
+        i += 16;
+    }
+    let mut tail = acc.reduce_sum();
+    while i < n {
+        tail += a[i] * b[i];
+        i += 1;
+    }
+    tail
 }
 
 /// 4-band linear-phase FIR crossover. Bands are derived from a single LP per split:
