@@ -6,9 +6,7 @@ use pope_scope::ring_buffer::RingBuffer;
 fn bench_ring_buffer_push(c: &mut Criterion) {
     // Representative: 512-sample block pushed into a 192000-sample ring. Exercises
     // the f32x16 mipmap downsample fast path in RingBuffer::push.
-    let block: Vec<f32> = (0..512)
-        .map(|i| (i as f32 * 0.01).sin() * 0.5)
-        .collect();
+    let block: Vec<f32> = (0..512).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
 
     let mut group = c.benchmark_group("ring_buffer_push");
     group.throughput(Throughput::Elements(block.len() as u64));

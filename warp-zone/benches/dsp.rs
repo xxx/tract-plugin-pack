@@ -7,9 +7,7 @@ fn bench_spectral_shifter(c: &mut Criterion) {
     // Full phase-vocoder step across a 512-sample block. Rustfft has its own SIMD
     // dispatch so most visible gain comes from the surrounding bin-remap + phase loops.
     let mut shifter = SpectralShifter::new(4096, 1024);
-    let block: Vec<f32> = (0..512)
-        .map(|i| (i as f32 * 0.02).sin() * 0.7)
-        .collect();
+    let block: Vec<f32> = (0..512).map(|i| (i as f32 * 0.02).sin() * 0.7).collect();
     let fft_size = 4096;
     let low_bin = 0usize;
     let high_bin = fft_size / 2;

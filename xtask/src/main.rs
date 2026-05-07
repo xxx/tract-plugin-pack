@@ -70,9 +70,7 @@ fn run_native(args: &[String]) -> Result<()> {
             eprintln!("[xtask] RUSTFLAGS already sets target-cpu; leaving it alone");
         }
         None => {
-            eprintln!(
-                "[xtask] no AVX2/FMA/BMI2 detected on build host; using default target-cpu"
-            );
+            eprintln!("[xtask] no AVX2/FMA/BMI2 detected on build host; using default target-cpu");
         }
     }
 

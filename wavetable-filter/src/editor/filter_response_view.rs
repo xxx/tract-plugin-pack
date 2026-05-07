@@ -269,11 +269,8 @@ pub(crate) fn draw_filter_response(
     // baseline, which produces a zero-height polygon that tiny-skia warns about
     // on every call. Skip the draw when there's nothing to show.
     let mag_floor = 10f32.powf(DB_FLOOR / 20.0); // mag corresponding to -48 dB
-    let has_audio = cache.cached_input_sr > 0.0
-        && cache
-            .cached_input_mags
-            .iter()
-            .any(|&m| m > mag_floor);
+    let has_audio =
+        cache.cached_input_sr > 0.0 && cache.cached_input_mags.iter().any(|&m| m > mag_floor);
     if has_audio {
         let bin_hz = cache.cached_input_sr / (2.0 * (cache.cached_input_mags.len() - 1) as f32);
         let mut pb = PathBuilder::new();

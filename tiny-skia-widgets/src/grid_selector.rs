@@ -110,7 +110,14 @@ pub fn draw_grid_selector(
         let text_size = (vh * 0.5).max(10.0);
         let text_y = vy + (vh + text_size) * 0.5 - 2.0;
         let pad = 6.0;
-        text_renderer.draw_text(pixmap, vx + pad, text_y, value_text, text_size, color_text());
+        text_renderer.draw_text(
+            pixmap,
+            vx + pad,
+            text_y,
+            value_text,
+            text_size,
+            color_text(),
+        );
     }
 
     // Grid cells.
@@ -247,10 +254,7 @@ pub fn draw_grid_tooltips_pass<A: Clone + PartialEq>(
         let Some(label) = name_for(&region.action) else {
             continue;
         };
-        if mx >= region.x
-            && mx < region.x + region.w
-            && my >= region.y
-            && my < region.y + region.h
+        if mx >= region.x && mx < region.x + region.w && my >= region.y && my < region.y + region.h
         {
             draw_grid_tooltip(
                 pixmap,
@@ -281,10 +285,7 @@ mod tests {
     }
 
     /// Sample the pixel at the center of `cell_rect`.
-    fn pixel_at_cell_center(
-        pm: &Pixmap,
-        cell_rect: (f32, f32, f32, f32),
-    ) -> (u8, u8, u8, u8) {
+    fn pixel_at_cell_center(pm: &Pixmap, cell_rect: (f32, f32, f32, f32)) -> (u8, u8, u8, u8) {
         let (cx, cy, cw, ch) = cell_rect;
         let px = (cx + cw * 0.5) as u32;
         let py = (cy + ch * 0.5) as u32;
@@ -485,7 +486,6 @@ mod tests {
             "inactive cell center should be color_control_bg()"
         );
     }
-
 
     /// Per the layout table in the spec (§3): for each N, expected (rows, cols, cell_count).
     /// Grid is right-aligned within the bounding box, with `cell_gap` of

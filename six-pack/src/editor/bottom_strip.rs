@@ -62,10 +62,7 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
 
     for (i, &(id, label)) in dials.iter().enumerate() {
         let (text, normalized) = match id {
-            GlobalDialId::Input => (
-                format!("{:+.1} dB", input_db),
-                input_norm,
-            ),
+            GlobalDialId::Input => (format!("{:+.1} dB", input_db), input_norm),
             GlobalDialId::Output => {
                 if io_linked {
                     (format!("{:+.1} dB", -input_db), 1.0 - input_norm)
