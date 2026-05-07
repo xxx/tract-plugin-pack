@@ -16,6 +16,11 @@ const SAMPLE_BUDGET: usize = 4096;
 /// bars (which themselves occupy the bottom 36 px).
 const MODE_LABEL_FOOTER_H: i32 = 16;
 
+#[inline]
+fn scaled(v: i32, s: f32) -> i32 {
+    ((v as f32) * s).round().max(1.0) as i32
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum VectorMode {
     Polar = 0,
@@ -83,23 +88,31 @@ pub fn draw(
     vec_l: &mut Vec<f32>,
     vec_r: &mut Vec<f32>,
     text_renderer: &mut TextRenderer,
+    scale_factor: f32,
 ) {
+    let s = scale_factor.max(0.1);
     let mode = VectorMode::from_u32(params.vector_mode.load(Ordering::Relaxed));
     let corr = f32::from_bits(params.correlation.load(Ordering::Relaxed));
     let bal = f32::from_bits(params.balance.load(Ordering::Relaxed));
+
+    let pad = scaled(6, s);
+    let bar_h = scaled(8, s);
+    let bar_gap = scaled(4, s);
+    let bottom_reserve = scaled(36, s);
+    let footer_h = scaled(MODE_LABEL_FOOTER_H, s);
 
     {
         let mut pm = pixmap.as_mut();
         fill_rect_i(&mut pm, x, y, w, h, theme::panel_bg());
         stroke_rect_i(&mut pm, x, y, w, h, theme::border());
 
-        // Reserve bottom 36 px for correlation + balance bars, plus an
-        // additional MODE_LABEL_FOOTER_H above them for the mode label so it
+        // Reserve bottom area for correlation + balance bars, plus an
+        // additional footer above them for the mode label so it
         // doesn't overlap the dot cloud.
-        let scope_h = h - 36 - MODE_LABEL_FOOTER_H;
-        let scope_x = x + 6;
-        let scope_y = y + 6;
-        let scope_w = w - 12;
+        let scope_h = h - bottom_reserve - footer_h;
+        let scope_x = x + pad;
+        let scope_y = y + pad;
+        let scope_w = w - 2 * pad;
 
         // Snapshot up to SAMPLE_BUDGET samples.
         if vec_l.len() < SAMPLE_BUDGET {
@@ -110,7 +123,7 @@ pub fn draw(
 
         let cx = scope_x + scope_w / 2;
         let cy = scope_y + scope_h / 2;
-        let r = scope_w.min(scope_h) / 2 - 6;
+        let r = scope_w.min(scope_h) / 2 - pad;
 
         // Background grid (a faint cross).
         fill_rect_i(
@@ -135,43 +148,63 @@ pub fn draw(
             VectorMode::Lissajous => draw_lissajous(&mut pm, cx, cy, r, &vec_l[..n], &vec_r[..n]),
         }
 
-        // Correlation bar at the bottom
-        let bar_y = y + h - 28;
+        // Correlation bar at the bottom. Bar layout (from bottom up):
+        //   pad-from-bottom (bar_gap), bal bar (bar_h), gap, corr bar (bar_h)
+        let bal_y = y + h - bar_h - bar_gap;
+        let corr_y = bal_y - bar_h - bar_gap;
         let corr_color = theme::cyan_to_pink(if corr > 0.0 { 0.0 } else { 1.0 });
-        draw_meter_bar(&mut pm, x + 6, bar_y, w - 12, 8, corr, corr_color);
+        draw_meter_bar(
+            &mut pm,
+            x + pad,
+            corr_y,
+            w - 2 * pad,
+            bar_h,
+            corr,
+            corr_color,
+        );
 
         // Balance bar
-        let bal_y = y + h - 16;
-        draw_meter_bar(&mut pm, x + 6, bal_y, w - 12, 8, bal, theme::accent());
+        draw_meter_bar(
+            &mut pm,
+            x + pad,
+            bal_y,
+            w - 2 * pad,
+            bar_h,
+            bal,
+            theme::accent(),
+        );
     }
 
     // Text labels.
-    let label_size = 10.0_f32;
+    let label_size = (10.0_f32 * s).max(6.0);
+    let small_size = (9.0_f32 * s).max(6.0);
     let mode_label = match mode {
         VectorMode::Polar => "Polar",
         VectorMode::Lissajous => "Lissajous",
     };
     // Mode toggle area is the bottom-left corner above the meter bars
-    // (matches the hit region in the editor: 80×16 px starting at +6 px from
-    // the panel's left edge, ending 36 px above the bottom).
-    let toggle_y1 = (y + h) as f32 - 36.0;
-    let toggle_y0 = toggle_y1 - 16.0;
+    // (matches the hit region in the editor: 80×16 px starting at +pad from
+    // the panel's left edge, ending bottom_reserve px above the bottom).
+    let toggle_y1 = (y + h) as f32 - bottom_reserve as f32;
+    let toggle_y0 = toggle_y1 - footer_h as f32;
     text_renderer.draw_text(
         pixmap,
-        x as f32 + 6.0,
+        x as f32 + pad as f32,
         toggle_y0 + (toggle_y1 - toggle_y0) * 0.5 + label_size * 0.35,
         mode_label,
         label_size,
         theme::text(),
     );
 
-    // Correlation / Balance captions and values.
-    let small_size = 9.0_f32;
+    // Correlation / Balance captions and values. Recompute the bar positions
+    // (mirrors the shape pass above) so captions sit just above each bar.
+    let bal_y = y + h - bar_h - bar_gap;
+    let corr_y = bal_y - bar_h - bar_gap;
     let corr_text = format!("Corr {:+.2}", corr);
     text_renderer.draw_text(
         pixmap,
-        x as f32 + 6.0,
-        (y + h - 28) as f32 - 2.0,
+        x as f32 + pad as f32,
+        corr_y as f32 - 2.0,
         &corr_text,
         small_size,
         theme::text_dim(),
@@ -179,8 +212,8 @@ pub fn draw(
     let bal_text = format!("Bal {:+.2}", bal);
     text_renderer.draw_text(
         pixmap,
-        x as f32 + 6.0,
-        (y + h - 16) as f32 - 2.0,
+        x as f32 + pad as f32,
+        bal_y as f32 - 2.0,
         &bal_text,
         small_size,
         theme::text_dim(),
@@ -273,6 +306,7 @@ mod tests {
             &mut vl,
             &mut vr,
             &mut tr,
+            1.0,
         );
     }
 
@@ -301,6 +335,7 @@ mod tests {
             &mut vl,
             &mut vr,
             &mut tr,
+            1.0,
         );
     }
 }

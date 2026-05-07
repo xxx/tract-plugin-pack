@@ -222,6 +222,7 @@ impl ImagineWindow {
 
         // Dispatch to view modules. Each view receives `&mut Pixmap` (so it
         // can call into TextRenderer::draw_text) plus `&mut TextRenderer`.
+        let sf = self.scale_factor;
         let pm = &mut self.surface.pixmap;
         vectorscope_view::draw(
             pm,
@@ -234,6 +235,7 @@ impl ImagineWindow {
             &mut self.vec_l,
             &mut self.vec_r,
             &mut self.text_renderer,
+            sf,
         );
         spectrum_view::draw(
             pm,
@@ -243,6 +245,7 @@ impl ImagineWindow {
             layout.spectrum.3,
             &self.params,
             &mut self.text_renderer,
+            sf,
         );
         band_strip::draw(
             pm,
@@ -252,6 +255,7 @@ impl ImagineWindow {
             layout.band.3,
             &self.params,
             &mut self.text_renderer,
+            sf,
         );
         spectrum_view::draw_coherence(
             pm,
@@ -261,6 +265,7 @@ impl ImagineWindow {
             layout.coherence.3,
             &self.params,
             &mut self.text_renderer,
+            sf,
         );
         global_strip::draw(
             pm,
@@ -270,6 +275,7 @@ impl ImagineWindow {
             layout.global.3,
             &self.params,
             &mut self.text_renderer,
+            sf,
         );
     }
 
@@ -406,7 +412,7 @@ impl ImagineWindow {
             && my >= by as f32
             && my < (by + bh) as f32;
         if in_band_strip {
-            let layout = band_strip::compute_layout(bx, by, bw, bh);
+            let layout = band_strip::compute_layout(bx, by, bw, bh, self.scale_factor);
             for i in 0..NUM_BANDS {
                 let band_left = layout.band_x[i] as f32;
                 let band_right = band_left + layout.band_w as f32;
@@ -466,7 +472,7 @@ impl ImagineWindow {
             && my >= gy as f32
             && my < (gy + gh) as f32;
         if in_global {
-            let layout = global_strip::compute_layout(gx, gy, gw, gh);
+            let layout = global_strip::compute_layout(gx, gy, gw, gh, self.scale_factor);
             let (rx, ry, rw, rh) = layout.recover_rect;
             if mx >= rx as f32 && mx < (rx + rw) as f32 && my >= ry as f32 && my < (ry + rh) as f32
             {
@@ -500,11 +506,13 @@ impl ImagineWindow {
             && my >= vy as f32
             && my < (vy + vh) as f32;
         if in_vec {
-            // Toggle area: bottom-left ~80×16 px just above the meter bars.
-            let toggle_x0 = vx as f32 + 6.0;
-            let toggle_y1 = (vy + vh) as f32 - 36.0;
-            let toggle_y0 = toggle_y1 - 16.0;
-            let toggle_x1 = toggle_x0 + 80.0;
+            // Toggle area: bottom-left ~80×16 px (scaled) just above the
+            // meter bars. Mirrors the layout in `vectorscope_view::draw`.
+            let s = self.scale_factor;
+            let toggle_x0 = vx as f32 + 6.0 * s;
+            let toggle_y1 = (vy + vh) as f32 - 36.0 * s;
+            let toggle_y0 = toggle_y1 - 16.0 * s;
+            let toggle_x1 = toggle_x0 + 80.0 * s;
             if mx >= toggle_x0 && mx < toggle_x1 && my >= toggle_y0 && my < toggle_y1 {
                 return Some(HitAction::VectorMode);
             }
@@ -540,7 +548,7 @@ impl ImagineWindow {
                 if bw <= 0 || bh <= 0 {
                     return;
                 }
-                let layout = band_strip::compute_layout(bx, by, bw, bh);
+                let layout = band_strip::compute_layout(bx, by, bw, bh, self.scale_factor);
                 let (_wxr, wyr, _wwr, whr) = layout.width_rect;
                 if whr <= 0 {
                     return;
@@ -572,7 +580,7 @@ impl ImagineWindow {
                 if gw <= 0 || gh <= 0 {
                     return;
                 }
-                let layout = global_strip::compute_layout(gx, gy, gw, gh);
+                let layout = global_strip::compute_layout(gx, gy, gw, gh, self.scale_factor);
                 let (rx, _ry, rw, _rh) = layout.recover_rect;
                 if rw <= 0 {
                     return;

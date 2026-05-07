@@ -14,6 +14,11 @@ pub const LABEL_H: i32 = 12;
 /// Reserved height for value readouts placed beneath their control.
 pub const VALUE_H: i32 = 11;
 
+#[inline]
+fn scaled(v: i32, s: f32) -> i32 {
+    ((v as f32) * s).round().max(1.0) as i32
+}
+
 pub struct BandStripLayout {
     pub band_x: [i32; 4],
     pub band_w: i32,
@@ -30,7 +35,8 @@ pub struct BandStripLayout {
     pub solo_rect: (i32, i32, i32, i32),
 }
 
-pub fn compute_layout(x: i32, y: i32, w: i32, h: i32) -> BandStripLayout {
+pub fn compute_layout(x: i32, y: i32, w: i32, h: i32, scale_factor: f32) -> BandStripLayout {
+    let s = scale_factor.max(0.1);
     let band_w = w / 4;
     let band_x = [x, x + band_w, x + 2 * band_w, x + 3 * band_w];
 
@@ -39,27 +45,44 @@ pub fn compute_layout(x: i32, y: i32, w: i32, h: i32) -> BandStripLayout {
     //   y = HEADER_H..HEADER_H+LABEL_H : "Width" caption above the slider slot
     //   Width slider runs from y=HEADER_H+LABEL_H down to leave VALUE_H at the
     //   bottom for the value readout text.
-    let pad = 6;
-    let width_top = HEADER_H + LABEL_H; // 26
-    let width_bottom_reserve = VALUE_H + 2; // value text + a little padding
+    let pad = scaled(6, s);
+    let header_h = scaled(HEADER_H, s);
+    let label_h = scaled(LABEL_H, s);
+    let value_h = scaled(VALUE_H, s);
+    let slider_w = scaled(24, s);
+    let button_w = scaled(32, s);
+    let button_h = scaled(14, s);
+    let button_right_inset = scaled(38, s);
+    let stack_gap = scaled(12, s);
+    let knob_top_offset = scaled(18, s);
+    let knob_x_offset = scaled(12, s);
+    let stack_above_pad = scaled(8, s);
+
+    let width_top = header_h + label_h;
+    let width_bottom_reserve = value_h + scaled(2, s);
     let width_h = (h - width_top - width_bottom_reserve).max(1);
-    let width_rect = (pad, width_top, 24, width_h);
+    let width_rect = (pad, width_top, slider_w, width_h);
 
     // Stereoize knob: place its center below "Stz" label (header + label).
     // Center vertically in the upper region; clamp radius to fit alongside
     // the mode/solo buttons stacked below.
-    let stz_center_y = HEADER_H + LABEL_H + 18;
-    let stz_center = (band_w / 2 + 12, stz_center_y);
-    // Reserve room for two stacked 14 px bars (Mode + Solo) with a 12 px gap
-    // between them, then 4 px panel padding.
-    let buttons_h = 14 + 12 + 14 + 4;
+    let stz_center_y = header_h + label_h + knob_top_offset;
+    let stz_center = (band_w / 2 + knob_x_offset, stz_center_y);
+    // Reserve room for two stacked button-height bars (Mode + Solo) with a
+    // gap between them, then panel padding.
+    let buttons_h = button_h + stack_gap + button_h + scaled(4, s);
     let max_radius_h = (h - stz_center_y - buttons_h).max(2);
-    let stz_radius = (band_w / 4).min(max_radius_h).max(4) - 2;
+    let stz_radius = (band_w / 4).min(max_radius_h).max(scaled(4, s)) - scaled(2, s);
 
-    // Mode toggle / Solo button stack below the knob with 12 px gaps.
-    let stack_top = stz_center_y + stz_radius + 8;
-    let mode_rect = (band_w - 38, stack_top, 32, 14);
-    let solo_rect = (band_w - 38, stack_top + 14 + 12, 32, 14);
+    // Mode toggle / Solo button stack below the knob with stack_gap gaps.
+    let stack_top = stz_center_y + stz_radius + stack_above_pad;
+    let mode_rect = (band_w - button_right_inset, stack_top, button_w, button_h);
+    let solo_rect = (
+        band_w - button_right_inset,
+        stack_top + button_h + stack_gap,
+        button_w,
+        button_h,
+    );
 
     BandStripLayout {
         band_x,
@@ -98,6 +121,7 @@ fn stroke_rect_i(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: i32, h: i32, col
     fill_rect_i(pixmap, x + w - 1, y, 1, h, color);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     pixmap: &mut Pixmap,
     x: i32,
@@ -106,8 +130,10 @@ pub fn draw(
     h: i32,
     params: &Arc<ImagineParams>,
     text_renderer: &mut TextRenderer,
+    scale_factor: f32,
 ) {
-    let layout = compute_layout(x, y, w, h);
+    let s = scale_factor.max(0.1);
+    let layout = compute_layout(x, y, w, h, s);
 
     let widths = [
         params.bands[0].width.value(),
@@ -220,8 +246,8 @@ pub fn draw(
 
     // Text pass — labels for band number, Width value, Stereoize amount,
     // Mode I/II halves, and Solo button.
-    let label_size = 11.0_f32;
-    let small_size = 9.5_f32;
+    let label_size = (11.0_f32 * s).max(6.0);
+    let small_size = (9.5_f32 * s).max(6.0);
     for i in 0..4 {
         let bx = layout.band_x[i];
 
@@ -402,7 +428,7 @@ mod tests {
 
     #[test]
     fn layout_4_columns() {
-        let layout = compute_layout(0, 0, 400, 200);
+        let layout = compute_layout(0, 0, 400, 200, 1.0);
         assert_eq!(layout.band_x[0], 0);
         assert_eq!(layout.band_x[3], 300);
         assert_eq!(layout.band_w, 100);
@@ -414,7 +440,7 @@ mod tests {
         let mut pixmap = tiny_skia::Pixmap::new(720, 580).unwrap();
         let font_data = include_bytes!("../fonts/DejaVuSans.ttf");
         let mut tr = TextRenderer::new(font_data);
-        draw(&mut pixmap, 290, 350, 430, 150, &params, &mut tr);
+        draw(&mut pixmap, 290, 350, 430, 150, &params, &mut tr, 1.0);
     }
 
     #[test]
@@ -423,6 +449,6 @@ mod tests {
         let mut pixmap = tiny_skia::Pixmap::new(720, 580).unwrap();
         let font_data = include_bytes!("../fonts/DejaVuSans.ttf");
         let mut tr = TextRenderer::new(font_data);
-        draw(&mut pixmap, 290, 350, 430, 150, &params, &mut tr);
+        draw(&mut pixmap, 290, 350, 430, 150, &params, &mut tr, 1.0);
     }
 }

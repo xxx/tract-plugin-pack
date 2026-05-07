@@ -40,7 +40,13 @@ pub fn hz_to_x(hz: f32) -> f32 {
 
 /// Reserved height at the top of the spectrum panel for frequency labels above
 /// each split handle. Spectrum bars and split handles are inset below this.
+/// Multiply by `scale_factor` for actual pixels at runtime.
 pub const LABEL_H: i32 = 14;
+
+#[inline]
+fn scaled(v: i32, s: f32) -> i32 {
+    ((v as f32) * s).round().max(1.0) as i32
+}
 
 /// Pixel x for a split at given frequency, given the panel's left edge and width.
 pub fn split_pixel_x(panel_x: i32, panel_w: i32, hz: f32) -> i32 {
@@ -75,6 +81,7 @@ fn stroke_rect_i(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: i32, h: i32, col
     fill_rect_i(pixmap, x + w - 1, y + 1, 1, (h - 2).max(0), color);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     pixmap: &mut Pixmap,
     x: i32,
@@ -83,7 +90,9 @@ pub fn draw(
     h: i32,
     params: &Arc<ImagineParams>,
     text_renderer: &mut TextRenderer,
+    scale_factor: f32,
 ) {
+    let s = scale_factor.max(0.1);
     let f1 = params.xover_1.value();
     let f2 = params.xover_2.value();
     let f3 = params.xover_3.value();
@@ -91,8 +100,9 @@ pub fn draw(
     // Spectrum bars, split lines, and split handles are all inset below the
     // top LABEL_H reserve so the frequency labels can sit at y=2..LABEL_H
     // without overlapping the bars.
-    let bars_top = y + LABEL_H;
-    let bars_h = (h - LABEL_H).max(1);
+    let label_h_px = scaled(LABEL_H, s);
+    let bars_top = y + label_h_px;
+    let bars_h = (h - label_h_px).max(1);
 
     {
         let mut pm = pixmap.as_mut();
@@ -128,20 +138,31 @@ pub fn draw(
 
         // 3 draggable split lines + handles. Handles sit just below the label
         // strip (y = LABEL_H + 2 from the panel top).
-        let handle_y = bars_top + 2;
+        let handle_y = bars_top + scaled(2, s);
         let line_y = bars_top;
-        let line_h = (y + h - line_y - 2).max(0);
+        let line_h = (y + h - line_y - scaled(2, s)).max(0);
+        let line_w = scaled(2, s);
+        let handle_w = scaled(9, s);
+        let handle_h = scaled(8, s);
+        let handle_inset = scaled(4, s);
         for hz in [f1, f2, f3] {
             let lx = split_pixel_x(x, w, hz);
             // Vertical line
-            fill_rect_i(&mut pm, lx, line_y, 2, line_h, theme::split_line());
+            fill_rect_i(&mut pm, lx, line_y, line_w, line_h, theme::split_line());
             // Handle (small filled square at the top of the bars region)
-            fill_rect_i(&mut pm, lx - 4, handle_y, 9, 8, theme::accent());
+            fill_rect_i(
+                &mut pm,
+                lx - handle_inset,
+                handle_y,
+                handle_w,
+                handle_h,
+                theme::accent(),
+            );
         }
     }
 
     // Frequency labels above each split handle, inside the LABEL_H strip.
-    let label_size = 10.0_f32;
+    let label_size = (10.0_f32 * s).max(6.0);
     for hz in [f1, f2, f3] {
         let lx = split_pixel_x(x, w, hz);
         let txt = format_freq(hz);
@@ -162,6 +183,7 @@ pub fn draw(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_coherence(
     pixmap: &mut Pixmap,
     x: i32,
@@ -170,7 +192,9 @@ pub fn draw_coherence(
     h: i32,
     params: &Arc<ImagineParams>,
     text_renderer: &mut TextRenderer,
+    scale_factor: f32,
 ) {
+    let s = scale_factor.max(0.1);
     {
         let mut pm = pixmap.as_mut();
         fill_rect_i(&mut pm, x, y, w, h, theme::spectrum_bg());
@@ -199,7 +223,7 @@ pub fn draw_coherence(
     }
 
     // Small "Coherence" caption inside the top-left corner.
-    let label_size = 10.0_f32;
+    let label_size = (10.0_f32 * s).max(6.0);
     let caption = "Coherence";
     text_renderer.draw_text(
         pixmap,
@@ -255,8 +279,8 @@ mod tests {
         let mut pixmap = tiny_skia::Pixmap::new(720, 580).unwrap();
         let font_data = include_bytes!("../fonts/DejaVuSans.ttf");
         let mut tr = TextRenderer::new(font_data);
-        draw(&mut pixmap, 290, 0, 430, 350, &params, &mut tr);
-        draw_coherence(&mut pixmap, 290, 480, 430, 100, &params, &mut tr);
+        draw(&mut pixmap, 290, 0, 430, 350, &params, &mut tr, 1.0);
+        draw_coherence(&mut pixmap, 290, 480, 430, 100, &params, &mut tr, 1.0);
     }
 
     #[test]

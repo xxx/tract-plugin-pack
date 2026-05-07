@@ -10,20 +10,27 @@ use tiny_skia_widgets::TextRenderer;
 /// ("Recover Sides", "Link", "Quality").
 pub const HEADER_H: i32 = 14;
 
+#[inline]
+fn scaled(v: i32, s: f32) -> i32 {
+    ((v as f32) * s).round().max(1.0) as i32
+}
+
 pub struct GlobalLayout {
     pub recover_rect: (i32, i32, i32, i32),
     pub link_rect: (i32, i32, i32, i32),
     pub quality_rect: (i32, i32, i32, i32),
 }
 
-pub fn compute_layout(x: i32, y: i32, w: i32, h: i32) -> GlobalLayout {
+pub fn compute_layout(x: i32, y: i32, w: i32, h: i32, scale_factor: f32) -> GlobalLayout {
+    let s = scale_factor.max(0.1);
     // Three sections, equal-ish width. The top HEADER_H pixels are reserved
     // for the section captions ("Recover Sides", "Link", "Quality") and the
     // remaining height is the control body.
-    let pad = 8;
+    let pad = scaled(8, s);
+    let header_h = scaled(HEADER_H, s);
     let section_w = (w - 4 * pad) / 3;
-    let body_top = HEADER_H + 2;
-    let body_h = (h - body_top - 4).max(1);
+    let body_top = header_h + scaled(2, s);
+    let body_h = (h - body_top - scaled(4, s)).max(1);
     GlobalLayout {
         recover_rect: (x + pad, y + body_top, section_w, body_h),
         link_rect: (x + pad * 2 + section_w, y + body_top, section_w, body_h),
@@ -54,6 +61,7 @@ fn stroke_rect_i(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: i32, h: i32, col
     fill_rect_i(pixmap, x + w - 1, y, 1, h, color);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     pixmap: &mut Pixmap,
     x: i32,
@@ -62,8 +70,10 @@ pub fn draw(
     h: i32,
     params: &Arc<ImagineParams>,
     text_renderer: &mut TextRenderer,
+    scale_factor: f32,
 ) {
-    let layout = compute_layout(x, y, w, h);
+    let s = scale_factor.max(0.1);
+    let layout = compute_layout(x, y, w, h, s);
 
     // Shape pass — borrow PixmapMut for rect helpers.
     let recover_norm = params.recover_sides.value() / 100.0;
@@ -114,8 +124,8 @@ pub fn draw(
 
     // Text pass — section captions in the HEADER_H row at the top of the
     // strip, value labels inside their respective bodies.
-    let label_size = 11.0_f32;
-    let value_size = 10.5_f32;
+    let label_size = (11.0_f32 * s).max(6.0);
+    let value_size = (10.5_f32 * s).max(6.0);
     // Baseline for header captions: drop label_size into the HEADER_H row.
     let header_y = y as f32 + label_size + 1.0;
 
@@ -226,7 +236,7 @@ mod tests {
 
     #[test]
     fn layout_three_sections() {
-        let l = compute_layout(0, 0, 600, 52);
+        let l = compute_layout(0, 0, 600, 52, 1.0);
         assert!(l.recover_rect.0 < l.link_rect.0);
         assert!(l.link_rect.0 < l.quality_rect.0);
     }
@@ -235,7 +245,7 @@ mod tests {
     fn layout_reserves_header_row() {
         // Body rects must start strictly below the HEADER_H reserve so the
         // section captions never overlap the control bodies.
-        let l = compute_layout(0, 0, 600, 52);
+        let l = compute_layout(0, 0, 600, 52, 1.0);
         assert!(l.recover_rect.1 >= HEADER_H);
         assert!(l.link_rect.1 >= HEADER_H);
         assert!(l.quality_rect.1 >= HEADER_H);
@@ -247,6 +257,6 @@ mod tests {
         let mut pixmap = tiny_skia::Pixmap::new(720, 580).unwrap();
         let font_data = include_bytes!("../fonts/DejaVuSans.ttf");
         let mut tr = TextRenderer::new(font_data);
-        draw(&mut pixmap, 0, 528, 720, 52, &params, &mut tr);
+        draw(&mut pixmap, 0, 528, 720, 52, &params, &mut tr, 1.0);
     }
 }
