@@ -10,7 +10,6 @@ pub mod editor_base;
 pub mod grid_selector;
 pub mod param_dial;
 pub mod primitives;
-pub mod resize_grip;
 pub mod text;
 pub mod text_edit;
 
@@ -23,6 +22,5 @@ pub use editor_base::*;
 pub use grid_selector::*;
 pub use param_dial::*;
 pub use primitives::*;
-pub use resize_grip::*;
 pub use text::*;
 pub use text_edit::*;
