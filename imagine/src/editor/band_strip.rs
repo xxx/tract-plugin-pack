@@ -198,9 +198,10 @@ pub fn draw(
             let slot_y = layout.y + wy;
             fill_rect_i(&mut pm, slot_x, slot_y, ww, wh, theme::spectrum_bg());
             stroke_rect_i(&mut pm, slot_x, slot_y, ww, wh, theme::border());
-            // Center line at width=0
-            let center_y = slot_y + wh / 2;
-            fill_rect_i(&mut pm, slot_x, center_y, ww, 1, theme::text_dim());
+            // Center line at width=0 — at least 2 px tall, scales with editor.
+            let center_h = scaled(2, s);
+            let center_y = slot_y + wh / 2 - center_h / 2;
+            fill_rect_i(&mut pm, slot_x, center_y, ww, center_h, theme::text());
             // Marker: top = +100, bottom = -100
             let w_norm = (widths[i] + 100.0) / 200.0; // 0..1
             let marker_y = slot_y + wh - (w_norm * wh as f32) as i32;
@@ -213,11 +214,12 @@ pub fn draw(
                 theme::cyan_to_pink(w_norm),
             );
 
-            // Stereoize knob (filled-arc representation)
+            // Stereoize knob (filled annular ring + amount sector).
             let (cx, cy) = (bx + layout.stz_center.0, layout.y + layout.stz_center.1);
             let radius = layout.stz_radius;
-            // Ring background (full circle as series of dots)
-            draw_arc_ring(&mut pm, cx, cy, radius, 0.0, 1.0, theme::spectrum_bg());
+            // Ring background — full circle, brighter than spectrum_bg so the
+            // user sees the knob outline even at amount = 0.
+            draw_arc_ring(&mut pm, cx, cy, radius, 0.0, 1.0, theme::border());
             // Amount arc
             let stz_norm = (stz_amounts[i] / 100.0).clamp(0.0, 1.0);
             if stz_norm > 0.0 {
@@ -396,9 +398,10 @@ pub fn draw(
     }
 }
 
-/// Draw a partial ring from `start_norm` to `end_norm` (both in [0, 1]),
-/// where 0 = top of ring (12 o'clock) and progress is clockwise.
-/// Implemented as a series of small filled rectangles around the perimeter.
+/// Draw a partial annular sector (donut slice) from `start_norm` to `end_norm`
+/// (both in [0, 1]), where 0 = top of ring (12 o'clock) and progress is
+/// clockwise. The ring thickness scales with `radius` so the knob reads as a
+/// continuous band at any editor scale.
 fn draw_arc_ring(
     pixmap: &mut PixmapMut<'_>,
     cx: i32,
@@ -408,26 +411,53 @@ fn draw_arc_ring(
     end_norm: f32,
     color: Color,
 ) {
-    if radius <= 0 {
+    if radius <= 1 || end_norm <= start_norm {
         return;
     }
-    let r_inner = (radius - 3).max(1) as f32;
+    use tiny_skia::{FillRule, PathBuilder};
     let r_outer = radius as f32;
-    let steps = 60;
-    let start = start_norm * std::f32::consts::TAU;
-    let end = end_norm * std::f32::consts::TAU;
-    if end <= start {
-        return;
-    }
-    let r_mid = (r_inner + r_outer) * 0.5;
-    for i in 0..steps {
+    // Thickness grows with the radius so the ring stays visible at large
+    // scales. Minimum 3 px so it never disappears at scale 1.0.
+    let thickness = ((radius as f32 / 4.0).round() as i32).max(3) as f32;
+    let r_inner = (r_outer - thickness).max(1.0);
+    let cx_f = cx as f32 + 0.5;
+    let cy_f = cy as f32 + 0.5;
+
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = true;
+
+    // 12 o'clock origin: subtract π/2 so 0-norm aligns with the top.
+    let start = start_norm * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+    let end = end_norm * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+    // Sample density: ~60 steps for a full turn, scaled to the swept angle.
+    let steps = 60_i32.max((((end - start) / 0.05).abs()) as i32);
+
+    let mut pb = PathBuilder::new();
+    // Outer edge, start → end.
+    let (sx, sy) = (cx_f + r_outer * start.cos(), cy_f + r_outer * start.sin());
+    pb.move_to(sx, sy);
+    for i in 1..=steps {
         let t = i as f32 / steps as f32;
-        let angle = start + (end - start) * t;
-        // 12 o'clock origin: angle 0 = -π/2
-        let real_angle = angle - std::f32::consts::FRAC_PI_2;
-        let px = cx + (real_angle.cos() * r_mid) as i32;
-        let py = cy + (real_angle.sin() * r_mid) as i32;
-        fill_rect_i(pixmap, px - 1, py - 1, 3, 3, color);
+        let a = start + (end - start) * t;
+        pb.line_to(cx_f + r_outer * a.cos(), cy_f + r_outer * a.sin());
+    }
+    // Inner edge, end → start.
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let a = end - (end - start) * t;
+        pb.line_to(cx_f + r_inner * a.cos(), cy_f + r_inner * a.sin());
+    }
+    pb.close();
+
+    if let Some(path) = pb.finish() {
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
 }
 

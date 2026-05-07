@@ -227,13 +227,15 @@ impl Analyzer {
             // Coherence γ² = |Sxy|² / (Sxx · Syy) ∈ [0, 1].
             let cross_mag_sq = sxy_re_acc * sxy_re_acc + sxy_im_acc * sxy_im_acc;
             let denom = sxx_acc * syy_acc;
-            let gamma_sq = if denom > 1e-12 {
-                (cross_mag_sq / denom).clamp(0.0, 1.0)
+            // Display 1 - γ² so high values mean "decorrelated / wide".
+            // No-signal case (denom near zero) publishes 0 instead of 1 so empty
+            // buffers render as empty bars rather than full-pink.
+            let width_metric = if denom > 1e-12 {
+                let gamma_sq = (cross_mag_sq / denom).clamp(0.0, 1.0);
+                1.0 - gamma_sq
             } else {
                 0.0
             };
-            // Display 1 - γ² so high values mean "decorrelated / wide".
-            let width_metric = 1.0 - gamma_sq;
 
             self.display.mag_m[li].store(mag_m_avg.to_bits(), Ordering::Relaxed);
             self.display.coherence[li].store(width_metric.to_bits(), Ordering::Relaxed);
