@@ -1,17 +1,23 @@
-//! Per-band processor: constant-power M/S Width gain + Stereoize injection.
+//! Per-band processor: M/S Width gain + Stereoize injection.
 //!
-//! Width law (equal-power M/S pan):
-//!   θ      = (width + 100) / 200 · π        // θ ∈ [0, π]
-//!   M_gain = √2 · cos(θ / 2)                 // [√2, 1, 0]   at width = [-100, 0, +100]
-//!   S_gain = √2 · sin(θ / 2)                 // [0,  1, √2]
-//! Total power M_gain² + S_gain² = 2 (constant).
+//! Width law (Ozone-style — scale Side, leave Mid alone):
+//!   W      = (width + 100) / 100              // W ∈ [0, 2]
+//!   M_gain = 1                                 // mid untouched
+//!   S_gain = W                                 // [0, 1, 2] at width = [-100, 0, +100]
+//!
+//! At Width = -100 the side is fully muted (mono); at +100 the side is
+//! doubled (full stereo widening). The mid stays at unity always, so a
+//! mono signal stays mono regardless of Width — matches user intuition
+//! and standard imager behavior. Note: at Width=+100 with strongly stereo
+//! content the output may exceed 0 dBFS — the user is expected to manage
+//! headroom with downstream gain.
 //!
 //! Recover-Sides accumulator:
 //!   S_removed = if width < 0 { S · (1 − S_gain) } else { 0 }
-//! Width=0 already gives S_gain=1 → S_removed=0; positive widths leave Recover unaffected.
+//! Width=0 already gives S_gain=1 → S_removed=0; positive widths leave Recover unaffected
+//! (no side energy was lost; in fact more was added).
 
 use crate::decorrelator::Decorrelator;
-use std::f32::consts::PI;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StereoizeMode {
@@ -31,12 +37,12 @@ pub struct Band {
 }
 
 /// Width gains computed once per sample (or once per block when smoothed).
+/// Returns `(M_gain, S_gain)`. M is always 1.0; S scales linearly from 0 (at
+/// width = -100) through 1 (at width = 0, unity) to 2 (at width = +100).
 #[inline]
 pub fn width_gains(width_param: f32) -> (f32, f32) {
-    let theta = (width_param + 100.0) / 200.0 * PI;
-    let m_gain = std::f32::consts::SQRT_2 * (theta * 0.5).cos();
-    let s_gain = std::f32::consts::SQRT_2 * (theta * 0.5).sin();
-    (m_gain, s_gain)
+    let w = (width_param + 100.0) / 100.0;
+    (1.0, w.clamp(0.0, 2.0))
 }
 
 impl Band {
@@ -169,29 +175,35 @@ mod tests {
     #[test]
     fn width_minus100_zero_side() {
         let (m, s) = width_gains(-100.0);
-        assert!(
-            (m - std::f32::consts::SQRT_2).abs() < 1e-6,
-            "M_gain(-100) = {m}"
-        );
+        assert!((m - 1.0).abs() < 1e-6, "M_gain(-100) = {m}");
         assert!(s.abs() < 1e-6, "S_gain(-100) = {s}");
     }
 
     #[test]
-    fn width_plus100_zero_mid() {
+    fn width_plus100_doubles_side() {
         let (m, s) = width_gains(100.0);
-        assert!(m.abs() < 1e-6, "M_gain(+100) = {m}");
-        assert!(
-            (s - std::f32::consts::SQRT_2).abs() < 1e-6,
-            "S_gain(+100) = {s}"
-        );
+        assert!((m - 1.0).abs() < 1e-6, "M_gain(+100) = {m}");
+        assert!((s - 2.0).abs() < 1e-6, "S_gain(+100) = {s}");
     }
 
     #[test]
-    fn width_constant_power() {
+    fn width_mid_is_constant_unity() {
         for w in -100..=100 {
-            let (mg, sg) = width_gains(w as f32);
-            let total = mg * mg + sg * sg;
-            assert!((total - 2.0).abs() < 1e-5, "w={w}: M²+S² = {total}");
+            let (mg, _) = width_gains(w as f32);
+            assert!((mg - 1.0).abs() < 1e-6, "w={w}: M_gain = {mg}");
+        }
+    }
+
+    #[test]
+    fn width_side_scales_linearly() {
+        // S_gain at width w should equal (w + 100) / 100, clamped to [0, 2].
+        for w in [-100, -50, 0, 50, 100] {
+            let (_, sg) = width_gains(w as f32);
+            let expected = (w as f32 + 100.0) / 100.0;
+            assert!(
+                (sg - expected).abs() < 1e-6,
+                "w={w}: S_gain={sg} expected={expected}"
+            );
         }
     }
 
