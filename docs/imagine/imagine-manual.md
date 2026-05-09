@@ -57,10 +57,12 @@ The window has two halves:
 
 ### Vectorscope (left)
 
-Two display modes, toggled by clicking the **Polar / Lissajous** label:
+Four display modes, cycled by clicking the mode label below the scope. The cycle is **Polar → Goniometer → Polar Level → Lissajous → Polar**.
 
-- **Polar** (default): the L vs R sample pairs are rotated 45° and plotted, so a perfectly correlated mono signal draws a vertical line, an anti-correlated signal draws a horizontal line, and a fully decorrelated stereo field fills a circle. This is the conventional "goniometer" view.
-- **Lissajous**: the same (L, R) pairs are plotted directly without rotation. A mono signal draws a 45° diagonal; a stereo signal draws a 2D scatter.
+- **Polar** (default): half-disc dot cloud. Each (L, R) pair is mapped to a polar position where mono in-phase content lands at the top, hard-L / hard-R in-phase content lands on the upper-left / upper-right 45° spokes (the iZotope "safe lines"), and out-of-phase content lands beyond the spokes toward the L / R baseline corners.
+- **Goniometer**: full-square 45°-rotated dot cloud, dual-tone (pink = L, cyan = R). A mono signal draws a vertical line, an anti-correlated signal draws a horizontal line, a fully decorrelated stereo field fills a circle.
+- **Polar Level**: same half-disc geometry as **Polar**, but instead of a dot cloud the audio thread peak-picks the loudest (M, S) sample every 30 ms and emits one ray at that position. Each ray is a thick triangular fan that fades to background over the next ~1 second of emits, so the display reads as a constellation of recently-emitted rays at independent decay states. Per the iZotope Imager manual: ray length = amplitude, ray angle = stereo position. Inside the 45° "safe lines" the rays represent in-phase content; rays beyond the safe lines are out-of-phase. The angle of an out-of-phase ray within its wing reflects how anti-phase the peak sample was — just past the spoke = mildly anti-phase (the dominant channel has a small opposite-polarity copy in the other channel), at the baseline corner = perfectly anti-phase (`L = -R`).
+- **Lissajous**: the (L, R) pairs are plotted directly without rotation. A mono signal draws a 45° diagonal; a stereo signal draws a 2D scatter.
 
 Below the scope:
 
@@ -253,7 +255,7 @@ The Hilbert phase rotator is a Type-IV anti-symmetric FIR (length 65). It rotate
 - **Drag** a crossover split line in the spectrum view horizontally to move it.
 - **Drag** the Recover Sides bar to set the amount.
 - **Click** the Link Bands toggle to enable / disable global Width linking.
-- **Click** the Polar / Lissajous toggle in the vectorscope area to switch view.
+- **Click** the mode label below the vectorscope to cycle through Polar → Goniometer → Polar Level → Lissajous.
 - **Click** the Quality selector to switch between Linear and IIR (latency change — set once at load).
 - **Right-click** any continuous control (Width, Stereoize, Recover Sides, crossover splits) for numeric entry. **Enter** commits, **Escape** cancels, clicking outside auto-commits.
 - The window is **freely resizable** — drag the bottom-right corner. Size persists with the host session.
