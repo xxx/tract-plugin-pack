@@ -143,6 +143,18 @@ fn blend_pixel(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, color: Color, alpha: 
         tiny_skia::PremultipliedColorU8::from_rgba(r, g, b, 255).unwrap_or(dst);
 }
 
+/// 2×2 dot variant of `blend_pixel`. Writes the same colour with the
+/// same alpha to four adjacent pixels (`(x, y)` plus right, down, and
+/// down-right neighbours). Each dot covers 4× the area, so single
+/// stray samples produce visible "haze" instead of being lost as
+/// sub-pixel-dim flecks. Used by the dot-cloud vectorscope modes.
+fn blend_dot_2x2(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, color: Color, alpha: f32) {
+    blend_pixel(pixmap, x, y, color, alpha);
+    blend_pixel(pixmap, x + 1, y, color, alpha);
+    blend_pixel(pixmap, x, y + 1, color, alpha);
+    blend_pixel(pixmap, x + 1, y + 1, color, alpha);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
     pixmap: &mut Pixmap,
@@ -388,9 +400,12 @@ fn draw_polar(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: &[f3
         // bias > 0 → pink (L); bias < 0 → cyan (R)
         let t = (bias + 1.0) * 0.5;
         let color = theme::cyan_to_pink(t);
-        let age = 1.0 - (i as f32) * inv_n_minus_1;
-        let alpha = DOT_BASE_ALPHA * age;
-        blend_pixel(pixmap, px, py, color, alpha);
+        // Snapshot returns oldest at i=0, newest at i=n-1. Freshness
+        // ramps 0 (oldest) → 1 (newest), so newest dots are bright and
+        // oldest fade to background — matches Ozone's phosphor decay.
+        let freshness = (i as f32) * inv_n_minus_1;
+        let alpha = DOT_BASE_ALPHA * freshness;
+        blend_dot_2x2(pixmap, px, py, color, alpha);
     }
 }
 
@@ -406,9 +421,9 @@ fn draw_lissajous(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: 
     for i in 0..n {
         let px = cx + (l[i].clamp(-1.0, 1.0) * r_f) as i32;
         let py = cy - (r[i].clamp(-1.0, 1.0) * r_f) as i32;
-        let age = 1.0 - (i as f32) * inv_n_minus_1;
-        let alpha = DOT_BASE_ALPHA * age;
-        blend_pixel(pixmap, px, py, color, alpha);
+        let freshness = (i as f32) * inv_n_minus_1;
+        let alpha = DOT_BASE_ALPHA * freshness;
+        blend_dot_2x2(pixmap, px, py, color, alpha);
     }
 }
 
@@ -513,7 +528,7 @@ fn draw_half_polar(
         // oldest fade to background — matches Ozone's phosphor decay.
         let freshness = (i as f32) * inv_n_minus_1;
         let alpha = DOT_BASE_ALPHA * freshness;
-        blend_pixel(pixmap, px, py, color, alpha);
+        blend_dot_2x2(pixmap, px, py, color, alpha);
     }
 }
 
