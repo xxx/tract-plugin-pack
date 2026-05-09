@@ -11,7 +11,12 @@ use std::sync::Arc;
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, PixmapMut, Rect, Transform};
 use tiny_skia_widgets::TextRenderer;
 
-const SAMPLE_BUDGET: usize = 4096;
+/// Per-frame audio history snapshot fed to the dot-cloud modes
+/// (HalfPolar / Polar / Lissajous). Sized for ~800 ms at 48 kHz so the
+/// rendered history matches Ozone's slow-decay phosphor look. Each dot
+/// is alpha-blended with a per-sample age fade, so older samples within
+/// this window render dimmer than newer ones.
+const SAMPLE_BUDGET: usize = 38_400;
 
 /// Reserved footer height beneath the scope dot cloud for the mode label
 /// ("Polar" / "Goniometer" / "Lissajous"). Sits between the scope and the
@@ -110,6 +115,32 @@ fn put_pixel(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, color: Color) {
     pixels[idx] =
         tiny_skia::PremultipliedColorU8::from_rgba(cu.red(), cu.green(), cu.blue(), cu.alpha())
             .unwrap_or(pixels[idx]);
+}
+
+/// Source-over alpha blend of `color` onto a single pixel. Used for the
+/// phosphor-decay dot-cloud renderers — each dot writes with low alpha,
+/// so dense regions accumulate toward full brightness while sparse
+/// regions stay dim. Output stays opaque (alpha=255).
+fn blend_pixel(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, color: Color, alpha: f32) {
+    if alpha <= 0.0 {
+        return;
+    }
+    let w = pixmap.width() as i32;
+    let h = pixmap.height() as i32;
+    if x < 0 || y < 0 || x >= w || y >= h {
+        return;
+    }
+    let alpha = alpha.min(1.0);
+    let inv = 1.0 - alpha;
+    let pixels = pixmap.pixels_mut();
+    let idx = (y as usize) * (w as usize) + (x as usize);
+    let dst = pixels[idx];
+    let cu = color.to_color_u8();
+    let r = ((cu.red() as f32) * alpha + (dst.red() as f32) * inv).round() as u8;
+    let g = ((cu.green() as f32) * alpha + (dst.green() as f32) * inv).round() as u8;
+    let b = ((cu.blue() as f32) * alpha + (dst.blue() as f32) * inv).round() as u8;
+    pixels[idx] =
+        tiny_skia::PremultipliedColorU8::from_rgba(r, g, b, 255).unwrap_or(dst);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -337,7 +368,12 @@ pub fn draw(
 fn draw_polar(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: &[f32], r: &[f32]) {
     let r_f = radius as f32;
     let inv_sqrt2 = std::f32::consts::FRAC_1_SQRT_2;
-    for i in 0..l.len() {
+    let n = l.len().min(r.len());
+    if n == 0 {
+        return;
+    }
+    let inv_n_minus_1 = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
+    for i in 0..n {
         let xn = (l[i] - r[i]) * inv_sqrt2;
         let yn = -((l[i] + r[i]) * inv_sqrt2);
         let px = cx + (xn.clamp(-1.0, 1.0) * r_f) as i32;
@@ -352,17 +388,27 @@ fn draw_polar(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: &[f3
         // bias > 0 → pink (L); bias < 0 → cyan (R)
         let t = (bias + 1.0) * 0.5;
         let color = theme::cyan_to_pink(t);
-        put_pixel(pixmap, px, py, color);
+        let age = 1.0 - (i as f32) * inv_n_minus_1;
+        let alpha = DOT_BASE_ALPHA * age;
+        blend_pixel(pixmap, px, py, color, alpha);
     }
 }
 
 /// Lissajous: L on X, R on Y, no rotation.
 fn draw_lissajous(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: &[f32], r: &[f32]) {
     let r_f = radius as f32;
-    for i in 0..l.len() {
+    let n = l.len().min(r.len());
+    if n == 0 {
+        return;
+    }
+    let inv_n_minus_1 = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
+    let color = theme::accent();
+    for i in 0..n {
         let px = cx + (l[i].clamp(-1.0, 1.0) * r_f) as i32;
         let py = cy - (r[i].clamp(-1.0, 1.0) * r_f) as i32;
-        put_pixel(pixmap, px, py, theme::accent());
+        let age = 1.0 - (i as f32) * inv_n_minus_1;
+        let alpha = DOT_BASE_ALPHA * age;
+        blend_pixel(pixmap, px, py, color, alpha);
     }
 }
 
@@ -410,14 +456,20 @@ fn draw_half_polar(
     // Faint half-circle outline + spokes + baseline.
     draw_half_disc_grid(pixmap, cx, base_y, disc_radius, theme::text_dim());
 
-    // Plot each sample as a 1×1 dot. Geometry matches `spectrum.rs::polar_push`:
+    // Plot each sample as a 1×1 dot. Geometry:
     //
     //   M = (L+R)/2, S = (L-R)/2,  sgn = sign(M)  (sign(0) := +1)
     //   x_disc = -sgn · S,  y_disc = |M|
     //   θ = atan2(y_disc, x_disc) ∈ [0, π]
-    //   r = max(|L|, |R|)
+    //   r = (|L| + |R|), clamped to 1
     //
-    // Mappings (per polar_geometry.md §3):
+    // The radial distance is the L1 stereo norm so a mono sample at peak
+    // amplitude `a` reaches `2a` on the disc (clamped at the rim) and a
+    // hard-panned sample at peak `a` reaches `a`. This matches Ozone's
+    // dot spread on real material — using `max(|L|, |R|)` produces a
+    // visibly tighter cluster (~⅓ the radial extent) for stereo content.
+    //
+    // Mappings (angle):
     //   - mono in-phase            → θ = π/2 (top)
     //   - hard-L in-phase (1, 0)   → θ = 3π/4 (upper-left 45° spoke)
     //   - hard-R in-phase (0, 1)   → θ = π/4 (upper-right 45° spoke)
@@ -429,10 +481,20 @@ fn draw_half_polar(
     // corners directly without a `dy < 0` skip.
     let r_f = disc_radius as f32;
     let n = samples_l.len().min(samples_r.len());
+    if n == 0 {
+        return;
+    }
+    // Per-sample age fade: samples are chronological (oldest first, newest
+    // last in the snapshot). Newest sample gets full DOT_BASE_ALPHA; oldest
+    // fades to zero. Source-over blending means dense pixel regions
+    // accumulate toward the cyan target while sparse single hits stay
+    // visibly dim — Ozone's phosphor-decay look without a persistent
+    // pixmap.
+    let inv_n_minus_1 = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
     for i in 0..n {
         let l = samples_l[i].clamp(-1.0, 1.0);
         let rr = samples_r[i].clamp(-1.0, 1.0);
-        let amplitude = l.abs().max(rr.abs()).min(1.0);
+        let amplitude = (l.abs() + rr.abs()).min(1.0);
         if amplitude < 1e-6 {
             continue;
         }
@@ -446,9 +508,21 @@ fn draw_half_polar(
         let dy = theta.sin();
         let px = cx + (amplitude * dx * r_f) as i32;
         let py = base_y - (amplitude * dy * r_f) as i32;
-        put_pixel(pixmap, px, py, color);
+        // Snapshot returns oldest at i=0, newest at i=n-1. Freshness
+        // ramps 0 (oldest) → 1 (newest), so newest dots are bright and
+        // oldest fade to background — matches Ozone's phosphor decay.
+        let freshness = (i as f32) * inv_n_minus_1;
+        let alpha = DOT_BASE_ALPHA * freshness;
+        blend_pixel(pixmap, px, py, color, alpha);
     }
 }
+
+/// Per-dot base opacity for the dot-cloud renderers (HalfPolar, Polar,
+/// Lissajous). Low so individual dots are dim and dense pixel regions
+/// build up toward full cyan via source-over blending — matches Ozone's
+/// phosphor display where rare transients stay sparse and common
+/// stereo positions accumulate to a bright cluster.
+const DOT_BASE_ALPHA: f32 = 0.18;
 
 /// Polar Level: per-pan-angle level "rays" on the half-disc. Each of the
 /// `NUM_POLAR_BINS` pan bins is rendered as ONE independent radial line
@@ -880,11 +954,12 @@ mod tests {
         (pixmap, cx, base_y, disc_radius)
     }
 
-    /// Mono in-phase (L=R=0.8) lands on the central vertical column.
-    /// θ = π/2 → (cos, sin) = (0, 1) → dx = 0, dy = +radius·amp.
+    /// Mono in-phase (L=R=0.4) lands on the central vertical column.
+    /// θ = π/2 → (cos, sin) = (0, 1) → dx = 0, dy = +radius · (|L|+|R|).
+    /// Uses 0.4 so the L1 amplitude (0.8) doesn't clamp at the rim.
     #[test]
     fn half_polar_mono_dot_lands_on_vertical_axis() {
-        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(0.8, 0.8, 256);
+        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(0.4, 0.4, 256);
         let (dx, dy) = find_dot(&pixmap, cx, base_y).expect("expected a cyan dot");
         assert!(
             dx.abs() <= 1,
@@ -894,7 +969,7 @@ mod tests {
         let expected = (0.8 * disc_radius as f32) as i32;
         assert!(
             (dy - expected).abs() <= 2,
-            "mono dot dy={dy}, expected ~{expected} (amp·radius)"
+            "mono dot dy={dy}, expected ~{expected} ((|L|+|R|)·radius)"
         );
     }
 
@@ -940,11 +1015,12 @@ mod tests {
         );
     }
 
-    /// Anti-phase L-dom (L=+0.7, R=-0.7) lands at the left baseline corner.
-    /// M=0 (sgn=+1), S=+0.7 → x_disc=-0.7, y_disc=0 → θ=π → dx=-r, dy=0.
+    /// Anti-phase L-dom (L=+0.35, R=-0.35) lands at the left baseline corner.
+    /// M=0 (sgn=+1), S=+0.35 → x_disc=-0.35, y_disc=0 → θ=π → dx=-r·(|L|+|R|), dy=0.
+    /// Uses 0.35 so the L1 amplitude (0.7) doesn't clamp at the rim.
     #[test]
     fn half_polar_anti_phase_l_dom_lands_at_left_baseline_corner() {
-        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(0.7, -0.7, 256);
+        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(0.35, -0.35, 256);
         let (dx, dy) = find_dot(&pixmap, cx, base_y).expect("expected a cyan dot");
         let expected = (0.7 * disc_radius as f32) as i32;
         assert!(
@@ -961,11 +1037,12 @@ mod tests {
         );
     }
 
-    /// Anti-phase R-dom (L=-0.7, R=+0.7) lands at the right baseline corner.
-    /// M=0 (sgn=+1), S=-0.7 → x_disc=+0.7, y_disc=0 → θ=0 → dx=+r, dy=0.
+    /// Anti-phase R-dom (L=-0.35, R=+0.35) lands at the right baseline corner.
+    /// M=0 (sgn=+1), S=-0.35 → x_disc=+0.35, y_disc=0 → θ=0 → dx=+r·(|L|+|R|), dy=0.
+    /// Uses 0.35 so the L1 amplitude (0.7) doesn't clamp at the rim.
     #[test]
     fn half_polar_anti_phase_r_dom_lands_at_right_baseline_corner() {
-        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(-0.7, 0.7, 256);
+        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(-0.35, 0.35, 256);
         let (dx, dy) = find_dot(&pixmap, cx, base_y).expect("expected a cyan dot");
         let expected = (0.7 * disc_radius as f32) as i32;
         assert!(

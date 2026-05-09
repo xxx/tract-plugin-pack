@@ -25,7 +25,7 @@
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-pub const RING_CAPACITY: usize = 32_768;
+pub const RING_CAPACITY: usize = 65_536;
 
 struct Inner {
     samples_l: Vec<AtomicU32>,
