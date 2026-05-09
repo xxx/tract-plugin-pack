@@ -63,6 +63,15 @@ pub fn warn() -> Color {
     Color::from_rgba8(255, 112, 80, 255)
 }
 
+/// Foreground colour for text drawn on top of `accent()` (or any
+/// similarly-bright fill like `cyan_to_pink(0.5)`). The default `text()`
+/// cream has too little contrast against the warm gold accent —
+/// active toggle/segment labels use this near-black tint instead.
+#[inline]
+pub fn on_accent() -> Color {
+    Color::from_rgba8(8, 16, 22, 255)
+}
+
 #[inline]
 pub fn split_line() -> Color {
     Color::from_rgba8(160, 168, 176, 200)

@@ -375,7 +375,7 @@ pub fn draw(
         let stz_caption = "Stz";
         let scw = text_renderer.text_width(stz_caption, small_size);
         let stz_caption_color = if stz_ons[i] {
-            theme::text()
+            theme::on_accent()
         } else {
             theme::text_dim()
         };
@@ -416,14 +416,14 @@ pub fn draw(
         let iiw = text_renderer.text_width(ii_label, small_size);
         let i_active = matches!(modes[i], crate::StereoizeModeParam::I);
         let i_color = if i_active {
-            theme::text()
+            theme::on_accent()
         } else {
             theme::text_dim()
         };
         let ii_color = if i_active {
             theme::text_dim()
         } else {
-            theme::text()
+            theme::on_accent()
         };
         let txt_y = mode_y as f32 + (mh as f32) * 0.5 + small_size * 0.35;
         text_renderer.draw_text(
@@ -450,7 +450,7 @@ pub fn draw(
         let solo_label = "Solo";
         let slw = text_renderer.text_width(solo_label, small_size);
         let solo_color = if solos[i] {
-            theme::text()
+            theme::on_accent()
         } else {
             theme::text_dim()
         };

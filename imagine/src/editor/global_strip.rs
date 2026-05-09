@@ -174,13 +174,21 @@ pub fn draw(
     // State indicator inside the toggle ("On" / "Off").
     let link_state = if link_on { "On" } else { "Off" };
     let lsw = text_renderer.text_width(link_state, value_size);
+    // Inside the toggle the bg is `cyan_to_pink(0.5)` when on (a warm
+    // mid-tone) — use `on_accent()` for contrast there. When off the
+    // bg is the dark `spectrum_bg`, so dimmed cream reads fine.
+    let link_state_color = if link_on {
+        theme::on_accent()
+    } else {
+        theme::text_dim()
+    };
     text_renderer.draw_text(
         pixmap,
         lx as f32 + lw as f32 * 0.5 - lsw * 0.5,
         ly as f32 + lh as f32 * 0.5 + value_size * 0.35,
         link_state,
         value_size,
-        link_color,
+        link_state_color,
     );
 
     // "Quality" caption above the selector; halves labelled inside.
@@ -202,14 +210,14 @@ pub fn draw(
     let iir_w = text_renderer.text_width(iir_label, value_size);
     let lin_active = matches!(quality_v, Quality::Linear);
     let lin_color = if lin_active {
-        theme::text()
+        theme::on_accent()
     } else {
         theme::text_dim()
     };
     let iir_color = if lin_active {
         theme::text_dim()
     } else {
-        theme::text()
+        theme::on_accent()
     };
     let q_y = qy as f32 + qh as f32 * 0.5 + value_size * 0.35;
     text_renderer.draw_text(
