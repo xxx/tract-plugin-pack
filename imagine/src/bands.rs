@@ -31,6 +31,9 @@ pub struct Band {
     haas_buffer: Vec<f32>,
     haas_write_idx: usize,
     haas_delay_samples: usize,
+    /// Cached sample rate used to convert `stz_ms` → samples on each
+    /// process call. Updated by `set_sample_rate`.
+    sample_rate: f32,
 
     /// Decorrelator for Mode II.
     decorr: Decorrelator,
@@ -46,7 +49,10 @@ pub fn width_gains(width_param: f32) -> (f32, f32) {
 }
 
 impl Band {
-    /// `max_haas_ms` = upper bound for Haas τ in milliseconds (e.g. 25.0).
+    /// `max_haas_ms` = upper bound for the Haas delay buffer in ms
+    /// (sized at construction; needs headroom above the user-exposed
+    /// max so the dynamic `stz_ms` parameter can sweep without
+    /// reallocating).
     /// `max_sample_rate` is used to size the Haas buffer.
     pub fn new(max_haas_ms: f32, max_sample_rate: f32) -> Self {
         let max_samples = (max_haas_ms * 0.001 * max_sample_rate).ceil() as usize + 16;
@@ -54,13 +60,13 @@ impl Band {
             haas_buffer: vec![0.0; max_samples],
             haas_write_idx: 0,
             haas_delay_samples: 0,
+            sample_rate: max_sample_rate,
             decorr: Decorrelator::new(max_sample_rate),
         }
     }
 
-    pub fn set_sample_rate(&mut self, sr: f32, haas_ms: f32) {
-        self.haas_delay_samples =
-            ((haas_ms * 0.001 * sr).round() as usize).min(self.haas_buffer.len() - 1);
+    pub fn set_sample_rate(&mut self, sr: f32) {
+        self.sample_rate = sr;
         // Decorrelator is sample-rate-aware; rebuild it.
         self.decorr = Decorrelator::new(sr);
     }
@@ -68,21 +74,25 @@ impl Band {
     pub fn reset(&mut self) {
         self.haas_buffer.fill(0.0);
         self.haas_write_idx = 0;
+        self.haas_delay_samples = 0;
         self.decorr.reset();
     }
 
     /// Process one (M, S) pair for this band. Returns (M_out, S_out, S_removed).
     ///
     /// `width_param` is the raw -100..+100 Width parameter for this band.
-    /// `stereoize_amount` is 0..100 (will be normalized internally to 0..1).
-    /// `mode` selects Mode I (Haas) or Mode II (decorrelator).
+    /// `stz_ms` is the Mode I Haas delay (1..20 ms); only used when
+    /// `stz_on` is true and `mode` is Mode I.
+    /// `stz_on` gates the stereoize stage entirely — when false, no
+    /// haas/decorrelator contribution is added to S.
     #[inline]
     pub fn process(
         &mut self,
         m: f32,
         s: f32,
         width_param: f32,
-        stereoize_amount: f32,
+        stz_ms: f32,
+        stz_on: bool,
         mode: StereoizeMode,
     ) -> (f32, f32, f32) {
         let (m_gain, s_gain) = width_gains(width_param);
@@ -95,14 +105,22 @@ impl Band {
             0.0
         };
 
-        let amount_norm = (stereoize_amount * 0.01).clamp(0.0, 1.0);
-        let inject = if amount_norm > 0.0 {
+        let inject = if stz_on {
             match mode {
-                StereoizeMode::ModeI => self.haas_process(m) * amount_norm,
-                StereoizeMode::ModeII => self.decorr.process(m) * amount_norm,
+                StereoizeMode::ModeI => {
+                    // Update the Haas delay tap to the requested ms.
+                    // `stz_ms` is smoothed at the param level so this
+                    // changes once per sample by at most a few samples.
+                    let target = ((stz_ms * 0.001 * self.sample_rate).round() as usize)
+                        .clamp(1, self.haas_buffer.len() - 1);
+                    self.haas_delay_samples = target;
+                    self.haas_process(m)
+                }
+                StereoizeMode::ModeII => self.decorr.process(m),
             }
         } else {
-            // Still advance Haas delay buffer to keep state coherent.
+            // Still advance Haas delay buffer to keep state coherent so
+            // toggling on doesn't expose a stale tail.
             self.haas_advance(m);
             0.0
         };
@@ -210,8 +228,8 @@ mod tests {
     #[test]
     fn no_op_at_zero_width_no_stereoize() {
         let mut b = Band::new(25.0, 192_000.0);
-        b.set_sample_rate(48_000.0, 12.0);
-        let (m, s, r) = b.process(0.5, 0.3, 0.0, 0.0, StereoizeMode::ModeI);
+        b.set_sample_rate(48_000.0);
+        let (m, s, r) = b.process(0.5, 0.3, 0.0, 6.0, false, StereoizeMode::ModeI);
         assert!((m - 0.5).abs() < 1e-6);
         assert!((s - 0.3).abs() < 1e-6);
         assert!(r.abs() < 1e-6);
@@ -220,9 +238,9 @@ mod tests {
     #[test]
     fn s_removed_zero_for_positive_width() {
         let mut b = Band::new(25.0, 192_000.0);
-        b.set_sample_rate(48_000.0, 12.0);
+        b.set_sample_rate(48_000.0);
         for w in [10.0, 50.0, 100.0_f32] {
-            let (_, _, r) = b.process(0.5, 0.3, w, 0.0, StereoizeMode::ModeI);
+            let (_, _, r) = b.process(0.5, 0.3, w, 6.0, false, StereoizeMode::ModeI);
             assert!(r.abs() < 1e-6, "w={w}: S_removed = {r}");
         }
     }
@@ -230,11 +248,11 @@ mod tests {
     #[test]
     fn s_removed_for_negative_width() {
         let mut b = Band::new(25.0, 192_000.0);
-        b.set_sample_rate(48_000.0, 12.0);
+        b.set_sample_rate(48_000.0);
         let s_in = 0.4;
         let w = -50.0;
         let (m_g, s_g) = width_gains(w);
-        let (_, _, r) = b.process(0.0, s_in, w, 0.0, StereoizeMode::ModeI);
+        let (_, _, r) = b.process(0.0, s_in, w, 6.0, false, StereoizeMode::ModeI);
         let expected = s_in * (1.0 - s_g);
         assert!(
             (r - expected).abs() < 1e-6,
@@ -245,17 +263,17 @@ mod tests {
     #[test]
     fn mode_i_delays_mid_into_side() {
         let mut b = Band::new(25.0, 192_000.0);
-        b.set_sample_rate(48_000.0, 1.0); // 1 ms delay = 48 samples
-        let delay = 48;
+        b.set_sample_rate(48_000.0);
+        let delay = 48; // 1 ms at 48 kHz
 
         let m_pulse: Vec<f32> = std::iter::once(1.0)
             .chain(std::iter::repeat(0.0).take(100))
             .collect();
 
-        // Width=0 (S unchanged), Stereoize=100%, Mode I.
+        // Width=0 (S unchanged), Stereoize on at 1 ms, Mode I.
         let mut s_outs = Vec::new();
         for &m in &m_pulse {
-            let (_, s_o, _) = b.process(m, 0.0, 0.0, 100.0, StereoizeMode::ModeI);
+            let (_, s_o, _) = b.process(m, 0.0, 0.0, 1.0, true, StereoizeMode::ModeI);
             s_outs.push(s_o);
         }
         let max_idx = s_outs
@@ -273,13 +291,14 @@ mod tests {
     #[test]
     fn mode_ii_decorrelates() {
         let mut b = Band::new(25.0, 192_000.0);
-        b.set_sample_rate(48_000.0, 12.0);
+        b.set_sample_rate(48_000.0);
 
         let m_in = noise(8192);
         let mut s_inject = Vec::with_capacity(m_in.len());
         for &m in &m_in {
-            // Width=0 so S_scaled=0 (we input S=0). Stereoize=100% Mode II.
-            let (_, s_o, _) = b.process(m, 0.0, 0.0, 100.0, StereoizeMode::ModeII);
+            // Width=0 so S_scaled=0 (we input S=0). Stereoize on, Mode II
+            // (ms is irrelevant for the decorrelator).
+            let (_, s_o, _) = b.process(m, 0.0, 0.0, 6.0, true, StereoizeMode::ModeII);
             s_inject.push(s_o);
         }
 
@@ -288,13 +307,14 @@ mod tests {
     }
 
     #[test]
-    fn stereoize_amount_zero_no_injection() {
+    fn stereoize_off_no_injection() {
         let mut b = Band::new(25.0, 192_000.0);
-        b.set_sample_rate(48_000.0, 12.0);
+        b.set_sample_rate(48_000.0);
         for &mode in &[StereoizeMode::ModeI, StereoizeMode::ModeII] {
             for i in 0..512 {
                 let m = ((i as f32 * 0.1).sin()) * 0.5;
-                let (_, s_o, _) = b.process(m, 0.0, 0.0, 0.0, mode);
+                // stz_on = false: no injection regardless of mode or ms.
+                let (_, s_o, _) = b.process(m, 0.0, 0.0, 6.0, false, mode);
                 assert!(s_o.abs() < 1e-6, "i={i} mode={mode:?} s_o={s_o}");
             }
         }
@@ -304,7 +324,10 @@ mod tests {
     fn haas_delay_sample_rate_correct() {
         for sr in [44_100.0, 48_000.0, 96_000.0, 192_000.0_f32] {
             let mut b = Band::new(25.0, 192_000.0);
-            b.set_sample_rate(sr, 5.0); // 5 ms
+            b.set_sample_rate(sr);
+            // The Haas delay is set inside `process` from the live ms
+            // value; advance one sample with stz_on to apply it.
+            let _ = b.process(0.0, 0.0, 0.0, 5.0, true, StereoizeMode::ModeI);
             let expected = (5.0_f32 * 0.001 * sr).round() as usize;
             assert_eq!(b.haas_delay_samples, expected, "sr={sr}");
         }
@@ -313,15 +336,17 @@ mod tests {
     #[test]
     fn process_returns_finite_for_extreme_inputs() {
         let mut b = Band::new(25.0, 192_000.0);
-        b.set_sample_rate(48_000.0, 12.0);
+        b.set_sample_rate(48_000.0);
         for w in [-100.0, -50.0, 0.0, 50.0, 100.0_f32] {
-            for amount in [0.0, 50.0, 100.0_f32] {
-                for mode in [StereoizeMode::ModeI, StereoizeMode::ModeII] {
-                    let (m_o, s_o, r) = b.process(1.0, -1.0, w, amount, mode);
-                    assert!(
-                        m_o.is_finite() && s_o.is_finite() && r.is_finite(),
-                        "w={w} amount={amount} mode={mode:?}"
-                    );
+            for ms in [1.0, 6.0, 20.0_f32] {
+                for stz_on in [false, true] {
+                    for mode in [StereoizeMode::ModeI, StereoizeMode::ModeII] {
+                        let (m_o, s_o, r) = b.process(1.0, -1.0, w, ms, stz_on, mode);
+                        assert!(
+                            m_o.is_finite() && s_o.is_finite() && r.is_finite(),
+                            "w={w} ms={ms} on={stz_on} mode={mode:?}"
+                        );
+                    }
                 }
             }
         }

@@ -64,6 +64,8 @@ enum HitAction {
     BandWidth { band: usize },
     /// Per-band Stereoize knob. Drag = vertical anchored.
     BandStz { band: usize },
+    /// Per-band Stereoize on/off toggle (click only).
+    BandStzOn { band: usize },
     /// Per-band Mode I/II toggle (click only).
     BandMode { band: usize },
     /// Per-band Solo button (click only, radio behavior).
@@ -302,7 +304,7 @@ impl ImagineWindow {
                 _ => &self.params.xover_3,
             }),
             HitAction::BandWidth { band } => Some(&self.params.bands[band].width),
-            HitAction::BandStz { band } => Some(&self.params.bands[band].stz),
+            HitAction::BandStz { band } => Some(&self.params.bands[band].stz_ms),
             HitAction::Recover => Some(&self.params.recover_sides),
             _ => None,
         }
@@ -324,7 +326,7 @@ impl ImagineWindow {
         let mut stzs = [0.0_f32; NUM_BANDS];
         for b in 0..NUM_BANDS {
             widths[b] = self.params.bands[b].width.unmodulated_normalized_value();
-            stzs[b] = self.params.bands[b].stz.unmodulated_normalized_value();
+            stzs[b] = self.params.bands[b].stz_ms.unmodulated_normalized_value();
         }
         self.link_baseline = LinkBaseline {
             widths,
@@ -362,7 +364,7 @@ impl ImagineWindow {
         }
         for b in 0..NUM_BANDS {
             let target = (self.link_baseline.stzs[b] + clamped_delta).clamp(0.0, 1.0);
-            setter.set_parameter_normalized(&self.params.bands[b].stz, target);
+            setter.set_parameter_normalized(&self.params.bands[b].stz_ms, target);
         }
     }
 
@@ -443,6 +445,16 @@ impl ImagineWindow {
                     && local_y < (wyr + whr) as f32
                 {
                     return Some(HitAction::BandWidth { band: i });
+                }
+
+                // Stereoize on/off toggle (above the knob).
+                let (oxr, oyr, owr, ohr) = layout.stz_on_rect;
+                if local_x >= oxr as f32
+                    && local_x < (oxr + owr) as f32
+                    && local_y >= oyr as f32
+                    && local_y < (oyr + ohr) as f32
+                {
+                    return Some(HitAction::BandStzOn { band: i });
                 }
 
                 // Stereoize knob: round hit area.
@@ -585,7 +597,7 @@ impl ImagineWindow {
                     let actual_delta = target - self.link_baseline.dragged_baseline;
                     self.apply_link_stzs(&setter, actual_delta);
                 } else {
-                    setter.set_parameter_normalized(&self.params.bands[band].stz, target);
+                    setter.set_parameter_normalized(&self.params.bands[band].stz_ms, target);
                 }
             }
             HitAction::Recover => {
@@ -641,13 +653,13 @@ impl ImagineWindow {
                 self.handle_drag(action);
             }
             HitAction::BandStz { band } => {
-                let p = &self.params.bands[band].stz;
+                let p = &self.params.bands[band].stz_ms;
                 let norm = p.unmodulated_normalized_value();
                 setter.begin_set_parameter(p);
                 if self.params.link_bands.value() {
                     for b in 0..NUM_BANDS {
                         if b != band {
-                            setter.begin_set_parameter(&self.params.bands[b].stz);
+                            setter.begin_set_parameter(&self.params.bands[b].stz_ms);
                         }
                     }
                 }
@@ -655,6 +667,13 @@ impl ImagineWindow {
                 self.drag.begin_drag(action, norm, false);
                 // No immediate drag-update (anchored drag — value only changes
                 // once the mouse moves away from the anchor).
+            }
+            HitAction::BandStzOn { band } => {
+                let p = &self.params.bands[band].stz_on;
+                let cur = p.value();
+                setter.begin_set_parameter(p);
+                setter.set_parameter(p, !cur);
+                setter.end_set_parameter(p);
             }
             HitAction::BandMode { band } => {
                 let bp = &self.params.bands[band];
@@ -768,11 +787,11 @@ impl ImagineWindow {
                 }
             }
             HitAction::BandStz { band } => {
-                setter.end_set_parameter(&self.params.bands[band].stz);
+                setter.end_set_parameter(&self.params.bands[band].stz_ms);
                 if self.params.link_bands.value() {
                     for b in 0..NUM_BANDS {
                         if b != band {
-                            setter.end_set_parameter(&self.params.bands[b].stz);
+                            setter.end_set_parameter(&self.params.bands[b].stz_ms);
                         }
                     }
                 }

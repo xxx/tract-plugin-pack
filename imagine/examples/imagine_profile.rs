@@ -34,8 +34,8 @@ use imagine::midside;
 use imagine::spectrum::{Analyzer, SpectrumDisplay};
 use imagine::vectorscope::{ring_pair, VectorProducer};
 use imagine::{
-    Quality, FIR_CROSSFADE_DEFAULT, FIR_CROSSOVER_LENGTH, FIR_HILBERT_LENGTH, HAAS_DEFAULT_MS,
-    HAAS_MAX_MS, MAX_SAMPLE_RATE, NUM_BANDS,
+    Quality, FIR_CROSSFADE_DEFAULT, FIR_CROSSOVER_LENGTH, FIR_HILBERT_LENGTH,
+    HAAS_BUFFER_MAX_MS, HAAS_DEFAULT_MS, MAX_SAMPLE_RATE, NUM_BANDS,
 };
 
 use std::hint::black_box;
@@ -46,7 +46,8 @@ const BLOCK: usize = 1024;
 const N_BLOCKS: usize = 50_000;
 
 const BAND_WIDTH: [f32; 4] = [-30.0, 20.0, 50.0, 80.0];
-const BAND_STZ: [f32; 4] = [0.0, 20.0, 40.0, 10.0];
+const BAND_STZ_MS: [f32; 4] = [HAAS_DEFAULT_MS; 4];
+const BAND_STZ_ON: [bool; 4] = [false, true, true, false];
 const BAND_MODE: [StereoizeMode; 4] = [
     StereoizeMode::ModeI,
     StereoizeMode::ModeI,
@@ -105,10 +106,10 @@ fn run(scenario: Scenario) -> Result {
         scenario.at_rest,
     );
 
-    let (widths, stz_amounts, recover) = if scenario.at_rest {
-        ([0.0_f32; 4], [0.0_f32; 4], 0.0_f32)
+    let (widths, stz_ms, stz_on, recover) = if scenario.at_rest {
+        ([0.0_f32; 4], [HAAS_DEFAULT_MS; 4], [false; 4], 0.0_f32)
     } else {
-        (BAND_WIDTH, BAND_STZ, RECOVER_AMOUNT)
+        (BAND_WIDTH, BAND_STZ_MS, BAND_STZ_ON, RECOVER_AMOUNT)
     };
 
     let sr = scenario.sample_rate;
@@ -144,9 +145,9 @@ fn run(scenario: Scenario) -> Result {
     }
 
     let mut bands: [Band; 4] =
-        std::array::from_fn(|_| Band::new(HAAS_MAX_MS, MAX_SAMPLE_RATE));
+        std::array::from_fn(|_| Band::new(HAAS_BUFFER_MAX_MS, MAX_SAMPLE_RATE));
     for b in bands.iter_mut() {
-        b.set_sample_rate(sr, HAAS_DEFAULT_MS);
+        b.set_sample_rate(sr);
     }
 
     let mut hilbert = HilbertFir::new(FIR_HILBERT_LENGTH);
@@ -225,7 +226,8 @@ fn run(scenario: Scenario) -> Result {
                     m_bands[b],
                     s_bands[b],
                     widths[b],
-                    stz_amounts[b],
+                    stz_ms[b],
+                    stz_on[b],
                     BAND_MODE[b],
                 );
                 m_outs[b] = m_o;

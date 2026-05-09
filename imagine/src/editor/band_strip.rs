@@ -29,6 +29,10 @@ pub struct BandStripLayout {
     /// Stereoize knob center + radius (relative to band's top-left).
     pub stz_center: (i32, i32),
     pub stz_radius: i32,
+    /// Stereoize on/off toggle rect (relative to band's top-left). Sits
+    /// above the knob, in the row that previously held only the "Stz"
+    /// caption text.
+    pub stz_on_rect: (i32, i32, i32, i32),
     /// Mode toggle rect (relative to band's top-left).
     pub mode_rect: (i32, i32, i32, i32),
     /// Solo button rect (relative to band's top-left).
@@ -67,6 +71,13 @@ pub fn compute_layout(x: i32, y: i32, w: i32, h: i32, scale_factor: f32) -> Band
     // single "B1Stz" blob at large scales. The knob center must leave radius
     // worth of clearance above it for the caption + ring top.
     let stz_label_top = header_h + label_h;
+    // The Stz on/off toggle replaces the previous static "Stz" caption
+    // row. Same width as the Mode/Solo buttons; centred horizontally on
+    // the knob's column so it sits directly above the knob.
+    let stz_on_w = button_w;
+    let stz_on_h = button_h;
+    let stz_on_rect_x = (band_w - stz_on_w) / 2 + scaled(12, s);
+    let stz_on_rect = (stz_on_rect_x, stz_label_top, stz_on_w, stz_on_h);
     // Reserve room for two stacked button-height bars (Mode + Solo) with a
     // gap between them, then panel padding.
     let buttons_h = button_h + stack_gap + button_h + scaled(4, s);
@@ -101,6 +112,7 @@ pub fn compute_layout(x: i32, y: i32, w: i32, h: i32, scale_factor: f32) -> Band
         width_rect,
         stz_center,
         stz_radius,
+        stz_on_rect,
         mode_rect,
         solo_rect,
     }
@@ -150,11 +162,17 @@ pub fn draw(
         params.bands[2].width.value(),
         params.bands[3].width.value(),
     ];
-    let stz_amounts = [
-        params.bands[0].stz.value(),
-        params.bands[1].stz.value(),
-        params.bands[2].stz.value(),
-        params.bands[3].stz.value(),
+    let stz_ms = [
+        params.bands[0].stz_ms.value(),
+        params.bands[1].stz_ms.value(),
+        params.bands[2].stz_ms.value(),
+        params.bands[3].stz_ms.value(),
+    ];
+    let stz_ons = [
+        params.bands[0].stz_on.value(),
+        params.bands[1].stz_on.value(),
+        params.bands[2].stz_on.value(),
+        params.bands[3].stz_on.value(),
     ];
     let modes = [
         params.bands[0].mode.value(),
@@ -214,16 +232,24 @@ pub fn draw(
                 theme::cyan_to_pink(w_norm),
             );
 
-            // Stereoize knob (filled annular ring + amount sector).
+            // Stereoize knob (filled annular ring + ms sector). The arc
+            // tracks the ms value within the [HAAS_MIN_MS, HAAS_MAX_MS]
+            // range; it dims to a single colour band when `stz_on` is
+            // false so the user can see the band's stereoize is bypassed.
             let (cx, cy) = (bx + layout.stz_center.0, layout.y + layout.stz_center.1);
             let radius = layout.stz_radius;
             // Ring background — full circle, brighter than spectrum_bg so the
             // user sees the knob outline even at amount = 0.
             draw_arc_ring(&mut pm, cx, cy, radius, 0.0, 1.0, theme::border());
-            // Amount arc
-            let stz_norm = (stz_amounts[i] / 100.0).clamp(0.0, 1.0);
+            let stz_range = crate::HAAS_MAX_MS - crate::HAAS_MIN_MS;
+            let stz_norm = ((stz_ms[i] - crate::HAAS_MIN_MS) / stz_range).clamp(0.0, 1.0);
             if stz_norm > 0.0 {
-                draw_arc_ring(&mut pm, cx, cy, radius, 0.0, stz_norm, theme::accent());
+                let arc_color = if stz_ons[i] {
+                    theme::accent()
+                } else {
+                    theme::text_dim()
+                };
+                draw_arc_ring(&mut pm, cx, cy, radius, 0.0, stz_norm, arc_color);
             }
 
             // Mode toggle
@@ -252,6 +278,18 @@ pub fn draw(
             };
             fill_rect_i(&mut pm, solo_x, solo_y, sw, sh, color);
             stroke_rect_i(&mut pm, solo_x, solo_y, sw, sh, theme::border());
+
+            // Stereoize on/off toggle (above the knob). Filled when on.
+            let (oxi, oyi, ow, oh) = layout.stz_on_rect;
+            let stz_x = bx + oxi;
+            let stz_y = layout.y + oyi;
+            let stz_color = if stz_ons[i] {
+                theme::accent()
+            } else {
+                theme::spectrum_bg()
+            };
+            fill_rect_i(&mut pm, stz_x, stz_y, ow, oh, stz_color);
+            stroke_rect_i(&mut pm, stz_x, stz_y, ow, oh, theme::border());
         }
     }
 
@@ -313,21 +351,32 @@ pub fn draw(
             theme::text_dim(),
         );
 
-        // Stereoize knob: "Stz" above + amount inside.
+        // Stereoize knob: ms value inside; "Stz" label sits inside the
+        // on/off toggle button above (rendered below).
         let (kxr, kyr) = layout.stz_center;
         let kx = bx + kxr;
         let ky = layout.y + kyr;
+        let (oxi, oyi, ow, oh) = layout.stz_on_rect;
         let stz_caption = "Stz";
         let scw = text_renderer.text_width(stz_caption, small_size);
+        let stz_caption_color = if stz_ons[i] {
+            theme::text()
+        } else {
+            theme::text_dim()
+        };
         text_renderer.draw_text(
             pixmap,
-            kx as f32 - scw * 0.5,
-            (ky - layout.stz_radius - 4) as f32,
+            (bx + oxi + ow / 2) as f32 - scw * 0.5,
+            (layout.y + oyi + oh / 2) as f32 + small_size * 0.35,
             stz_caption,
             small_size,
-            theme::text_dim(),
+            stz_caption_color,
         );
-        let stz_text = format!("{:.0}", stz_amounts[i]);
+        let stz_text = if stz_ons[i] {
+            format!("{:.1}", stz_ms[i])
+        } else {
+            "off".to_string()
+        };
         let stw = text_renderer.text_width(&stz_text, small_size);
         text_renderer.draw_text(
             pixmap,
