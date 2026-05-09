@@ -255,6 +255,44 @@ pub fn draw(
             ),
         }
 
+        // L/R peak meter strip in the otherwise-unused top of the scope
+        // panel, for the half-disc modes only (HalfPolar / PolarLevel —
+        // the rotated dot-cloud modes use the full square already and
+        // don't have wasted vertical space). Two stacked horizontal
+        // bars: gold for L, teal for R, dB-scaled with 0 dBFS at full
+        // bar and -60 dBFS at empty.
+        if matches!(mode, VectorMode::HalfPolar | VectorMode::PolarLevel) && n > 0 {
+            let peak_window = n.min((SAMPLE_BUDGET / 8).max(1));
+            let peak_start = n - peak_window;
+            let mut peak_l = 0.0_f32;
+            let mut peak_r = 0.0_f32;
+            for i in peak_start..n {
+                peak_l = peak_l.max(vec_l[i].abs());
+                peak_r = peak_r.max(vec_r[i].abs());
+            }
+            let db_pos = |peak: f32| -> f32 {
+                if peak <= 0.001 {
+                    0.0
+                } else {
+                    let db = 20.0 * peak.log10();
+                    ((db + 60.0) / 60.0).clamp(0.0, 1.0)
+                }
+            };
+            let label_w = scaled(12, s);
+            let meter_x = scope_x + label_w;
+            let meter_w = (scope_w - label_w).max(1);
+            let l_y = scope_y + scaled(6, s);
+            let r_y = l_y + bar_h + scaled(2, s);
+            let l_fill = (db_pos(peak_l) * meter_w as f32) as i32;
+            let r_fill = (db_pos(peak_r) * meter_w as f32) as i32;
+            fill_rect_i(&mut pm, meter_x, l_y, meter_w, bar_h, theme::spectrum_bg());
+            fill_rect_i(&mut pm, meter_x, l_y, l_fill, bar_h, theme::pink());
+            stroke_rect_i(&mut pm, meter_x, l_y, meter_w, bar_h, theme::border());
+            fill_rect_i(&mut pm, meter_x, r_y, meter_w, bar_h, theme::spectrum_bg());
+            fill_rect_i(&mut pm, meter_x, r_y, r_fill, bar_h, theme::cyan());
+            stroke_rect_i(&mut pm, meter_x, r_y, meter_w, bar_h, theme::border());
+        }
+
         // Correlation bar at the bottom. Bar layout (from bottom up):
         //   pad-from-bottom (bar_gap), bal bar (bar_h), gap, corr bar (bar_h)
         let bal_y = y + h - bar_h - bar_gap;
@@ -295,6 +333,29 @@ pub fn draw(
         let scope_x = x + pad;
         let scope_y = y + pad;
         let scope_w = w - 2 * pad;
+
+        // Peak-meter L/R captions (shape pass drew the bars; this draws
+        // the small character labels to the left of each bar).
+        let l_meter_y = scope_y + scaled(6, s);
+        let r_meter_y = l_meter_y + bar_h + scaled(2, s);
+        let label_baseline_offset = bar_h as f32 - 1.0;
+        text_renderer.draw_text(
+            pixmap,
+            scope_x as f32 + 2.0,
+            l_meter_y as f32 + label_baseline_offset,
+            "L",
+            small_size,
+            theme::text_dim(),
+        );
+        text_renderer.draw_text(
+            pixmap,
+            scope_x as f32 + 2.0,
+            r_meter_y as f32 + label_baseline_offset,
+            "R",
+            small_size,
+            theme::text_dim(),
+        );
+
         let (cx, base_y, disc_radius) = half_disc_geometry(scope_x, scope_y, scope_w, scope_h, s);
         let r_f = disc_radius as f32;
         let cx_f = cx as f32;
