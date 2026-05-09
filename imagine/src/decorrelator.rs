@@ -4,11 +4,23 @@
 //!   y[n] = -g · x[n] + x[n - D] + g · y[n - D]
 //! where D is a stage-specific delay (mutually prime) and g = 0.7 (stable, characteristic
 //! decorrelation strength without obvious resonance).
+//!
+//! The user-exposed `stz_scale` parameter (0.5..2.0×) multiplies all six
+//! delays. Buffers are oversized at construction for the max combined
+//! (`max_sample_rate × MAX_SCALE`) so `set_scale` can change the
+//! effective delay at runtime without reallocating.
 
 const NUM_STAGES: usize = 6;
 const FEEDBACK: f32 = 0.7;
 
-/// Prime delays at 48 kHz reference. `new(sample_rate)` rescales these.
+/// Hard upper bound on the runtime `stz_scale` multiplier. Used to size
+/// each stage's buffer at construction. The user-exposed parameter
+/// caps at 2.0× — keeping a small bit of headroom would tempt future
+/// range bumps without realloc, but the lock-in is fine here.
+const MAX_SCALE: f32 = 2.0;
+
+/// Prime delays at 48 kHz reference. `set_scale(sr, scale)` rescales
+/// these by `scale × (sr / 48 kHz)`.
 const PRIME_DELAYS_AT_48K: [usize; NUM_STAGES] = [41, 53, 67, 79, 97, 113];
 
 pub struct Decorrelator {
@@ -16,16 +28,20 @@ pub struct Decorrelator {
 }
 
 struct AllpassDelayStage {
+    /// Backing buffer sized for max delay; effective delay is `delay`.
     buffer: Vec<f32>,
     write_idx: usize,
+    /// Effective delay in samples; `<= buffer.len()`.
+    delay: usize,
 }
 
 impl AllpassDelayStage {
-    fn new(delay: usize) -> Self {
-        let len = delay.max(1);
+    fn new(max_delay: usize) -> Self {
+        let cap = max_delay.max(1);
         Self {
-            buffer: vec![0.0; len],
+            buffer: vec![0.0; cap],
             write_idx: 0,
+            delay: cap,
         }
     }
 
@@ -34,18 +50,25 @@ impl AllpassDelayStage {
         self.write_idx = 0;
     }
 
+    fn set_delay(&mut self, delay: usize) {
+        self.delay = delay.clamp(1, self.buffer.len());
+        if self.write_idx >= self.buffer.len() {
+            self.write_idx = 0;
+        }
+    }
+
     #[inline]
     fn process(&mut self, x: f32) -> f32 {
         // Standard 1st-order all-pass with delay-line feedback:
         //   v = buffer[read]   (this is x[n-D] + g·y[n-D] from prior write)
         //   y = -g·x + v
         //   buffer[write] = x + g·y
-        // The buffer is sized exactly to the delay D, so read_idx == write_idx
-        // (the wraparound modulo collapses to identity). No `%` on the audio path.
-        let v = self.buffer[self.write_idx];
+        let cap = self.buffer.len();
+        let read_idx = (self.write_idx + cap - self.delay) % cap;
+        let v = self.buffer[read_idx];
         let y = -FEEDBACK * x + v;
         self.buffer[self.write_idx] = x + FEEDBACK * y;
-        self.write_idx = if self.write_idx + 1 == self.buffer.len() {
+        self.write_idx = if self.write_idx + 1 == cap {
             0
         } else {
             self.write_idx + 1
@@ -55,18 +78,42 @@ impl AllpassDelayStage {
 }
 
 impl Decorrelator {
+    /// Construct a Decorrelator sized for `sample_rate` at the upper
+    /// end of the runtime delay-scale range, with effective delays
+    /// initialised to 1.0× at that sample rate. Use `set_scale` to
+    /// pick a live scale once the actual sample rate is known.
     pub fn new(sample_rate: f32) -> Self {
-        let scale = sample_rate / 48_000.0;
+        let cap_scale = (sample_rate / 48_000.0) * MAX_SCALE;
         let stages = std::array::from_fn(|i| {
-            let d = (PRIME_DELAYS_AT_48K[i] as f32 * scale).round().max(1.0) as usize;
-            AllpassDelayStage::new(d)
+            let cap = (PRIME_DELAYS_AT_48K[i] as f32 * cap_scale)
+                .round()
+                .max(1.0) as usize;
+            AllpassDelayStage::new(cap)
         });
-        Self { stages }
+        let mut s = Self { stages };
+        // Default to the historical 1.0× scale so consumers that
+        // never call `set_scale` still get the original behaviour.
+        s.set_scale(sample_rate, 1.0);
+        s
     }
 
     pub fn reset(&mut self) {
         for s in &mut self.stages {
             s.reset();
+        }
+    }
+
+    /// Set the runtime delay scale. Effective delay for stage `i` is
+    /// `PRIME_DELAYS_AT_48K[i] × (sample_rate / 48 kHz) × scale`,
+    /// clamped to the buffer capacity that was sized at construction.
+    pub fn set_scale(&mut self, sample_rate: f32, scale: f32) {
+        let sr_factor = sample_rate / 48_000.0;
+        let scale = scale.clamp(0.0, MAX_SCALE);
+        for (i, s) in self.stages.iter_mut().enumerate() {
+            let d = (PRIME_DELAYS_AT_48K[i] as f32 * sr_factor * scale)
+                .round()
+                .max(1.0) as usize;
+            s.set_delay(d);
         }
     }
 

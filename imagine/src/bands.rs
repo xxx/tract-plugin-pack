@@ -83,15 +83,19 @@ impl Band {
     /// `width_param` is the raw -100..+100 Width parameter for this band.
     /// `stz_ms` is the Mode I Haas delay (1..20 ms); only used when
     /// `stz_on` is true and `mode` is Mode I.
+    /// `stz_scale` is the Mode II decorrelator delay scale (0.5..2.0×);
+    /// only used when `stz_on` is true and `mode` is Mode II.
     /// `stz_on` gates the stereoize stage entirely — when false, no
     /// haas/decorrelator contribution is added to S.
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     pub fn process(
         &mut self,
         m: f32,
         s: f32,
         width_param: f32,
         stz_ms: f32,
+        stz_scale: f32,
         stz_on: bool,
         mode: StereoizeMode,
     ) -> (f32, f32, f32) {
@@ -116,7 +120,12 @@ impl Band {
                     self.haas_delay_samples = target;
                     self.haas_process(m)
                 }
-                StereoizeMode::ModeII => self.decorr.process(m),
+                StereoizeMode::ModeII => {
+                    // Update the decorrelator delays for the live scale
+                    // before processing. Cheap — 6 stages, integer ops.
+                    self.decorr.set_scale(self.sample_rate, stz_scale);
+                    self.decorr.process(m)
+                }
             }
         } else {
             // Still advance Haas delay buffer to keep state coherent so
@@ -229,7 +238,7 @@ mod tests {
     fn no_op_at_zero_width_no_stereoize() {
         let mut b = Band::new(25.0, 192_000.0);
         b.set_sample_rate(48_000.0);
-        let (m, s, r) = b.process(0.5, 0.3, 0.0, 6.0, false, StereoizeMode::ModeI);
+        let (m, s, r) = b.process(0.5, 0.3, 0.0, 6.0, 1.0, false, StereoizeMode::ModeI);
         assert!((m - 0.5).abs() < 1e-6);
         assert!((s - 0.3).abs() < 1e-6);
         assert!(r.abs() < 1e-6);
@@ -240,7 +249,7 @@ mod tests {
         let mut b = Band::new(25.0, 192_000.0);
         b.set_sample_rate(48_000.0);
         for w in [10.0, 50.0, 100.0_f32] {
-            let (_, _, r) = b.process(0.5, 0.3, w, 6.0, false, StereoizeMode::ModeI);
+            let (_, _, r) = b.process(0.5, 0.3, w, 6.0, 1.0, false, StereoizeMode::ModeI);
             assert!(r.abs() < 1e-6, "w={w}: S_removed = {r}");
         }
     }
@@ -252,7 +261,7 @@ mod tests {
         let s_in = 0.4;
         let w = -50.0;
         let (m_g, s_g) = width_gains(w);
-        let (_, _, r) = b.process(0.0, s_in, w, 6.0, false, StereoizeMode::ModeI);
+        let (_, _, r) = b.process(0.0, s_in, w, 6.0, 1.0, false, StereoizeMode::ModeI);
         let expected = s_in * (1.0 - s_g);
         assert!(
             (r - expected).abs() < 1e-6,
@@ -273,7 +282,7 @@ mod tests {
         // Width=0 (S unchanged), Stereoize on at 1 ms, Mode I.
         let mut s_outs = Vec::new();
         for &m in &m_pulse {
-            let (_, s_o, _) = b.process(m, 0.0, 0.0, 1.0, true, StereoizeMode::ModeI);
+            let (_, s_o, _) = b.process(m, 0.0, 0.0, 1.0, 1.0, true, StereoizeMode::ModeI);
             s_outs.push(s_o);
         }
         let max_idx = s_outs
@@ -298,7 +307,7 @@ mod tests {
         for &m in &m_in {
             // Width=0 so S_scaled=0 (we input S=0). Stereoize on, Mode II
             // (ms is irrelevant for the decorrelator).
-            let (_, s_o, _) = b.process(m, 0.0, 0.0, 6.0, true, StereoizeMode::ModeII);
+            let (_, s_o, _) = b.process(m, 0.0, 0.0, 6.0, 1.0, true, StereoizeMode::ModeII);
             s_inject.push(s_o);
         }
 
@@ -314,7 +323,7 @@ mod tests {
             for i in 0..512 {
                 let m = ((i as f32 * 0.1).sin()) * 0.5;
                 // stz_on = false: no injection regardless of mode or ms.
-                let (_, s_o, _) = b.process(m, 0.0, 0.0, 6.0, false, mode);
+                let (_, s_o, _) = b.process(m, 0.0, 0.0, 6.0, 1.0, false, mode);
                 assert!(s_o.abs() < 1e-6, "i={i} mode={mode:?} s_o={s_o}");
             }
         }
@@ -327,7 +336,7 @@ mod tests {
             b.set_sample_rate(sr);
             // The Haas delay is set inside `process` from the live ms
             // value; advance one sample with stz_on to apply it.
-            let _ = b.process(0.0, 0.0, 0.0, 5.0, true, StereoizeMode::ModeI);
+            let _ = b.process(0.0, 0.0, 0.0, 5.0, 1.0, true, StereoizeMode::ModeI);
             let expected = (5.0_f32 * 0.001 * sr).round() as usize;
             assert_eq!(b.haas_delay_samples, expected, "sr={sr}");
         }
@@ -341,11 +350,14 @@ mod tests {
             for ms in [1.0, 6.0, 20.0_f32] {
                 for stz_on in [false, true] {
                     for mode in [StereoizeMode::ModeI, StereoizeMode::ModeII] {
-                        let (m_o, s_o, r) = b.process(1.0, -1.0, w, ms, stz_on, mode);
-                        assert!(
-                            m_o.is_finite() && s_o.is_finite() && r.is_finite(),
-                            "w={w} ms={ms} on={stz_on} mode={mode:?}"
-                        );
+                        for scale in [0.5, 1.0, 2.0_f32] {
+                            let (m_o, s_o, r) =
+                                b.process(1.0, -1.0, w, ms, scale, stz_on, mode);
+                            assert!(
+                                m_o.is_finite() && s_o.is_finite() && r.is_finite(),
+                                "w={w} ms={ms} scale={scale} on={stz_on} mode={mode:?}"
+                            );
+                        }
                     }
                 }
             }

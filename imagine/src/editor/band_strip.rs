@@ -168,6 +168,12 @@ pub fn draw(
         params.bands[2].stz_ms.value(),
         params.bands[3].stz_ms.value(),
     ];
+    let stz_scales = [
+        params.bands[0].stz_scale.value(),
+        params.bands[1].stz_scale.value(),
+        params.bands[2].stz_scale.value(),
+        params.bands[3].stz_scale.value(),
+    ];
     let stz_ons = [
         params.bands[0].stz_on.value(),
         params.bands[1].stz_on.value(),
@@ -232,17 +238,26 @@ pub fn draw(
                 theme::cyan_to_pink(w_norm),
             );
 
-            // Stereoize knob (filled annular ring + ms sector). The arc
-            // tracks the ms value within the [HAAS_MIN_MS, HAAS_MAX_MS]
-            // range; it dims to a single colour band when `stz_on` is
-            // false so the user can see the band's stereoize is bypassed.
+            // Stereoize knob (filled annular ring + active-mode sector).
+            // In Mode I the arc tracks `stz_ms` within [HAAS_MIN_MS,
+            // HAAS_MAX_MS]; in Mode II it tracks `stz_scale` within
+            // [STZ_SCALE_MIN, STZ_SCALE_MAX]. Dims when `stz_on` is
+            // false to show the stereoize stage is bypassed.
             let (cx, cy) = (bx + layout.stz_center.0, layout.y + layout.stz_center.1);
             let radius = layout.stz_radius;
             // Ring background — full circle, brighter than spectrum_bg so the
             // user sees the knob outline even at amount = 0.
             draw_arc_ring(&mut pm, cx, cy, radius, 0.0, 1.0, theme::border());
-            let stz_range = crate::HAAS_MAX_MS - crate::HAAS_MIN_MS;
-            let stz_norm = ((stz_ms[i] - crate::HAAS_MIN_MS) / stz_range).clamp(0.0, 1.0);
+            let stz_norm = match modes[i] {
+                crate::StereoizeModeParam::I => {
+                    let range = crate::HAAS_MAX_MS - crate::HAAS_MIN_MS;
+                    ((stz_ms[i] - crate::HAAS_MIN_MS) / range).clamp(0.0, 1.0)
+                }
+                crate::StereoizeModeParam::Ii => {
+                    let range = crate::STZ_SCALE_MAX - crate::STZ_SCALE_MIN;
+                    ((stz_scales[i] - crate::STZ_SCALE_MIN) / range).clamp(0.0, 1.0)
+                }
+            };
             if stz_norm > 0.0 {
                 let arc_color = if stz_ons[i] {
                     theme::accent()
@@ -373,7 +388,10 @@ pub fn draw(
             stz_caption_color,
         );
         let stz_text = if stz_ons[i] {
-            format!("{:.1}", stz_ms[i])
+            match modes[i] {
+                crate::StereoizeModeParam::I => format!("{:.1}", stz_ms[i]),
+                crate::StereoizeModeParam::Ii => format!("{:.2}×", stz_scales[i]),
+            }
         } else {
             "off".to_string()
         };

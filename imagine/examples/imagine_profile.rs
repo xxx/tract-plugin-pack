@@ -35,7 +35,7 @@ use imagine::spectrum::{Analyzer, SpectrumDisplay};
 use imagine::vectorscope::{ring_pair, VectorProducer};
 use imagine::{
     Quality, FIR_CROSSFADE_DEFAULT, FIR_CROSSOVER_LENGTH, FIR_HILBERT_LENGTH,
-    HAAS_BUFFER_MAX_MS, HAAS_DEFAULT_MS, MAX_SAMPLE_RATE, NUM_BANDS,
+    HAAS_BUFFER_MAX_MS, HAAS_DEFAULT_MS, MAX_SAMPLE_RATE, NUM_BANDS, STZ_SCALE_DEFAULT,
 };
 
 use std::hint::black_box;
@@ -47,6 +47,7 @@ const N_BLOCKS: usize = 50_000;
 
 const BAND_WIDTH: [f32; 4] = [-30.0, 20.0, 50.0, 80.0];
 const BAND_STZ_MS: [f32; 4] = [HAAS_DEFAULT_MS; 4];
+const BAND_STZ_SCALE: [f32; 4] = [STZ_SCALE_DEFAULT; 4];
 const BAND_STZ_ON: [bool; 4] = [false, true, true, false];
 const BAND_MODE: [StereoizeMode; 4] = [
     StereoizeMode::ModeI,
@@ -106,10 +107,22 @@ fn run(scenario: Scenario) -> Result {
         scenario.at_rest,
     );
 
-    let (widths, stz_ms, stz_on, recover) = if scenario.at_rest {
-        ([0.0_f32; 4], [HAAS_DEFAULT_MS; 4], [false; 4], 0.0_f32)
+    let (widths, stz_ms, stz_scales, stz_on, recover) = if scenario.at_rest {
+        (
+            [0.0_f32; 4],
+            [HAAS_DEFAULT_MS; 4],
+            [STZ_SCALE_DEFAULT; 4],
+            [false; 4],
+            0.0_f32,
+        )
     } else {
-        (BAND_WIDTH, BAND_STZ_MS, BAND_STZ_ON, RECOVER_AMOUNT)
+        (
+            BAND_WIDTH,
+            BAND_STZ_MS,
+            BAND_STZ_SCALE,
+            BAND_STZ_ON,
+            RECOVER_AMOUNT,
+        )
     };
 
     let sr = scenario.sample_rate;
@@ -227,6 +240,7 @@ fn run(scenario: Scenario) -> Result {
                     s_bands[b],
                     widths[b],
                     stz_ms[b],
+                    stz_scales[b],
                     stz_on[b],
                     BAND_MODE[b],
                 );

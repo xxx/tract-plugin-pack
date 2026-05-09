@@ -47,6 +47,14 @@ pub const HAAS_MIN_MS: f32 = 1.0;
 pub const HAAS_MAX_MS: f32 = 20.0;
 pub const HAAS_DEFAULT_MS: f32 = 6.0;
 pub const HAAS_BUFFER_MAX_MS: f32 = 25.0;
+
+/// Mode II Stereoize delay-scale parameter bounds. Multiplies the
+/// decorrelator's six fixed prime delays. 1.0× is the historical
+/// behaviour; smaller is tighter / less spacious, larger is more
+/// diffuse with longer reverberant tail.
+pub const STZ_SCALE_MIN: f32 = 0.5;
+pub const STZ_SCALE_MAX: f32 = 2.0;
+pub const STZ_SCALE_DEFAULT: f32 = 1.0;
 pub const MAX_SAMPLE_RATE: f32 = 192_000.0;
 pub const FIR_CROSSFADE_DEFAULT: usize = 1024;
 
@@ -89,9 +97,13 @@ pub struct BandParams {
     pub width: FloatParam,
     /// Stereoize Haas delay in milliseconds (Mode I). Range 1–20 ms;
     /// effect is gated by `stz_on`. Mode II (decorrelator) ignores the
-    /// ms value and runs at full strength when `stz_on` is true.
+    /// ms value.
     #[id = "stz_ms"]
     pub stz_ms: FloatParam,
+    /// Stereoize Mode II decorrelator delay scale. Range 0.5–2.0×;
+    /// effect is gated by `stz_on`. Mode I (Haas) ignores the scale.
+    #[id = "stz_scale"]
+    pub stz_scale: FloatParam,
     /// Stereoize on/off toggle. When false, the band's stereoize stage
     /// adds nothing to S regardless of mode.
     #[id = "stz_on"]
@@ -127,6 +139,18 @@ fn make_band_params() -> BandParams {
         .with_smoother(SmoothingStyle::Linear(20.0))
         .with_unit(" ms")
         .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
+        stz_scale: FloatParam::new(
+            "Stereoize Scale",
+            STZ_SCALE_DEFAULT,
+            FloatRange::Linear {
+                min: STZ_SCALE_MIN,
+                max: STZ_SCALE_MAX,
+            },
+        )
+        .with_smoother(SmoothingStyle::Linear(20.0))
+        .with_unit("×")
+        .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
         stz_on: BoolParam::new("Stereoize On", false),
 
@@ -624,6 +648,7 @@ impl Plugin for Imagine {
         // Per-band smoothed Width / Stereoize / mode / solo.
         let mut widths = [0.0_f32; NUM_BANDS];
         let mut stz_ms = [HAAS_DEFAULT_MS; NUM_BANDS];
+        let mut stz_scales = [STZ_SCALE_DEFAULT; NUM_BANDS];
         let mut stz_ons = [false; NUM_BANDS];
         let mut modes = [StereoizeMode::ModeI; NUM_BANDS];
         let mut solos = [false; NUM_BANDS];
@@ -634,6 +659,10 @@ impl Plugin for Imagine {
                 .next_step(smoother_steps);
             stz_ms[i] = self.params.bands[i]
                 .stz_ms
+                .smoothed
+                .next_step(smoother_steps);
+            stz_scales[i] = self.params.bands[i]
+                .stz_scale
                 .smoothed
                 .next_step(smoother_steps);
             stz_ons[i] = self.params.bands[i].stz_on.value();
@@ -693,6 +722,7 @@ impl Plugin for Imagine {
                     s_bands[b],
                     widths[b],
                     stz_ms[b],
+                    stz_scales[b],
                     stz_ons[b],
                     modes[b],
                 );
@@ -784,6 +814,7 @@ mod plugin_tests {
         r: &mut [f32],
         widths: [f32; NUM_BANDS],
         stz_ms: [f32; NUM_BANDS],
+        stz_scales: [f32; NUM_BANDS],
         stz_ons: [bool; NUM_BANDS],
         modes: [StereoizeMode; NUM_BANDS],
         solos: [bool; NUM_BANDS],
@@ -822,6 +853,7 @@ mod plugin_tests {
                     s_bands[b],
                     widths[b],
                     stz_ms[b],
+                    stz_scales[b],
                     stz_ons[b],
                     modes[b],
                 );
@@ -899,6 +931,7 @@ mod plugin_tests {
             &mut r,
             [0.0, 0.0, 0.0, 0.0],
             [HAAS_DEFAULT_MS; NUM_BANDS],
+            [STZ_SCALE_DEFAULT; NUM_BANDS],
             [false; NUM_BANDS],
             [StereoizeMode::ModeI; NUM_BANDS],
             [false; NUM_BANDS],
@@ -933,6 +966,7 @@ mod plugin_tests {
             &mut r,
             [-100.0, -100.0, -100.0, -100.0],
             [HAAS_DEFAULT_MS; NUM_BANDS],
+            [STZ_SCALE_DEFAULT; NUM_BANDS],
             [false; NUM_BANDS],
             [StereoizeMode::ModeI; NUM_BANDS],
             [false; NUM_BANDS],
@@ -969,6 +1003,7 @@ mod plugin_tests {
             &mut r,
             widths,
             [HAAS_DEFAULT_MS; NUM_BANDS],
+            [STZ_SCALE_DEFAULT; NUM_BANDS],
             [false; NUM_BANDS],
             [StereoizeMode::ModeI; NUM_BANDS],
             solos,
@@ -1000,6 +1035,7 @@ mod plugin_tests {
             &mut r_a,
             [50.0, 50.0, 50.0, 50.0],
             [HAAS_DEFAULT_MS; NUM_BANDS],
+            [STZ_SCALE_DEFAULT; NUM_BANDS],
             [false; NUM_BANDS],
             [StereoizeMode::ModeI; NUM_BANDS],
             [false; NUM_BANDS],
@@ -1015,6 +1051,7 @@ mod plugin_tests {
             &mut r_b,
             [50.0, 50.0, 50.0, 50.0],
             [HAAS_DEFAULT_MS; NUM_BANDS],
+            [STZ_SCALE_DEFAULT; NUM_BANDS],
             [false; NUM_BANDS],
             [StereoizeMode::ModeI; NUM_BANDS],
             [false; NUM_BANDS],

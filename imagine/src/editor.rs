@@ -296,6 +296,19 @@ impl ImagineWindow {
 
     // ── Param helpers ───────────────────────────────────────────────────
 
+    /// Pick which Stereoize parameter the band's knob is bound to right
+    /// now. Mode I → `stz_ms` (the Haas delay); Mode II → `stz_scale`
+    /// (the decorrelator delay scale). Drag, click, text-entry, and
+    /// the link-bands snapshot all consult this so the knob always
+    /// targets the parameter that's audible.
+    fn stz_param_for_band(&self, band: usize) -> &FloatParam {
+        let bp = &self.params.bands[band];
+        match bp.mode.value() {
+            StereoizeModeParam::I => &bp.stz_ms,
+            StereoizeModeParam::Ii => &bp.stz_scale,
+        }
+    }
+
     fn float_for_action(&self, action: HitAction) -> Option<&FloatParam> {
         match action {
             HitAction::Split { idx } => Some(match idx {
@@ -304,7 +317,7 @@ impl ImagineWindow {
                 _ => &self.params.xover_3,
             }),
             HitAction::BandWidth { band } => Some(&self.params.bands[band].width),
-            HitAction::BandStz { band } => Some(&self.params.bands[band].stz_ms),
+            HitAction::BandStz { band } => Some(self.stz_param_for_band(band)),
             HitAction::Recover => Some(&self.params.recover_sides),
             _ => None,
         }
@@ -326,7 +339,7 @@ impl ImagineWindow {
         let mut stzs = [0.0_f32; NUM_BANDS];
         for b in 0..NUM_BANDS {
             widths[b] = self.params.bands[b].width.unmodulated_normalized_value();
-            stzs[b] = self.params.bands[b].stz_ms.unmodulated_normalized_value();
+            stzs[b] = self.stz_param_for_band(b).unmodulated_normalized_value();
         }
         self.link_baseline = LinkBaseline {
             widths,
@@ -364,7 +377,7 @@ impl ImagineWindow {
         }
         for b in 0..NUM_BANDS {
             let target = (self.link_baseline.stzs[b] + clamped_delta).clamp(0.0, 1.0);
-            setter.set_parameter_normalized(&self.params.bands[b].stz_ms, target);
+            setter.set_parameter_normalized(self.stz_param_for_band(b), target);
         }
     }
 
@@ -597,7 +610,7 @@ impl ImagineWindow {
                     let actual_delta = target - self.link_baseline.dragged_baseline;
                     self.apply_link_stzs(&setter, actual_delta);
                 } else {
-                    setter.set_parameter_normalized(&self.params.bands[band].stz_ms, target);
+                    setter.set_parameter_normalized(self.stz_param_for_band(band), target);
                 }
             }
             HitAction::Recover => {
@@ -653,13 +666,13 @@ impl ImagineWindow {
                 self.handle_drag(action);
             }
             HitAction::BandStz { band } => {
-                let p = &self.params.bands[band].stz_ms;
+                let p = self.stz_param_for_band(band);
                 let norm = p.unmodulated_normalized_value();
                 setter.begin_set_parameter(p);
                 if self.params.link_bands.value() {
                     for b in 0..NUM_BANDS {
                         if b != band {
-                            setter.begin_set_parameter(&self.params.bands[b].stz_ms);
+                            setter.begin_set_parameter(self.stz_param_for_band(b));
                         }
                     }
                 }
@@ -787,11 +800,11 @@ impl ImagineWindow {
                 }
             }
             HitAction::BandStz { band } => {
-                setter.end_set_parameter(&self.params.bands[band].stz_ms);
+                setter.end_set_parameter(self.stz_param_for_band(band));
                 if self.params.link_bands.value() {
                     for b in 0..NUM_BANDS {
                         if b != band {
-                            setter.end_set_parameter(&self.params.bands[b].stz_ms);
+                            setter.end_set_parameter(self.stz_param_for_band(b));
                         }
                     }
                 }
