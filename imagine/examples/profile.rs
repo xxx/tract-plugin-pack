@@ -81,6 +81,10 @@ struct Scenario {
     /// If Some(b), band `b` is soloed throughout the run — short-circuits the
     /// recover-sides path and uses only that band's outs.
     solo_band: Option<usize>,
+    /// If true, force widths/stz/recover to zero and feed silence — matches
+    /// "plugin dropped into chain, audio not playing" in a host. Closest
+    /// scenario to what a user sees in their DAW's DSP graph at idle.
+    at_rest: bool,
 }
 
 #[derive(Debug)]
@@ -92,13 +96,20 @@ struct Result {
 
 fn run(scenario: Scenario) -> Result {
     eprintln!(
-        "── {} ({:?} @ {:.0} Hz, automate={}, solo={:?}) ──",
+        "── {} ({:?} @ {:.0} Hz, automate={}, solo={:?}, at_rest={}) ──",
         scenario.name,
         scenario.quality,
         scenario.sample_rate,
         scenario.automate_freqs,
         scenario.solo_band,
+        scenario.at_rest,
     );
+
+    let (widths, stz_amounts, recover) = if scenario.at_rest {
+        ([0.0_f32; 4], [0.0_f32; 4], 0.0_f32)
+    } else {
+        (BAND_WIDTH, BAND_STZ, RECOVER_AMOUNT)
+    };
 
     let sr = scenario.sample_rate;
 
@@ -161,10 +172,15 @@ fn run(scenario: Scenario) -> Result {
     let start = Instant::now();
 
     for block in 0..N_BLOCKS {
-        // Generate a fresh stereo white-noise block.
-        for i in 0..BLOCK {
-            l[i] = rng_l.next_f32() * 0.5;
-            r[i] = rng_r.next_f32() * 0.5;
+        // Generate a fresh stereo block — white noise normally, silence at rest.
+        if scenario.at_rest {
+            l.fill(0.0);
+            r.fill(0.0);
+        } else {
+            for i in 0..BLOCK {
+                l[i] = rng_l.next_f32() * 0.5;
+                r[i] = rng_r.next_f32() * 0.5;
+            }
         }
 
         // Optional per-block crossover automation. Slightly drift each freq
@@ -208,8 +224,8 @@ fn run(scenario: Scenario) -> Result {
                 let (m_o, s_o, s_rem) = bands[b].process(
                     m_bands[b],
                     s_bands[b],
-                    BAND_WIDTH[b],
-                    BAND_STZ[b],
+                    widths[b],
+                    stz_amounts[b],
                     BAND_MODE[b],
                 );
                 m_outs[b] = m_o;
@@ -230,7 +246,7 @@ fn run(scenario: Scenario) -> Result {
                 (m_old, s_old)
             };
 
-            let recover_inject = hilbert.process(s_removed_total) * RECOVER_AMOUNT;
+            let recover_inject = hilbert.process(s_removed_total) * recover;
 
             let (m_final, s_final) = if let Some(idx) = solo_idx {
                 (m_outs[idx], s_outs[idx])
@@ -304,12 +320,32 @@ impl MeterAccum {
 
 fn main() {
     let scenarios = [
+        // "at rest" — silent input + default params. Mirrors what a user sees
+        // in their DAW's DSP graph immediately after dropping the plugin into
+        // a chain (audio not playing, nothing tweaked yet).
+        Scenario {
+            name: "Linear / 48kHz / AT REST (silent + defaults)",
+            quality: Quality::Linear,
+            sample_rate: 48_000.0,
+            automate_freqs: false,
+            solo_band: None,
+            at_rest: true,
+        },
+        Scenario {
+            name: "IIR / 48kHz / AT REST (silent + defaults)",
+            quality: Quality::Iir,
+            sample_rate: 48_000.0,
+            automate_freqs: false,
+            solo_band: None,
+            at_rest: true,
+        },
         Scenario {
             name: "IIR / 48kHz / static",
             quality: Quality::Iir,
             sample_rate: 48_000.0,
             automate_freqs: false,
             solo_band: None,
+            at_rest: false,
         },
         Scenario {
             name: "Linear / 48kHz / static",
@@ -317,6 +353,7 @@ fn main() {
             sample_rate: 48_000.0,
             automate_freqs: false,
             solo_band: None,
+            at_rest: false,
         },
         Scenario {
             name: "Linear / 48kHz / CROSSOVER AUTOMATION",
@@ -324,6 +361,7 @@ fn main() {
             sample_rate: 48_000.0,
             automate_freqs: true,
             solo_band: None,
+            at_rest: false,
         },
         Scenario {
             name: "Linear / 96kHz / static",
@@ -331,6 +369,7 @@ fn main() {
             sample_rate: 96_000.0,
             automate_freqs: false,
             solo_band: None,
+            at_rest: false,
         },
         Scenario {
             name: "IIR / 48kHz / static / SOLO band 0",
@@ -338,6 +377,7 @@ fn main() {
             sample_rate: 48_000.0,
             automate_freqs: false,
             solo_band: Some(0),
+            at_rest: false,
         },
     ];
 
