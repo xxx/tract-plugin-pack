@@ -45,6 +45,14 @@ pub fn cyan() -> Color {
     Color::from_rgba8(96, 200, 228, 255)
 }
 
+/// Saturation/clip warning red. Used by the dot-cloud vectorscope
+/// modes (HalfPolar, Polar/Goniometer, Lissajous) to flag samples that
+/// exceed 0 dBFS without colliding with the cyan/pink in-range palette.
+#[inline]
+pub fn warn() -> Color {
+    Color::from_rgba8(228, 80, 64, 255)
+}
+
 #[inline]
 pub fn split_line() -> Color {
     Color::from_rgba8(170, 130, 198, 200)

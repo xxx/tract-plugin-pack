@@ -389,20 +389,31 @@ fn draw_polar(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: &[f3
         // Hard-L (L>0, R=0) → upper-left, hard-R → upper-right (matches
         // Ozone's polar / goniometer orientation). Negating x relative
         // to the literal `(L-R)/√2` rotation puts L on the left.
-        let xn = (r[i] - l[i]) * inv_sqrt2;
-        let yn = -((l[i] + r[i]) * inv_sqrt2);
-        let px = cx + (xn.clamp(-1.0, 1.0) * r_f) as i32;
-        let py = cy + (yn.clamp(-1.0, 1.0) * r_f) as i32;
-        // Color by L-vs-R dominance.
-        let denom = l[i].abs() + r[i].abs() + 1e-9;
-        let bias = if l[i].abs() > r[i].abs() {
-            ((l[i].abs() - r[i].abs()) / denom).clamp(0.0, 1.0)
+        let xn_raw = (r[i] - l[i]) * inv_sqrt2;
+        let yn_raw = -((l[i] + r[i]) * inv_sqrt2);
+        let xn = xn_raw.clamp(-1.0, 1.0);
+        let yn = yn_raw.clamp(-1.0, 1.0);
+        let px = cx + (xn * r_f) as i32;
+        let py = cy + (yn * r_f) as i32;
+        // Clipping detection: any (L, R) where the rotated coords leave
+        // the unit square is "off-screen" in goniometer terms. Draw at
+        // the clamped edge in `theme::warn()` so the cyan/pink palette
+        // still maps to in-range L/R bias.
+        let clipped = xn_raw.abs() > 1.0 || yn_raw.abs() > 1.0;
+        let color = if clipped {
+            theme::warn()
         } else {
-            -((r[i].abs() - l[i].abs()) / denom).clamp(0.0, 1.0)
+            // Color by L-vs-R dominance.
+            let denom = l[i].abs() + r[i].abs() + 1e-9;
+            let bias = if l[i].abs() > r[i].abs() {
+                ((l[i].abs() - r[i].abs()) / denom).clamp(0.0, 1.0)
+            } else {
+                -((r[i].abs() - l[i].abs()) / denom).clamp(0.0, 1.0)
+            };
+            // bias > 0 → pink (L); bias < 0 → cyan (R)
+            let t = (bias + 1.0) * 0.5;
+            theme::cyan_to_pink(t)
         };
-        // bias > 0 → pink (L); bias < 0 → cyan (R)
-        let t = (bias + 1.0) * 0.5;
-        let color = theme::cyan_to_pink(t);
         // Snapshot returns oldest at i=0, newest at i=n-1. Freshness
         // ramps 0 (oldest) → 1 (newest), so newest dots are bright and
         // oldest fade to background — matches Ozone's phosphor decay.
@@ -424,15 +435,25 @@ fn draw_lissajous(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: 
         return;
     }
     let inv_n_minus_1 = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
-    let color = theme::accent();
+    let in_range_color = theme::accent();
+    let clip_color = theme::warn();
     for i in 0..n {
         // L on the left, R on the right (matches Ozone's Lissajous
         // diamond orientation — hard-L → upper-left point, hard-R →
         // upper-right point).
-        let xn = (r[i] - l[i]) * inv_sqrt2;
-        let yn = (l[i] + r[i]) * inv_sqrt2;
-        let px = cx + (xn.clamp(-1.0, 1.0) * r_f) as i32;
-        let py = cy - (yn.clamp(-1.0, 1.0) * r_f) as i32;
+        let xn_raw = (r[i] - l[i]) * inv_sqrt2;
+        let yn_raw = (l[i] + r[i]) * inv_sqrt2;
+        let xn = xn_raw.clamp(-1.0, 1.0);
+        let yn = yn_raw.clamp(-1.0, 1.0);
+        let px = cx + (xn * r_f) as i32;
+        let py = cy - (yn * r_f) as i32;
+        // Clipping: rotated coord outside unit square → flag in red at
+        // the clamped edge.
+        let color = if xn_raw.abs() > 1.0 || yn_raw.abs() > 1.0 {
+            clip_color
+        } else {
+            in_range_color
+        };
         let freshness = (i as f32) * inv_n_minus_1;
         let alpha = DOT_BASE_ALPHA * freshness;
         blend_dot_2x2(pixmap, px, py, color, alpha);
@@ -520,7 +541,7 @@ fn draw_half_polar(
     // visibly dim — Ozone's phosphor-decay look without a persistent
     // pixmap.
     let inv_n_minus_1 = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
-    let clip_color = theme::pink();
+    let clip_color = theme::warn();
     for i in 0..n {
         let l = samples_l[i];
         let rr = samples_r[i];
@@ -531,8 +552,8 @@ fn draw_half_polar(
         let (amplitude, dot_color) = if raw_amp > 1.0 {
             // Clipping: cap radius to 1 + POLAR_CLIP_RIM_OFFSET so the
             // dot lands in the small margin just beyond the rim, and
-            // colour it pink to flag the clip without colliding with
-            // the in-range cyan cluster.
+            // colour it `theme::warn()` (red) to flag the clip without
+            // colliding with the in-range cyan cluster.
             (1.0 + POLAR_CLIP_RIM_OFFSET, clip_color)
         } else {
             (raw_amp, color)
