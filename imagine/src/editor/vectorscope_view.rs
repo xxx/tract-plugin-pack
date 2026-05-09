@@ -423,13 +423,14 @@ fn draw_polar(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: &[f3
     }
 }
 
-/// Lissajous: 45°-rotated to the diamond orientation (matches Ozone's
-/// Lissajous mode). Mono signals (L=R) draw a vertical line; anti-phase
-/// signals (L=-R) draw a horizontal line; full-scale corners are at the
-/// diamond points (top/bottom/left/right).
+/// Traditional Lissajous: X = L (positive right), Y = R (positive up).
+/// Mono signals (L = R) trace a +45° diagonal; anti-phase signals
+/// (L = −R) trace a −45° diagonal. Hard-L panning lies on the
+/// horizontal axis (y = 0); hard-R panning lies on the vertical axis
+/// (x = 0). The 45°-rotated diamond view of the same signal lives in
+/// the Goniometer mode.
 fn draw_lissajous(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: &[f32], r: &[f32]) {
     let r_f = radius as f32;
-    let inv_sqrt2 = std::f32::consts::FRAC_1_SQRT_2;
     let n = l.len().min(r.len());
     if n == 0 {
         return;
@@ -438,18 +439,15 @@ fn draw_lissajous(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: 
     let in_range_color = theme::accent();
     let clip_color = theme::warn();
     for i in 0..n {
-        // L on the left, R on the right (matches Ozone's Lissajous
-        // diamond orientation — hard-L → upper-left point, hard-R →
-        // upper-right point).
-        let xn_raw = (r[i] - l[i]) * inv_sqrt2;
-        let yn_raw = (l[i] + r[i]) * inv_sqrt2;
-        let xn = xn_raw.clamp(-1.0, 1.0);
-        let yn = yn_raw.clamp(-1.0, 1.0);
+        let li = l[i];
+        let ri = r[i];
+        let xn = li.clamp(-1.0, 1.0);
+        let yn = ri.clamp(-1.0, 1.0);
         let px = cx + (xn * r_f) as i32;
         let py = cy - (yn * r_f) as i32;
-        // Clipping: rotated coord outside unit square → flag in red at
-        // the clamped edge.
-        let color = if xn_raw.abs() > 1.0 || yn_raw.abs() > 1.0 {
+        // Clipping: any sample where |L| > 1 or |R| > 1 → flag in red
+        // at the clamped square edge.
+        let color = if li.abs() > 1.0 || ri.abs() > 1.0 {
             clip_color
         } else {
             in_range_color

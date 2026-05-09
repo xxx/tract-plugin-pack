@@ -389,7 +389,7 @@ pub fn draw(
         );
         let stz_text = if stz_ons[i] {
             match modes[i] {
-                crate::StereoizeModeParam::I => format!("{:.1}", stz_ms[i]),
+                crate::StereoizeModeParam::I => format!("{:.1} ms", stz_ms[i]),
                 crate::StereoizeModeParam::Ii => format!("{:.2}×", stz_scales[i]),
             }
         } else {
