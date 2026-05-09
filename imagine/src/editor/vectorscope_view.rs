@@ -488,13 +488,15 @@ fn draw_half_polar(
     //   M = (L+R)/2, S = (L-R)/2,  sgn = sign(M)  (sign(0) := +1)
     //   x_disc = -sgn · S,  y_disc = |M|
     //   θ = atan2(y_disc, x_disc) ∈ [0, π]
-    //   r = (|L| + |R|), clamped to 1
+    //   r = max(|L|, |R|)
     //
-    // The radial distance is the L1 stereo norm so a mono sample at peak
-    // amplitude `a` reaches `2a` on the disc (clamped at the rim) and a
-    // hard-panned sample at peak `a` reaches `a`. This matches Ozone's
-    // dot spread on real material — using `max(|L|, |R|)` produces a
-    // visibly tighter cluster (~⅓ the radial extent) for stereo content.
+    // The rim represents 0 dBFS peak amplitude — a sample with `|L| = 1`
+    // or `|R| = 1` lands exactly on the half-circle. Samples that exceed
+    // 0 dBFS (clipping) are drawn just outside the rim in pink (the
+    // theme's warning colour) so the user can see clipping by direction
+    // without obscuring the in-range cluster. The over-rim radius is
+    // capped at `1 + POLAR_CLIP_RIM_OFFSET` so clipped dots stay inside
+    // the panel area regardless of how hot the audio is.
     //
     // Mappings (angle):
     //   - mono in-phase            → θ = π/2 (top)
@@ -518,13 +520,23 @@ fn draw_half_polar(
     // visibly dim — Ozone's phosphor-decay look without a persistent
     // pixmap.
     let inv_n_minus_1 = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
+    let clip_color = theme::pink();
     for i in 0..n {
-        let l = samples_l[i].clamp(-1.0, 1.0);
-        let rr = samples_r[i].clamp(-1.0, 1.0);
-        let amplitude = (l.abs() + rr.abs()).min(1.0);
-        if amplitude < 1e-6 {
+        let l = samples_l[i];
+        let rr = samples_r[i];
+        let raw_amp = l.abs().max(rr.abs());
+        if raw_amp < 1e-6 {
             continue;
         }
+        let (amplitude, dot_color) = if raw_amp > 1.0 {
+            // Clipping: cap radius to 1 + POLAR_CLIP_RIM_OFFSET so the
+            // dot lands in the small margin just beyond the rim, and
+            // colour it pink to flag the clip without colliding with
+            // the in-range cyan cluster.
+            (1.0 + POLAR_CLIP_RIM_OFFSET, clip_color)
+        } else {
+            (raw_amp, color)
+        };
         let m = 0.5 * (l + rr);
         let s = 0.5 * (l - rr);
         let sgn_m = if m >= 0.0 { 1.0 } else { -1.0 };
@@ -540,9 +552,15 @@ fn draw_half_polar(
         // oldest fade to background — matches Ozone's phosphor decay.
         let freshness = (i as f32) * inv_n_minus_1;
         let alpha = DOT_BASE_ALPHA * freshness;
-        blend_dot_2x2(pixmap, px, py, color, alpha);
+        blend_dot_2x2(pixmap, px, py, dot_color, alpha);
     }
 }
+
+/// Radial offset (as a fraction of `disc_radius`) at which clipping
+/// dots are drawn — beyond the 0 dBFS rim. Sized to fit inside the
+/// panel margin around the disc so clipping markers land in the gap
+/// between the rim and the panel edge rather than getting cropped.
+const POLAR_CLIP_RIM_OFFSET: f32 = 0.05;
 
 /// Per-dot base opacity for the dot-cloud renderers (HalfPolar, Polar,
 /// Lissajous). Low so individual dots are dim and dense pixel regions
@@ -981,22 +999,22 @@ mod tests {
         (pixmap, cx, base_y, disc_radius)
     }
 
-    /// Mono in-phase (L=R=0.4) lands on the central vertical column.
-    /// θ = π/2 → (cos, sin) = (0, 1) → dx = 0, dy = +radius · (|L|+|R|).
-    /// Uses 0.4 so the L1 amplitude (0.8) doesn't clamp at the rim.
+    /// Mono in-phase (L=R=0.5) lands on the central vertical column.
+    /// θ = π/2 → (cos, sin) = (0, 1). The radial metric is `max(|L|, |R|)`,
+    /// so dy = radius · 0.5.
     #[test]
     fn half_polar_mono_dot_lands_on_vertical_axis() {
-        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(0.4, 0.4, 256);
+        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(0.5, 0.5, 256);
         let (dx, dy) = find_dot(&pixmap, cx, base_y).expect("expected a cyan dot");
         assert!(
             dx.abs() <= 1,
             "mono dot should sit on cx (dx≈0), got dx={dx}"
         );
         assert!(dy > 0, "mono dot should be above baseline, got dy={dy}");
-        let expected = (0.8 * disc_radius as f32) as i32;
+        let expected = (0.5 * disc_radius as f32) as i32;
         assert!(
             (dy - expected).abs() <= 2,
-            "mono dot dy={dy}, expected ~{expected} ((|L|+|R|)·radius)"
+            "mono dot dy={dy}, expected ~{expected} (max(|L|,|R|)·radius)"
         );
     }
 
@@ -1042,12 +1060,11 @@ mod tests {
         );
     }
 
-    /// Anti-phase L-dom (L=+0.35, R=-0.35) lands at the left baseline corner.
-    /// M=0 (sgn=+1), S=+0.35 → x_disc=-0.35, y_disc=0 → θ=π → dx=-r·(|L|+|R|), dy=0.
-    /// Uses 0.35 so the L1 amplitude (0.7) doesn't clamp at the rim.
+    /// Anti-phase L-dom (L=+0.7, R=-0.7) lands at the left baseline corner.
+    /// M=0 (sgn=+1), S=+0.7 → x_disc=-0.7, y_disc=0 → θ=π → dx=-r·max(|L|,|R|), dy=0.
     #[test]
     fn half_polar_anti_phase_l_dom_lands_at_left_baseline_corner() {
-        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(0.35, -0.35, 256);
+        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(0.7, -0.7, 256);
         let (dx, dy) = find_dot(&pixmap, cx, base_y).expect("expected a cyan dot");
         let expected = (0.7 * disc_radius as f32) as i32;
         assert!(
@@ -1064,12 +1081,11 @@ mod tests {
         );
     }
 
-    /// Anti-phase R-dom (L=-0.35, R=+0.35) lands at the right baseline corner.
-    /// M=0 (sgn=+1), S=-0.35 → x_disc=+0.35, y_disc=0 → θ=0 → dx=+r·(|L|+|R|), dy=0.
-    /// Uses 0.35 so the L1 amplitude (0.7) doesn't clamp at the rim.
+    /// Anti-phase R-dom (L=-0.7, R=+0.7) lands at the right baseline corner.
+    /// M=0 (sgn=+1), S=-0.7 → x_disc=+0.7, y_disc=0 → θ=0 → dx=+r·max(|L|,|R|), dy=0.
     #[test]
     fn half_polar_anti_phase_r_dom_lands_at_right_baseline_corner() {
-        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(-0.35, 0.35, 256);
+        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(-0.7, 0.7, 256);
         let (dx, dy) = find_dot(&pixmap, cx, base_y).expect("expected a cyan dot");
         let expected = (0.7 * disc_radius as f32) as i32;
         assert!(
