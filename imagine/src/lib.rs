@@ -21,6 +21,7 @@ pub mod decorrelator;
 pub mod editor;
 pub mod hilbert;
 pub mod midside;
+pub mod polar_rays;
 pub mod spectrum;
 pub mod theme;
 pub mod vectorscope;
@@ -29,6 +30,7 @@ use crate::bands::{Band, StereoizeMode};
 use crate::crossover::{CrossoverFir, CrossoverIir};
 use crate::hilbert::HilbertFir;
 use crate::spectrum::{Analyzer, SpectrumDisplay};
+use crate::polar_rays::{PolarRayConsumer, PolarRayProducer};
 use crate::vectorscope::{ring_pair, VectorConsumer, VectorProducer};
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -172,6 +174,11 @@ pub struct ImagineParams {
     /// eagerly in `Imagine::default()` and overwrites the placeholder set
     /// here.
     pub vector_consumer: Arc<VectorConsumer>,
+
+    /// Polar Level ray ring (consumer end). The audio-thread analyzer
+    /// emits one (angle, amplitude) per emit interval; the editor reads
+    /// this consumer to render the rays with age-scaled opacity.
+    pub polar_consumer: Arc<PolarRayConsumer>,
 }
 
 impl Default for ImagineParams {
@@ -180,6 +187,7 @@ impl Default for ImagineParams {
         // real consumer that's paired with the producer it keeps. The dropped
         // dummy producer here is harmless: nobody ever pushes into it.
         let (_dummy_prod, dummy_cons) = ring_pair();
+        let (_dummy_polar_prod, dummy_polar_cons) = crate::polar_rays::ring_pair();
 
         Self {
             editor_state: tiny_skia_widgets::EditorState::from_size(960, 640),
@@ -256,6 +264,7 @@ impl Default for ImagineParams {
             balance: Arc::new(AtomicU32::new(0)),
 
             vector_consumer: Arc::new(dummy_cons),
+            polar_consumer: Arc::new(dummy_polar_cons),
         }
     }
 }
@@ -331,6 +340,12 @@ pub struct Imagine {
     /// the params handle, so the producer doesn't need to be optional.
     vector_producer: VectorProducer,
 
+    /// Polar Level emit producer (audio-side). Paired with the consumer
+    /// stored on `ImagineParams::polar_consumer`. Wrapped in `Arc` so the
+    /// `Analyzer` (constructed in `initialize`) can hold its own clone
+    /// without re-plumbing the producer through the analyzer's API.
+    polar_producer: Arc<PolarRayProducer>,
+
     /// FFT analyzer. Reset in `initialize` to update sample-rate-dependent log
     /// bin tables.
     spectrum: Option<Analyzer>,
@@ -365,8 +380,11 @@ impl Default for Imagine {
         // by then. The placeholder consumer set in `ImagineParams::default()`
         // is overwritten here with the matching half of `vector_producer`.
         let (vector_producer, vector_consumer) = ring_pair();
+        let (polar_producer, polar_consumer) = crate::polar_rays::ring_pair();
+        let polar_producer = Arc::new(polar_producer);
         let params = ImagineParams {
             vector_consumer: Arc::new(vector_consumer),
+            polar_consumer: Arc::new(polar_consumer),
             ..ImagineParams::default()
         };
 
@@ -388,6 +406,7 @@ impl Default for Imagine {
             meter_accumulator: MeterAccum::default(),
 
             vector_producer,
+            polar_producer,
 
             spectrum: None,
 
@@ -497,9 +516,10 @@ impl Plugin for Imagine {
 
         // Rebuild the spectrum analyzer at the current sample rate so its
         // log-bin table is correct.
-        self.spectrum = Some(Analyzer::new(
+        self.spectrum = Some(Analyzer::with_polar_producer(
             self.sample_rate,
             self.params.spectrum_display.clone(),
+            Some(self.polar_producer.clone()),
         ));
 
         ctx.set_latency_samples(self.latency_samples_total());
@@ -821,6 +841,7 @@ mod plugin_tests {
             })
             .collect()
     }
+
 
     fn make_plugin(quality: Quality, sr: f32) -> Imagine {
         let mut p = Imagine::default();

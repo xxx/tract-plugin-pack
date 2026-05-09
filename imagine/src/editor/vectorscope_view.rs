@@ -1,13 +1,14 @@
 //! Vectorscope view: half-polar Ozone-style disc, full-square polar dot cloud,
-//! or Lissajous trace.
+//! Lissajous trace, or polar level (per-pan-angle level histogram).
 //! Below the scope: correlation bar + balance bar.
 
+use crate::polar_rays::{Ray, RING_CAPACITY as POLAR_RING_CAPACITY};
 use crate::theme;
 use crate::vectorscope::VectorConsumer;
 use crate::ImagineParams;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tiny_skia::{Color, Paint, Pixmap, PixmapMut, Rect, Transform};
+use tiny_skia::{Color, Paint, PathBuilder, Pixmap, PixmapMut, Rect, Transform};
 use tiny_skia_widgets::TextRenderer;
 
 const SAMPLE_BUDGET: usize = 4096;
@@ -24,13 +25,19 @@ fn scaled(v: i32, s: f32) -> i32 {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum VectorMode {
-    /// Ozone-style half-disc polar scope. Mono → straight up,
-    /// hard-left/right → bottom corners, anti-phase → baseline. Default.
+    /// Ozone-style half-disc polar scope. Mono → straight up; hard-L /
+    /// hard-R in-phase → upper-left / upper-right 45° spokes (per the
+    /// Ozone manual's "safe lines"); anti-phase content → baseline
+    /// corners. Default.
     HalfPolar = 0,
     /// Full-square 45°-rotated dot cloud, dual-tone (pink = L, cyan = R).
     Polar = 1,
     /// L on X, R on Y (no rotation).
     Lissajous = 2,
+    /// Ozone-style polar level: per-pan-angle level histogram on the same
+    /// half-disc geometry as `HalfPolar`. Filled fast envelope + slower
+    /// peak-hold outline.
+    PolarLevel = 3,
 }
 
 impl VectorMode {
@@ -38,6 +45,7 @@ impl VectorMode {
         match v {
             1 => VectorMode::Polar,
             2 => VectorMode::Lissajous,
+            3 => VectorMode::PolarLevel,
             _ => VectorMode::HalfPolar,
         }
     }
@@ -50,7 +58,8 @@ impl VectorMode {
         match self {
             VectorMode::HalfPolar => VectorMode::Polar,
             VectorMode::Polar => VectorMode::Lissajous,
-            VectorMode::Lissajous => VectorMode::HalfPolar,
+            VectorMode::Lissajous => VectorMode::PolarLevel,
+            VectorMode::PolarLevel => VectorMode::HalfPolar,
         }
     }
 
@@ -59,6 +68,7 @@ impl VectorMode {
             VectorMode::HalfPolar => "Polar",
             VectorMode::Polar => "Goniometer",
             VectorMode::Lissajous => "Lissajous",
+            VectorMode::PolarLevel => "Polar Level",
         }
     }
 }
@@ -153,9 +163,9 @@ pub fn draw(
         let r = scope_w.min(scope_h) / 2 - pad;
 
         match mode {
-            VectorMode::HalfPolar => {
-                // Half-disc has its own grid (half-circle outline + spokes +
-                // baseline) drawn inside draw_half_polar.
+            VectorMode::HalfPolar | VectorMode::PolarLevel => {
+                // Half-disc geometry has its own grid (half-circle outline +
+                // spokes + baseline) drawn inside the per-mode renderer.
             }
             VectorMode::Polar | VectorMode::Lissajous => {
                 // Background grid (a faint cross) for the square modes.
@@ -192,6 +202,15 @@ pub fn draw(
             ),
             VectorMode::Polar => draw_polar(&mut pm, cx, cy, r, &vec_l[..n], &vec_r[..n]),
             VectorMode::Lissajous => draw_lissajous(&mut pm, cx, cy, r, &vec_l[..n], &vec_r[..n]),
+            VectorMode::PolarLevel => draw_polar_level(
+                &mut pm,
+                scope_x,
+                scope_y,
+                scope_w,
+                scope_h,
+                params,
+                s,
+            ),
         }
 
         // Correlation bar at the bottom. Bar layout (from bottom up):
@@ -226,9 +245,10 @@ pub fn draw(
     let small_size = (9.0_f32 * s).max(6.0);
     let mode_label = mode.label();
 
-    // For HalfPolar, render the L/R corner labels and the +1/0/-1 amplitude
-    // markers. The disc geometry must mirror draw_half_polar exactly.
-    if mode == VectorMode::HalfPolar {
+    // For half-disc modes (HalfPolar, PolarLevel), render the L/R corner
+    // labels and the +1/0 amplitude markers. The disc geometry must mirror
+    // draw_half_polar / draw_polar_level exactly.
+    if mode == VectorMode::HalfPolar || mode == VectorMode::PolarLevel {
         let scope_h = h - bottom_reserve - footer_h;
         let scope_x = x + pad;
         let scope_y = y + pad;
@@ -370,8 +390,10 @@ fn half_disc_geometry(
 }
 
 /// Ozone-style half-disc polar scope.
-/// Origin at bottom-center. Mono → straight up, hard-left → bottom-left,
-/// hard-right → bottom-right, anti-phase → baseline.
+/// Origin at bottom-center. Mono → straight up (θ=π/2), hard-L in-phase →
+/// upper-left 45° spoke (θ=3π/4), hard-R in-phase → upper-right 45° spoke
+/// (θ=π/4), anti-phase L-dom → left baseline corner (θ=π), anti-phase R-dom →
+/// right baseline corner (θ=0).
 #[allow(clippy::too_many_arguments)]
 fn draw_half_polar(
     pixmap: &mut PixmapMut<'_>,
@@ -389,38 +411,148 @@ fn draw_half_polar(
     // Faint half-circle outline + spokes + baseline.
     draw_half_disc_grid(pixmap, cx, base_y, disc_radius, theme::text_dim());
 
-    // Plot each sample as a 1×1 dot.
+    // Plot each sample as a 1×1 dot. Geometry matches `spectrum.rs::polar_push`:
+    //
+    //   M = (L+R)/2, S = (L-R)/2,  sgn = sign(M)  (sign(0) := +1)
+    //   x_disc = -sgn · S,  y_disc = |M|
+    //   θ = atan2(y_disc, x_disc) ∈ [0, π]
+    //   r = max(|L|, |R|)
+    //
+    // Mappings (per polar_geometry.md §3):
+    //   - mono in-phase            → θ = π/2 (top)
+    //   - hard-L in-phase (1, 0)   → θ = 3π/4 (upper-left 45° spoke)
+    //   - hard-R in-phase (0, 1)   → θ = π/4 (upper-right 45° spoke)
+    //   - anti-phase L-dom (1,-1)  → θ = π (left baseline corner)
+    //   - anti-phase R-dom (-1, 1) → θ = 0 (right baseline corner)
+    //
+    // The mapping is polarity-invariant: (L,R) and (-L,-R) land on the
+    // same disc point, which folds anti-phase samples onto the baseline
+    // corners directly without a `dy < 0` skip.
     let r_f = disc_radius as f32;
     let n = samples_l.len().min(samples_r.len());
     for i in 0..n {
         let l = samples_l[i].clamp(-1.0, 1.0);
         let rr = samples_r[i].clamp(-1.0, 1.0);
-        // Pan-vs-amplitude mapping (matches Ozone's polar):
-        //   angle = 2·atan2(L, R)  → 0 = right baseline corner,
-        //                            π/2 = top (mono),
-        //                            π   = left baseline corner.
-        //   radius = max(|L|, |R|) → loudness of the loudest channel.
-        //
-        // Anti-phase samples land below the baseline (angle ∈ (π, 2π))
-        // and we skip them. Negative half-cycles of a single-channel
-        // sine collapse onto the same corner as the positive half (e.g.
-        // L=-0.7, R=0 → angle = -π → cos=-1, sin=0 → left baseline),
-        // so a left-only sine traces a streak from origin out to the
-        // L corner without spurious right-side dots.
         let amplitude = l.abs().max(rr.abs()).min(1.0);
         if amplitude < 1e-6 {
             continue;
         }
-        let angle = 2.0 * l.atan2(rr);
-        let dx = angle.cos();
-        let dy = angle.sin();
-        if dy < 0.0 {
-            continue;
-        }
+        let m = 0.5 * (l + rr);
+        let s = 0.5 * (l - rr);
+        let sgn_m = if m >= 0.0 { 1.0 } else { -1.0 };
+        let x_disc = -sgn_m * s;
+        let y_disc = m.abs();
+        let theta = y_disc.atan2(x_disc);
+        let dx = theta.cos();
+        let dy = theta.sin();
         let px = cx + (amplitude * dx * r_f) as i32;
         let py = base_y - (amplitude * dy * r_f) as i32;
         put_pixel(pixmap, px, py, color);
     }
+}
+
+/// Polar Level: per-pan-angle level "rays" on the half-disc. Each of the
+/// `NUM_POLAR_BINS` pan bins is rendered as ONE independent radial line
+/// from the origin to a length proportional to that bin's level. The
+/// iZotope manual is explicit: "The length of the rays represents
+/// amplitude. The angle of the rays represents their position in the
+/// stereo image." Densely-packed long rays in the centre visually merge
+/// into a wedge; sparse out-of-phase content shows as individual rays
+/// near the L/R baseline. The angular space between adjacent rays is
+/// NOT filled — that fill is precisely what produced the "blob"
+/// regression in the polygon-based renderer.
+#[allow(clippy::too_many_arguments)]
+fn draw_polar_level(
+    pixmap: &mut PixmapMut<'_>,
+    panel_x: i32,
+    panel_y: i32,
+    panel_w: i32,
+    panel_h: i32,
+    params: &Arc<ImagineParams>,
+    _scale: f32,
+) {
+    let (cx, base_y, disc_radius) =
+        half_disc_geometry(panel_x, panel_y, panel_w, panel_h, _scale);
+    if disc_radius <= 0 {
+        return;
+    }
+
+    // Faint half-circle outline + spokes + baseline. Same grid as the
+    // dot-cloud HalfPolar mode so the user can switch between them with no
+    // visual reframing.
+    draw_half_disc_grid(pixmap, cx, base_y, disc_radius, theme::text_dim());
+
+    let r_f = disc_radius as f32;
+    let consumer = &params.polar_consumer;
+    let mut rays = [Ray {
+        angle: 0.0,
+        amp: 0.0,
+        age_normalised: 0.0,
+    }; POLAR_RING_CAPACITY];
+    let n = consumer.snapshot(&mut rays);
+    if n == 0 {
+        return;
+    }
+    let cyan = theme::cyan();
+    let bg = theme::panel_bg();
+    let cx_f = cx as f32;
+    let base_yf = base_y as f32;
+    // Per-ray triangular fan: each ray spans ±POLAR_RAY_HALF_WIDTH_RAD from
+    // its emit angle, tapered to a point at origin and broadening to a
+    // visible width at the ray's endpoint. Renders via tiny-skia
+    // anti-aliased fill so the fan reads as a "lobe" rather than a 1px
+    // line — matches Ozone's visible ray thickness.
+    for ray in rays.iter().take(n) {
+        if ray.amp <= POLAR_LEVEL_GATE {
+            continue;
+        }
+        let alpha = (1.0 - ray.age_normalised).clamp(0.0, 1.0);
+        let color = lerp_color(bg, cyan, alpha);
+        let r = ray.amp.clamp(0.0, 1.0) * r_f;
+        let theta = ray.angle;
+        let theta_l = theta + POLAR_RAY_HALF_WIDTH_RAD;
+        let theta_r = theta - POLAR_RAY_HALF_WIDTH_RAD;
+        let p1 = (cx_f + theta_l.cos() * r, base_yf - theta_l.sin() * r);
+        let p2 = (cx_f + theta_r.cos() * r, base_yf - theta_r.sin() * r);
+        let mut pb = PathBuilder::new();
+        pb.move_to(cx_f, base_yf);
+        pb.line_to(p1.0, p1.1);
+        pb.line_to(p2.0, p2.1);
+        pb.close();
+        if let Some(path) = pb.finish() {
+            let mut paint = Paint::default();
+            paint.set_color(color);
+            paint.anti_alias = true;
+            pixmap.fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+}
+
+/// Half-width of each polar-level ray's triangular fan, in radians.
+/// 1.5° per side → 3° total fan, narrow enough that adjacent rays at
+/// distinct emit angles read as separate lobes, wide enough that a
+/// single ray is visible as a thick triangle rather than a 1 px line.
+const POLAR_RAY_HALF_WIDTH_RAD: f32 = 0.026; // ≈ 1.5°
+
+/// Threshold below which a ray is not drawn at all. Filters out the
+/// silent-emit sentinel (amp = 0) plus any near-zero amplitude noise.
+const POLAR_LEVEL_GATE: f32 = 0.005;
+
+/// Linear interpolation between two RGB colors. Used to pre-mix faded
+/// rays toward the background so the direct-pixel-write `draw_line`
+/// helper can paint them without any alpha-blending pass.
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let r = a.red() * (1.0 - t) + b.red() * t;
+    let g = a.green() * (1.0 - t) + b.green() * t;
+    let b_ = a.blue() * (1.0 - t) + b.blue() * t;
+    Color::from_rgba(r, g, b_, 1.0).unwrap_or(b)
 }
 
 /// Faint half-circle outline + 3 angular spokes + baseline at the bottom.
@@ -554,6 +686,7 @@ mod tests {
         assert_eq!(VectorMode::from_u32(0), VectorMode::HalfPolar);
         assert_eq!(VectorMode::from_u32(1), VectorMode::Polar);
         assert_eq!(VectorMode::from_u32(2), VectorMode::Lissajous);
+        assert_eq!(VectorMode::from_u32(3), VectorMode::PolarLevel);
         assert_eq!(VectorMode::from_u32(99), VectorMode::HalfPolar);
     }
 
@@ -572,7 +705,8 @@ mod tests {
     fn vector_mode_next_cycles() {
         assert_eq!(VectorMode::HalfPolar.next(), VectorMode::Polar);
         assert_eq!(VectorMode::Polar.next(), VectorMode::Lissajous);
-        assert_eq!(VectorMode::Lissajous.next(), VectorMode::HalfPolar);
+        assert_eq!(VectorMode::Lissajous.next(), VectorMode::PolarLevel);
+        assert_eq!(VectorMode::PolarLevel.next(), VectorMode::HalfPolar);
     }
 
     #[test]
@@ -580,6 +714,7 @@ mod tests {
         assert_eq!(VectorMode::HalfPolar.label(), "Polar");
         assert_eq!(VectorMode::Polar.label(), "Goniometer");
         assert_eq!(VectorMode::Lissajous.label(), "Lissajous");
+        assert_eq!(VectorMode::PolarLevel.label(), "Polar Level");
     }
 
     #[test]
@@ -588,6 +723,7 @@ mod tests {
             VectorMode::HalfPolar,
             VectorMode::Polar,
             VectorMode::Lissajous,
+            VectorMode::PolarLevel,
         ] {
             assert_eq!(VectorMode::from_u32(m.as_u32()), m);
         }
@@ -680,6 +816,187 @@ mod tests {
             &mut vr,
             &mut tr,
             1.0,
+        );
+    }
+
+    /// Locate the brightest cyan pixel in the pixmap. Returns disc-local
+    /// (dx, dy) where dx is signed (− = left of cx, + = right) and dy is
+    /// positive going up from baseline.
+    ///
+    /// Cyan = RGB(96, 200, 228); bg/grid are gray (R≈G≈B in the 14..134
+    /// range). The signature "B > G + 20" filters cyan pixels from
+    /// baseline/spoke pixels (which are grayish, R≈G≈B).
+    fn find_dot(pixmap: &tiny_skia::Pixmap, cx: i32, base_y: i32) -> Option<(i32, i32)> {
+        let w = pixmap.width() as i32;
+        let h = pixmap.height() as i32;
+        let pixels = pixmap.pixels();
+        for y in 0..h {
+            for x in 0..w {
+                let p = pixels[(y as usize) * (w as usize) + (x as usize)];
+                let b = p.blue() as i32;
+                let g = p.green() as i32;
+                let r = p.red() as i32;
+                // Cyan: B clearly > G > R (blue-green leaning).
+                if b > 200 && g > 150 && b > g + 20 && g > r + 50 {
+                    return Some((x - cx, base_y - y));
+                }
+            }
+        }
+        None
+    }
+
+    /// Helper: render `draw_half_polar` into a fresh pixmap with constant
+    /// (l, r) samples and return (pixmap, cx, base_y, disc_radius).
+    fn render_half_polar_constant(
+        l: f32,
+        r: f32,
+        n_samples: usize,
+    ) -> (tiny_skia::Pixmap, i32, i32, i32) {
+        let mut pixmap = tiny_skia::Pixmap::new(300, 300).unwrap();
+        let panel_x = 0;
+        let panel_y = 0;
+        let panel_w = 300;
+        let panel_h = 300;
+        let scale = 1.0;
+        let (cx, base_y, disc_radius) =
+            half_disc_geometry(panel_x, panel_y, panel_w, panel_h, scale);
+        let samples_l = vec![l; n_samples];
+        let samples_r = vec![r; n_samples];
+        {
+            let mut pm = pixmap.as_mut();
+            // Pre-fill panel bg so spoke colour isn't confused with cyan dots.
+            fill_rect_i(&mut pm, panel_x, panel_y, panel_w, panel_h, theme::panel_bg());
+            draw_half_polar(
+                &mut pm,
+                panel_x,
+                panel_y,
+                panel_w,
+                panel_h,
+                &samples_l,
+                &samples_r,
+                theme::cyan(),
+                scale,
+            );
+        }
+        (pixmap, cx, base_y, disc_radius)
+    }
+
+    /// Mono in-phase (L=R=0.8) lands on the central vertical column.
+    /// θ = π/2 → (cos, sin) = (0, 1) → dx = 0, dy = +radius·amp.
+    #[test]
+    fn half_polar_mono_dot_lands_on_vertical_axis() {
+        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(0.8, 0.8, 256);
+        let (dx, dy) = find_dot(&pixmap, cx, base_y).expect("expected a cyan dot");
+        assert!(
+            dx.abs() <= 1,
+            "mono dot should sit on cx (dx≈0), got dx={dx}"
+        );
+        assert!(dy > 0, "mono dot should be above baseline, got dy={dy}");
+        let expected = (0.8 * disc_radius as f32) as i32;
+        assert!(
+            (dy - expected).abs() <= 2,
+            "mono dot dy={dy}, expected ~{expected} (amp·radius)"
+        );
+    }
+
+    /// Hard-L in-phase (L=1.0, R=0.0) lands on the upper-left 45° spoke.
+    /// θ = 3π/4 → (cos, sin) = (-√2/2, +√2/2) → dx ≈ -r/√2, dy ≈ +r/√2.
+    #[test]
+    fn half_polar_hard_l_in_phase_lands_on_upper_left_spoke() {
+        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(1.0, 0.0, 256);
+        let (dx, dy) = find_dot(&pixmap, cx, base_y).expect("expected a cyan dot");
+        let expected = (disc_radius as f32 * std::f32::consts::FRAC_1_SQRT_2) as i32;
+        assert!(
+            dx < -2,
+            "hard-L in-phase dot should be left of cx, got dx={dx}"
+        );
+        assert!(
+            dy > 2,
+            "hard-L in-phase dot should be above baseline, got dy={dy}"
+        );
+        assert!(
+            (dx + expected).abs() <= 3 && (dy - expected).abs() <= 3,
+            "hard-L in-phase dot at (dx={dx}, dy={dy}), expected near (-{expected}, +{expected})"
+        );
+    }
+
+    /// Hard-R in-phase (L=0.0, R=1.0) lands on the upper-right 45° spoke.
+    /// θ = π/4 → (cos, sin) = (+√2/2, +√2/2) → dx ≈ +r/√2, dy ≈ +r/√2.
+    #[test]
+    fn half_polar_hard_r_in_phase_lands_on_upper_right_spoke() {
+        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(0.0, 1.0, 256);
+        let (dx, dy) = find_dot(&pixmap, cx, base_y).expect("expected a cyan dot");
+        let expected = (disc_radius as f32 * std::f32::consts::FRAC_1_SQRT_2) as i32;
+        assert!(
+            dx > 2,
+            "hard-R in-phase dot should be right of cx, got dx={dx}"
+        );
+        assert!(
+            dy > 2,
+            "hard-R in-phase dot should be above baseline, got dy={dy}"
+        );
+        assert!(
+            (dx - expected).abs() <= 3 && (dy - expected).abs() <= 3,
+            "hard-R in-phase dot at (dx={dx}, dy={dy}), expected near (+{expected}, +{expected})"
+        );
+    }
+
+    /// Anti-phase L-dom (L=+0.7, R=-0.7) lands at the left baseline corner.
+    /// M=0 (sgn=+1), S=+0.7 → x_disc=-0.7, y_disc=0 → θ=π → dx=-r, dy=0.
+    #[test]
+    fn half_polar_anti_phase_l_dom_lands_at_left_baseline_corner() {
+        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(0.7, -0.7, 256);
+        let (dx, dy) = find_dot(&pixmap, cx, base_y).expect("expected a cyan dot");
+        let expected = (0.7 * disc_radius as f32) as i32;
+        assert!(
+            dx < -2,
+            "anti-phase L-dom dot should be left of cx, got dx={dx}"
+        );
+        assert!(
+            dy.abs() <= 2,
+            "anti-phase L-dom dot should sit on baseline (dy≈0), got dy={dy}"
+        );
+        assert!(
+            (dx + expected).abs() <= 3,
+            "anti-phase L-dom dot at dx={dx}, expected near -{expected} (left baseline corner)"
+        );
+    }
+
+    /// Anti-phase R-dom (L=-0.7, R=+0.7) lands at the right baseline corner.
+    /// M=0 (sgn=+1), S=-0.7 → x_disc=+0.7, y_disc=0 → θ=0 → dx=+r, dy=0.
+    #[test]
+    fn half_polar_anti_phase_r_dom_lands_at_right_baseline_corner() {
+        let (pixmap, cx, base_y, disc_radius) = render_half_polar_constant(-0.7, 0.7, 256);
+        let (dx, dy) = find_dot(&pixmap, cx, base_y).expect("expected a cyan dot");
+        let expected = (0.7 * disc_radius as f32) as i32;
+        assert!(
+            dx > 2,
+            "anti-phase R-dom dot should be right of cx, got dx={dx}"
+        );
+        assert!(
+            dy.abs() <= 2,
+            "anti-phase R-dom dot should sit on baseline (dy≈0), got dy={dy}"
+        );
+        assert!(
+            (dx - expected).abs() <= 3,
+            "anti-phase R-dom dot at dx={dx}, expected near +{expected} (right baseline corner)"
+        );
+    }
+
+    /// Polarity-invariance: (L, R) and (-L, -R) must map to the same disc
+    /// pixel — audio is real-valued, a polarity flip on both channels is
+    /// the same acoustic signal. This is the property that lets
+    /// anti-phase samples populate the corners directly without the
+    /// previous `dy < 0` skip.
+    #[test]
+    fn half_polar_polarity_invariance() {
+        let (pix_a, cx_a, base_y_a, _) = render_half_polar_constant(1.0, 0.0, 256);
+        let (pix_b, cx_b, base_y_b, _) = render_half_polar_constant(-1.0, 0.0, 256);
+        let a = find_dot(&pix_a, cx_a, base_y_a).expect("(+1, 0) dot");
+        let b = find_dot(&pix_b, cx_b, base_y_b).expect("(-1, 0) dot");
+        assert_eq!(
+            a, b,
+            "(L,R) and (-L,-R) must map to the same disc point, got {a:?} vs {b:?}"
         );
     }
 }
