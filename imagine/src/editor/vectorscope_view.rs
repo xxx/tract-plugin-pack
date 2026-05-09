@@ -386,7 +386,10 @@ fn draw_polar(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: &[f3
     }
     let inv_n_minus_1 = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
     for i in 0..n {
-        let xn = (l[i] - r[i]) * inv_sqrt2;
+        // Hard-L (L>0, R=0) → upper-left, hard-R → upper-right (matches
+        // Ozone's polar / goniometer orientation). Negating x relative
+        // to the literal `(L-R)/√2` rotation puts L on the left.
+        let xn = (r[i] - l[i]) * inv_sqrt2;
         let yn = -((l[i] + r[i]) * inv_sqrt2);
         let px = cx + (xn.clamp(-1.0, 1.0) * r_f) as i32;
         let py = cy + (yn.clamp(-1.0, 1.0) * r_f) as i32;
@@ -409,9 +412,13 @@ fn draw_polar(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: &[f3
     }
 }
 
-/// Lissajous: L on X, R on Y, no rotation.
+/// Lissajous: 45°-rotated to the diamond orientation (matches Ozone's
+/// Lissajous mode). Mono signals (L=R) draw a vertical line; anti-phase
+/// signals (L=-R) draw a horizontal line; full-scale corners are at the
+/// diamond points (top/bottom/left/right).
 fn draw_lissajous(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: &[f32], r: &[f32]) {
     let r_f = radius as f32;
+    let inv_sqrt2 = std::f32::consts::FRAC_1_SQRT_2;
     let n = l.len().min(r.len());
     if n == 0 {
         return;
@@ -419,8 +426,13 @@ fn draw_lissajous(pixmap: &mut PixmapMut<'_>, cx: i32, cy: i32, radius: i32, l: 
     let inv_n_minus_1 = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
     let color = theme::accent();
     for i in 0..n {
-        let px = cx + (l[i].clamp(-1.0, 1.0) * r_f) as i32;
-        let py = cy - (r[i].clamp(-1.0, 1.0) * r_f) as i32;
+        // L on the left, R on the right (matches Ozone's Lissajous
+        // diamond orientation — hard-L → upper-left point, hard-R →
+        // upper-right point).
+        let xn = (r[i] - l[i]) * inv_sqrt2;
+        let yn = (l[i] + r[i]) * inv_sqrt2;
+        let px = cx + (xn.clamp(-1.0, 1.0) * r_f) as i32;
+        let py = cy - (yn.clamp(-1.0, 1.0) * r_f) as i32;
         let freshness = (i as f32) * inv_n_minus_1;
         let alpha = DOT_BASE_ALPHA * freshness;
         blend_dot_2x2(pixmap, px, py, color, alpha);
