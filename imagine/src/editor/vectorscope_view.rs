@@ -966,22 +966,42 @@ mod tests {
     /// range). The signature "B > G + 20" filters cyan pixels from
     /// baseline/spoke pixels (which are grayish, R≈G≈B).
     fn find_dot(pixmap: &tiny_skia::Pixmap, cx: i32, base_y: i32) -> Option<(i32, i32)> {
+        // Pick the pixel closest to the dot color (theme::cyan()) over
+        // the panel-bg, scanning the whole pixmap. Independent of which
+        // hue the palette currently uses for the R-channel — works for
+        // pink/cyan, gold/teal, or any future theme — so long as the
+        // dot colour is distinguishable from the panel bg.
+        let target = theme::cyan().to_color_u8();
+        let bg = theme::panel_bg().to_color_u8();
+        let dist_to_bg = |p: &tiny_skia::PremultipliedColorU8| -> i32 {
+            let dr = p.red() as i32 - bg.red() as i32;
+            let dg = p.green() as i32 - bg.green() as i32;
+            let db = p.blue() as i32 - bg.blue() as i32;
+            dr * dr + dg * dg + db * db
+        };
+        let dist_to_target = |p: &tiny_skia::PremultipliedColorU8| -> i32 {
+            let dr = p.red() as i32 - target.red() as i32;
+            let dg = p.green() as i32 - target.green() as i32;
+            let db = p.blue() as i32 - target.blue() as i32;
+            dr * dr + dg * dg + db * db
+        };
         let w = pixmap.width() as i32;
         let h = pixmap.height() as i32;
         let pixels = pixmap.pixels();
+        let mut best: Option<(i32, i32, i32)> = None;
         for y in 0..h {
             for x in 0..w {
                 let p = pixels[(y as usize) * (w as usize) + (x as usize)];
-                let b = p.blue() as i32;
-                let g = p.green() as i32;
-                let r = p.red() as i32;
-                // Cyan: B clearly > G > R (blue-green leaning).
-                if b > 200 && g > 150 && b > g + 20 && g > r + 50 {
-                    return Some((x - cx, base_y - y));
+                // Only consider pixels that are clearly "lit" (closer to
+                // the dot color than to the panel bg).
+                let d_bg = dist_to_bg(&p);
+                let d_t = dist_to_target(&p);
+                if d_t < d_bg / 2 && best.is_none_or(|(_, _, bd)| d_t < bd) {
+                    best = Some((x, y, d_t));
                 }
             }
         }
-        None
+        best.map(|(x, y, _)| (x - cx, base_y - y))
     }
 
     /// Helper: render `draw_half_polar` into a fresh pixmap with constant

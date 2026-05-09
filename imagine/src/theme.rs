@@ -1,5 +1,14 @@
-//! Pink/cyan duo-tone palette for Imagine.
-//! Pink = L-dominant / decorrelated. Cyan = R-dominant / coherent.
+//! Cassiopeia A duo-tone palette for Imagine.
+//!
+//! Inspired by Hubble false-colour imagery of Cassiopeia A: deep
+//! teal-cyan jets through warm gold dust on a near-black space
+//! background.
+//!
+//! Channel mapping (variable names retained from the previous
+//! pink/cyan palette to avoid churning every call site):
+//!   `pink()`  = L-dominant / decorrelated  → warm gold
+//!   `cyan()`  = R-dominant / coherent      → deep teal-cyan
+//!   `accent()` ≈ `pink()` for active controls
 
 use tiny_skia::Color;
 
@@ -7,68 +16,70 @@ use tiny_skia::Color;
 
 #[inline]
 pub fn bg() -> Color {
-    Color::from_rgba8(8, 10, 16, 255)
+    Color::from_rgba8(6, 18, 26, 255)
 }
 
 #[inline]
 pub fn panel_bg() -> Color {
-    Color::from_rgba8(14, 18, 26, 255)
+    Color::from_rgba8(14, 28, 36, 255)
 }
 
 #[inline]
 pub fn border() -> Color {
-    Color::from_rgba8(36, 44, 60, 255)
+    Color::from_rgba8(30, 56, 72, 255)
 }
 
 #[inline]
 pub fn text() -> Color {
-    Color::from_rgba8(190, 198, 214, 255)
+    Color::from_rgba8(212, 208, 196, 255)
 }
 
 #[inline]
 pub fn text_dim() -> Color {
-    Color::from_rgba8(110, 118, 134, 255)
+    Color::from_rgba8(112, 128, 152, 255)
 }
 
 #[inline]
 pub fn accent() -> Color {
-    Color::from_rgba8(214, 100, 168, 255)
+    Color::from_rgba8(232, 184, 80, 255)
 }
 
 #[inline]
 pub fn pink() -> Color {
-    Color::from_rgba8(228, 96, 168, 255)
+    Color::from_rgba8(240, 192, 96, 255)
 }
 
 #[inline]
 pub fn cyan() -> Color {
-    Color::from_rgba8(96, 200, 228, 255)
+    Color::from_rgba8(32, 168, 200, 255)
 }
 
-/// Saturation/clip warning red. Used by the dot-cloud vectorscope
-/// modes (HalfPolar, Polar/Goniometer, Lissajous) to flag samples that
-/// exceed 0 dBFS without colliding with the cyan/pink in-range palette.
+/// Saturation/clip warning. Used by the dot-cloud vectorscope modes
+/// (HalfPolar, Polar/Goniometer, Lissajous) to flag samples that
+/// exceed 0 dBFS without colliding with the in-range gold/teal
+/// palette.
 #[inline]
 pub fn warn() -> Color {
-    Color::from_rgba8(228, 80, 64, 255)
+    Color::from_rgba8(255, 112, 80, 255)
 }
 
 #[inline]
 pub fn split_line() -> Color {
-    Color::from_rgba8(170, 130, 198, 200)
+    Color::from_rgba8(160, 168, 176, 200)
 }
 
 #[inline]
 pub fn spectrum_bg() -> Color {
-    Color::from_rgba8(20, 26, 38, 255)
+    Color::from_rgba8(20, 36, 52, 255)
 }
 
-/// 0.0 = fully cyan, 1.0 = fully pink. Used for coherence display
-/// (low coherence = decorrelated/wide = pink; high coherence = coherent = cyan).
+/// 0.0 = fully cyan (teal), 1.0 = fully pink (gold). Used for coherence
+/// display (low coherence = decorrelated/wide = gold; high coherence =
+/// coherent = teal).
 pub fn cyan_to_pink(t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
-    let cyan = (96.0, 200.0, 228.0);
-    let pink = (228.0, 96.0, 168.0);
+    let cyan = (32.0, 168.0, 200.0);
+    let pink = (240.0, 192.0, 96.0);
     Color::from_rgba8(
         ((1.0 - t) * cyan.0 + t * pink.0) as u8,
         ((1.0 - t) * cyan.1 + t * pink.1) as u8,
@@ -97,21 +108,22 @@ mod tests {
         let pink = cyan_to_pink(1.0);
         assert_eq!(
             cyan.to_color_u8(),
-            tiny_skia::ColorU8::from_rgba(96, 200, 228, 255)
+            tiny_skia::ColorU8::from_rgba(32, 168, 200, 255)
         );
         assert_eq!(
             pink.to_color_u8(),
-            tiny_skia::ColorU8::from_rgba(228, 96, 168, 255)
+            tiny_skia::ColorU8::from_rgba(240, 192, 96, 255)
         );
     }
 
     #[test]
     fn midpoint_blends() {
+        // Midpoint of (32, 168, 200) and (240, 192, 96).
         let mid = cyan_to_pink(0.5);
         let u = mid.to_color_u8();
-        assert!((u.red() as i32 - 162).abs() <= 2);
-        assert!((u.green() as i32 - 148).abs() <= 2);
-        assert!((u.blue() as i32 - 198).abs() <= 2);
+        assert!((u.red() as i32 - 136).abs() <= 2);
+        assert!((u.green() as i32 - 180).abs() <= 2);
+        assert!((u.blue() as i32 - 148).abs() <= 2);
     }
 
     #[test]
