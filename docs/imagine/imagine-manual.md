@@ -57,7 +57,7 @@ The window has two halves:
 
 ### Vectorscope (left)
 
-Four display modes, cycled by clicking the mode label below the scope. The cycle is **Polar → Goniometer → Polar Level → Lissajous → Polar**.
+Four display modes, cycled by clicking the mode label below the scope. The cycle is **Polar → Polar Level → Goniometer → Lissajous → Polar**.
 
 - **Polar** (default): half-disc dot cloud. Each (L, R) pair is mapped to a polar position where mono in-phase content lands at the top, hard-L / hard-R in-phase content lands on the upper-left / upper-right 45° spokes (the iZotope "safe lines"), and out-of-phase content lands beyond the spokes toward the L / R baseline corners.
 - **Goniometer**: full-square 45°-rotated dot cloud, dual-tone (pink = L, cyan = R). A mono signal draws a vertical line, an anti-correlated signal draws a horizontal line, a fully decorrelated stereo field fills a circle.
@@ -255,7 +255,7 @@ The Hilbert phase rotator is a Type-IV anti-symmetric FIR (length 65). It rotate
 - **Drag** a crossover split line in the spectrum view horizontally to move it.
 - **Drag** the Recover Sides bar to set the amount.
 - **Click** the Link Bands toggle to enable / disable global Width linking.
-- **Click** the mode label below the vectorscope to cycle through Polar → Goniometer → Polar Level → Lissajous.
+- **Click** the mode label below the vectorscope to cycle through Polar → Polar Level → Goniometer → Lissajous.
 - **Click** the Quality selector to switch between Linear and IIR (latency change — set once at load).
 - **Right-click** any continuous control (Width, Stereoize, Recover Sides, crossover splits) for numeric entry. **Enter** commits, **Escape** cancels, clicking outside auto-commits.
 - The window is **freely resizable** — drag the bottom-right corner. Size persists with the host session.

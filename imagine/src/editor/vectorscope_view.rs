@@ -35,20 +35,20 @@ pub enum VectorMode {
     /// Ozone manual's "safe lines"); anti-phase content → baseline
     /// corners. Default.
     HalfPolar = 0,
-    /// Full-square 45°-rotated dot cloud, dual-tone (pink = L, cyan = R).
-    Polar = 1,
     /// Ozone-style polar level: periodic peak-pick emit ring rendered as
     /// triangular fans on the same half-disc geometry as `HalfPolar`.
-    PolarLevel = 2,
-    /// L on X, R on Y (no rotation).
+    PolarLevel = 1,
+    /// Full-square 45°-rotated dot cloud, dual-tone (pink = L, cyan = R).
+    Polar = 2,
+    /// 45°-rotated diamond Lissajous (mono → vertical, anti-phase → horizontal).
     Lissajous = 3,
 }
 
 impl VectorMode {
     pub fn from_u32(v: u32) -> Self {
         match v {
-            1 => VectorMode::Polar,
-            2 => VectorMode::PolarLevel,
+            1 => VectorMode::PolarLevel,
+            2 => VectorMode::Polar,
             3 => VectorMode::Lissajous,
             _ => VectorMode::HalfPolar,
         }
@@ -60,9 +60,9 @@ impl VectorMode {
 
     pub fn next(self) -> Self {
         match self {
-            VectorMode::HalfPolar => VectorMode::Polar,
-            VectorMode::Polar => VectorMode::PolarLevel,
-            VectorMode::PolarLevel => VectorMode::Lissajous,
+            VectorMode::HalfPolar => VectorMode::PolarLevel,
+            VectorMode::PolarLevel => VectorMode::Polar,
+            VectorMode::Polar => VectorMode::Lissajous,
             VectorMode::Lissajous => VectorMode::HalfPolar,
         }
     }
@@ -784,8 +784,8 @@ mod tests {
     #[test]
     fn vector_mode_from_u32() {
         assert_eq!(VectorMode::from_u32(0), VectorMode::HalfPolar);
-        assert_eq!(VectorMode::from_u32(1), VectorMode::Polar);
-        assert_eq!(VectorMode::from_u32(2), VectorMode::PolarLevel);
+        assert_eq!(VectorMode::from_u32(1), VectorMode::PolarLevel);
+        assert_eq!(VectorMode::from_u32(2), VectorMode::Polar);
         assert_eq!(VectorMode::from_u32(3), VectorMode::Lissajous);
         assert_eq!(VectorMode::from_u32(99), VectorMode::HalfPolar);
     }
@@ -803,9 +803,9 @@ mod tests {
 
     #[test]
     fn vector_mode_next_cycles() {
-        assert_eq!(VectorMode::HalfPolar.next(), VectorMode::Polar);
-        assert_eq!(VectorMode::Polar.next(), VectorMode::PolarLevel);
-        assert_eq!(VectorMode::PolarLevel.next(), VectorMode::Lissajous);
+        assert_eq!(VectorMode::HalfPolar.next(), VectorMode::PolarLevel);
+        assert_eq!(VectorMode::PolarLevel.next(), VectorMode::Polar);
+        assert_eq!(VectorMode::Polar.next(), VectorMode::Lissajous);
         assert_eq!(VectorMode::Lissajous.next(), VectorMode::HalfPolar);
     }
 
