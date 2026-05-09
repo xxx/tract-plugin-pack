@@ -8,14 +8,16 @@ colorlinks: true
 
 # Imagine Manual
 
+![](screenshot.png){width=80%}
+
 ## What is Imagine?
 
 Imagine is a multiband stereo imager modeled on iZotope's Ozone Imager. It splits the input into four frequency bands and lets you independently control the stereo width, decorrelation amount, and stereoize behavior of each band. Because the controls are per-band, you can tighten the low end while widening the highs, mono-fold a problematic midrange band without touching the rest of the mix, or decorrelate the high shelf to add "air" without smearing the kick.
 
 Three things distinguish Imagine from a naive M/S widener:
 
-- **Constant-power Width** keeps total energy constant as you push width up — no +6 dB side-energy spike at full-wide that downstream limiters would otherwise hit.
-- **Two Stereoize modes**: Mode I is a Haas-style mid-into-side delay (classic, free, inexpensive); Mode II is a real Schroeder/Gerzon all-pass decorrelator (genuinely lowers cross-correlation, not just rotates phase).
+- **Ozone-style Width** scales the side channel from 0 (full mono-fold) through unity to 2× (max widening), independent of mid — matches Ozone Imager's per-band Width law.
+- **Two Stereoize modes**: Mode I is a Haas-style mid-into-side delay with a 1–20 ms delay-time control (classic, inexpensive); Mode II is a real Schroeder/Gerzon all-pass decorrelator with a 0.5–2.0× delay-scale control (genuinely lowers cross-correlation, not just rotates phase).
 - **Recover Sides** folds a Hilbert-rotated residue of removed-side energy back into the mid signal when you narrow a band, so narrowing-without-energy-loss workflows feel natural.
 
 The plugin is intended for both mastering (per-band width control on a stereo bus) and mixing (mono-fold a sub-50-Hz band, widen highs, decorrelate a synth pad).
@@ -45,7 +47,8 @@ A standalone build is also available: `cargo build --bin imagine --release` prod
 3. In the band strip on the right, drag any band's vertical **Width** slider up to widen, down to narrow. Negative values fold toward mono.
 4. For a quick "tighten the lows" pass: pull band 1's Width to roughly −60 % to −100 %.
 5. For "wider highs" without any phase tricks: push band 4's Width to +50 % to +100 %.
-6. Watch the vectorscope on the left and the coherence bar at the bottom of the spectrum view to see what you're doing to the stereo field.
+6. To add stereo content: click a band's **Stz** toggle to enable stereoize, drag the Stz knob to dial in the Haas delay (Mode I, 1–20 ms) or the decorrelator scale (Mode II, 0.5–2.0×). Switch modes with the **I / II** toggle below the knob.
+7. Watch the vectorscope on the left and the coherence bar at the bottom of the spectrum view to see what you're doing to the stereo field.
 
 ## The Display
 
@@ -57,12 +60,12 @@ The window has two halves:
 
 ### Vectorscope (left)
 
-Four display modes, cycled by clicking the mode label below the scope. The cycle is **Polar → Polar Level → Goniometer → Lissajous → Polar**.
+Four display modes, cycled by clicking the mode label below the scope. The cycle is **Polar → Polar Level → Goniometer → Lissajous → Polar**. Throughout, **gold** denotes the L channel and **deep teal** the R channel.
 
-- **Polar** (default): half-disc dot cloud. Each (L, R) pair is mapped to a polar position where mono in-phase content lands at the top, hard-L / hard-R in-phase content lands on the upper-left / upper-right 45° spokes (the iZotope "safe lines"), and out-of-phase content lands beyond the spokes toward the L / R baseline corners.
-- **Goniometer**: full-square 45°-rotated dot cloud, dual-tone (pink = L, cyan = R). A mono signal draws a vertical line, an anti-correlated signal draws a horizontal line, a fully decorrelated stereo field fills a circle.
-- **Polar Level**: same half-disc geometry as **Polar**, but instead of a dot cloud the audio thread peak-picks the loudest (M, S) sample every 30 ms and emits one ray at that position. Each ray is a thick triangular fan that fades to background over the next ~1 second of emits, so the display reads as a constellation of recently-emitted rays at independent decay states. Per the iZotope Imager manual: ray length = amplitude, ray angle = stereo position. Inside the 45° "safe lines" the rays represent in-phase content; rays beyond the safe lines are out-of-phase. The angle of an out-of-phase ray within its wing reflects how anti-phase the peak sample was — just past the spoke = mildly anti-phase (the dominant channel has a small opposite-polarity copy in the other channel), at the baseline corner = perfectly anti-phase (`L = -R`).
-- **Lissajous**: the (L, R) pairs are plotted directly without rotation. A mono signal draws a 45° diagonal; a stereo signal draws a 2D scatter.
+- **Polar** (default): half-disc dot cloud. Each (L, R) pair is mapped to a polar position where mono in-phase content lands at the top, hard-L / hard-R in-phase content lands on the upper-left / upper-right 45° spokes (the iZotope "safe lines"), and out-of-phase content lands beyond the spokes toward the L / R baseline corners. Samples that exceed 0 dBFS are flagged in **red** beyond the rim. A thin **L / R peak meter strip** sits in the otherwise-empty top of the panel — two stacked dB-scaled bars showing the peak amplitude per channel over the last ~100 ms.
+- **Polar Level**: same half-disc geometry as **Polar**, but instead of a dot cloud the audio thread peak-picks the loudest (M, S) sample every 30 ms and emits one ray at that position. Each ray is a thick triangular fan that fades to background over the next ~1 second of emits, so the display reads as a constellation of recently-emitted rays at independent decay states. Per the iZotope Imager manual: ray length = amplitude, ray angle = stereo position. Inside the 45° "safe lines" the rays represent in-phase content; rays beyond the safe lines are out-of-phase. The angle of an out-of-phase ray within its wing reflects how anti-phase the peak sample was — just past the spoke = mildly anti-phase, at the baseline corner = perfectly anti-phase (`L = −R`). Same L / R peak meter strip at the top as Polar mode.
+- **Goniometer**: full-square 45°-rotated dot cloud, dual-tone — gold dots are L-dominant samples, teal dots are R-dominant. A mono signal draws a vertical line, an anti-correlated signal draws a horizontal line, a fully decorrelated stereo field fills a circle. Out-of-range samples (rotated coords leaving the unit square) render in red at the clamped edge.
+- **Lissajous**: traditional unrotated XY view. X = L (positive right), Y = R (positive up). Mono signals trace a +45° diagonal; anti-phase signals trace a −45° diagonal; hard-L lies on the horizontal axis, hard-R on the vertical axis. Single-tone (gold). Out-of-range samples render in red at the clamped edge.
 
 Below the scope:
 
@@ -75,16 +78,16 @@ Log-frequency display from 20 Hz to 20 kHz. Three vertical lines mark the three 
 
 - **Drag** any split line horizontally to move that crossover frequency. The bands on either side update immediately.
 - The faded backdrop is `|M|` (mid-channel magnitude spectrum) so you can see what's living in each band before deciding where to split.
-- The four bands are rendered in alternating cyan / pink tints. Each band's tint matches its column in the band strip below.
+- The four bands are rendered in alternating teal / gold tints. Each band's tint matches its column in the band strip below.
 
 ### Coherence Spectrum (bottom right)
 
 Below the crossover view, a per-bin **coherence** bar shows the magnitude-squared coherence γ²(k) — a measure of how phase-aligned L and R are at each frequency. The plot shows `1 − γ²(k)`:
 
-- **Cyan / low** = coherent (phase-aligned, mono-compatible at that frequency).
-- **Pink / high** = decorrelated (out of phase, "wide" or unstable).
+- **Teal / low** = coherent (phase-aligned, mono-compatible at that frequency).
+- **Gold / high** = decorrelated (out of phase, "wide" or unstable).
 
-This is what you actually adjust when you push Width or Stereoize on a band — the coherence at frequencies inside that band shifts toward pink. Use it to confirm that a stereoize move actually decorrelated the band rather than just shifting phase.
+This is what you actually adjust when you push Width or Stereoize on a band — the coherence at frequencies inside that band shifts toward gold. Use it to confirm that a stereoize move actually decorrelated the band rather than just shifting phase.
 
 ### Band Strip (middle right)
 
@@ -92,7 +95,8 @@ Four columns, one per band. Each column has, top to bottom:
 
 - **Band number** (1 = lowest, 4 = highest) and frequency range label (e.g., "120 Hz – 1 kHz").
 - **Width** slider: vertical fader, range −100 % to +100 %, default 0 %.
-- **Stereoize** knob: rotary, range 0 % to 100 %, default 0 %.
+- **Stz** toggle: enables / disables the band's stereoize stage. Default off. The dial below has no audible effect when the toggle is off (its readout shows "off").
+- **Stereoize** knob: rotary; meaning depends on the active mode. In **Mode I** it sets the Haas delay time (1–20 ms, default 6.0 ms). In **Mode II** it sets the decorrelator delay scale (0.5–2.0×, default 1.0×).
 - **Mode I / Mode II** toggle: which Stereoize algorithm runs in this band.
 - **Solo** button: routes only this band to the output (silences the other three).
 
@@ -110,43 +114,48 @@ Each of the four bands exposes three parameters plus solo. The bands themselves 
 
 Range: **−100 % to +100 %**. Default: **0 %** (passthrough).
 
-Width controls the M/S balance for the band's frequency content. The law is **constant-power**:
+Width controls the side-channel gain for the band's frequency content, matching Ozone Imager's **scale-the-side** law:
 
 ```
-mid_gain  = √(1 − w/2),    side_gain = √(1 + w/2),    where w = width / 100
+S_gain = (width + 100) / 100        // 0 at width=−100, 1 at width=0, 2 at width=+100
+M_gain = 1                          // mid is unchanged at every setting
 ```
 
-Because `mid_gain² + side_gain² = 2` regardless of `w`, total band power is preserved. Compare to a naive linear law (`mid_gain = 1 − w/2`, `side_gain = 1 + w/2`) which would deliver +6 dB more side energy at full-wide than at center — a recipe for downstream limiters to fire harder than expected.
+The mid signal is preserved; only the side is scaled. At +100 the side is doubled; at 0 the side is unchanged; at −100 the side is muted (full mono-fold). Drag the band's vertical Width slider, or right-click for numeric entry.
 
-- **+100 %**: maximum widening — side is boosted by √2, mid by zero.
-- **0 %**: passthrough — both gains are 1.
-- **−100 %**: full mono-fold — side is zero, mid is boosted by √2.
-
-Drag the band's vertical Width slider, or right-click for numeric entry.
+Trade-off: at +100 with strongly stereo content the output can exceed 0 dBFS — handle with downstream gain (standard mastering practice). The earlier constant-power law (M²+S²=2 invariant) was theoretically clean but practically wrong: it removed the mid at +100, which dramatically reduced volume on most music (whose energy is mid-dominated).
 
 ### Stereoize
 
-Range: **0 % to 100 %**. Default: **0 %**.
+The Stereoize stage *generates* additional decorrelated side content. It has three controls per band:
 
-Stereoize *generates* additional decorrelated side content, rather than gating what's already there. Two modes select the algorithm:
+- **Stz** toggle (above the knob): enables / disables the entire stereoize stage for this band. Default off. Toggling it on/off doesn't click — the internal buffers stay coherent.
+- **Stereoize** knob: meaning depends on the active mode (see below). One knob, two interpretations.
+- **Mode I / Mode II** toggle (below the knob): switches the algorithm.
 
 #### Mode I (Haas)
 
-A short delay of mid (1–25 ms, scaling with the Stereoize knob) is added back into the side. The Haas effect creates the impression of width by exploiting the precedence effect — the brain treats the delayed copy as a discrete echo from one side, perceiving the source as wider. Cheap, classic, free of phase artifacts at low frequencies.
+Knob range: **1.0 ms to 20.0 ms**. Default: **6.0 ms**.
 
-Tradeoff: a Haas move is *not* a true decorrelation. The cross-correlation between L and R doesn't drop much; you're shifting phase coherence, not breaking it. Mono-folding a heavily-Haas'd track produces a comb filter.
+A delayed copy of the band's mid signal is added back into the side. The knob sets the delay time directly. The Haas effect creates the impression of width by exploiting the precedence effect — the brain treats the delayed copy as a discrete echo from one side, perceiving the source as wider. Cheap, classic, free of phase artifacts at low frequencies.
+
+Trade-off: a Haas move is *not* a true decorrelation. The cross-correlation between L and R doesn't drop much; you're shifting phase coherence, not breaking it. Mono-folding a heavily-Haas'd track produces a comb filter at the delay frequency.
 
 #### Mode II (Schroeder / Gerzon)
 
-A 6-stage all-pass cascade with mutually-prime delays {41, 53, 67, 79, 97, 113} samples (sample-rate scaled) processes the mid and adds the result into the side. This is a real decorrelator — cross-correlation drops to roughly **0.3 on broadband noise** when fully engaged, vs. roughly 0.8 for a single-stage all-pass.
+Knob range: **0.5× to 2.0×**. Default: **1.0×**.
 
-Tradeoff: more CPU than Haas, and the all-pass cascade introduces ~3 ms of additional group delay scattering. On transients you may hear a subtle "smear" — by design, since that smear is what's decorrelating the signal.
+A 6-stage all-pass cascade with mutually-prime delays {41, 53, 67, 79, 97, 113} samples (at 48 kHz, sample-rate-scaled) processes the band's mid and adds the result into the side. The knob multiplies all six delays by the same scale factor — at 0.5× the cascade is tighter and more "in front", at 2.0× it's more diffuse with a longer reverberant tail.
+
+This is a real decorrelator — cross-correlation drops to roughly **0.3 on broadband noise** at the default 1.0×, vs. roughly 0.8 for a single-stage all-pass.
+
+Trade-off: more CPU than Haas, and the cascade introduces some group delay scattering. On transients you may hear a subtle "smear" — by design, since that smear is what's decorrelating the signal. Higher scale values lengthen the smear; lower values tighten it but reduce the diffusion.
 
 The original spec for this plugin called for a Hilbert-90 phase rotator on mid for Mode II. That design *did not* decorrelate (xcorr stayed near +0.8) — adding a phase-rotated copy of mid into side is mathematically a phase shift, not a decorrelation. The Schroeder/Gerzon cascade is the correct approach.
 
 #### Mode toggle
 
-Click the **Mode I / Mode II** toggle below the Stereoize knob to switch.
+Click the **I / II** toggle below the Stereoize knob to switch.
 
 ### Solo
 
@@ -160,7 +169,7 @@ Range: **0 % to 100 %**. Default: **0 %**.
 
 When you narrow a band (Width < 0 %), some of the original side-channel energy is removed. Recover Sides accumulates that removed-side residue across all narrowed bands, runs it through a **90° Hilbert phase rotator** (FIR, length 65 ≈ 32-sample / 0.7-ms latency at 48 kHz), and folds the result back into the mid channel.
 
-This is **not** literal energy compensation — constant-power Width already preserves per-band energy. Recover Sides is a *perceptual* control. Adding a phase-decorrelated rotation of the removed side into mid retains some of the spatial impression that narrowing would otherwise lose, without re-introducing the original side energy that you intentionally removed.
+Recover Sides is a *perceptual* control. Adding a phase-decorrelated rotation of the removed side into mid retains some of the spatial impression that narrowing would otherwise lose, without re-introducing the original side energy that you intentionally removed.
 
 A reasonable default workflow: start at 0 %, narrow whatever bands you want to narrow, then push Recover Sides up to 30–60 % until the result feels less "centered" without becoming wide again.
 
@@ -199,15 +208,16 @@ L, R → M/S encode → 4-band crossover (IIR or FIR by Quality)
 
 The dry M/S sums are passed through a delay matching the Hilbert FIR's group delay (~32 samples) so that the Recover Sides injection lines up cleanly when added to S_sum.
 
-### Constant-power Width
+### Width law (Ozone-style scale-the-side)
 
 ```
-w = width / 100                        # in [-1, +1]
-mid_gain  = sqrt(max(0, 1 - w / 2))
-side_gain = sqrt(max(0, 1 + w / 2))
+S_gain = (width + 100) / 100        # 0 .. 2 across width [-100..+100]
+M_gain = 1                           # mid is unchanged
 ```
 
-`mid_gain² + side_gain² = 2` for all w, so total band power is invariant. Compare to the naive linear law `mid_gain = 1 - w/2, side_gain = 1 + w/2`, which gives +6 dB more side energy at w=+1 than at w=0 — a side-channel spike that downstream limiters must absorb. The constant-power law avoids that.
+The mid signal passes through untouched at every Width setting; only the side is scaled. Width=0 is unity, Width=−100 mutes the side (full mono-fold), Width=+100 doubles the side. This matches Ozone Imager's per-band Width semantics.
+
+The earlier draft of this plugin used a constant-power law (M²+S²=2), which is theoretically clean but practically wrong for a "scale the width" workflow: at +100 the mid was muted, dramatically reducing volume on most music (which is mid-dominated). The current law trades that energy invariance for predictable mid behaviour at the cost of letting hot stereo content exceed 0 dBFS at full-wide — handle with downstream gain.
 
 ### Stereoize Mode II details
 
@@ -249,8 +259,9 @@ The Hilbert phase rotator is a Type-IV anti-symmetric FIR (length 65). It rotate
 ## Interaction
 
 - **Drag** a vertical Width slider up / down to set width.
-- **Drag** a Stereoize knob to set decorrelation amount.
-- **Click** the Mode I / Mode II toggle to switch Stereoize algorithm.
+- **Click** a band's **Stz** toggle to enable / disable that band's stereoize stage.
+- **Drag** the Stereoize knob to set the Mode I delay (ms) or the Mode II delay scale (×), depending on the active mode.
+- **Click** the **I / II** toggle below the Stereoize knob to switch algorithm.
 - **Click** a band's Solo button to isolate it.
 - **Drag** a crossover split line in the spectrum view horizontally to move it.
 - **Drag** the Recover Sides bar to set the amount.
@@ -277,7 +288,7 @@ The Hilbert phase rotator is a Type-IV anti-symmetric FIR (length 65). It rotate
 
 ### Common pitfalls
 
-- **Pushing Width past the point of usefulness**: at +100 %, you've lost mid energy; the sound becomes hollow and weak in the center. Constant-power keeps energy invariant but doesn't keep *mid* invariant — the mid drops by √2 (~−3 dB) at +100 %.
+- **Pushing Width past 0 dBFS**: at +100 with strongly stereo content the side doubles, so the channel sum can clip. The half-disc Polar / Polar Level views flag clipping samples in red beyond the rim and show per-channel peaks in the L/R meter strip at the top — keep an eye on those, drop the band's Width or pull a Trim plugin downstream if they're lighting up.
 - **Stacking Stereoize Mode I across bands**: each band's Haas delay produces a comb on mono-fold. Test with a mono-down to verify your master isn't going to fall apart on a phone speaker.
 - **Forgetting Recover Sides** when you narrow heavily: a band at width = −80 % loses spatial impression. Recover Sides at 30–50 % brings back perceptual width without re-introducing the side energy.
 
@@ -295,8 +306,9 @@ The plugin is suitable for use on multiple buses simultaneously. Tested at 16 in
 ## Technical Notes
 
 - **No audio-thread allocations.** The `process()` callback never allocates heap memory.
-- **Constant-power Width** is a math requirement to avoid the +6 dB side-energy spike at full-wide. Limiters downstream of Imagine never see a Width-related transient.
-- **Stereoize Mode II** uses a 6-stage Schroeder/Gerzon all-pass cascade with prime-spaced delays {41, 53, 67, 79, 97, 113}. Genuinely decorrelates (xcorr < 0.3 broadband).
+- **Width** scales only the side channel (mid passes through unchanged). +100 doubles side, −100 mutes side. Matches Ozone Imager's Width law.
+- **Stereoize Mode I** is a Haas mid-into-side delay; the user-exposed `stz_ms` parameter (1–20 ms) sets the tap directly. Toggling the stage on/off doesn't click — the Haas buffer keeps advancing while disabled.
+- **Stereoize Mode II** uses a 6-stage Schroeder/Gerzon all-pass cascade with prime-spaced delays {41, 53, 67, 79, 97, 113}. The user-exposed `stz_scale` parameter (0.5–2.0×) multiplies all six delays; buffers are oversized at construction so the scale can change at runtime without reallocating. Genuinely decorrelates (xcorr < 0.3 broadband at the default 1.0×).
 - **Linear-phase FIR crossovers** use double-buffered tap arrays + sample-wise crossfade on coefficient swap, gated on >0.5 Hz frequency change so static-param workloads don't pay for a continuous crossfade.
 - **IIR crossovers** use Lipshitz/Vanderkooy delay-matched cascade so the 4-band sum is true allpass-equivalent (magnitude-flat to ±0.05 dB).
 - **Hilbert** is FIR-only (Type-IV anti-symmetric, length 65, ~32-sample latency). Mathematically exact 90° rotation across the band; ~0.7 ms latency is below human perception threshold.
