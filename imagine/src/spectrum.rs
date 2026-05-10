@@ -65,7 +65,6 @@ impl Default for SpectrumDisplay {
     }
 }
 
-
 /// Audio-thread FFT analyzer state. Pre-allocate everything in `new`.
 pub struct Analyzer {
     fft: Arc<dyn Fft<f32>>,
@@ -148,8 +147,7 @@ impl Analyzer {
         }
 
         let n_useful = FFT_SIZE / 2 + 1;
-        let polar_emit_period =
-            ((sample_rate * POLAR_EMIT_INTERVAL_S).round() as usize).max(1);
+        let polar_emit_period = ((sample_rate * POLAR_EMIT_INTERVAL_S).round() as usize).max(1);
         Self {
             fft,
             window,

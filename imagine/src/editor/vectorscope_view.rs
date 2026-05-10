@@ -139,8 +139,7 @@ fn blend_pixel(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, color: Color, alpha: 
     let r = ((cu.red() as f32) * alpha + (dst.red() as f32) * inv).round() as u8;
     let g = ((cu.green() as f32) * alpha + (dst.green() as f32) * inv).round() as u8;
     let b = ((cu.blue() as f32) * alpha + (dst.blue() as f32) * inv).round() as u8;
-    pixels[idx] =
-        tiny_skia::PremultipliedColorU8::from_rgba(r, g, b, 255).unwrap_or(dst);
+    pixels[idx] = tiny_skia::PremultipliedColorU8::from_rgba(r, g, b, 255).unwrap_or(dst);
 }
 
 /// 2×2 dot variant of `blend_pixel`. Writes the same colour with the
@@ -244,15 +243,9 @@ pub fn draw(
             ),
             VectorMode::Polar => draw_polar(&mut pm, cx, cy, r, &vec_l[..n], &vec_r[..n]),
             VectorMode::Lissajous => draw_lissajous(&mut pm, cx, cy, r, &vec_l[..n], &vec_r[..n]),
-            VectorMode::PolarLevel => draw_polar_level(
-                &mut pm,
-                scope_x,
-                scope_y,
-                scope_w,
-                scope_h,
-                params,
-                s,
-            ),
+            VectorMode::PolarLevel => {
+                draw_polar_level(&mut pm, scope_x, scope_y, scope_w, scope_h, params, s)
+            }
         }
 
         // L/R peak meter strip in the otherwise-unused top of the scope
@@ -669,8 +662,7 @@ fn draw_polar_level(
     params: &Arc<ImagineParams>,
     _scale: f32,
 ) {
-    let (cx, base_y, disc_radius) =
-        half_disc_geometry(panel_x, panel_y, panel_w, panel_h, _scale);
+    let (cx, base_y, disc_radius) = half_disc_geometry(panel_x, panel_y, panel_w, panel_h, _scale);
     if disc_radius <= 0 {
         return;
     }
@@ -1083,7 +1075,14 @@ mod tests {
         {
             let mut pm = pixmap.as_mut();
             // Pre-fill panel bg so spoke colour isn't confused with cyan dots.
-            fill_rect_i(&mut pm, panel_x, panel_y, panel_w, panel_h, theme::panel_bg());
+            fill_rect_i(
+                &mut pm,
+                panel_x,
+                panel_y,
+                panel_w,
+                panel_h,
+                theme::panel_bg(),
+            );
             draw_half_polar(
                 &mut pm,
                 panel_x,

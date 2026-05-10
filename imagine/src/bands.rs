@@ -351,8 +351,7 @@ mod tests {
                 for stz_on in [false, true] {
                     for mode in [StereoizeMode::ModeI, StereoizeMode::ModeII] {
                         for scale in [0.5, 1.0, 2.0_f32] {
-                            let (m_o, s_o, r) =
-                                b.process(1.0, -1.0, w, ms, scale, stz_on, mode);
+                            let (m_o, s_o, r) = b.process(1.0, -1.0, w, ms, scale, stz_on, mode);
                             assert!(
                                 m_o.is_finite() && s_o.is_finite() && r.is_finite(),
                                 "w={w} ms={ms} scale={scale} on={stz_on} mode={mode:?}"

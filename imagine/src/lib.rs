@@ -29,8 +29,8 @@ pub mod vectorscope;
 use crate::bands::{Band, StereoizeMode};
 use crate::crossover::{CrossoverFir, CrossoverIir};
 use crate::hilbert::HilbertFir;
-use crate::spectrum::{Analyzer, SpectrumDisplay};
 use crate::polar_rays::{PolarRayConsumer, PolarRayProducer};
+use crate::spectrum::{Analyzer, SpectrumDisplay};
 use crate::vectorscope::{ring_pair, VectorConsumer, VectorProducer};
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -897,7 +897,6 @@ mod plugin_tests {
             })
             .collect()
     }
-
 
     fn make_plugin(quality: Quality, sr: f32) -> Imagine {
         let mut p = Imagine::default();

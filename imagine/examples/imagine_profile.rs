@@ -34,8 +34,8 @@ use imagine::midside;
 use imagine::spectrum::{Analyzer, SpectrumDisplay};
 use imagine::vectorscope::{ring_pair, VectorProducer};
 use imagine::{
-    Quality, FIR_CROSSFADE_DEFAULT, FIR_CROSSOVER_LENGTH, FIR_HILBERT_LENGTH,
-    HAAS_BUFFER_MAX_MS, HAAS_DEFAULT_MS, MAX_SAMPLE_RATE, NUM_BANDS, STZ_SCALE_DEFAULT,
+    Quality, FIR_CROSSFADE_DEFAULT, FIR_CROSSOVER_LENGTH, FIR_HILBERT_LENGTH, HAAS_BUFFER_MAX_MS,
+    HAAS_DEFAULT_MS, MAX_SAMPLE_RATE, NUM_BANDS, STZ_SCALE_DEFAULT,
 };
 
 use std::hint::black_box;
@@ -219,14 +219,8 @@ fn run(scenario: Scenario) -> Result {
         for i in 0..BLOCK {
             let (m_in, s_in) = midside::encode(l[i], r[i]);
             let (m_bands, s_bands) = match scenario.quality {
-                Quality::Iir => (
-                    crossover_iir_m.process(m_in),
-                    crossover_iir_s.process(s_in),
-                ),
-                Quality::Linear => (
-                    crossover_fir_m.process(m_in),
-                    crossover_fir_s.process(s_in),
-                ),
+                Quality::Iir => (crossover_iir_m.process(m_in), crossover_iir_s.process(s_in)),
+                Quality::Linear => (crossover_fir_m.process(m_in), crossover_fir_s.process(s_in)),
             };
 
             let mut m_outs = [0.0_f32; NUM_BANDS];
@@ -400,10 +394,7 @@ fn main() {
     let results: Vec<Result> = scenarios.iter().map(|s| run(*s)).collect();
 
     eprintln!("─────── summary ───────");
-    eprintln!(
-        "{:<48}  {:>8}  {:>8}",
-        "scenario", "RT-factor", "cpu/inst"
-    );
+    eprintln!("{:<48}  {:>8}  {:>8}", "scenario", "RT-factor", "cpu/inst");
     for r in &results {
         eprintln!(
             "{:<48}  {:>7.1}×  {:>7.2}%",

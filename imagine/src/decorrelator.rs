@@ -85,9 +85,7 @@ impl Decorrelator {
     pub fn new(sample_rate: f32) -> Self {
         let cap_scale = (sample_rate / 48_000.0) * MAX_SCALE;
         let stages = std::array::from_fn(|i| {
-            let cap = (PRIME_DELAYS_AT_48K[i] as f32 * cap_scale)
-                .round()
-                .max(1.0) as usize;
+            let cap = (PRIME_DELAYS_AT_48K[i] as f32 * cap_scale).round().max(1.0) as usize;
             AllpassDelayStage::new(cap)
         });
         let mut s = Self { stages };
