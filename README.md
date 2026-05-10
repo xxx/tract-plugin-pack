@@ -28,15 +28,15 @@ A lightweight loudness meter with integrated gain utility, purpose-built for [cl
 
 ### Imagine
 
-A multiband stereo imager modeled on iZotope Ozone Imager. Four fixed bands with switchable linear-phase FIR or Linkwitz-Riley IIR (Lipshitz/Vanderkooy compensated) crossovers. Per-band constant-power **Width** (M² + S² = 2 invariant — no +6 dB side spike at full-wide), two **Stereoize** modes (Mode I = Haas mid-into-side delay, Mode II = Schroeder/Gerzon all-pass decorrelator), and a global **Recover Sides** that folds a Hilbert-rotated residue of removed-side energy back into mid for perceptual width retention when narrowing.
+A multiband stereo imager modeled on iZotope Ozone Imager. Four fixed bands with switchable linear-phase FIR or Linkwitz-Riley IIR (Lipshitz/Vanderkooy compensated) crossovers. Per-band Ozone-style **Width** (S_gain = (width+100)/100, mid unchanged), two **Stereoize** modes — Mode I is a Haas mid-into-side delay (1–20 ms control), Mode II is a Schroeder/Gerzon all-pass decorrelator (0.5–2.0× delay-scale control) — and a global **Recover Sides** that folds a Hilbert-rotated residue of removed-side energy back into mid for perceptual width retention when narrowing.
 
 - 4 fixed bands with 3 draggable crossover splits, log-frequency display
-- Constant-power Width law (no +6 dB side energy spike at full-wide)
-- Stereoize Mode I (Haas mid → side delay) + Mode II (real Schroeder/Gerzon decorrelator, xcorr < 0.3 on broadband noise)
+- Ozone-style Width law: scales the side channel from 0 (mono-fold) through 1 (unity) to 2× (max widening), mid unchanged
+- Stereoize per band with on/off toggle — Mode I (Haas, 1–20 ms tap) or Mode II (real Schroeder/Gerzon decorrelator, 0.5–2.0× delay scale, xcorr < 0.3 on broadband noise)
 - Global Recover Sides for narrowing-without-energy-loss workflows
-- Vectorscope (polar / Lissajous toggle) with correlation + balance bars
+- Four vectorscope modes — half-disc Polar dot cloud, Polar Level rays, Goniometer (45°-rotated dual-tone dots), traditional Lissajous (X=L, Y=R) — with correlation + balance bars and a per-channel L/R peak meter strip in the half-disc modes
 - Spectrum + magnitude-squared coherence γ²(k) display via single complex M+jS FFT
-- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable, pink/cyan duo-tone palette
+- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable, Cassiopeia A gold/teal palette
 - Inspired by [iZotope Ozone Imager](https://www.izotope.com/en/products/ozone/features/imager.html)
 
 ### Pope Scope
