@@ -144,6 +144,54 @@ impl<A: Copy + PartialEq> DropdownState<A> {
     pub fn is_open(&self) -> bool {
         self.active.is_some()
     }
+
+    /// `true` when the dropdown for `action` is the one currently open.
+    pub fn is_open_for(&self, action: A) -> bool {
+        matches!(&self.active, Some(a) if a.action == action)
+    }
+
+    /// Open the dropdown for `action`, auto-closing any other. `current` is
+    /// the currently-selected UNFILTERED index; it seeds the highlight and is
+    /// scrolled into view. `window_size` is the editor pixmap size.
+    pub fn open(
+        &mut self,
+        action: A,
+        anchor: (f32, f32, f32, f32),
+        item_count: usize,
+        current: usize,
+        filter_enabled: bool,
+        window_size: (f32, f32),
+    ) {
+        let highlight = current.min(item_count.saturating_sub(1));
+        self.active = Some(Active {
+            action,
+            anchor,
+            item_count,
+            highlight,
+            scroll_px: 0.0,
+            filter: String::new(),
+            filter_enabled,
+            scrollbar_drag: None,
+        });
+        self.last_filter_change = Instant::now();
+        // Scroll the seeded highlight into view. With an empty filter the
+        // filtered position equals the unfiltered index.
+        self.scroll_highlight_into_view_empty_filter(window_size);
+    }
+
+    /// Close the dropdown.
+    pub fn close(&mut self) {
+        self.active = None;
+    }
+
+    /// Scroll so the highlight is visible, assuming an empty filter.
+    /// Real implementation lands in Task 4; no-op stub keeps Task 3 compiling.
+    fn scroll_highlight_into_view_empty_filter(&mut self, _window_size: (f32, f32)) {}
+
+    #[cfg(test)]
+    fn highlight_for_test(&self) -> Option<usize> {
+        self.active.as_ref().map(|a| a.highlight)
+    }
 }
 
 impl<A: Copy + PartialEq> Default for DropdownState<A> {
@@ -162,6 +210,9 @@ mod tests {
         Wavetable,
         Algorithm,
     }
+
+    const WIN: (f32, f32) = (800.0, 600.0);
+    const ANCHOR: (f32, f32, f32, f32) = (100.0, 100.0, 160.0, 24.0);
 
     #[test]
     fn new_reports_closed() {
@@ -203,5 +254,45 @@ mod tests {
     fn filtered_indices_no_match_is_empty() {
         let items = ["a", "b"];
         assert!(filtered_indices(&items, "z").is_empty());
+    }
+
+    #[test]
+    fn open_marks_dropdown_open() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        s.open(A::Wavetable, ANCHOR, 50, 3, true, WIN);
+        assert!(s.is_open());
+        assert!(s.is_open_for(A::Wavetable));
+        assert!(!s.is_open_for(A::Algorithm));
+    }
+
+    #[test]
+    fn open_auto_closes_previous() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        s.open(A::Wavetable, ANCHOR, 50, 3, true, WIN);
+        s.open(A::Algorithm, ANCHOR, 6, 0, false, WIN);
+        assert!(!s.is_open_for(A::Wavetable));
+        assert!(s.is_open_for(A::Algorithm));
+    }
+
+    #[test]
+    fn open_seeds_highlight_from_current() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        s.open(A::Wavetable, ANCHOR, 50, 7, true, WIN);
+        assert_eq!(s.highlight_for_test(), Some(7));
+    }
+
+    #[test]
+    fn close_clears_state() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        s.open(A::Wavetable, ANCHOR, 50, 3, true, WIN);
+        s.close();
+        assert!(!s.is_open());
+        assert!(!s.is_open_for(A::Wavetable));
+    }
+
+    #[test]
+    fn is_open_for_false_when_closed() {
+        let s: DropdownState<A> = DropdownState::new();
+        assert!(!s.is_open_for(A::Wavetable));
     }
 }
