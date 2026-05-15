@@ -325,6 +325,75 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         }
     }
 
+    /// Handle a key event for the open dropdown. Returns `None` when closed
+    /// or the key has no effect. Arrow/Page/Home/End move the highlight over
+    /// the *visible* (filtered) items; Enter selects; Esc closes.
+    pub fn on_key(
+        &mut self,
+        key: DropdownKey,
+        items: &[&str],
+        window_size: (f32, f32),
+    ) -> Option<DropdownEvent<A>> {
+        let active = self.active.as_ref()?;
+        let action = active.action;
+        let matches = filtered_indices(items, &active.filter);
+
+        match key {
+            DropdownKey::Esc => {
+                self.close();
+                Some(DropdownEvent::Closed(action))
+            }
+            DropdownKey::Enter => {
+                if matches.is_empty() {
+                    return None;
+                }
+                let highlight = active.highlight;
+                self.close();
+                Some(DropdownEvent::Selected(action, highlight))
+            }
+            DropdownKey::Backspace => self.on_char_internal(None, items),
+            DropdownKey::Up
+            | DropdownKey::Down
+            | DropdownKey::PageUp
+            | DropdownKey::PageDown
+            | DropdownKey::Home
+            | DropdownKey::End => {
+                if matches.is_empty() {
+                    return None;
+                }
+                // Current filtered position of the highlight (fall back to 0).
+                let cur = matches
+                    .iter()
+                    .position(|&i| i == active.highlight)
+                    .unwrap_or(0);
+                let last = matches.len() - 1;
+                let page = MAX_VISIBLE_ROWS.saturating_sub(1).max(1);
+                let next = match key {
+                    DropdownKey::Up => cur.saturating_sub(1),
+                    DropdownKey::Down => (cur + 1).min(last),
+                    DropdownKey::PageUp => cur.saturating_sub(page),
+                    DropdownKey::PageDown => (cur + page).min(last),
+                    DropdownKey::Home => 0,
+                    DropdownKey::End => last,
+                    _ => cur,
+                };
+                let new_highlight = matches[next];
+                self.active.as_mut().unwrap().highlight = new_highlight;
+                self.scroll_highlight_into_view(items, window_size);
+                Some(DropdownEvent::HighlightChanged(action, new_highlight))
+            }
+        }
+    }
+
+    /// Stub — real body lands in Task 6.
+    fn on_char_internal(
+        &mut self,
+        _c: Option<char>,
+        _items: &[&str],
+    ) -> Option<DropdownEvent<A>> {
+        None
+    }
+
     #[cfg(test)]
     fn highlight_for_test(&self) -> Option<usize> {
         self.active.as_ref().map(|a| a.highlight)
@@ -524,5 +593,92 @@ mod tests {
         let s: DropdownState<A> = DropdownState::new();
         let items: Vec<&str> = vec!["a"; 3];
         assert!(dropdown_popup_layout(&s, &items, WIN).is_none());
+    }
+
+    #[test]
+    fn key_down_moves_highlight_forward() {
+        let mut s = open_state(5, false);
+        let items: Vec<&str> = vec!["a"; 5];
+        let ev = s.on_key(DropdownKey::Down, &items, WIN);
+        assert_eq!(ev, Some(DropdownEvent::HighlightChanged(A::Wavetable, 1)));
+        assert_eq!(s.highlight_for_test(), Some(1));
+    }
+
+    #[test]
+    fn key_up_moves_highlight_back() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        s.open(A::Wavetable, ANCHOR, 5, 3, false, WIN);
+        let items: Vec<&str> = vec!["a"; 5];
+        s.on_key(DropdownKey::Up, &items, WIN);
+        assert_eq!(s.highlight_for_test(), Some(2));
+    }
+
+    #[test]
+    fn key_down_clamps_at_last_item() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        s.open(A::Wavetable, ANCHOR, 3, 2, false, WIN);
+        let items: Vec<&str> = vec!["a"; 3];
+        s.on_key(DropdownKey::Down, &items, WIN);
+        assert_eq!(s.highlight_for_test(), Some(2));
+    }
+
+    #[test]
+    fn key_up_clamps_at_first_item() {
+        let mut s = open_state(3, false);
+        let items: Vec<&str> = vec!["a"; 3];
+        s.on_key(DropdownKey::Up, &items, WIN);
+        assert_eq!(s.highlight_for_test(), Some(0));
+    }
+
+    #[test]
+    fn key_home_and_end_jump() {
+        let mut s = open_state(10, false);
+        let items: Vec<&str> = vec!["a"; 10];
+        s.on_key(DropdownKey::End, &items, WIN);
+        assert_eq!(s.highlight_for_test(), Some(9));
+        s.on_key(DropdownKey::Home, &items, WIN);
+        assert_eq!(s.highlight_for_test(), Some(0));
+    }
+
+    #[test]
+    fn key_enter_emits_selected_and_closes() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        s.open(A::Wavetable, ANCHOR, 5, 2, false, WIN);
+        let items: Vec<&str> = vec!["a"; 5];
+        let ev = s.on_key(DropdownKey::Enter, &items, WIN);
+        assert_eq!(ev, Some(DropdownEvent::Selected(A::Wavetable, 2)));
+        assert!(!s.is_open());
+    }
+
+    #[test]
+    fn key_esc_emits_closed() {
+        let mut s = open_state(5, false);
+        let items: Vec<&str> = vec!["a"; 5];
+        let ev = s.on_key(DropdownKey::Esc, &items, WIN);
+        assert_eq!(ev, Some(DropdownEvent::Closed(A::Wavetable)));
+        assert!(!s.is_open());
+    }
+
+    #[test]
+    fn key_arrows_navigate_filtered_set() {
+        // 4 items, filter "bra" -> visible indices 1,2,3. Down from highlight=1
+        // (filtered position 0) should land on 2, the next *visible* item.
+        let mut s: DropdownState<A> = DropdownState::new();
+        s.open(A::Wavetable, ANCHOR, 4, 1, true, WIN);
+        s.set_filter_for_test("bra");
+        let items = ["alpha", "bravo", "bravado", "bract"];
+        s.on_key(DropdownKey::Down, &items, WIN);
+        assert_eq!(s.highlight_for_test(), Some(2));
+    }
+
+    #[test]
+    fn key_enter_noop_when_no_matches() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        s.open(A::Wavetable, ANCHOR, 4, 0, true, WIN);
+        s.set_filter_for_test("zzz");
+        let items = ["alpha", "bravo", "bravado", "bract"];
+        let ev = s.on_key(DropdownKey::Enter, &items, WIN);
+        assert_eq!(ev, None);
+        assert!(s.is_open(), "Enter with no matches must not close");
     }
 }
