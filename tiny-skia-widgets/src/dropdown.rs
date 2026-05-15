@@ -61,8 +61,6 @@ struct Active<A> {
     action: A,
     /// Trigger widget rect captured at open time.
     anchor: (f32, f32, f32, f32),
-    #[allow(dead_code)]
-    item_count: usize,
     /// Index into the UNFILTERED list.
     highlight: usize,
     /// Viewport top, in popup-content pixels.
@@ -260,7 +258,6 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         self.active = Some(Active {
             action,
             anchor,
-            item_count,
             highlight,
             scroll_px: 0.0,
             filter: String::new(),
