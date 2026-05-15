@@ -70,7 +70,6 @@ struct Active<A> {
     filter: String,
     filter_enabled: bool,
     /// `Some(grab_offset_y)` while the scrollbar thumb is being dragged.
-    #[allow(dead_code)]
     scrollbar_drag: Option<f32>,
 }
 
@@ -286,7 +285,6 @@ impl<A: Copy + PartialEq> DropdownState<A> {
     }
 
     /// Clamp `scroll_px` into `[0, content_height - viewport_h]`.
-    #[allow(dead_code)]
     fn clamp_scroll(&mut self, items: &[&str], window_size: (f32, f32)) {
         let Some(layout) = dropdown_popup_layout(self, items, window_size) else {
             return;
@@ -418,6 +416,114 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         }
         self.last_filter_change = Instant::now();
         first.map(|idx| DropdownEvent::HighlightChanged(action, idx))
+    }
+
+    /// `true` when `(x, y)` lies inside `rect` (half-open).
+    fn point_in(rect: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
+        x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3
+    }
+
+    /// Handle a primary-button press. Inside an item row -> select + close.
+    /// On the scrollbar thumb -> begin a drag. Outside the popup -> close.
+    pub fn on_mouse_down(
+        &mut self,
+        x: f32,
+        y: f32,
+        items: &[&str],
+        window_size: (f32, f32),
+    ) -> Option<DropdownEvent<A>> {
+        let layout = dropdown_popup_layout(self, items, window_size)?;
+        let action = self.active.as_ref()?.action;
+
+        // Scrollbar thumb -> start dragging.
+        if let Some(sb) = layout.scrollbar {
+            if Self::point_in(sb.thumb, x, y) {
+                if let Some(active) = self.active.as_mut() {
+                    active.scrollbar_drag = Some(y - sb.thumb.1);
+                }
+                return None;
+            }
+        }
+
+        // Item row -> select and close.
+        for row in &layout.visible_rows {
+            if Self::point_in(row.rect, x, y) {
+                let idx = row.item_index;
+                self.close();
+                return Some(DropdownEvent::Selected(action, idx));
+            }
+        }
+
+        // Inside the popup but not on a row (filter row, scrollbar track,
+        // padding) -> consume, keep open.
+        if Self::point_in(layout.popup_rect, x, y) {
+            return None;
+        }
+
+        // Outside the popup -> close. The click is consumed by the editor.
+        self.close();
+        Some(DropdownEvent::Closed(action))
+    }
+
+    /// Handle pointer motion. Updates the highlight on row hover, or scrolls
+    /// when a scrollbar-thumb drag is in progress.
+    pub fn on_mouse_move(
+        &mut self,
+        x: f32,
+        y: f32,
+        items: &[&str],
+        window_size: (f32, f32),
+    ) -> Option<DropdownEvent<A>> {
+        let layout = dropdown_popup_layout(self, items, window_size)?;
+        let active = self.active.as_ref()?;
+        let action = active.action;
+
+        // Scrollbar drag in progress.
+        if let Some(grab) = active.scrollbar_drag {
+            let lv = layout.list_viewport;
+            let thumb_h = layout
+                .scrollbar
+                .map(|sb| sb.thumb.3)
+                .unwrap_or(lv.3);
+            let travel = (lv.3 - thumb_h).max(1.0);
+            let thumb_y = (y - grab).clamp(lv.1, lv.1 + travel);
+            let frac = (thumb_y - lv.1) / travel;
+            let max_scroll = (layout.content_height - lv.3).max(0.0);
+            if let Some(active) = self.active.as_mut() {
+                active.scroll_px = frac * max_scroll;
+            }
+            return None;
+        }
+
+        // Row hover -> move highlight.
+        for row in &layout.visible_rows {
+            if Self::point_in(row.rect, x, y) {
+                let idx = row.item_index;
+                if self.active.as_ref().unwrap().highlight != idx {
+                    self.active.as_mut().unwrap().highlight = idx;
+                    return Some(DropdownEvent::HighlightChanged(action, idx));
+                }
+                return None;
+            }
+        }
+        None
+    }
+
+    /// End any in-progress scrollbar-thumb drag.
+    pub fn on_mouse_up(&mut self) {
+        if let Some(active) = self.active.as_mut() {
+            active.scrollbar_drag = None;
+        }
+    }
+
+    /// Scroll the list. `delta_y` follows the usual convention: positive
+    /// scrolls toward the top of the list.
+    pub fn on_wheel(&mut self, delta_y: f32, items: &[&str], window_size: (f32, f32)) {
+        const WHEEL_STEP: f32 = 32.0;
+        if let Some(active) = self.active.as_mut() {
+            active.scroll_px -= delta_y * WHEEL_STEP;
+        }
+        self.clamp_scroll(items, window_size);
     }
 
     #[cfg(test)]
@@ -800,5 +906,92 @@ mod tests {
             s.on_char('x', &items);
         }
         assert_eq!(s.filter_for_test().unwrap().len(), MAX_FILTER_LEN);
+    }
+
+    #[test]
+    fn mouse_down_on_item_selects_and_closes() {
+        let s_items: Vec<&str> = vec!["a"; 5];
+        let mut s = open_state(5, false);
+        let l = dropdown_popup_layout(&s, &s_items, WIN).unwrap();
+        let row = l.visible_rows[2];
+        let (rx, ry, rw, rh) = row.rect;
+        let ev = s.on_mouse_down(rx + rw * 0.5, ry + rh * 0.5, &s_items, WIN);
+        assert_eq!(ev, Some(DropdownEvent::Selected(A::Wavetable, row.item_index)));
+        assert!(!s.is_open());
+    }
+
+    #[test]
+    fn mouse_down_outside_closes() {
+        let s_items: Vec<&str> = vec!["a"; 5];
+        let mut s = open_state(5, false);
+        // Far from the popup (popup is around x=100..260, y=124..).
+        let ev = s.on_mouse_down(5.0, 5.0, &s_items, WIN);
+        assert_eq!(ev, Some(DropdownEvent::Closed(A::Wavetable)));
+        assert!(!s.is_open());
+    }
+
+    #[test]
+    fn mouse_down_on_filter_row_keeps_open() {
+        let s_items: Vec<&str> = vec!["a"; 5];
+        let mut s = open_state(5, true);
+        let l = dropdown_popup_layout(&s, &s_items, WIN).unwrap();
+        let (fx, fy, fw, fh) = l.filter_rect.unwrap();
+        let ev = s.on_mouse_down(fx + fw * 0.5, fy + fh * 0.5, &s_items, WIN);
+        assert_eq!(ev, None);
+        assert!(s.is_open());
+    }
+
+    #[test]
+    fn mouse_move_over_row_updates_highlight() {
+        let s_items: Vec<&str> = vec!["a"; 5];
+        let mut s = open_state(5, false);
+        let l = dropdown_popup_layout(&s, &s_items, WIN).unwrap();
+        let row = l.visible_rows[3];
+        let (rx, ry, rw, rh) = row.rect;
+        let ev = s.on_mouse_move(rx + rw * 0.5, ry + rh * 0.5, &s_items, WIN);
+        assert_eq!(
+            ev,
+            Some(DropdownEvent::HighlightChanged(A::Wavetable, row.item_index))
+        );
+        assert_eq!(s.highlight_for_test(), Some(row.item_index));
+    }
+
+    #[test]
+    fn wheel_scrolls_and_clamps() {
+        let s_items: Vec<&str> = vec!["a"; 40];
+        let mut s = open_state(40, false);
+        // Scroll way past the end; must clamp to max_scroll, not exceed it.
+        s.on_wheel(-100000.0, &s_items, WIN);
+        let l = dropdown_popup_layout(&s, &s_items, WIN).unwrap();
+        let max_scroll = l.content_height - l.list_viewport.3;
+        assert!((s.scroll_for_test().unwrap() - max_scroll).abs() < 0.01);
+        // Scroll back past zero; must clamp to 0.
+        s.on_wheel(100000.0, &s_items, WIN);
+        assert_eq!(s.scroll_for_test(), Some(0.0));
+    }
+
+    #[test]
+    fn scrollbar_thumb_drag_scrolls() {
+        let s_items: Vec<&str> = vec!["a"; 40];
+        let mut s = open_state(40, false);
+        let l = dropdown_popup_layout(&s, &s_items, WIN).unwrap();
+        let thumb = l.scrollbar.unwrap().thumb;
+        // Press on the thumb, drag down by 50px, release.
+        s.on_mouse_down(thumb.0 + 2.0, thumb.1 + 2.0, &s_items, WIN);
+        s.on_mouse_move(thumb.0 + 2.0, thumb.1 + 52.0, &s_items, WIN);
+        assert!(s.scroll_for_test().unwrap() > 0.0, "thumb drag should scroll");
+        s.on_mouse_up();
+        // After release a plain move must not keep scrolling.
+        let after = s.scroll_for_test().unwrap();
+        s.on_mouse_move(thumb.0 + 2.0, thumb.1 + 200.0, &s_items, WIN);
+        assert_eq!(s.scroll_for_test(), Some(after));
+    }
+
+    #[test]
+    fn mouse_handlers_noop_when_closed() {
+        let s_items: Vec<&str> = vec!["a"; 5];
+        let mut s: DropdownState<A> = DropdownState::new();
+        assert_eq!(s.on_mouse_down(10.0, 10.0, &s_items, WIN), None);
+        assert_eq!(s.on_mouse_move(10.0, 10.0, &s_items, WIN), None);
     }
 }
