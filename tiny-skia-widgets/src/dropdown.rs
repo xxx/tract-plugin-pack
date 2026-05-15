@@ -28,11 +28,9 @@ pub const MAX_VISIBLE_ROWS: usize = 12;
 const MAX_FILTER_LEN: usize = 64;
 
 /// Popup border thickness, in physical pixels.
-#[allow(dead_code)]
 const BORDER: f32 = 1.0;
 
 /// Scrollbar strip width, in physical pixels.
-#[allow(dead_code)]
 const SCROLLBAR_W: f32 = 5.0;
 
 /// Crate-local key enum. The editor maps host (baseview) key events to this,
@@ -60,11 +58,11 @@ pub enum DropdownEvent<A> {
 }
 
 /// Transient state for the single open dropdown.
-#[allow(dead_code)]
 struct Active<A> {
     action: A,
     /// Trigger widget rect captured at open time.
     anchor: (f32, f32, f32, f32),
+    #[allow(dead_code)]
     item_count: usize,
     /// Index into the UNFILTERED list.
     highlight: usize,
@@ -73,6 +71,7 @@ struct Active<A> {
     filter: String,
     filter_enabled: bool,
     /// `Some(grab_offset_y)` while the scrollbar thumb is being dragged.
+    #[allow(dead_code)]
     scrollbar_drag: Option<f32>,
 }
 
@@ -112,7 +111,6 @@ pub struct DropdownPopupLayout {
 }
 
 /// Case-insensitive substring match. An empty filter matches everything.
-#[allow(dead_code)]
 fn filter_matches(item: &str, filter: &str) -> bool {
     if filter.is_empty() {
         return true;
@@ -122,7 +120,6 @@ fn filter_matches(item: &str, filter: &str) -> bool {
 
 /// UNFILTERED indices of items matching `filter`, in original order.
 /// Allocates — fine here, this runs on the editor thread, never `process()`.
-#[allow(dead_code)]
 fn filtered_indices(items: &[&str], filter: &str) -> Vec<usize> {
     items
         .iter()
@@ -130,6 +127,106 @@ fn filtered_indices(items: &[&str], filter: &str) -> Vec<usize> {
         .filter(|(_, item)| filter_matches(item, filter))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Compute popup geometry for the open dropdown. Returns `None` when closed.
+///
+/// Pure: this is the single source of truth for both drawing and hit
+/// testing. `items` is the UNFILTERED list; rows are filtered internally
+/// against the active filter.
+pub fn dropdown_popup_layout<A: Copy + PartialEq>(
+    state: &DropdownState<A>,
+    items: &[&str],
+    window_size: (f32, f32),
+) -> Option<DropdownPopupLayout> {
+    let active = state.active.as_ref()?;
+    let (win_w, win_h) = window_size;
+    let (ax, ay, aw, ah) = active.anchor;
+
+    let item_h = ah;
+    let filter_h = if active.filter_enabled { ah } else { 0.0 };
+
+    let matches = filtered_indices(items, &active.filter);
+    let n = matches.len();
+    let content_height = n as f32 * item_h;
+
+    let visible = n.min(MAX_VISIBLE_ROWS);
+    let desired_list_h = visible.max(1) as f32 * item_h;
+    let desired_popup_h = filter_h + desired_list_h + 2.0 * BORDER;
+
+    let space_below = win_h - (ay + ah);
+    let space_above = ay;
+
+    let (popup_y, popup_h, opens_upward) = if desired_popup_h <= space_below {
+        (ay + ah, desired_popup_h, false)
+    } else if space_above > space_below {
+        let h = desired_popup_h.min(space_above);
+        (ay - h, h, true)
+    } else {
+        let h = desired_popup_h.min(space_below);
+        (ay + ah, h, false)
+    };
+
+    let popup_w = aw;
+    let popup_x = ax.min(win_w - popup_w).max(0.0);
+
+    // Filter row sits at the top of the popup interior.
+    let filter_rect = if active.filter_enabled {
+        Some((popup_x + BORDER, popup_y + BORDER, popup_w - 2.0 * BORDER, filter_h))
+    } else {
+        None
+    };
+
+    let lv_x = popup_x + BORDER;
+    let lv_y = popup_y + BORDER + filter_h;
+    let lv_w = popup_w - 2.0 * BORDER;
+    let lv_h = popup_h - 2.0 * BORDER - filter_h;
+    let list_viewport = (lv_x, lv_y, lv_w, lv_h);
+
+    let has_scrollbar = content_height > lv_h + 0.01;
+    let row_w = if has_scrollbar { lv_w - SCROLLBAR_W } else { lv_w };
+
+    // Visible rows: filtered position k -> screen y. Keep rows that intersect
+    // the viewport at all.
+    let mut visible_rows = Vec::new();
+    for (k, &item_index) in matches.iter().enumerate() {
+        let row_y = lv_y - active.scroll_px + k as f32 * item_h;
+        if row_y + item_h <= lv_y || row_y >= lv_y + lv_h {
+            continue;
+        }
+        visible_rows.push(RowRect {
+            rect: (lv_x, row_y, row_w, item_h),
+            item_index,
+        });
+    }
+
+    let scrollbar = if has_scrollbar {
+        let track = (lv_x + lv_w - SCROLLBAR_W, lv_y, SCROLLBAR_W, lv_h);
+        let thumb_h = (lv_h * (lv_h / content_height)).max(8.0);
+        let max_scroll = (content_height - lv_h).max(0.0);
+        let frac = if max_scroll > 0.0 {
+            active.scroll_px / max_scroll
+        } else {
+            0.0
+        };
+        let thumb_y = lv_y + frac * (lv_h - thumb_h);
+        Some(ScrollbarRect {
+            track,
+            thumb: (track.0, thumb_y, SCROLLBAR_W, thumb_h),
+        })
+    } else {
+        None
+    };
+
+    Some(DropdownPopupLayout {
+        popup_rect: (popup_x, popup_y, popup_w, popup_h),
+        filter_rect,
+        list_viewport,
+        visible_rows,
+        scrollbar,
+        content_height,
+        opens_upward,
+    })
 }
 
 impl<A: Copy + PartialEq> DropdownState<A> {
@@ -176,7 +273,10 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         self.last_filter_change = Instant::now();
         // Scroll the seeded highlight into view. With an empty filter the
         // filtered position equals the unfiltered index.
-        self.scroll_highlight_into_view_empty_filter(window_size);
+        // Empty filter at open time, so the unfiltered `items` are unavailable
+        // here; build a trivial slice of the right length for the scroll math.
+        let dummy: Vec<&str> = vec![""; item_count];
+        self.scroll_highlight_into_view(&dummy, window_size);
     }
 
     /// Close the dropdown.
@@ -184,13 +284,52 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         self.active = None;
     }
 
-    /// Scroll so the highlight is visible, assuming an empty filter.
-    /// Real implementation lands in Task 4; no-op stub keeps Task 3 compiling.
-    fn scroll_highlight_into_view_empty_filter(&mut self, _window_size: (f32, f32)) {}
+    /// Clamp `scroll_px` into `[0, content_height - viewport_h]`.
+    #[allow(dead_code)]
+    fn clamp_scroll(&mut self, items: &[&str], window_size: (f32, f32)) {
+        let Some(layout) = dropdown_popup_layout(self, items, window_size) else {
+            return;
+        };
+        let max_scroll = (layout.content_height - layout.list_viewport.3).max(0.0);
+        if let Some(active) = self.active.as_mut() {
+            active.scroll_px = active.scroll_px.clamp(0.0, max_scroll);
+        }
+    }
+
+    /// Scroll so the highlighted item's row is fully inside the viewport.
+    fn scroll_highlight_into_view(&mut self, items: &[&str], window_size: (f32, f32)) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        let matches = filtered_indices(items, &active.filter);
+        let Some(k) = matches.iter().position(|&i| i == active.highlight) else {
+            return;
+        };
+        let Some(layout) = dropdown_popup_layout(self, items, window_size) else {
+            return;
+        };
+        let item_h = active.anchor.3;
+        let viewport_h = layout.list_viewport.3;
+        let row_top = k as f32 * item_h;
+        let row_bot = row_top + item_h;
+        let active = self.active.as_mut().unwrap();
+        if row_top < active.scroll_px {
+            active.scroll_px = row_top;
+        } else if row_bot > active.scroll_px + viewport_h {
+            active.scroll_px = row_bot - viewport_h;
+        }
+    }
 
     #[cfg(test)]
     fn highlight_for_test(&self) -> Option<usize> {
         self.active.as_ref().map(|a| a.highlight)
+    }
+
+    #[cfg(test)]
+    fn set_filter_for_test(&mut self, f: &str) {
+        if let Some(active) = self.active.as_mut() {
+            active.filter = f.to_string();
+        }
     }
 }
 
@@ -294,5 +433,91 @@ mod tests {
     fn is_open_for_false_when_closed() {
         let s: DropdownState<A> = DropdownState::new();
         assert!(!s.is_open_for(A::Wavetable));
+    }
+
+    // Helper: build an open state with N items and a given filter.
+    fn open_state(item_count: usize, filter_enabled: bool) -> DropdownState<A> {
+        let mut s: DropdownState<A> = DropdownState::new();
+        s.open(A::Wavetable, ANCHOR, item_count, 0, filter_enabled, WIN);
+        s
+    }
+
+    #[test]
+    fn layout_opens_downward_when_room_below() {
+        let s = open_state(5, false);
+        let items: Vec<&str> = vec!["a"; 5];
+        let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
+        assert!(!l.opens_upward);
+        // popup starts just below the anchor bottom (100 + 24)
+        assert_eq!(l.popup_rect.1, 124.0);
+    }
+
+    #[test]
+    fn layout_flips_upward_when_no_room_below() {
+        // Anchor near the bottom of an 600px window; 12 rows of 24px won't fit.
+        let mut s: DropdownState<A> = DropdownState::new();
+        let low_anchor = (100.0, 560.0, 160.0, 24.0);
+        s.open(A::Wavetable, low_anchor, 20, 0, false, WIN);
+        let items: Vec<&str> = vec!["a"; 20];
+        let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
+        assert!(l.opens_upward);
+        // popup bottom touches the anchor top (560)
+        assert!((l.popup_rect.1 + l.popup_rect.3 - 560.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn layout_clamps_to_right_window_edge() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        let edge_anchor = (760.0, 100.0, 160.0, 24.0); // 760 + 160 = 920 > 800
+        s.open(A::Wavetable, edge_anchor, 3, 0, false, WIN);
+        let items: Vec<&str> = vec!["a"; 3];
+        let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
+        assert!(l.popup_rect.0 + l.popup_rect.2 <= 800.0 + 0.01);
+    }
+
+    #[test]
+    fn layout_no_scrollbar_when_few_items() {
+        let s = open_state(5, false);
+        let items: Vec<&str> = vec!["a"; 5];
+        let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
+        assert!(l.scrollbar.is_none());
+    }
+
+    #[test]
+    fn layout_has_scrollbar_when_overflowing() {
+        let s = open_state(40, false);
+        let items: Vec<&str> = vec!["a"; 40];
+        let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
+        assert!(l.scrollbar.is_some());
+        // content height = 40 rows * 24px
+        assert!((l.content_height - 40.0 * 24.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn layout_filter_rect_present_only_when_enabled() {
+        let with = open_state(5, true);
+        let without = open_state(5, false);
+        let items: Vec<&str> = vec!["a"; 5];
+        assert!(dropdown_popup_layout(&with, &items, WIN).unwrap().filter_rect.is_some());
+        assert!(dropdown_popup_layout(&without, &items, WIN).unwrap().filter_rect.is_none());
+    }
+
+    #[test]
+    fn layout_visible_rows_map_to_unfiltered_indices() {
+        // 4 items; filter "bra" -> matches indices 1,2,3.
+        let mut s: DropdownState<A> = DropdownState::new();
+        s.open(A::Wavetable, ANCHOR, 4, 0, true, WIN);
+        s.set_filter_for_test("bra");
+        let items = ["alpha", "bravo", "bravado", "bract"];
+        let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
+        let mapped: Vec<usize> = l.visible_rows.iter().map(|r| r.item_index).collect();
+        assert_eq!(mapped, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn layout_returns_none_when_closed() {
+        let s: DropdownState<A> = DropdownState::new();
+        let items: Vec<&str> = vec!["a"; 3];
+        assert!(dropdown_popup_layout(&s, &items, WIN).is_none());
     }
 }
