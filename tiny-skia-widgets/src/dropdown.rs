@@ -681,4 +681,24 @@ mod tests {
         assert_eq!(ev, None);
         assert!(s.is_open(), "Enter with no matches must not close");
     }
+
+    #[test]
+    fn key_arrows_noop_when_no_matches() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        s.open(A::Wavetable, ANCHOR, 4, 0, true, WIN);
+        s.set_filter_for_test("zzz");
+        let items = ["alpha", "bravo", "bravado", "bract"];
+        // Every arrow/page/home/end key must be a no-op when nothing matches.
+        for key in [
+            DropdownKey::Down,
+            DropdownKey::Up,
+            DropdownKey::PageDown,
+            DropdownKey::PageUp,
+            DropdownKey::Home,
+            DropdownKey::End,
+        ] {
+            assert_eq!(s.on_key(key, &items, WIN), None);
+        }
+        assert!(s.is_open(), "no-match navigation must not close the dropdown");
+    }
 }
