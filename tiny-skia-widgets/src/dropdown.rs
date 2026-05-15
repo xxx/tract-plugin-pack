@@ -1239,9 +1239,14 @@ mod tests {
         let items = ["sine", "saw", "square", "triangle", "noise"];
         draw_dropdown_popup(&mut pm, &mut tr, &s, &items, WIN);
         let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
-        let (px, py, _, _) = l.popup_rect;
-        // Popup interior must be painted.
-        assert!(px_alpha(&pm, (px + 20.0) as u32, (py + 20.0) as u32) > 0);
+        // Row 0 is the highlighted row (open_state seeds highlight=0), so it gets
+        // an accent-fill background. Sampling its centre proves the row-drawing
+        // loop actually ran — not just the panel background.
+        let (rx, ry, rw, rh) = l.visible_rows[0].rect;
+        assert!(
+            px_alpha(&pm, (rx + rw * 0.5) as u32, (ry + rh * 0.5) as u32) > 0,
+            "highlighted row fill not drawn"
+        );
     }
 
     #[test]
