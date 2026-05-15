@@ -765,7 +765,6 @@ mod tests {
         draw_dropdown_trigger(&mut pm, &mut tr, (10.0, 10.0, 200.0, 28.0), "Sine.wt", true);
     }
 
-    #[allow(dead_code)]
     #[derive(Clone, Copy, PartialEq, Debug)]
     enum A {
         Wavetable,
