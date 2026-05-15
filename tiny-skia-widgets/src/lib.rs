@@ -6,6 +6,7 @@
 
 pub mod controls;
 pub mod drag;
+pub mod dropdown;
 pub mod editor_base;
 pub mod grid_selector;
 pub mod param_dial;
@@ -18,6 +19,7 @@ mod test_font;
 
 pub use controls::*;
 pub use drag::*;
+pub use dropdown::*;
 pub use editor_base::*;
 pub use grid_selector::*;
 pub use param_dial::*;
