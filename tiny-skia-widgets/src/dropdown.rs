@@ -11,7 +11,6 @@ use std::time::Instant;
 
 use tiny_skia::Pixmap;
 
-#[allow(unused_imports)]
 use crate::primitives::{
     color_accent, color_border, color_control_bg, color_edit_bg, color_muted, color_text,
     draw_rect, draw_rect_outline,
@@ -165,7 +164,12 @@ pub fn dropdown_popup_layout<A: Copy + PartialEq>(
 
     // Filter row sits at the top of the popup interior.
     let filter_rect = if active.filter_enabled {
-        Some((popup_x + BORDER, popup_y + BORDER, popup_w - 2.0 * BORDER, filter_h))
+        Some((
+            popup_x + BORDER,
+            popup_y + BORDER,
+            popup_w - 2.0 * BORDER,
+            filter_h,
+        ))
     } else {
         None
     };
@@ -177,7 +181,11 @@ pub fn dropdown_popup_layout<A: Copy + PartialEq>(
     let list_viewport = (lv_x, lv_y, lv_w, lv_h);
 
     let has_scrollbar = content_height > lv_h + 0.01;
-    let row_w = if has_scrollbar { lv_w - SCROLLBAR_W } else { lv_w };
+    let row_w = if has_scrollbar {
+        lv_w - SCROLLBAR_W
+    } else {
+        lv_w
+    };
 
     // Visible rows: filtered position k -> screen y. Keep rows that intersect
     // the viewport at all.
@@ -224,12 +232,7 @@ pub fn dropdown_popup_layout<A: Copy + PartialEq>(
 
 /// Truncate `text` with a trailing "…" so it fits within `max_w` at `size`.
 /// Returns `text` unchanged when it already fits.
-fn truncate_to_width(
-    tr: &mut TextRenderer,
-    text: &str,
-    size: f32,
-    max_w: f32,
-) -> String {
+fn truncate_to_width(tr: &mut TextRenderer, text: &str, size: f32, max_w: f32) -> String {
     if tr.text_width(text, size) <= max_w {
         return text.to_string();
     }
@@ -261,7 +264,11 @@ pub fn draw_dropdown_trigger(
 ) {
     let (x, y, w, h) = rect;
     draw_rect(pixmap, x, y, w, h, color_control_bg());
-    let border = if is_open { color_accent() } else { color_border() };
+    let border = if is_open {
+        color_accent()
+    } else {
+        color_border()
+    };
     draw_rect_outline(pixmap, x, y, w, h, border, 1.0);
 
     let text_size = (h * 0.5).max(10.0);
@@ -289,6 +296,100 @@ pub fn draw_dropdown_trigger(
             cy - tri_h * 0.5 + i as f32
         };
         draw_rect(pixmap, cx - half, row_y, half * 2.0, 1.0, color_muted());
+    }
+}
+
+/// Draw the open dropdown popup: bordered panel, optional filter row, the
+/// scrollable item list (highlight tint + selected marker), and a scrollbar
+/// when the list overflows. No-op when the dropdown is closed.
+///
+/// Call this LAST in the editor's draw pass so the popup paints over
+/// everything else.
+pub fn draw_dropdown_popup<A: Copy + PartialEq>(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    state: &DropdownState<A>,
+    items: &[&str],
+    window_size: (f32, f32),
+) {
+    let Some(layout) = dropdown_popup_layout(state, items, window_size) else {
+        return;
+    };
+    let Some(active) = state.active.as_ref() else {
+        return;
+    };
+
+    // Panel.
+    let (px, py, pw, ph) = layout.popup_rect;
+    draw_rect(pixmap, px, py, pw, ph, color_control_bg());
+    draw_rect_outline(pixmap, px, py, pw, ph, color_accent(), 1.0);
+
+    let item_h = active.anchor.3;
+    let text_size = (item_h * 0.5).max(10.0);
+    let pad = 6.0;
+
+    // Filter row.
+    if let Some((fx, fy, fw, fh)) = layout.filter_rect {
+        draw_rect(pixmap, fx, fy, fw, fh, color_edit_bg());
+        let ty = fy + (fh + text_size) * 0.5 - 2.0;
+        let shown = truncate_to_width(
+            text_renderer,
+            &active.filter,
+            text_size,
+            (fw - 2.0 * pad).max(0.0),
+        );
+        text_renderer.draw_text(pixmap, fx + pad, ty, &shown, text_size, color_text());
+        if state.caret_visible() {
+            let caret_x = fx + pad + text_renderer.text_width(&shown, text_size) + 1.0;
+            draw_rect(pixmap, caret_x, fy + 3.0, 1.0, fh - 6.0, color_text());
+        }
+    }
+
+    // Empty-result message.
+    if layout.visible_rows.is_empty() {
+        let (lx, ly, lw, lh) = layout.list_viewport;
+        let ty = ly + (lh.min(item_h) + text_size) * 0.5 - 2.0;
+        let msg = "No matches";
+        let mw = text_renderer.text_width(msg, text_size);
+        text_renderer.draw_text(
+            pixmap,
+            lx + (lw - mw) * 0.5,
+            ty,
+            msg,
+            text_size,
+            color_muted(),
+        );
+        return;
+    }
+
+    // Item rows.
+    for row in &layout.visible_rows {
+        let (rx, ry, rw, rh) = row.rect;
+        if row.item_index == active.highlight {
+            draw_rect(pixmap, rx, ry, rw, rh, color_accent());
+        }
+        // Marker bar for the originally-selected item is omitted: `open()`
+        // seeds the highlight from the current selection, so the highlight
+        // tint already shows it on open. (A separate marker would only
+        // matter after the highlight moves; deliberately kept minimal.)
+        let label = items.get(row.item_index).copied().unwrap_or("");
+        let shown = truncate_to_width(text_renderer, label, text_size, (rw - 2.0 * pad).max(0.0));
+        let color = if row.item_index == active.highlight {
+            // Dark text on the accent fill, matching `draw_button`.
+            tiny_skia::Color::from_rgba8(0x1a, 0x1c, 0x22, 0xff)
+        } else {
+            color_text()
+        };
+        let ty = ry + (rh + text_size) * 0.5 - 2.0;
+        text_renderer.draw_text(pixmap, rx + pad, ty, &shown, text_size, color);
+    }
+
+    // Scrollbar.
+    if let Some(sb) = layout.scrollbar {
+        let (tx, ty, tw, th) = sb.track;
+        draw_rect(pixmap, tx, ty, tw, th, color_border());
+        let (hx, hy, hw, hh) = sb.thumb;
+        draw_rect(pixmap, hx, hy, hw, hh, color_muted());
     }
 }
 
@@ -453,11 +554,7 @@ impl<A: Copy + PartialEq> DropdownState<A> {
 
     /// Shared filter-edit logic. `Some(c)` appends; `None` is a backspace.
     /// Resets scroll to the top and the highlight to the first match.
-    fn on_char_internal(
-        &mut self,
-        c: Option<char>,
-        items: &[&str],
-    ) -> Option<DropdownEvent<A>> {
+    fn on_char_internal(&mut self, c: Option<char>, items: &[&str]) -> Option<DropdownEvent<A>> {
         let active = self.active.as_mut()?;
         if !active.filter_enabled {
             return None;
@@ -546,10 +643,7 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         // Scrollbar drag in progress.
         if let Some(grab) = active.scrollbar_drag {
             let lv = layout.list_viewport;
-            let thumb_h = layout
-                .scrollbar
-                .map(|sb| sb.thumb.3)
-                .unwrap_or(lv.3);
+            let thumb_h = layout.scrollbar.map(|sb| sb.thumb.3).unwrap_or(lv.3);
             let travel = (lv.3 - thumb_h).max(1.0);
             let thumb_y = (y - grab).clamp(lv.1, lv.1 + travel);
             let frac = (thumb_y - lv.1) / travel;
@@ -653,7 +747,13 @@ mod tests {
     fn draw_trigger_paints_something() {
         let mut pm = Pixmap::new(300, 80).unwrap();
         let mut tr = TextRenderer::new(&test_font_data());
-        draw_dropdown_trigger(&mut pm, &mut tr, (10.0, 10.0, 200.0, 28.0), "Sine.wt", false);
+        draw_dropdown_trigger(
+            &mut pm,
+            &mut tr,
+            (10.0, 10.0, 200.0, 28.0),
+            "Sine.wt",
+            false,
+        );
         // The trigger background fills its rect — interior pixel must be painted.
         assert!(px_alpha(&pm, 100, 24) > 0, "trigger background not drawn");
     }
@@ -820,8 +920,14 @@ mod tests {
         let with = open_state(5, true);
         let without = open_state(5, false);
         let items: Vec<&str> = vec!["a"; 5];
-        assert!(dropdown_popup_layout(&with, &items, WIN).unwrap().filter_rect.is_some());
-        assert!(dropdown_popup_layout(&without, &items, WIN).unwrap().filter_rect.is_none());
+        assert!(dropdown_popup_layout(&with, &items, WIN)
+            .unwrap()
+            .filter_rect
+            .is_some());
+        assert!(dropdown_popup_layout(&without, &items, WIN)
+            .unwrap()
+            .filter_rect
+            .is_none());
     }
 
     #[test]
@@ -947,7 +1053,10 @@ mod tests {
         ] {
             assert_eq!(s.on_key(key, &items, WIN), None);
         }
-        assert!(s.is_open(), "no-match navigation must not close the dropdown");
+        assert!(
+            s.is_open(),
+            "no-match navigation must not close the dropdown"
+        );
     }
 
     #[test]
@@ -1015,7 +1124,10 @@ mod tests {
         let row = l.visible_rows[2];
         let (rx, ry, rw, rh) = row.rect;
         let ev = s.on_mouse_down(rx + rw * 0.5, ry + rh * 0.5, &s_items, WIN);
-        assert_eq!(ev, Some(DropdownEvent::Selected(A::Wavetable, row.item_index)));
+        assert_eq!(
+            ev,
+            Some(DropdownEvent::Selected(A::Wavetable, row.item_index))
+        );
         assert!(!s.is_open());
     }
 
@@ -1050,7 +1162,10 @@ mod tests {
         let ev = s.on_mouse_move(rx + rw * 0.5, ry + rh * 0.5, &s_items, WIN);
         assert_eq!(
             ev,
-            Some(DropdownEvent::HighlightChanged(A::Wavetable, row.item_index))
+            Some(DropdownEvent::HighlightChanged(
+                A::Wavetable,
+                row.item_index
+            ))
         );
         assert_eq!(s.highlight_for_test(), Some(row.item_index));
     }
@@ -1078,7 +1193,10 @@ mod tests {
         // Press on the thumb, drag down by 50px, release.
         s.on_mouse_down(thumb.0 + 2.0, thumb.1 + 2.0, &s_items, WIN);
         s.on_mouse_move(thumb.0 + 2.0, thumb.1 + 52.0, &s_items, WIN);
-        assert!(s.scroll_for_test().unwrap() > 0.0, "thumb drag should scroll");
+        assert!(
+            s.scroll_for_test().unwrap() > 0.0,
+            "thumb drag should scroll"
+        );
         s.on_mouse_up();
         // After release a plain move must not keep scrolling.
         let after = s.scroll_for_test().unwrap();
@@ -1111,5 +1229,49 @@ mod tests {
         let s = open_state(5, true);
         // Freshly opened -> within the first 500ms "on" half of the cycle.
         assert!(s.caret_visible());
+    }
+
+    #[test]
+    fn draw_popup_filter_disabled_paints_rows() {
+        let mut pm = Pixmap::new(800, 600).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        let s = open_state(5, false);
+        let items = ["sine", "saw", "square", "triangle", "noise"];
+        draw_dropdown_popup(&mut pm, &mut tr, &s, &items, WIN);
+        let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
+        let (px, py, _, _) = l.popup_rect;
+        // Popup interior must be painted.
+        assert!(px_alpha(&pm, (px + 20.0) as u32, (py + 20.0) as u32) > 0);
+    }
+
+    #[test]
+    fn draw_popup_filter_enabled_does_not_panic() {
+        let mut pm = Pixmap::new(800, 600).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        let mut s = open_state(40, true);
+        let items: Vec<&str> = vec!["wavetable-frame"; 40];
+        s.set_filter_for_test("wave");
+        draw_dropdown_popup(&mut pm, &mut tr, &s, &items, WIN);
+    }
+
+    #[test]
+    fn draw_popup_no_matches_does_not_panic() {
+        let mut pm = Pixmap::new(800, 600).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        let mut s = open_state(5, true);
+        s.set_filter_for_test("zzzzz");
+        let items = ["sine", "saw", "square", "triangle", "noise"];
+        draw_dropdown_popup(&mut pm, &mut tr, &s, &items, WIN);
+    }
+
+    #[test]
+    fn draw_popup_closed_is_noop() {
+        let mut pm = Pixmap::new(800, 600).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        let s: DropdownState<A> = DropdownState::new();
+        let items = ["a", "b"];
+        draw_dropdown_popup(&mut pm, &mut tr, &s, &items, WIN);
+        // Nothing open -> nothing drawn.
+        assert_eq!(px_alpha(&pm, 400, 300), 0);
     }
 }
