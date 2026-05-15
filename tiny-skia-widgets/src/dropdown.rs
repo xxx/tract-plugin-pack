@@ -24,7 +24,6 @@ use crate::text::TextRenderer;
 pub const MAX_VISIBLE_ROWS: usize = 12;
 
 /// Filter-text buffer cap (defensive — typed filters are short).
-#[allow(dead_code)]
 const MAX_FILTER_LEN: usize = 64;
 
 /// Popup border thickness, in physical pixels.
@@ -79,7 +78,6 @@ struct Active<A> {
 pub struct DropdownState<A: Copy + PartialEq> {
     active: Option<Active<A>>,
     /// Drives the filter-row caret blink; reset on every filter edit / open.
-    #[allow(dead_code)]
     last_filter_change: Instant,
 }
 
@@ -385,13 +383,41 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         }
     }
 
-    /// Stub — real body lands in Task 6.
+    /// Public char-input handler. Only effective when the filter is enabled.
+    pub fn on_char(&mut self, c: char, items: &[&str]) -> Option<DropdownEvent<A>> {
+        self.on_char_internal(Some(c), items)
+    }
+
+    /// Shared filter-edit logic. `Some(c)` appends; `None` is a backspace.
+    /// Resets scroll to the top and the highlight to the first match.
     fn on_char_internal(
         &mut self,
-        _c: Option<char>,
-        _items: &[&str],
+        c: Option<char>,
+        items: &[&str],
     ) -> Option<DropdownEvent<A>> {
-        None
+        let active = self.active.as_mut()?;
+        if !active.filter_enabled {
+            return None;
+        }
+        match c {
+            Some(ch) => {
+                if ch.is_control() || active.filter.len() >= MAX_FILTER_LEN {
+                    return None;
+                }
+                active.filter.push(ch);
+            }
+            None => {
+                active.filter.pop();
+            }
+        }
+        active.scroll_px = 0.0;
+        let action = active.action;
+        let first = filtered_indices(items, &active.filter).first().copied();
+        if let Some(idx) = first {
+            active.highlight = idx;
+        }
+        self.last_filter_change = Instant::now();
+        first.map(|idx| DropdownEvent::HighlightChanged(action, idx))
     }
 
     #[cfg(test)]
@@ -403,6 +429,23 @@ impl<A: Copy + PartialEq> DropdownState<A> {
     fn set_filter_for_test(&mut self, f: &str) {
         if let Some(active) = self.active.as_mut() {
             active.filter = f.to_string();
+        }
+    }
+
+    #[cfg(test)]
+    fn filter_for_test(&self) -> Option<&str> {
+        self.active.as_ref().map(|a| a.filter.as_str())
+    }
+
+    #[cfg(test)]
+    fn scroll_for_test(&self) -> Option<f32> {
+        self.active.as_ref().map(|a| a.scroll_px)
+    }
+
+    #[cfg(test)]
+    fn set_scroll_for_test(&mut self, v: f32) {
+        if let Some(a) = self.active.as_mut() {
+            a.scroll_px = v;
         }
     }
 }
@@ -700,5 +743,62 @@ mod tests {
             assert_eq!(s.on_key(key, &items, WIN), None);
         }
         assert!(s.is_open(), "no-match navigation must not close the dropdown");
+    }
+
+    #[test]
+    fn char_appends_to_filter_when_enabled() {
+        let mut s = open_state(4, true);
+        let items = ["sine", "saw", "square", "sample"];
+        s.on_char('s', &items);
+        s.on_char('a', &items);
+        assert_eq!(s.filter_for_test(), Some("sa"));
+    }
+
+    #[test]
+    fn char_ignored_when_filter_disabled() {
+        let mut s = open_state(4, false);
+        let items = ["sine", "saw", "square", "sample"];
+        s.on_char('s', &items);
+        assert_eq!(s.filter_for_test(), Some(""));
+    }
+
+    #[test]
+    fn char_resets_highlight_to_first_match() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        s.open(A::Wavetable, ANCHOR, 4, 3, true, WIN);
+        let items = ["sine", "saw", "square", "sample"];
+        // typing "sq" filters to index 2 only -> highlight should become 2.
+        s.on_char('s', &items);
+        s.on_char('q', &items);
+        assert_eq!(s.highlight_for_test(), Some(2));
+    }
+
+    #[test]
+    fn char_resets_scroll_to_top() {
+        let mut s = open_state(40, true);
+        let items: Vec<&str> = vec!["wave"; 40];
+        s.set_scroll_for_test(200.0);
+        s.on_char('w', &items);
+        assert_eq!(s.scroll_for_test(), Some(0.0));
+    }
+
+    #[test]
+    fn backspace_removes_last_filter_char() {
+        let mut s = open_state(4, true);
+        let items = ["sine", "saw", "square", "sample"];
+        s.on_char('s', &items);
+        s.on_char('a', &items);
+        s.on_key(DropdownKey::Backspace, &items, WIN);
+        assert_eq!(s.filter_for_test(), Some("s"));
+    }
+
+    #[test]
+    fn char_respects_filter_length_cap() {
+        let mut s = open_state(4, true);
+        let items: Vec<&str> = vec!["x"; 4];
+        for _ in 0..100 {
+            s.on_char('x', &items);
+        }
+        assert_eq!(s.filter_for_test().unwrap().len(), MAX_FILTER_LEN);
     }
 }
