@@ -271,10 +271,13 @@ impl<A: Copy + PartialEq> DropdownState<A> {
             scrollbar_drag: None,
         });
         self.last_filter_change = Instant::now();
-        // Scroll the seeded highlight into view. With an empty filter the
-        // filtered position equals the unfiltered index.
-        // Empty filter at open time, so the unfiltered `items` are unavailable
-        // here; build a trivial slice of the right length for the scroll math.
+        // `scroll_highlight_into_view` needs an items slice only to size the
+        // layout and locate the highlight's filtered position. The filter was
+        // just cleared above, so an empty filter matches every item: filtered
+        // position == unfiltered index, and item *text* is irrelevant — only
+        // the slice *length* matters. A dummy slice of the right length is
+        // therefore sufficient and correct. (If `open()` ever pre-seeds a
+        // non-empty filter, this trick breaks — use the real items instead.)
         let dummy: Vec<&str> = vec![""; item_count];
         self.scroll_highlight_into_view(&dummy, window_size);
     }
@@ -312,6 +315,8 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         let viewport_h = layout.list_viewport.3;
         let row_top = k as f32 * item_h;
         let row_bot = row_top + item_h;
+        // `active` is still `Some`: the early-returns above already proved it,
+        // and nothing between them closed the dropdown.
         let active = self.active.as_mut().unwrap();
         if row_top < active.scroll_px {
             active.scroll_px = row_top;
