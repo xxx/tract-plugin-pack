@@ -523,6 +523,18 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         self.clamp_scroll(items, window_size);
     }
 
+    /// `true` during the "on" half of the 1000ms blink cycle, but only when
+    /// a filter-enabled dropdown is open. The blink phase is measured from
+    /// the last filter edit (or open), matching `TextEditState::caret_visible`.
+    pub fn caret_visible(&self) -> bool {
+        match &self.active {
+            Some(a) if a.filter_enabled => {
+                (self.last_filter_change.elapsed().as_millis() % 1000) < 500
+            }
+            _ => false,
+        }
+    }
+
     #[cfg(test)]
     fn highlight_for_test(&self) -> Option<usize> {
         self.active.as_ref().map(|a| a.highlight)
@@ -990,5 +1002,24 @@ mod tests {
         let mut s: DropdownState<A> = DropdownState::new();
         assert_eq!(s.on_mouse_down(10.0, 10.0, &s_items, WIN), None);
         assert_eq!(s.on_mouse_move(10.0, 10.0, &s_items, WIN), None);
+    }
+
+    #[test]
+    fn caret_hidden_when_closed() {
+        let s: DropdownState<A> = DropdownState::new();
+        assert!(!s.caret_visible());
+    }
+
+    #[test]
+    fn caret_hidden_when_filter_disabled() {
+        let s = open_state(5, false);
+        assert!(!s.caret_visible());
+    }
+
+    #[test]
+    fn caret_visible_at_open_when_filter_enabled() {
+        let s = open_state(5, true);
+        // Freshly opened -> within the first 500ms "on" half of the cycle.
+        assert!(s.caret_visible());
     }
 }
