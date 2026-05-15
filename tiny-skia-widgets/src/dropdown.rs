@@ -9,7 +9,6 @@
 
 use std::time::Instant;
 
-#[allow(unused_imports)]
 use tiny_skia::Pixmap;
 
 #[allow(unused_imports)]
@@ -17,7 +16,6 @@ use crate::primitives::{
     color_accent, color_border, color_control_bg, color_edit_bg, color_muted, color_text,
     draw_rect, draw_rect_outline,
 };
-#[allow(unused_imports)]
 use crate::text::TextRenderer;
 
 /// Maximum rows shown before the list scrolls.
@@ -222,6 +220,76 @@ pub fn dropdown_popup_layout<A: Copy + PartialEq>(
         content_height,
         opens_upward,
     })
+}
+
+/// Truncate `text` with a trailing "…" so it fits within `max_w` at `size`.
+/// Returns `text` unchanged when it already fits.
+fn truncate_to_width(
+    tr: &mut TextRenderer,
+    text: &str,
+    size: f32,
+    max_w: f32,
+) -> String {
+    if tr.text_width(text, size) <= max_w {
+        return text.to_string();
+    }
+    let ellipsis = "…";
+    let ell_w = tr.text_width(ellipsis, size);
+    let mut out = String::new();
+    let mut w = 0.0;
+    for ch in text.chars() {
+        let cw = tr.text_width(&ch.to_string(), size);
+        if w + cw + ell_w > max_w {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push_str(ellipsis);
+    out
+}
+
+/// Draw the collapsed dropdown trigger: bordered rect, selected-item label
+/// (ellipsis-truncated), and a chevron at the right. `is_open` brightens the
+/// border to the accent color and flips the chevron.
+pub fn draw_dropdown_trigger(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    rect: (f32, f32, f32, f32),
+    label: &str,
+    is_open: bool,
+) {
+    let (x, y, w, h) = rect;
+    draw_rect(pixmap, x, y, w, h, color_control_bg());
+    let border = if is_open { color_accent() } else { color_border() };
+    draw_rect_outline(pixmap, x, y, w, h, border, 1.0);
+
+    let text_size = (h * 0.5).max(10.0);
+    let text_y = y + (h + text_size) * 0.5 - 2.0;
+    let pad = 6.0;
+    let chevron_w = h * 0.6;
+
+    // Label region: from the left pad to the start of the chevron.
+    let label_max_w = (w - 2.0 * pad - chevron_w).max(0.0);
+    let shown = truncate_to_width(text_renderer, label, text_size, label_max_w);
+    text_renderer.draw_text(pixmap, x + pad, text_y, &shown, text_size, color_text());
+
+    // Chevron: a small filled triangle made of stacked 1px rows.
+    let cx = x + w - pad - chevron_w * 0.5;
+    let cy = y + h * 0.5;
+    let tri_h = chevron_w * 0.4;
+    let steps = tri_h.max(1.0) as i32;
+    for i in 0..steps {
+        let t = i as f32 / steps as f32;
+        let half = (chevron_w * 0.5) * (1.0 - t);
+        // Down chevron when closed, up chevron when open.
+        let row_y = if is_open {
+            cy + tri_h * 0.5 - i as f32
+        } else {
+            cy - tri_h * 0.5 + i as f32
+        };
+        draw_rect(pixmap, cx - half, row_y, half * 2.0, 1.0, color_muted());
+    }
 }
 
 impl<A: Copy + PartialEq> DropdownState<A> {
@@ -574,6 +642,28 @@ impl<A: Copy + PartialEq> Default for DropdownState<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_font::test_font_data;
+    use tiny_skia::Pixmap;
+
+    fn px_alpha(pm: &Pixmap, x: u32, y: u32) -> u8 {
+        pm.pixels()[(y * pm.width() + x) as usize].alpha()
+    }
+
+    #[test]
+    fn draw_trigger_paints_something() {
+        let mut pm = Pixmap::new(300, 80).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        draw_dropdown_trigger(&mut pm, &mut tr, (10.0, 10.0, 200.0, 28.0), "Sine.wt", false);
+        // The trigger background fills its rect — interior pixel must be painted.
+        assert!(px_alpha(&pm, 100, 24) > 0, "trigger background not drawn");
+    }
+
+    #[test]
+    fn draw_trigger_open_does_not_panic() {
+        let mut pm = Pixmap::new(300, 80).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        draw_dropdown_trigger(&mut pm, &mut tr, (10.0, 10.0, 200.0, 28.0), "Sine.wt", true);
+    }
 
     #[allow(dead_code)]
     #[derive(Clone, Copy, PartialEq, Debug)]
