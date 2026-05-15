@@ -63,6 +63,7 @@ pub enum DropdownEvent<A> {
 #[allow(dead_code)]
 struct Active<A> {
     action: A,
+    /// Trigger widget rect captured at open time.
     anchor: (f32, f32, f32, f32),
     item_count: usize,
     /// Index into the UNFILTERED list.
@@ -99,7 +100,7 @@ pub struct ScrollbarRect {
 }
 
 /// Computed popup geometry. Backs both drawing and hit testing.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Debug)]
 pub struct DropdownPopupLayout {
     pub popup_rect: (f32, f32, f32, f32),
     pub filter_rect: Option<(f32, f32, f32, f32)>,
