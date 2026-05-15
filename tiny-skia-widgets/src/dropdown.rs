@@ -111,6 +111,27 @@ pub struct DropdownPopupLayout {
     pub opens_upward: bool,
 }
 
+/// Case-insensitive substring match. An empty filter matches everything.
+#[allow(dead_code)]
+fn filter_matches(item: &str, filter: &str) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    item.to_lowercase().contains(&filter.to_lowercase())
+}
+
+/// UNFILTERED indices of items matching `filter`, in original order.
+/// Allocates — fine here, this runs on the editor thread, never `process()`.
+#[allow(dead_code)]
+fn filtered_indices(items: &[&str], filter: &str) -> Vec<usize> {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| filter_matches(item, filter))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 impl<A: Copy + PartialEq> DropdownState<A> {
     pub fn new() -> Self {
         Self {
@@ -146,5 +167,41 @@ mod tests {
     fn new_reports_closed() {
         let s: DropdownState<A> = DropdownState::new();
         assert!(!s.is_open());
+    }
+
+    #[test]
+    fn filter_matches_empty_filter_matches_all() {
+        assert!(filter_matches("anything", ""));
+    }
+
+    #[test]
+    fn filter_matches_is_case_insensitive() {
+        assert!(filter_matches("SineWave.wt", "sine"));
+        assert!(filter_matches("sinewave.wt", "SINE"));
+    }
+
+    #[test]
+    fn filter_matches_is_substring_not_prefix() {
+        assert!(filter_matches("deep-bass.wt", "bass"));
+        assert!(!filter_matches("deep-bass.wt", "treble"));
+    }
+
+    #[test]
+    fn filtered_indices_empty_filter_returns_all() {
+        let items = ["a", "b", "c"];
+        assert_eq!(filtered_indices(&items, ""), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn filtered_indices_returns_unfiltered_positions() {
+        let items = ["alpha", "bravo", "bravado", "bract"];
+        // "bra" matches bravo(1), bravado(2), bract(3) — alpha(0) does not.
+        assert_eq!(filtered_indices(&items, "bra"), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn filtered_indices_no_match_is_empty() {
+        let items = ["a", "b"];
+        assert!(filtered_indices(&items, "z").is_empty());
     }
 }
