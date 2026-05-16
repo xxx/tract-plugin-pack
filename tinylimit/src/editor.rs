@@ -113,9 +113,12 @@ const PRESETS: &[LimiterPreset] = &[
     },
 ];
 
-/// Preset display names, as a slice for the dropdown widget.
-fn preset_names() -> Vec<&'static str> {
-    PRESETS.iter().map(|p| p.name).collect()
+/// Preset display names, as a slice for the dropdown widget. Built once.
+fn preset_names() -> &'static [&'static str] {
+    use std::sync::LazyLock;
+    static NAMES: LazyLock<Vec<&'static str>> =
+        LazyLock::new(|| PRESETS.iter().map(|p| p.name).collect());
+    NAMES.as_slice()
 }
 
 // ── Window Handler ──────────────────────────────────────────────────────
@@ -694,12 +697,11 @@ impl TinylimitWindow {
         );
 
         // Preset dropdown popup — drawn last so it overlays every other widget.
-        let preset_names = preset_names();
         widgets::draw_dropdown_popup(
             &mut self.surface.pixmap,
             tr,
             &self.dropdown,
-            &preset_names,
+            preset_names(),
             (self.physical_width as f32, self.physical_height as f32),
         );
     }
@@ -793,10 +795,13 @@ impl baseview::WindowHandler for TinylimitWindow {
             }) => {
                 self.drag.set_mouse(position.x as f32, position.y as f32);
                 if self.dropdown.is_open() {
-                    let names = preset_names();
                     let win = (self.physical_width as f32, self.physical_height as f32);
-                    self.dropdown
-                        .on_mouse_move(position.x as f32, position.y as f32, &names, win);
+                    self.dropdown.on_mouse_move(
+                        position.x as f32,
+                        position.y as f32,
+                        preset_names(),
+                        win,
+                    );
                 }
                 if let Some(HitAction::Dial(param_id)) = self.drag.active_action().copied() {
                     let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
@@ -815,10 +820,9 @@ impl baseview::WindowHandler for TinylimitWindow {
                 // selecting a row applies the preset, clicking outside closes.
                 if self.dropdown.is_open() {
                     let (mx, my) = self.drag.mouse_pos();
-                    let names = preset_names();
                     let win = (self.physical_width as f32, self.physical_height as f32);
                     if let Some(widgets::DropdownEvent::Selected(_, idx)) =
-                        self.dropdown.on_mouse_down(mx, my, &names, win)
+                        self.dropdown.on_mouse_down(mx, my, preset_names(), win)
                     {
                         self.current_preset = idx;
                         let setter = ParamSetter::new(self.gui_context.as_ref());
@@ -869,7 +873,7 @@ impl baseview::WindowHandler for TinylimitWindow {
                             self.dropdown.open(
                                 DropdownId::Preset,
                                 (region.x, region.y, region.w, region.h),
-                                PRESETS.len(),
+                                preset_names(),
                                 self.current_preset,
                                 false, // 7 presets — no typeahead filter
                                 win,
@@ -922,10 +926,9 @@ impl baseview::WindowHandler for TinylimitWindow {
                     _ => None,
                 };
                 if let Some(dd_key) = dd_key {
-                    let names = preset_names();
                     let win = (self.physical_width as f32, self.physical_height as f32);
                     if let Some(widgets::DropdownEvent::Selected(_, idx)) =
-                        self.dropdown.on_key(dd_key, &names, win)
+                        self.dropdown.on_key(dd_key, preset_names(), win)
                     {
                         self.current_preset = idx;
                         let setter = ParamSetter::new(self.gui_context.as_ref());

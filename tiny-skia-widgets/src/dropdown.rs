@@ -69,6 +69,14 @@ struct Active<A> {
 }
 
 /// Per-editor dropdown focus + transient state. At most one open at a time.
+///
+/// **Stable-items invariant:** every method and free function that takes an
+/// `items: &[&str]` argument — `open`, `on_key`, `on_char`, `on_mouse_down`,
+/// `on_mouse_move`, `on_wheel`, `dropdown_popup_layout`, `draw_dropdown_popup`
+/// — must be given the *same* list (identical length and order) for the whole
+/// time a dropdown is open. Highlight and selection are indices into that
+/// list; passing a different list mid-session yields wrong selections or
+/// silently dropped rows.
 pub struct DropdownState<A: Copy + PartialEq> {
     active: Option<Active<A>>,
     /// Drives the filter-row caret blink; reset on every filter edit / open.
@@ -119,6 +127,11 @@ fn filtered_indices(items: &[&str], filter: &str) -> Vec<usize> {
         .filter(|(_, item)| filter_matches(item, filter))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Maximum valid `scroll_px`: content height beyond the viewport, floored at 0.
+fn max_scroll(content_height: f32, viewport_h: f32) -> f32 {
+    (content_height - viewport_h).max(0.0)
 }
 
 /// Compute popup geometry for the open dropdown. Returns `None` when closed.
@@ -204,7 +217,7 @@ pub fn dropdown_popup_layout<A: Copy + PartialEq>(
     let scrollbar = if has_scrollbar {
         let track = (lv_x + lv_w - SCROLLBAR_W, lv_y, SCROLLBAR_W, lv_h);
         let thumb_h = (lv_h * (lv_h / content_height)).max(8.0);
-        let max_scroll = (content_height - lv_h).max(0.0);
+        let max_scroll = max_scroll(content_height, lv_h);
         let frac = if max_scroll > 0.0 {
             active.scroll_px / max_scroll
         } else {
@@ -411,19 +424,19 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         matches!(&self.active, Some(a) if a.action == action)
     }
 
-    /// Open the dropdown for `action`, auto-closing any other. `current` is
-    /// the currently-selected UNFILTERED index; it seeds the highlight and is
-    /// scrolled into view. `window_size` is the editor pixmap size.
+    /// Open the dropdown for `action`, auto-closing any other. `items` is the
+    /// full UNFILTERED list; `current` seeds the highlight and is scrolled into
+    /// view. `window_size` is the editor pixmap size.
     pub fn open(
         &mut self,
         action: A,
         anchor: (f32, f32, f32, f32),
-        item_count: usize,
+        items: &[&str],
         current: usize,
         filter_enabled: bool,
         window_size: (f32, f32),
     ) {
-        let highlight = current.min(item_count.saturating_sub(1));
+        let highlight = current.min(items.len().saturating_sub(1));
         self.active = Some(Active {
             action,
             anchor,
@@ -434,15 +447,7 @@ impl<A: Copy + PartialEq> DropdownState<A> {
             scrollbar_drag: None,
         });
         self.last_filter_change = Instant::now();
-        // `scroll_highlight_into_view` needs an items slice only to size the
-        // layout and locate the highlight's filtered position. The filter was
-        // just cleared above, so an empty filter matches every item: filtered
-        // position == unfiltered index, and item *text* is irrelevant — only
-        // the slice *length* matters. A dummy slice of the right length is
-        // therefore sufficient and correct. (If `open()` ever pre-seeds a
-        // non-empty filter, this trick breaks — use the real items instead.)
-        let dummy: Vec<&str> = vec![""; item_count];
-        self.scroll_highlight_into_view(&dummy, window_size);
+        self.scroll_highlight_into_view(items, window_size);
     }
 
     /// Close the dropdown.
@@ -455,7 +460,7 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         let Some(layout) = dropdown_popup_layout(self, items, window_size) else {
             return;
         };
-        let max_scroll = (layout.content_height - layout.list_viewport.3).max(0.0);
+        let max_scroll = max_scroll(layout.content_height, layout.list_viewport.3);
         if let Some(active) = self.active.as_mut() {
             active.scroll_px = active.scroll_px.clamp(0.0, max_scroll);
         }
@@ -647,7 +652,7 @@ impl<A: Copy + PartialEq> DropdownState<A> {
             let travel = (lv.3 - thumb_h).max(1.0);
             let thumb_y = (y - grab).clamp(lv.1, lv.1 + travel);
             let frac = (thumb_y - lv.1) / travel;
-            let max_scroll = (layout.content_height - lv.3).max(0.0);
+            let max_scroll = max_scroll(layout.content_height, lv.3);
             if let Some(active) = self.active.as_mut() {
                 active.scroll_px = frac * max_scroll;
             }
@@ -819,7 +824,7 @@ mod tests {
     #[test]
     fn open_marks_dropdown_open() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, 50, 3, true, WIN);
+        s.open(A::Wavetable, ANCHOR, &vec!["x"; 50], 3, true, WIN);
         assert!(s.is_open());
         assert!(s.is_open_for(A::Wavetable));
         assert!(!s.is_open_for(A::Algorithm));
@@ -828,8 +833,8 @@ mod tests {
     #[test]
     fn open_auto_closes_previous() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, 50, 3, true, WIN);
-        s.open(A::Algorithm, ANCHOR, 6, 0, false, WIN);
+        s.open(A::Wavetable, ANCHOR, &vec!["x"; 50], 3, true, WIN);
+        s.open(A::Algorithm, ANCHOR, &vec!["x"; 6], 0, false, WIN);
         assert!(!s.is_open_for(A::Wavetable));
         assert!(s.is_open_for(A::Algorithm));
     }
@@ -837,14 +842,14 @@ mod tests {
     #[test]
     fn open_seeds_highlight_from_current() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, 50, 7, true, WIN);
+        s.open(A::Wavetable, ANCHOR, &vec!["x"; 50], 7, true, WIN);
         assert_eq!(s.highlight_for_test(), Some(7));
     }
 
     #[test]
     fn close_clears_state() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, 50, 3, true, WIN);
+        s.open(A::Wavetable, ANCHOR, &vec!["x"; 50], 3, true, WIN);
         s.close();
         assert!(!s.is_open());
         assert!(!s.is_open_for(A::Wavetable));
@@ -859,7 +864,8 @@ mod tests {
     // Helper: build an open state with N items and a given filter.
     fn open_state(item_count: usize, filter_enabled: bool) -> DropdownState<A> {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, item_count, 0, filter_enabled, WIN);
+        let items: Vec<&str> = vec!["x"; item_count];
+        s.open(A::Wavetable, ANCHOR, &items, 0, filter_enabled, WIN);
         s
     }
 
@@ -878,7 +884,7 @@ mod tests {
         // Anchor near the bottom of an 600px window; 12 rows of 24px won't fit.
         let mut s: DropdownState<A> = DropdownState::new();
         let low_anchor = (100.0, 560.0, 160.0, 24.0);
-        s.open(A::Wavetable, low_anchor, 20, 0, false, WIN);
+        s.open(A::Wavetable, low_anchor, &vec!["x"; 20], 0, false, WIN);
         let items: Vec<&str> = vec!["a"; 20];
         let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
         assert!(l.opens_upward);
@@ -890,7 +896,7 @@ mod tests {
     fn layout_clamps_to_right_window_edge() {
         let mut s: DropdownState<A> = DropdownState::new();
         let edge_anchor = (760.0, 100.0, 160.0, 24.0); // 760 + 160 = 920 > 800
-        s.open(A::Wavetable, edge_anchor, 3, 0, false, WIN);
+        s.open(A::Wavetable, edge_anchor, &vec!["x"; 3], 0, false, WIN);
         let items: Vec<&str> = vec!["a"; 3];
         let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
         assert!(l.popup_rect.0 + l.popup_rect.2 <= 800.0 + 0.01);
@@ -933,7 +939,7 @@ mod tests {
     fn layout_visible_rows_map_to_unfiltered_indices() {
         // 4 items; filter "bra" -> matches indices 1,2,3.
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, 4, 0, true, WIN);
+        s.open(A::Wavetable, ANCHOR, &vec!["x"; 4], 0, true, WIN);
         s.set_filter_for_test("bra");
         let items = ["alpha", "bravo", "bravado", "bract"];
         let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
@@ -960,7 +966,7 @@ mod tests {
     #[test]
     fn key_up_moves_highlight_back() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, 5, 3, false, WIN);
+        s.open(A::Wavetable, ANCHOR, &vec!["x"; 5], 3, false, WIN);
         let items: Vec<&str> = vec!["a"; 5];
         s.on_key(DropdownKey::Up, &items, WIN);
         assert_eq!(s.highlight_for_test(), Some(2));
@@ -969,7 +975,7 @@ mod tests {
     #[test]
     fn key_down_clamps_at_last_item() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, 3, 2, false, WIN);
+        s.open(A::Wavetable, ANCHOR, &vec!["x"; 3], 2, false, WIN);
         let items: Vec<&str> = vec!["a"; 3];
         s.on_key(DropdownKey::Down, &items, WIN);
         assert_eq!(s.highlight_for_test(), Some(2));
@@ -996,7 +1002,7 @@ mod tests {
     #[test]
     fn key_enter_emits_selected_and_closes() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, 5, 2, false, WIN);
+        s.open(A::Wavetable, ANCHOR, &vec!["x"; 5], 2, false, WIN);
         let items: Vec<&str> = vec!["a"; 5];
         let ev = s.on_key(DropdownKey::Enter, &items, WIN);
         assert_eq!(ev, Some(DropdownEvent::Selected(A::Wavetable, 2)));
@@ -1017,7 +1023,7 @@ mod tests {
         // 4 items, filter "bra" -> visible indices 1,2,3. Down from highlight=1
         // (filtered position 0) should land on 2, the next *visible* item.
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, 4, 1, true, WIN);
+        s.open(A::Wavetable, ANCHOR, &vec!["x"; 4], 1, true, WIN);
         s.set_filter_for_test("bra");
         let items = ["alpha", "bravo", "bravado", "bract"];
         s.on_key(DropdownKey::Down, &items, WIN);
@@ -1027,7 +1033,7 @@ mod tests {
     #[test]
     fn key_enter_noop_when_no_matches() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, 4, 0, true, WIN);
+        s.open(A::Wavetable, ANCHOR, &vec!["x"; 4], 0, true, WIN);
         s.set_filter_for_test("zzz");
         let items = ["alpha", "bravo", "bravado", "bract"];
         let ev = s.on_key(DropdownKey::Enter, &items, WIN);
@@ -1038,7 +1044,7 @@ mod tests {
     #[test]
     fn key_arrows_noop_when_no_matches() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, 4, 0, true, WIN);
+        s.open(A::Wavetable, ANCHOR, &vec!["x"; 4], 0, true, WIN);
         s.set_filter_for_test("zzz");
         let items = ["alpha", "bravo", "bravado", "bract"];
         // Every arrow/page/home/end key must be a no-op when nothing matches.
@@ -1078,7 +1084,7 @@ mod tests {
     #[test]
     fn char_resets_highlight_to_first_match() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, 4, 3, true, WIN);
+        s.open(A::Wavetable, ANCHOR, &vec!["x"; 4], 3, true, WIN);
         let items = ["sine", "saw", "square", "sample"];
         // typing "sq" filters to index 2 only -> highlight should become 2.
         s.on_char('s', &items);
@@ -1277,5 +1283,63 @@ mod tests {
         draw_dropdown_popup(&mut pm, &mut tr, &s, &items, WIN);
         // Nothing open -> nothing drawn.
         assert_eq!(px_alpha(&pm, 400, 300), 0);
+    }
+
+    #[test]
+    fn layout_flips_upward_with_scrolling_viewport() {
+        // Near the window bottom AND more items than fit -> flips up AND scrolls.
+        let mut s: DropdownState<A> = DropdownState::new();
+        let low_anchor = (100.0, 560.0, 160.0, 24.0);
+        let items: Vec<&str> = vec!["x"; 40];
+        s.open(A::Wavetable, low_anchor, &items, 0, false, WIN);
+        let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
+        assert!(l.opens_upward);
+        assert!(l.scrollbar.is_some(), "40 items must overflow the popup");
+    }
+
+    #[test]
+    fn scroll_highlight_into_view_scrolls_for_distant_row() {
+        // End jumps the highlight to the last row of a long list, which must
+        // push scroll_px past 0 to bring that row into the viewport.
+        let mut s: DropdownState<A> = DropdownState::new();
+        let items: Vec<&str> = vec!["x"; 40];
+        s.open(A::Wavetable, ANCHOR, &items, 0, false, WIN);
+        assert_eq!(s.scroll_for_test(), Some(0.0));
+        s.on_key(DropdownKey::End, &items, WIN);
+        assert!(
+            s.scroll_for_test().unwrap() > 0.0,
+            "End on a long list must scroll the viewport"
+        );
+    }
+
+    #[test]
+    fn open_with_empty_item_list_does_not_panic() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        let items: [&str; 0] = [];
+        s.open(A::Wavetable, ANCHOR, &items, 0, false, WIN);
+        assert!(s.is_open());
+        assert!(dropdown_popup_layout(&s, &items, WIN).is_some());
+        let mut pm = Pixmap::new(800, 600).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        draw_dropdown_popup(&mut pm, &mut tr, &s, &items, WIN);
+    }
+
+    #[test]
+    fn open_with_single_item() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        let items = ["only"];
+        s.open(A::Wavetable, ANCHOR, &items, 0, false, WIN);
+        assert_eq!(s.highlight_for_test(), Some(0));
+        let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
+        assert_eq!(l.visible_rows.len(), 1);
+        assert!(l.scrollbar.is_none());
+    }
+
+    #[test]
+    fn key_and_char_when_closed_return_none() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        let items = ["a", "b"];
+        assert_eq!(s.on_key(DropdownKey::Down, &items, WIN), None);
+        assert_eq!(s.on_char('a', &items), None);
     }
 }
