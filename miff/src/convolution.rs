@@ -114,10 +114,16 @@ pub struct PhaselessChannel {
     in_pos: usize,
     /// Overlap-add output accumulator: STFT_FRAME samples.
     out_buf: Vec<f32>,
-    /// Read/write position within the current hop (0..PHASELESS_HOP-1).
+    /// Read/write position within the current hop (0..PHASELESS_HOP).
     out_pos: usize,
     scratch_time: Vec<f32>,
     scratch_freq: Vec<Complex<f32>>,
+    /// Pre-allocated FFT scratch buffers. `realfft`'s short-form `process()`
+    /// heap-allocates a scratch vec per call; `process_with_scratch` reuses
+    /// these so the audio-thread frame path never allocates. The forward and
+    /// inverse transforms can require different scratch sizes — kept separate.
+    scratch_fwd: Vec<Complex<f32>>,
+    scratch_inv: Vec<Complex<f32>>,
 }
 
 impl PhaselessChannel {
@@ -133,6 +139,8 @@ impl PhaselessChannel {
                     - (2.0 * std::f32::consts::PI * i as f32 / STFT_FRAME as f32).cos())
             })
             .collect();
+        let scratch_fwd = fft.make_scratch_vec();
+        let scratch_inv = ifft.make_scratch_vec();
         Self {
             fft,
             ifft,
@@ -143,6 +151,8 @@ impl PhaselessChannel {
             out_pos: 0,
             scratch_time: vec![0.0; STFT_FRAME],
             scratch_freq: vec![Complex::new(0.0, 0.0); MAG_BINS],
+            scratch_fwd,
+            scratch_inv,
         }
     }
 
@@ -175,10 +185,12 @@ impl PhaselessChannel {
                 &mut self.out_buf,
                 kernel,
                 &self.window,
-                &self.fft,
-                &self.ifft,
+                self.fft.as_ref(),
+                self.ifft.as_ref(),
                 &mut self.scratch_time,
                 &mut self.scratch_freq,
+                &mut self.scratch_fwd,
+                &mut self.scratch_inv,
             );
         }
 
@@ -216,10 +228,12 @@ impl PhaselessChannel {
         out_buf: &mut [f32],
         kernel: &Kernel,
         window: &[f32],
-        fft: &Arc<dyn RealToComplex<f32>>,
-        ifft: &Arc<dyn ComplexToReal<f32>>,
+        fft: &dyn RealToComplex<f32>,
+        ifft: &dyn ComplexToReal<f32>,
         scratch_time: &mut [f32],
         scratch_freq: &mut [Complex<f32>],
+        scratch_fwd: &mut [Complex<f32>],
+        scratch_inv: &mut [Complex<f32>],
     ) {
         let n = STFT_FRAME;
         let mask = n - 1;
@@ -227,16 +241,24 @@ impl PhaselessChannel {
         for i in 0..n {
             scratch_time[i] = in_buf[(in_pos + i) & mask] * window[i];
         }
-        if fft.process(scratch_time, scratch_freq).is_err() {
+        if fft
+            .process_with_scratch(scratch_time, scratch_freq, scratch_fwd)
+            .is_err()
+        {
             return;
         }
         // Multiply each bin by the kernel magnitude (real scalar, preserves
-        // phase). A zero kernel uses gain 1.0 — identity, not silence.
-        for (bin, &mag) in scratch_freq.iter_mut().zip(kernel.mags.iter()) {
-            let gain = if kernel.is_zero { 1.0 } else { mag };
-            *bin *= gain;
+        // phase). A zero kernel is unity gain everywhere — the identity — so
+        // skip the multiply entirely and leave the bins unchanged.
+        if !kernel.is_zero {
+            for (bin, &mag) in scratch_freq.iter_mut().zip(kernel.mags.iter()) {
+                *bin *= mag;
+            }
         }
-        if ifft.process(scratch_freq, scratch_time).is_err() {
+        if ifft
+            .process_with_scratch(scratch_freq, scratch_time, scratch_inv)
+            .is_err()
+        {
             return;
         }
         // Overlap-add with 1/N normalization (matches wavetable-filter exactly).
@@ -331,7 +353,7 @@ mod tests {
         for _ in 0..16384 {
             last = ch.process(0.5, &k);
         }
-        assert!((last - 0.5).abs() < 0.05, "flat magnitude ~unity, got {last}");
+        assert!((last - 0.5).abs() < 5e-3, "flat magnitude ~unity, got {last}");
     }
 
     #[test]
