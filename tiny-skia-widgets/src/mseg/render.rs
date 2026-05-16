@@ -81,19 +81,20 @@ pub fn draw_mseg(
 ) {
     let layout = mseg_layout(rect, state.is_curve_only(), scale);
     draw_canvas(pixmap, &layout, data, state, scale);
-    draw_marker_lane(pixmap, &layout, data, state);
+    draw_marker_lane(pixmap, &layout, data, state, scale);
     // Control strip (Task 6) is drawn here in a later task; `text_renderer`
     // is used by that.
     let _ = text_renderer;
 }
 
 /// Draw the hold marker(s) in the marker lane. No-op in curve-only mode or
-/// when `hold` is `None`.
+/// when no hold is configured.
 fn draw_marker_lane(
     pixmap: &mut Pixmap,
     layout: &MsegLayout,
     data: &MsegData,
     state: &MsegEditState,
+    scale: f32,
 ) {
     if state.is_curve_only() || layout.marker_lane.3 <= 0.0 {
         return;
@@ -104,7 +105,7 @@ fn draw_marker_lane(
     let mark = |pm: &mut Pixmap, node: usize, color: tiny_skia::Color| {
         if node < data.node_count {
             let mx = phase_to_x(layout, a[node].time);
-            draw_rect(pm, mx - 3.0, ly + 2.0, 6.0, lh - 4.0, color);
+            draw_rect(pm, mx - 3.0 * scale, ly + 2.0 * scale, 6.0 * scale, lh - 4.0 * scale, color);
         }
     };
     match data.hold {
