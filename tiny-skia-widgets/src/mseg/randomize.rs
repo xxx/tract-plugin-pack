@@ -101,6 +101,17 @@ fn snap_value(v: f32, steps: u32) -> f32 {
     (v * s).round().clamp(0.0, s) / s
 }
 
+/// A node count scaled to the time grid: a random value between `lo_frac` and
+/// `hi_frac` of `grid_count`, clamped to a usable `[3, MAX_NODES]` range. This
+/// ties every style's density to the grid — a finer grid yields a busier
+/// randomization — without forcing an exact one-node-per-cell match.
+fn grid_scaled_count(rng: &mut Rng, grid_count: usize, lo_frac: f32, hi_frac: f32) -> usize {
+    let scale = |f: f32| ((grid_count as f32 * f).round() as usize).clamp(3, MAX_NODES);
+    let lo = scale(lo_frac);
+    let hi = scale(hi_frac);
+    rng.range_usize(lo.min(hi), lo.max(hi))
+}
+
 /// Regenerate `data.nodes` / `data.node_count` in the given `style`.
 /// Deterministic given `seed`. Leaves `play_mode`, `sync_mode`, timing, and
 /// grid settings untouched. Any `hold` left referencing an out-of-range node
@@ -108,15 +119,16 @@ fn snap_value(v: f32, steps: u32) -> f32 {
 pub fn randomize(data: &mut MsegData, style: RandomStyle, seed: u32) {
     let mut rng = Rng::new(seed);
 
-    // Node count. Stepped/Spiky fill the time grid (one node per cell, +1 for
-    // the closing endpoint), capped at MAX_NODES. Smooth/Ramps are sparse.
-    // Chaos picks freely.
+    // Node count — every style scales with the time grid. Stepped/Spiky fill
+    // it exactly (one node per cell, +1 for the closing endpoint). Smooth,
+    // Ramps, and Chaos take a randomized fraction of it: sparse for Smooth,
+    // a little denser for Ramps, densest for Chaos.
     let grid_count = (data.time_divisions as usize + 1).clamp(2, MAX_NODES);
     let count = match style {
         RandomStyle::Stepped | RandomStyle::Spiky => grid_count,
-        RandomStyle::Smooth => rng.range_usize(4, 8),
-        RandomStyle::Ramps => rng.range_usize(3, 6),
-        RandomStyle::Chaos => rng.range_usize(3, 16.min(MAX_NODES)),
+        RandomStyle::Smooth => grid_scaled_count(&mut rng, grid_count, 0.25, 0.5),
+        RandomStyle::Ramps => grid_scaled_count(&mut rng, grid_count, 0.35, 0.6),
+        RandomStyle::Chaos => grid_scaled_count(&mut rng, grid_count, 0.6, 1.0),
     };
 
     // Tracks the previous node's value so `Smooth` can place each node in the
@@ -288,6 +300,33 @@ mod tests {
             let hi = d.active().iter().map(|n| n.value).fold(0.0_f32, f32::max);
             assert!(lo <= 0.45, "seed {seed}: no low node (min {lo})");
             assert!(hi >= 0.55, "seed {seed}: no high node (max {hi})");
+        }
+    }
+
+    #[test]
+    fn node_count_scales_with_the_grid() {
+        // Every non-stepped style ties its node count to the time grid: a
+        // finer grid yields a busier randomization. Compare a coarse grid
+        // (4 divisions) against a fine one (32), summed over many seeds.
+        for style in [RandomStyle::Smooth, RandomStyle::Ramps, RandomStyle::Chaos] {
+            let mut coarse_total = 0usize;
+            let mut fine_total = 0usize;
+            for seed in 0..16u32 {
+                let mut c = MsegData::default();
+                c.time_divisions = 4;
+                randomize(&mut c, style, seed);
+                coarse_total += c.node_count;
+
+                let mut f = MsegData::default();
+                f.time_divisions = 32;
+                randomize(&mut f, style, seed);
+                fine_total += f.node_count;
+            }
+            assert!(
+                fine_total > coarse_total,
+                "{style:?}: fine grid ({fine_total}) should yield more nodes \
+                 than coarse ({coarse_total})"
+            );
         }
     }
 
