@@ -107,6 +107,61 @@ pub fn bake_taps(data: &MsegData, len: usize, out: &mut [f32; MAX_KERNEL]) -> us
     len
 }
 
+use realfft::RealFftPlanner;
+use rustfft::num_complex::Complex;
+
+/// Below this peak magnitude the kernel is treated as all-zero (dry
+/// passthrough) — guards the normalization divide.
+const ZERO_EPS: f32 = 1e-9;
+
+/// Bake `data` into a normalized `Kernel` for a kernel of `len` taps.
+///
+/// Runs on the GUI thread (an O(`len` log `len`) FFT) — never the audio
+/// thread. Steps: single-walk bake -> `MAX_KERNEL`-point FFT -> peak |H(k)|
+/// -> divide taps and mags by the peak. A peak below `ZERO_EPS` (e.g. the
+/// flat-0.5 default) yields an all-zero `is_zero` kernel.
+pub fn bake(data: &MsegData, len: usize) -> Kernel {
+    let mut taps = [0.0_f32; MAX_KERNEL];
+    let len = bake_taps(data, len, &mut taps);
+
+    let mut planner = RealFftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(MAX_KERNEL);
+    let mut fft_in = taps; // a MAX_KERNEL copy (taps beyond len are zero)
+    let mut spectrum = vec![Complex::new(0.0_f32, 0.0); MAG_BINS];
+    fft.process(&mut fft_in, &mut spectrum)
+        .expect("FFT length matches planner");
+
+    let mut mags = [0.0_f32; MAG_BINS];
+    let mut peak = 0.0_f32;
+    for (m, c) in mags.iter_mut().zip(spectrum.iter()) {
+        *m = c.norm();
+        peak = peak.max(*m);
+    }
+
+    if peak <= ZERO_EPS {
+        return Kernel {
+            taps: [0.0; MAX_KERNEL],
+            len,
+            mags: [0.0; MAG_BINS],
+            is_zero: true,
+        };
+    }
+
+    let inv = 1.0 / peak;
+    for t in taps.iter_mut() {
+        *t *= inv;
+    }
+    for m in mags.iter_mut() {
+        *m *= inv;
+    }
+    Kernel {
+        taps,
+        len,
+        mags,
+        is_zero: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +236,34 @@ mod tests {
     #[test]
     fn default_flat_curve_is_valid() {
         assert!(default_flat_curve().is_valid());
+    }
+
+    #[test]
+    fn bake_of_flat_half_is_a_zero_kernel() {
+        let k = bake(&default_flat_curve(), 256);
+        assert!(k.is_zero, "flat 0.5 default must bake to a zero kernel");
+        assert_eq!(k.len, 256);
+    }
+
+    #[test]
+    fn nonzero_kernel_has_unity_peak_magnitude() {
+        let k = bake(&MsegData::default(), 512);
+        assert!(!k.is_zero);
+        let peak = k.mags[..MAG_BINS].iter().cloned().fold(0.0_f32, f32::max);
+        assert!((peak - 1.0).abs() < 1e-3, "peak magnitude {peak}, expected 1.0");
+    }
+
+    #[test]
+    fn zero_kernel_skips_normalization_without_panic() {
+        let k = bake(&default_flat_curve(), 256);
+        assert!(k.is_zero);
+        assert!(k.taps[..k.len].iter().all(|&t| t == 0.0));
+        assert!(k.mags.iter().all(|&m| m == 0.0));
+    }
+
+    #[test]
+    fn bake_length_round_trips_into_kernel_len() {
+        let k = bake(&MsegData::default(), 100);
+        assert_eq!(k.len, 96); // rounded to a multiple of 16
     }
 }
