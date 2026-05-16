@@ -154,55 +154,16 @@ impl PhaselessChannel {
         self.out_pos = 0;
     }
 
-    /// Process one sample. Output is delayed by `PHASELESS_HOP` samples.
+    /// Process one sample. Output is always delayed by `PHASELESS_HOP` samples.
     ///
-    /// When `kernel.is_zero` the sample is passed through dry (no STFT work).
+    /// Both zero and non-zero kernels route through the STFT — the engine's
+    /// inherent `PHASELESS_HOP` latency is uniform regardless of kernel, so it
+    /// matches the fixed latency miff reports to the host in Phaseless mode.
+    /// A zero kernel maps to per-bin gain 1.0 (identity) inside `process_frame`,
+    /// so it becomes a *delayed* dry passthrough — never a 0-delay bypass,
+    /// which would play 2048 samples early against the host's delay
+    /// compensation.
     pub fn process(&mut self, sample: f32, kernel: &Kernel) -> f32 {
-        if kernel.is_zero {
-            // Dry passthrough: still must advance the STFT state so that
-            // switching to a non-zero kernel stays phase-coherent, but we can
-            // return the input directly since the kernel is unity (all-ones
-            // magnitude effectively is passthrough, and is_zero = true means
-            // we skip processing entirely and just pass audio).
-            //
-            // Update the input ring buffer so a later kernel change has correct
-            // history, but read back the delayed output (or just return input
-            // directly, matching the Raw channel's zero-kernel spec: "dry
-            // passthrough" = the live sample, not the delayed sample).
-            // The spec says zero kernel → dry passthrough, which for STFT means
-            // returning the undelayed input just like RawChannel does.
-            self.in_buf[self.in_pos] = sample;
-
-            // Trigger frame if needed (keep the overlap-add machinery running
-            // so state is consistent; gain=1 for each bin = identity STFT).
-            if self.out_pos == 0 {
-                // Shift the second hop of out_buf into first, clear the second.
-                self.out_buf.copy_within(PHASELESS_HOP..STFT_FRAME, 0);
-                self.out_buf[PHASELESS_HOP..].fill(0.0);
-                Self::process_frame_static(
-                    &self.in_buf,
-                    self.in_pos,
-                    &mut self.out_buf,
-                    None, // is_zero → identity mags
-                    &self.window,
-                    &self.fft,
-                    &self.ifft,
-                    &mut self.scratch_time,
-                    &mut self.scratch_freq,
-                );
-            }
-
-            self.in_pos = (self.in_pos + 1) & (STFT_FRAME - 1);
-            self.out_pos += 1;
-            if self.out_pos >= PHASELESS_HOP {
-                self.out_pos = 0;
-            }
-
-            // Dry passthrough: return the input sample directly (no latency),
-            // matching RawChannel's zero-kernel behavior.
-            return sample;
-        }
-
         // When out_pos is 0 (start of a new hop), process the next STFT frame.
         if self.out_pos == 0 {
             // Shift the second hop of out_buf into the first half, clear second.
@@ -212,7 +173,7 @@ impl PhaselessChannel {
                 &self.in_buf,
                 self.in_pos,
                 &mut self.out_buf,
-                Some(&kernel.mags),
+                kernel,
                 &self.window,
                 &self.fft,
                 &self.ifft,
@@ -223,7 +184,7 @@ impl PhaselessChannel {
 
         // Write the new input sample into the circular buffer.
         self.in_buf[self.in_pos] = sample;
-        // Read the current output sample.
+        // Read the current (delayed) output sample.
         let out = self.out_buf[self.out_pos];
 
         // Advance positions.
@@ -244,13 +205,16 @@ impl PhaselessChannel {
     /// `1/N` scale reduces this to a flat `0.5` gain — which is the correct
     /// normalization for Hann-windowed 50% OLA.
     ///
-    /// `mags`: `None` → identity (all-ones), `Some(slice)` → per-bin gain.
+    /// Per-bin gain: `1.0` when `kernel.is_zero` (identity — a delayed dry
+    /// passthrough), otherwise `kernel.mags[bin]`. A zero kernel has all-zero
+    /// `mags`, so blindly multiplying would produce silence — the `is_zero`
+    /// branch is what keeps the zero-kernel path a passthrough.
     #[allow(clippy::too_many_arguments)]
     fn process_frame_static(
         in_buf: &[f32],
         in_pos: usize,
         out_buf: &mut [f32],
-        mags: Option<&[f32; MAG_BINS]>,
+        kernel: &Kernel,
         window: &[f32],
         fft: &Arc<dyn RealToComplex<f32>>,
         ifft: &Arc<dyn ComplexToReal<f32>>,
@@ -266,14 +230,11 @@ impl PhaselessChannel {
         if fft.process(scratch_time, scratch_freq).is_err() {
             return;
         }
-        // Multiply each bin by the kernel magnitude (real scalar, preserves phase).
-        match mags {
-            None => { /* identity: no multiply needed */ }
-            Some(m) => {
-                for (bin, &mag) in scratch_freq.iter_mut().zip(m.iter()) {
-                    *bin *= mag;
-                }
-            }
+        // Multiply each bin by the kernel magnitude (real scalar, preserves
+        // phase). A zero kernel uses gain 1.0 — identity, not silence.
+        for (bin, &mag) in scratch_freq.iter_mut().zip(kernel.mags.iter()) {
+            let gain = if kernel.is_zero { 1.0 } else { mag };
+            *bin *= gain;
         }
         if ifft.process(scratch_freq, scratch_time).is_err() {
             return;
