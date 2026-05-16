@@ -32,11 +32,12 @@ pub fn default_editor_state() -> Arc<EditorState> {
 // ── Hit actions ─────────────────────────────────────────────────────────
 
 /// Hit actions for miff's editor.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum HitAction {
-    // placeholder — replaced by the real hit-action variants in Task 10
-    #[allow(dead_code)]
-    Placeholder,
+    ModeSelector,
+    MixDial,
+    GainDial,
+    LengthDial,
 }
 
 // ── Layout ───────────────────────────────────────────────────────────────
@@ -59,6 +60,61 @@ pub(crate) fn layout(w: f32, h: f32) -> (
     let strip_rect = (0.0, mseg_h + response_h, w, strip_h);
 
     (mseg_rect, response_rect, strip_rect)
+}
+
+// ── Strip layout helper ──────────────────────────────────────────────────
+
+/// Sizing constants for the bottom control strip.
+const STRIP_PAD: f32 = 8.0;
+const MODE_W: f32 = 160.0;
+const MODE_H: f32 = 28.0;
+const DIAL_RADIUS: f32 = 26.0;
+
+/// Compute the four control rects within `strip_rect` at `scale`.
+///
+/// Returns `Vec<((x, y, w, h), HitAction)>` for each control, left→right:
+/// Mode selector, Mix dial, Gain dial, Length dial.
+/// This is a pure function and is unit-testable without a window.
+pub(crate) fn strip_regions(
+    strip_rect: (f32, f32, f32, f32),
+    scale: f32,
+) -> Vec<((f32, f32, f32, f32), HitAction)> {
+    let (sx, sy, sw, sh) = strip_rect;
+    let pad = STRIP_PAD * scale;
+    let mode_w = MODE_W * scale;
+    let mode_h = MODE_H * scale;
+
+    // Mode selector: left-aligned, vertically centred in the strip.
+    let mode_x = sx + pad;
+    let mode_y = sy + (sh - mode_h) * 0.5;
+
+    // Three dials share the remaining horizontal space to the right.
+    let dials_x_start = mode_x + mode_w + pad;
+    let dials_region_w = (sx + sw) - dials_x_start - pad;
+    let dial_hit = DIAL_RADIUS * 3.2 * scale;
+    let dial_cy = sy + sh * 0.5;
+
+    // Place three dials evenly across dials_region_w.
+    let dial_labels = [
+        (HitAction::MixDial, 0usize),
+        (HitAction::GainDial, 1),
+        (HitAction::LengthDial, 2),
+    ];
+    let n_dials = 3_f32;
+    let slot_w = dials_region_w / n_dials;
+
+    let mut regions = Vec::with_capacity(4);
+
+    regions.push(((mode_x, mode_y, mode_w, mode_h), HitAction::ModeSelector));
+
+    for (action, idx) in dial_labels {
+        let cx = dials_x_start + slot_w * (idx as f32 + 0.5);
+        let rx = cx - dial_hit * 0.5;
+        let ry = dial_cy - dial_hit * 0.5;
+        regions.push(((rx, ry, dial_hit, dial_hit), action));
+    }
+
+    regions
 }
 
 // ── Window handler ──────────────────────────────────────────────────────
@@ -177,27 +233,8 @@ impl MiffWindow {
             );
         }
 
-        // ── Bottom strip (~16%) — placeholder until Task 10 ─────────────────
-        {
-            let (sx, sy, sw, sh) = strip_rect;
-            widgets::draw_rect(
-                &mut self.surface.pixmap,
-                sx,
-                sy,
-                sw,
-                sh,
-                widgets::color_bg(),
-            );
-            widgets::draw_rect_outline(
-                &mut self.surface.pixmap,
-                sx,
-                sy,
-                sw,
-                sh,
-                widgets::color_border(),
-                1.0,
-            );
-        }
+        // ── Bottom strip (~16%) ────────────────────────────────────────────
+        self.draw_strip(strip_rect, s);
     }
 
     fn resize_buffers(&mut self) {
@@ -205,6 +242,121 @@ impl MiffWindow {
         let ph = self.physical_height.max(1);
         self.surface.resize(pw, ph);
         self.params.editor_state.store_size(pw, ph);
+    }
+
+    /// Draw the bottom control strip: Mode stepped selector + Mix/Gain/Length dials.
+    /// Also registers hit regions into `self.drag` for all four controls.
+    fn draw_strip(&mut self, strip_rect: (f32, f32, f32, f32), scale: f32) {
+        use nih_plug::prelude::Param;
+
+        let regions = strip_regions(strip_rect, scale);
+
+        // Mode selector active index: Raw = 0, Phaseless = 1.
+        let mode_idx = if self.params.mode.value() == crate::MiffMode::Raw {
+            0usize
+        } else {
+            1
+        };
+
+        for ((rx, ry, rw, rh), action) in regions {
+            match action {
+                HitAction::ModeSelector => {
+                    widgets::draw_stepped_selector(
+                        &mut self.surface.pixmap,
+                        &mut self.text_renderer,
+                        rx,
+                        ry,
+                        rw,
+                        rh,
+                        &["Raw", "Phaseless"],
+                        mode_idx,
+                    );
+                }
+                HitAction::MixDial => {
+                    let p = &self.params.mix;
+                    let unmod = p.unmodulated_normalized_value();
+                    let modulated = p.modulated_normalized_value();
+                    let value_text = p.normalized_value_to_string(modulated, true);
+                    let editing_buf = self
+                        .text_edit
+                        .active_for(&HitAction::MixDial)
+                        .map(str::to_owned);
+                    let caret = self.text_edit.caret_visible();
+                    let cx = rx + rw * 0.5;
+                    let cy = ry + rh * 0.5;
+                    let radius = DIAL_RADIUS * scale;
+                    widgets::draw_dial_ex(
+                        &mut self.surface.pixmap,
+                        &mut self.text_renderer,
+                        cx,
+                        cy,
+                        radius,
+                        "Mix",
+                        &value_text,
+                        unmod,
+                        Some(modulated),
+                        editing_buf.as_deref(),
+                        caret,
+                    );
+                }
+                HitAction::GainDial => {
+                    let p = &self.params.gain;
+                    let unmod = p.unmodulated_normalized_value();
+                    let modulated = p.modulated_normalized_value();
+                    let value_text = p.normalized_value_to_string(modulated, true);
+                    let editing_buf = self
+                        .text_edit
+                        .active_for(&HitAction::GainDial)
+                        .map(str::to_owned);
+                    let caret = self.text_edit.caret_visible();
+                    let cx = rx + rw * 0.5;
+                    let cy = ry + rh * 0.5;
+                    let radius = DIAL_RADIUS * scale;
+                    widgets::draw_dial_ex(
+                        &mut self.surface.pixmap,
+                        &mut self.text_renderer,
+                        cx,
+                        cy,
+                        radius,
+                        "Gain",
+                        &value_text,
+                        unmod,
+                        Some(modulated),
+                        editing_buf.as_deref(),
+                        caret,
+                    );
+                }
+                HitAction::LengthDial => {
+                    let p = &self.params.length;
+                    let unmod = p.unmodulated_normalized_value();
+                    let modulated = p.modulated_normalized_value();
+                    let value_text = p.normalized_value_to_string(modulated, true);
+                    let editing_buf = self
+                        .text_edit
+                        .active_for(&HitAction::LengthDial)
+                        .map(str::to_owned);
+                    let caret = self.text_edit.caret_visible();
+                    let cx = rx + rw * 0.5;
+                    let cy = ry + rh * 0.5;
+                    let radius = DIAL_RADIUS * scale;
+                    widgets::draw_dial_ex(
+                        &mut self.surface.pixmap,
+                        &mut self.text_renderer,
+                        cx,
+                        cy,
+                        radius,
+                        "Length",
+                        &value_text,
+                        unmod,
+                        Some(modulated),
+                        editing_buf.as_deref(),
+                        caret,
+                    );
+                }
+            }
+            // Register hit region for every control.
+            self.drag.push_region(rx, ry, rw, rh, action);
+        }
     }
 }
 
@@ -410,6 +562,38 @@ mod tests {
         assert!((mseg.2 - w).abs() < 0.01);
         assert!((response.2 - w).abs() < 0.01);
         assert!((strip.2 - w).abs() < 0.01);
+    }
+
+    #[test]
+    fn strip_regions_are_within_strip_and_disjoint() {
+        let w = 880.0_f32;
+        let h = 620.0_f32;
+        let (_, _, strip_rect) = layout(w, h);
+        let (sx, sy, sw, sh) = strip_rect;
+
+        let regions = strip_regions(strip_rect, 1.0);
+        assert_eq!(regions.len(), 4, "expected exactly 4 control regions");
+
+        // All rects must lie inside the strip.
+        for ((rx, ry, rw, rh), action) in &regions {
+            assert!(
+                rx >= &sx && ry >= &sy && rx + rw <= sx + sw + 0.5 && ry + rh <= sy + sh + 0.5,
+                "{action:?} rect ({rx},{ry},{rw},{rh}) falls outside strip ({sx},{sy},{sw},{sh})"
+            );
+        }
+
+        // All rects must be pairwise non-overlapping.
+        for i in 0..regions.len() {
+            for j in (i + 1)..regions.len() {
+                let ((ax, ay, aw, ah), a_action) = regions[i];
+                let ((bx, by, bw, bh), b_action) = regions[j];
+                let overlap = ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+                assert!(
+                    !overlap,
+                    "{a_action:?} and {b_action:?} rects overlap"
+                );
+            }
+        }
     }
 
     #[test]
