@@ -3,6 +3,8 @@
 //! A self-contained module — no plugin or GUI types — so a future
 //! workspace-wide shared-DSP refactor can lift it cleanly.
 
+use std::sync::Mutex;
+
 use realfft::RealFftPlanner;
 use rustfft::num_complex::Complex;
 use tiny_skia_widgets::mseg::{warp, MsegData, MsegNode};
@@ -39,6 +41,45 @@ impl Default for Kernel {
             mags: [0.0; MAG_BINS],
             is_zero: true,
         }
+    }
+}
+
+/// GUI→audio `Kernel` handoff. `Mutex<Kernel>` + an audio-thread `try_lock`,
+/// matching wavetable-filter's reload-handoff pattern. The kernel only changes
+/// on a GUI edit, so audio-thread lock contention is negligible; on the rare
+/// miss the audio thread keeps its previous kernel for one buffer.
+///
+/// Wrap this in an `Arc` to share it between the GUI editor and the audio
+/// `process()`.
+pub struct KernelHandoff {
+    shared: Mutex<Kernel>,
+}
+
+impl KernelHandoff {
+    /// A fresh handoff holding the default (zero) kernel.
+    pub fn new() -> Self {
+        Self {
+            shared: Mutex::new(Kernel::default()),
+        }
+    }
+
+    /// Publish a freshly-baked kernel. GUI thread.
+    pub fn publish(&self, kernel: Kernel) {
+        if let Ok(mut slot) = self.shared.lock() {
+            *slot = kernel;
+        }
+    }
+
+    /// Try to read the latest kernel. Audio thread — non-blocking. Returns
+    /// `None` on a (rare) lock miss; the caller keeps its previous kernel.
+    pub fn try_read(&self) -> Option<Kernel> {
+        self.shared.try_lock().ok().map(|slot| *slot)
+    }
+}
+
+impl Default for KernelHandoff {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -264,5 +305,32 @@ mod tests {
     fn bake_length_round_trips_into_kernel_len() {
         let k = bake(&MsegData::default(), 100);
         assert_eq!(k.len, 96); // rounded to a multiple of 16
+    }
+
+    #[test]
+    fn handoff_hands_off_the_latest_kernel() {
+        let h = KernelHandoff::new();
+        // Initially: a zero kernel.
+        assert!(h.try_read().unwrap().is_zero);
+        // Publish a non-zero kernel.
+        h.publish(bake(&MsegData::default(), 512));
+        let k = h.try_read().unwrap();
+        assert!(!k.is_zero);
+        assert_eq!(k.len, 512);
+    }
+
+    #[test]
+    fn handoff_publish_is_visible_to_next_read() {
+        let h = KernelHandoff::new();
+        h.publish(bake(&MsegData::default(), 128));
+        assert_eq!(h.try_read().unwrap().len, 128);
+        h.publish(bake(&MsegData::default(), 256));
+        assert_eq!(h.try_read().unwrap().len, 256); // newest wins
+    }
+
+    #[test]
+    fn handoff_read_without_publish_is_the_default_zero_kernel() {
+        let h = KernelHandoff::new();
+        assert!(h.try_read().unwrap().is_zero);
     }
 }
