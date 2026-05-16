@@ -135,8 +135,7 @@ impl PhaselessChannel {
         // Matches wavetable-filter's `stft_window` construction exactly.
         let window: Vec<f32> = (0..STFT_FRAME)
             .map(|i| {
-                0.5 * (1.0
-                    - (2.0 * std::f32::consts::PI * i as f32 / STFT_FRAME as f32).cos())
+                0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / STFT_FRAME as f32).cos())
             })
             .collect();
         let scratch_fwd = fft.make_scratch_vec();
@@ -302,7 +301,10 @@ mod tests {
         let input = [0.5, -0.3, 0.9, 0.1];
         for &s in &input {
             let out = ch.process(s, &k);
-            assert!((out - s).abs() < 1e-6, "impulse kernel must pass {s} through, got {out}");
+            assert!(
+                (out - s).abs() < 1e-6,
+                "impulse kernel must pass {s} through, got {out}"
+            );
         }
     }
 
@@ -311,7 +313,10 @@ mod tests {
         let k = Kernel::default(); // is_zero
         let mut ch = RawChannel::new();
         for &s in &[0.7, -0.4, 0.2] {
-            assert!((ch.process(s, &k) - s).abs() < 1e-6, "zero kernel must pass through");
+            assert!(
+                (ch.process(s, &k) - s).abs() < 1e-6,
+                "zero kernel must pass through"
+            );
         }
     }
 
@@ -337,7 +342,10 @@ mod tests {
         for _ in 0..8192 {
             last = ch.process(0.5, &k);
         }
-        assert!((last - 0.5).abs() < 1e-3, "zero kernel must pass through, got {last}");
+        assert!(
+            (last - 0.5).abs() < 1e-3,
+            "zero kernel must pass through, got {last}"
+        );
     }
 
     #[test]
@@ -353,7 +361,10 @@ mod tests {
         for _ in 0..16384 {
             last = ch.process(0.5, &k);
         }
-        assert!((last - 0.5).abs() < 5e-3, "flat magnitude ~unity, got {last}");
+        assert!(
+            (last - 0.5).abs() < 5e-3,
+            "flat magnitude ~unity, got {last}"
+        );
     }
 
     #[test]

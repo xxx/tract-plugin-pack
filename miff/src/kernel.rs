@@ -223,7 +223,10 @@ mod tests {
         let mut out = [9.9_f32; MAX_KERNEL];
         let len = bake_taps(&d, 256, &mut out);
         assert_eq!(len, 256);
-        assert!(out[..len].iter().all(|&t| t.abs() < 1e-6), "flat 0.5 -> zero taps");
+        assert!(
+            out[..len].iter().all(|&t| t.abs() < 1e-6),
+            "flat 0.5 -> zero taps"
+        );
         assert!(
             out[len..].iter().all(|&t| t == 0.0),
             "bake_taps must zero-pad the tail beyond len"
@@ -237,7 +240,10 @@ mod tests {
         d.nodes[1].value = 1.0;
         let mut out = [0.0_f32; MAX_KERNEL];
         let len = bake_taps(&d, 128, &mut out);
-        assert!(out[..len].iter().all(|&t| (t - 1.0).abs() < 1e-6), "value 1.0 -> +1 taps");
+        assert!(
+            out[..len].iter().all(|&t| (t - 1.0).abs() < 1e-6),
+            "value 1.0 -> +1 taps"
+        );
     }
 
     #[test]
@@ -300,7 +306,10 @@ mod tests {
         let k = bake(&MsegData::default(), 512);
         assert!(!k.is_zero);
         let peak = k.mags.iter().cloned().fold(0.0_f32, f32::max);
-        assert!((peak - 1.0).abs() < 1e-3, "peak magnitude {peak}, expected 1.0");
+        assert!(
+            (peak - 1.0).abs() < 1e-3,
+            "peak magnitude {peak}, expected 1.0"
+        );
     }
 
     #[test]

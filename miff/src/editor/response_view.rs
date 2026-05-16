@@ -16,8 +16,7 @@ const DB_RANGE: f32 = DB_CEIL - DB_FLOOR; // 48.0
 
 /// Map a frequency in Hz to a normalised [0, 1] x position on the log axis.
 fn freq_to_x_norm(freq_hz: f32) -> f32 {
-    ((freq_hz.max(FREQ_MIN).ln() - FREQ_MIN.ln()) / (FREQ_MAX.ln() - FREQ_MIN.ln()))
-        .clamp(0.0, 1.0)
+    ((freq_hz.max(FREQ_MIN).ln() - FREQ_MIN.ln()) / (FREQ_MAX.ln() - FREQ_MIN.ln())).clamp(0.0, 1.0)
 }
 
 fn stroke_line(
@@ -75,7 +74,13 @@ pub fn draw_response(
         if let Some(path) = pb.finish() {
             let mut paint = Paint::default();
             paint.set_color_rgba8(20, 22, 28, 255);
-            pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+            pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
 
             let mut border = Paint::default();
             border.set_color_rgba8(60, 60, 70, 255);
@@ -137,8 +142,7 @@ pub fn draw_response(
     // The "floor" guard: if no bin exceeds -48 dB the polygon has zero height
     // and tiny-skia prints a warning. Skip the fill in that case.
     let mag_floor = 10f32.powf(DB_FLOOR / 20.0); // amplitude at -48 dB
-    let has_audio = !input_mags.is_empty()
-        && input_mags.iter().any(|&m| m > mag_floor);
+    let has_audio = !input_mags.is_empty() && input_mags.iter().any(|&m| m > mag_floor);
     if has_audio {
         let num_input_bins = input_mags.len();
         // Treat the last bin as the Nyquist limit (20 kHz for display).
@@ -167,7 +171,13 @@ pub fn draw_response(
             let mut paint = Paint::default();
             paint.set_color_rgba8(255, 200, 100, 25);
             paint.anti_alias = true;
-            pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+            pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
         }
     }
 
@@ -321,7 +331,14 @@ mod tests {
         let mut pm = Pixmap::new(400, 150).unwrap();
         let mut tr = make_text_renderer();
         let zero_mags = vec![0.0_f32; 2049];
-        draw_response(&mut pm, &mut tr, (0.0, 0.0, 400.0, 150.0), &zero_mags, &[], 1.0);
+        draw_response(
+            &mut pm,
+            &mut tr,
+            (0.0, 0.0, 400.0, 150.0),
+            &zero_mags,
+            &[],
+            1.0,
+        );
         // Just verifying no panic.
     }
 
@@ -340,7 +357,14 @@ mod tests {
         // Fake input spectrum: all bins at 0.5 magnitude.
         let input_mags = vec![0.5_f32; 1025];
 
-        draw_response(&mut pm, &mut tr, (0.0, 0.0, w as f32, h as f32), &k.mags, &input_mags, 1.0);
+        draw_response(
+            &mut pm,
+            &mut tr,
+            (0.0, 0.0, w as f32, h as f32),
+            &k.mags,
+            &input_mags,
+            1.0,
+        );
 
         // Verify a pixel is painted.
         let sample_x = w / 2;
@@ -364,7 +388,14 @@ mod tests {
         let floor = 10f32.powf(-48.0 / 20.0);
         let silent_mags = vec![floor * 0.5; 1025];
 
-        draw_response(&mut pm, &mut tr, (0.0, 0.0, 400.0, 150.0), &k.mags, &silent_mags, 1.0);
+        draw_response(
+            &mut pm,
+            &mut tr,
+            (0.0, 0.0, 400.0, 150.0),
+            &k.mags,
+            &silent_mags,
+            1.0,
+        );
         // Just verifying no panic.
     }
 

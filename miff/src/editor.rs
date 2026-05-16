@@ -20,11 +20,6 @@ use crate::MiffParams;
 // ── Event target ─────────────────────────────────────────────────────────
 
 /// Where an input event should be dispatched.
-//
-// Referenced only by `MiffWindow::on_event`. `MiffWindow` is not constructed
-// outside `#[cfg(test)]` until Task 13 wires `create()` into `Plugin::editor()`,
-// so the reachability analysis flags this chain as dead until then.
-#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum EventTarget {
     /// The event is inside the MSEG editor region.
@@ -34,8 +29,7 @@ pub(crate) enum EventTarget {
 }
 
 /// Pure routing helper: `Mseg` if `(x, y)` is inside `mseg_rect`, else `Controls`.
-/// Unit-testable without a window. See the `EventTarget` note re: `dead_code`.
-#[allow(dead_code)]
+/// Unit-testable without a window.
 pub(crate) fn event_target(mseg_rect: (f32, f32, f32, f32), x: f32, y: f32) -> EventTarget {
     let (rx, ry, rw, rh) = mseg_rect;
     if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
@@ -47,10 +41,8 @@ pub(crate) fn event_target(mseg_rect: (f32, f32, f32, f32), x: f32, y: f32) -> E
 
 pub const WINDOW_WIDTH: u32 = 880;
 pub const WINDOW_HEIGHT: u32 = 620;
-// Used in the Resized event handler; wired into host-resize in Task 13.
-#[allow(dead_code)]
+// Used in the Resized event handler.
 const MIN_WIDTH: u32 = 680;
-#[allow(dead_code)]
 const MIN_HEIGHT: u32 = 480;
 
 pub use widgets::EditorState;
@@ -75,7 +67,10 @@ pub(crate) enum HitAction {
 /// Compute the three editor regions from physical pixel dimensions.
 /// Returns `(mseg_rect, response_rect, strip_rect)` each as `(x, y, w, h)`.
 #[allow(clippy::type_complexity)]
-pub(crate) fn layout(w: f32, h: f32) -> (
+pub(crate) fn layout(
+    w: f32,
+    h: f32,
+) -> (
     (f32, f32, f32, f32),
     (f32, f32, f32, f32),
     (f32, f32, f32, f32),
@@ -148,8 +143,6 @@ pub(crate) fn strip_regions(
 
 // ── Window handler ──────────────────────────────────────────────────────
 
-// Fields wired up in Tasks 10-12
-#[allow(dead_code)]
 struct MiffWindow {
     gui_context: Arc<dyn GuiContext>,
     surface: widgets::SoftbufferSurface,
@@ -183,8 +176,6 @@ struct MiffWindow {
     mseg_last_click_pos: (f32, f32),
 }
 
-// Methods wired up in Tasks 10-12 (draw path) and Task 13 (spawn).
-#[allow(dead_code)]
 impl MiffWindow {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -252,12 +243,7 @@ impl MiffWindow {
 
         // ── MSEG region (top ~55%) ──────────────────────────────────────────
         // Lock the curve, copy the `Copy` value out, then release before drawing.
-        let curve = self
-            .params
-            .curve
-            .lock()
-            .map(|c| *c)
-            .unwrap_or_default();
+        let curve = self.params.curve.lock().map(|c| *c).unwrap_or_default();
 
         widgets::mseg::draw_mseg(
             &mut self.surface.pixmap,
@@ -704,13 +690,8 @@ impl baseview::WindowHandler for MiffWindow {
                         if is_double {
                             let changed = {
                                 if let Ok(mut curve) = self.params.curve.lock() {
-                                    self.mseg_state.on_double_click(
-                                        x,
-                                        y,
-                                        &mut curve,
-                                        mseg_rect,
-                                        s,
-                                    )
+                                    self.mseg_state
+                                        .on_double_click(x, y, &mut curve, mseg_rect, s)
                                 } else {
                                     None
                                 }
@@ -776,8 +757,7 @@ impl baseview::WindowHandler for MiffWindow {
                                         setter.end_set_parameter(p);
                                     } else {
                                         use nih_plug::prelude::Param;
-                                        let norm =
-                                            self.params.mix.unmodulated_normalized_value();
+                                        let norm = self.params.mix.unmodulated_normalized_value();
                                         self.drag.begin_drag(
                                             HitAction::MixDial,
                                             norm,
@@ -799,8 +779,7 @@ impl baseview::WindowHandler for MiffWindow {
                                         setter.end_set_parameter(p);
                                     } else {
                                         use nih_plug::prelude::Param;
-                                        let norm =
-                                            self.params.gain.unmodulated_normalized_value();
+                                        let norm = self.params.gain.unmodulated_normalized_value();
                                         self.drag.begin_drag(
                                             HitAction::GainDial,
                                             norm,
@@ -909,13 +888,8 @@ impl baseview::WindowHandler for MiffWindow {
                         // Right-click in MSEG: toggle segment stepped flag.
                         let changed = {
                             if let Ok(mut curve) = self.params.curve.lock() {
-                                self.mseg_state.on_right_click(
-                                    x,
-                                    y,
-                                    &mut curve,
-                                    mseg_rect,
-                                    s,
-                                )
+                                self.mseg_state
+                                    .on_right_click(x, y, &mut curve, mseg_rect, s)
                             } else {
                                 None
                             }
@@ -976,8 +950,6 @@ impl baseview::WindowHandler for MiffWindow {
 
 // ── Editor trait implementation ─────────────────────────────────────────
 
-// Wired into Plugin::editor() in Task 13.
-#[allow(dead_code)]
 pub(crate) struct MiffEditor {
     params: Arc<MiffParams>,
     kernel_handoff: Arc<crate::kernel::KernelHandoff>,
@@ -986,8 +958,6 @@ pub(crate) struct MiffEditor {
     pending_resize: Arc<AtomicU64>,
 }
 
-// Called from Plugin::editor() in Task 13.
-#[allow(dead_code)]
 pub(crate) fn create(
     params: Arc<MiffParams>,
     kernel_handoff: Arc<crate::kernel::KernelHandoff>,
@@ -1157,10 +1127,7 @@ mod tests {
                 let ((ax, ay, aw, ah), a_action) = regions[i];
                 let ((bx, by, bw, bh), b_action) = regions[j];
                 let overlap = ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
-                assert!(
-                    !overlap,
-                    "{a_action:?} and {b_action:?} rects overlap"
-                );
+                assert!(!overlap, "{a_action:?} and {b_action:?} rects overlap");
             }
         }
     }
@@ -1169,9 +1136,9 @@ mod tests {
     fn draw_smoke_headless() {
         // Draw into a Pixmap directly to verify the draw path doesn't panic and
         // leaves a non-zero-alpha pixel inside the MSEG region.
-        use tiny_skia_widgets::mseg::{draw_mseg, MsegEditState};
-        use tiny_skia_widgets::{TextRenderer, color_bg};
         use tiny_skia::Pixmap;
+        use tiny_skia_widgets::mseg::{draw_mseg, MsegEditState};
+        use tiny_skia_widgets::{color_bg, TextRenderer};
 
         // Use the embedded font (same as MiffWindow::new).
         let font_data = include_bytes!("fonts/DejaVuSans.ttf");
@@ -1193,6 +1160,9 @@ mod tests {
         let sample_x = (mseg_rect.0 + mseg_rect.2 * 0.25) as u32;
         let sample_y = (mseg_rect.1 + mseg_rect.3 * 0.5) as u32;
         let alpha = pm.pixels()[(sample_y * w + sample_x) as usize].alpha();
-        assert!(alpha > 0, "MSEG region not painted at ({sample_x}, {sample_y})");
+        assert!(
+            alpha > 0,
+            "MSEG region not painted at ({sample_x}, {sample_y})"
+        );
     }
 }

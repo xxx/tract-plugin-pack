@@ -129,15 +129,17 @@ impl Default for Miff {
 
         let input_window: Vec<f32> = (0..ISPECTRUM_FFT)
             .map(|i| {
-                0.5 * (1.0
-                    - (2.0 * std::f32::consts::PI * i as f32 / ISPECTRUM_FFT as f32).cos())
+                0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / ISPECTRUM_FFT as f32).cos())
             })
             .collect();
 
         Self {
             params: Arc::new(MiffParams::default()),
             sample_rate: 44100.0,
-            raw: [convolution::RawChannel::new(), convolution::RawChannel::new()],
+            raw: [
+                convolution::RawChannel::new(),
+                convolution::RawChannel::new(),
+            ],
             phaseless: [
                 convolution::PhaselessChannel::new(),
                 convolution::PhaselessChannel::new(),
@@ -220,6 +222,14 @@ impl Plugin for Miff {
 
     fn task_executor(&mut self) -> TaskExecutor<Self> {
         Box::new(|_| {})
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor::create(
+            self.params.clone(),
+            self.kernel_handoff.clone(),
+            self.input_spectrum.clone(),
+        )
     }
 
     fn params(&self) -> Arc<dyn Params> {
@@ -346,8 +356,11 @@ impl ClapPlugin for Miff {
         Some("A convolution filter whose kernel is hand-drawn with an MSEG editor");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] =
-        &[ClapFeature::AudioEffect, ClapFeature::Filter, ClapFeature::Stereo];
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::AudioEffect,
+        ClapFeature::Filter,
+        ClapFeature::Stereo,
+    ];
 }
 
 impl Vst3Plugin for Miff {
