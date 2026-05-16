@@ -26,11 +26,14 @@ Tract Plugin Pack is a Cargo workspace containing multiple audio effect plugins 
 
 **Imagine** — multiband stereo imager modeled on iZotope Ozone Imager. 4 fixed bands with Lipshitz/Vanderkooy compensated Linkwitz-Riley IIR or linear-phase FIR crossovers (switchable Quality). Per-band Ozone-style Width law (S_gain = (width+100)/100, M unchanged: 0=mono, 1=unity, 2=double-side at +100). Per-band Stereoize with on/off toggle: Mode I = Haas mid-into-side delay (1–20 ms control, default 6 ms), Mode II = Schroeder/Gerzon all-pass decorrelator (0.5–2.0× delay-scale control). Global Recover Sides folds a Hilbert-rotated residue of removed-side energy back into mid for perceptual width retention when narrowing. Spectrum + coherence display via single complex M+jS FFT. Four vectorscope modes — Polar (half-disc dot cloud, default) / Polar Level (peak-pick emit ring rendered as rays) / Goniometer (45°-rotated dual-tone dots) / Lissajous (unrotated X=L Y=R) — on the left; spectrum + 4-band strip + coherence on the right. Half-disc modes get an L/R peak meter strip atop the otherwise-empty top of the panel. Cassiopeia A gold/teal duo-tone palette.
 
+**miff** — a convolution filter whose FIR kernel is hand-drawn with an MSEG editor (not loaded from a wavetable file — distinct from its sibling `wavetable-filter`). The MSEG curve is baked into the kernel via a single-walk traversal with a bipolar tap map (`2·value − 1`), placing the MSEG midline (value 0.5) at a zero tap, enabling highpass/bandpass/comb FIRs by drawing above or below centre. The baked kernel is peak-magnitude normalised (the kernel's peak frequency-response magnitude is set to unity / 0 dB), so the filter never boosts, and loudness is consistent across any drawn shape. The default document is a flat curve at value 0.5, which bakes to an all-zero kernel — miff treats an all-zero kernel as dry passthrough, so a fresh instance colours nothing. Two modes: Raw (direct time-domain SIMD convolution, zero reported latency) and Phaseless (fixed 4096-point STFT magnitude-only filtering, constant 2048-sample reported latency). `Length` (64–4096 taps) is non-automatable so re-bakes stay GUI-thread-triggered. The GUI thread bakes the kernel from the curve on each edit and hands it to the audio thread via a `Mutex<Kernel>` + audio-thread `try_lock`. softbuffer + tiny-skia GUI: MSEG editor in curve-only mode (top, ~55%), frequency-response view with live input-spectrum shadow (middle, ~29%), Raw/Phaseless selector + Mix/Gain/Length dials (bottom strip, ~16%). Free resize.
+
 ## Workspace Structure
 
 ```
 tract-plugin-pack/
 ├── wavetable-filter/       # Wavetable-based filter plugin (softbuffer GUI)
+├── miff/                   # MSEG hand-drawn FIR convolution filter (softbuffer GUI)
 ├── gs-meter/               # Loudness meter + gain utility (softbuffer GUI)
 ├── gain-brain/             # Gain utility with group linking (softbuffer GUI)
 ├── tinylimit/              # Wideband peak limiter (softbuffer GUI)
@@ -52,6 +55,7 @@ Requires **nightly Rust** (enforced via `rust-toolchain.toml`) for portable SIMD
 ```bash
 # Plugin bundles (VST3 + CLAP)
 cargo nih-plug bundle wavetable-filter --release
+cargo nih-plug bundle miff --release
 cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle gain-brain --release
 cargo nih-plug bundle tinylimit --release
@@ -63,6 +67,7 @@ cargo nih-plug bundle imagine --release
 
 # Standalone binaries
 cargo build --bin wavetable-filter --release
+cargo build --bin miff --release
 cargo build --bin gs-meter --release
 cargo build --bin gain-brain --release
 cargo build --bin tinylimit --release
@@ -73,6 +78,7 @@ cargo build --bin warp-zone --release
 cargo build --bin imagine --release
 
 # Debug standalone (for GUI testing without DAW)
+cargo build --bin miff
 cargo build --bin gs-meter
 cargo build --bin gain-brain
 cargo build --bin tinylimit
@@ -86,7 +92,7 @@ cargo build --bin imagine
 ## Testing & Linting
 
 ```bash
-cargo nextest run --workspace                     # all tests (554) -- parallel test runner
+cargo nextest run --workspace                     # all tests (737) -- parallel test runner
 cargo clippy --workspace -- -D warnings           # lint (CI uses -D warnings)
 cargo fmt --check
 ```
@@ -103,6 +109,7 @@ Tests are inline `#[cfg(test)]` modules:
 - `six-pack/` — 54 tests across `svf.rs`, `saturation.rs`, `bands.rs`, `spectrum.rs`, `oversampling.rs`, `lib.rs::plugin_tests` (bypass equivalence, harmonic structure, mix curve, de-emph cancellation, sample-rate sweep), and `editor/{curve_view,band_labels}.rs` (log-freq mapping, peak magnitude, label rendering)
 - `warp-zone/src/spectral.rs` and `warp-zone/src/lib.rs` — 17 tests (phase vocoder, bin remapping, shift/stretch accuracy, spectral display, band downsampling)
 - `imagine/` — tests across `midside.rs`, `crossover.rs` (IIR + FIR crossfade, redesign-during-crossfade, band sum flatness), `hilbert.rs`, `decorrelator.rs`, `bands.rs` (Ozone-style Width unity-at-zero / S-muted-at-−100 / S-doubled-at-+100, stereoize on/off gating, Mode I delay tap, Mode II decorrelation), `spectrum.rs`, `vectorscope.rs` (SPSC concurrent writer/reader), `polar_rays.rs` (emit ring snapshot ordering), `theme.rs`, and `lib.rs::plugin_tests` (no-op default passes signal, recover-sides bypass)
+- `miff/` — 36 tests across `kernel.rs` (bake_taps, bipolar map, peak-magnitude normalization, zero-kernel passthrough, handoff round-trip), `convolution.rs` (Raw silence fast-path, SIMD MAC correctness, Phaseless latency constant, STFT zero-kernel identity), `lib.rs` (params defaults, mode switch detection), `editor.rs` + `editor/response_view.rs` (headless render smoke tests — silent/active input, response curve, input-spectrum shadow)
 - `tiny-skia-widgets/` — 29 widget rendering tests (dial, slider, button, text, drag state mouse-in-window)
 - Test fixtures: `wavetable-filter/tests/fixtures/`
 
@@ -127,6 +134,16 @@ Tests are inline `#[cfg(test)]` modules:
 | `wavetable-filter/src/editor/wavetable_view.rs` | 2D face-on + 3D overhead wavetable visualization. 3D strands are strided (max 48) and the full bg is cached into a viewport-sized pixmap + blitted per frame via a raw row-wise `copy_from_slice` (bypasses tiny-skia's raster pipeline) |
 | `wavetable-filter/src/editor/filter_response_view.rs` | Frequency response + input spectrum shadow. Response-curve Y coords cached with height/y0 keys to invalidate on vertical resize; shadow draw skipped when no bin exceeds the -48 dB floor (avoids tiny-skia's zero-height-polygon warning) |
 | `wavetable-filter/src/fonts/DejaVuSans.ttf` | Embedded font for CPU text rendering |
+
+### miff
+
+| File | Role |
+|------|------|
+| `miff/src/lib.rs` | Plugin struct, params (Mode/Mix/Gain/Length), process() loop, input-spectrum FFT accumulator, mode-switch click-safe reset, latency reporting |
+| `miff/src/kernel.rs` | Curve → FIR bake: single-walk `bake_taps` (bipolar tap map, monotone segment cursor), `bake` (MAX_KERNEL FFT → peak-magnitude normalization), `KernelHandoff` (Mutex + try_lock GUI→audio transfer), `default_flat_curve` |
+| `miff/src/convolution.rs` | Raw (`RawChannel`: double-buffered history ring, SIMD f32x16 MAC, silence fast-path) and Phaseless (`PhaselessChannel`: fixed 4096-pt STFT, 50% overlap-add, magnitude multiply, constant 2048-sample latency) engines |
+| `miff/src/editor.rs` | Softbuffer + baseview editor (880×620, freely resizable): MSEG editor in curve-only mode (top ~55%), response view (middle ~29%), controls strip (bottom ~16%); event dispatch, re-bake on curve edit, right-click text entry on dials |
+| `miff/src/editor/response_view.rs` | Frequency-response view: baked kernel magnitude curve on log-frequency axis + live input-spectrum shadow; shadow draw skipped when all bins are below the −48 dB floor |
 
 ### GS Meter
 
@@ -238,7 +255,7 @@ Tests are inline `#[cfg(test)]` modules:
 
 - **GS Meter uses CPU rendering** (softbuffer + tiny-skia + fontdue) instead of vizia/OpenGL. This eliminates 25 MB of GPU driver overhead (Mesa/LLVM) per instance. At 300 instances (Bitwig, 48kHz/1024): 15% CPU, 560 MB RSS (~1.8 MB per instance).
 - **All softbuffer plugins are freely resizable.** Scale factor is derived from `physical_width / WINDOW_WIDTH` on resize. Window size is persisted via `EditorState`. Host-initiated resize uses a packed `AtomicU64` (`pending_resize`) consumed on the next frame.
-- **Right-click text entry on continuous dials/sliders** is shared across gain-brain, satch, tinylimit, pope-scope, warp-zone, and wavetable-filter via `tiny_skia_widgets::TextEditState<A>`. Right-click opens a highlighted edit field seeded with `Param::normalized_value_to_string(_, false)` (unit stripped). `Enter` commits through `Param::string_to_normalized_value` + `begin/set/end_set_parameter`; `Escape` cancels; click-outside or drag-start auto-commits; right-click during a drag is ignored. Key-up events are swallowed while editing so host DAW shortcuts don't fire on release. Stepped selectors, buttons, and toggles remain non-editable — right-click on them is a no-op.
+- **Right-click text entry on continuous dials/sliders** is shared across gain-brain, satch, tinylimit, pope-scope, warp-zone, wavetable-filter, and miff via `tiny_skia_widgets::TextEditState<A>`. Right-click opens a highlighted edit field seeded with `Param::normalized_value_to_string(_, false)` (unit stripped). `Enter` commits through `Param::string_to_normalized_value` + `begin/set/end_set_parameter`; `Escape` cancels; click-outside or drag-start auto-commits; right-click during a drag is ignored. Key-up events are swallowed while editing so host DAW shortcuts don't fire on release. Stepped selectors, buttons, and toggles remain non-editable — right-click on them is a no-op.
 - **True peak uses exact ITU-R BS.1770-4 coefficients** (48-tap, 4-phase polyphase FIR). Double-buffered history for contiguous SIMD dot products. Sample-rate-aware: 4x OS at <96kHz, 2x at 96-192kHz, bypass at >=192kHz.
 - **Stereo RMS uses sum-of-power** (matches dpMeter5 SUM mode): `sqrt(ms_L + ms_R)`.
 - **Crest factor uses dpMeter5's convention** (peak_stereo vs rms_stereo), not the mathematically correct max(crest_L, crest_R). Documented for future "correct mode" toggle.
@@ -266,6 +283,12 @@ Tests are inline `#[cfg(test)]` modules:
 - **Imagine's FIR crossover uses double-buffered tap arrays + sample-wise crossfade** on coefficient swap to eliminate clicks during crossover-frequency automation. The redesign is gated on >0.5 Hz change so static-parameter workloads don't pay for a continuous crossfade.
 - **Imagine's Hilbert is FIR-only** (length 65, ~32 samples latency at 48 kHz). The plan originally specified an IIR all-pass cascade for zero-latency Recover Sides, but a single all-pass cascade can't produce 90° at low frequencies and the Niemitalo analytic-pair design produces an `(real, imag)` pair where `imag` is rotated relative to `real`, not relative to the input. The FIR is mathematically exact and ~0.7 ms latency is below human perception threshold.
 - **Imagine's vectorscope ring buffer uses per-sample `AtomicU32` storage** (f32 stored as bit-pattern) to avoid `unsafe` while remaining lock-free SPSC. Acquire/Release ordering on `write_pos` synchronizes slot writes with the GUI consumer's reads. Per-sample (L, R) pair can tear under contention but the vectorscope decimates thousands of points/frame so a single torn pair is sub-pixel. Same general pattern as Warp Zone's spectral display and Pope Scope's ring buffer atomics, applied here to per-sample (L, R) pairs.
+- **miff's bipolar tap map** (`kernel[i] = 2·value − 1`) places the MSEG midline (value 0.5) at a zero tap. This is what makes non-trivial filter shapes possible from an editor whose Y range is [0, 1]: values above 0.5 produce positive taps, values below produce negative taps, and a flat 0.5 line produces an all-zero kernel (dry passthrough). The same mapping enables highpass, bandpass, and comb FIRs by drawing shapes that cross the midline.
+- **miff uses peak-magnitude normalization, not L1 normalization.** After baking taps, miff runs a MAX_KERNEL-point real FFT, finds the peak bin magnitude, and divides all taps and magnitudes by that peak. This ensures the filter never boosts any frequency above 0 dB (consistent loudness across any drawn shape) without constraining the filter's time-domain energy. L1 normalization (`sum(|taps|) = 1`) would have the correct loudness property only for lowpass-ish shapes; peak-magnitude normalization is correct for any FIR shape.
+- **miff's flat-0.5 default bakes to an all-zero kernel → dry passthrough.** A fresh miff instance has two nodes both at value 0.5, which produces zero taps. The `Kernel::is_zero` flag lets `RawChannel::process` and `PhaselessChannel` short-circuit to returning the input unchanged. This means miff is safe to insert on any track before any shape has been drawn.
+- **miff's Phaseless mode uses a fixed 4096-point STFT frame** (matching `MAX_KERNEL`, the maximum kernel length), regardless of the current `Length` parameter. This gives a constant 2048-sample (50% overlap-add hop) reported latency that never jumps when the user adjusts Length, unlike a mode that would resize the STFT with the kernel.
+- **`Length` is non-automatable** (`IntParam::non_automatable()`). Re-baking the kernel (an O(N log N) FFT) must happen on the GUI thread. Marking Length non-automatable keeps re-bakes GUI-thread-triggered (on dial release or text-entry commit) and out of the audio-thread `process()`.
+- **miff's single-walk bake is distinct from `value_at_phase`.** `bake_taps` walks the curve monotonically with a forward-only segment cursor `*seg` that only advances, reproducing `tiny_skia_widgets::mseg::value_at_phase` exactly (stepped hold + exponential `warp`) without that function's per-tap rescan from node 0. For a 4096-tap kernel this reduces the segment-walk work from O(N·nodes) to O(N + nodes).
 - **nih-plug dependency** currently points to `xxx/nih-plug` branch `finish-vst3-pr`. Fork adds: Editor::set_size() for host-initiated resize, Plugin::update_track_info() + TrackInfo struct for CLAP track-info, BYPASS_BUFFER_COPY const, nightly SIMD compatibility, VST3 license fix.
 
 ### Wavetable File Formats
