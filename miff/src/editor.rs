@@ -11,9 +11,35 @@ use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tiny_skia_widgets as widgets;
-use tiny_skia_widgets::mseg::MsegEditState;
+use tiny_skia_widgets::mseg::{MsegEdit, MsegEditState};
 
 use crate::MiffParams;
+
+// ── Event target ─────────────────────────────────────────────────────────
+
+/// Where an input event should be dispatched.
+// Used in on_event (WindowHandler impl) and tests; allow dead_code for
+// the scaffolding phase where MiffWindow is not yet constructed in production.
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum EventTarget {
+    /// The event is inside the MSEG editor region.
+    Mseg,
+    /// The event is outside the MSEG region (controls strip, response area).
+    Controls,
+}
+
+/// Pure routing helper: `Mseg` if `(x, y)` is inside `mseg_rect`, else `Controls`.
+/// Unit-testable without a window.
+#[allow(dead_code)]
+pub(crate) fn event_target(mseg_rect: (f32, f32, f32, f32), x: f32, y: f32) -> EventTarget {
+    let (rx, ry, rw, rh) = mseg_rect;
+    if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
+        EventTarget::Mseg
+    } else {
+        EventTarget::Controls
+    }
+}
 
 pub const WINDOW_WIDTH: u32 = 880;
 pub const WINDOW_HEIGHT: u32 = 620;
@@ -140,6 +166,15 @@ struct MiffWindow {
     mseg_state: MsegEditState,
     /// Input spectrum shadow for the response view (Task 12).
     input_spectrum: Arc<Mutex<Vec<f32>>>,
+
+    /// Whether the Alt modifier is currently held (enables stepped-draw in the MSEG).
+    alt_held: bool,
+    /// Whether the Shift modifier is currently held (enables fine-drag in the MSEG).
+    shift_held: bool,
+    /// Timestamp of the last left-click in the MSEG region (for double-click detection).
+    mseg_last_click_time: std::time::Instant,
+    /// Position of the last left-click in the MSEG region.
+    mseg_last_click_pos: (f32, f32),
 }
 
 // Methods wired up in Tasks 10-12 (draw path) and Task 13 (spawn).
@@ -179,6 +214,10 @@ impl MiffWindow {
             kernel_handoff,
             mseg_state: MsegEditState::new_curve_only(),
             input_spectrum,
+            alt_held: false,
+            shift_held: false,
+            mseg_last_click_time: std::time::Instant::now(),
+            mseg_last_click_pos: (-999.0, -999.0),
         }
     }
 
@@ -241,6 +280,102 @@ impl MiffWindow {
         let ph = self.physical_height.max(1);
         self.surface.resize(pw, ph);
         self.params.editor_state.store_size(pw, ph);
+    }
+
+    /// Check if `(x, y)` is a double-click in the MSEG region.
+    /// Records the click position/time and returns `true` if the previous click
+    /// was within 400 ms and within 8 pixels.
+    fn mseg_double_click_check(&mut self, x: f32, y: f32) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed_ms = now.duration_since(self.mseg_last_click_time).as_millis();
+        let (px, py) = self.mseg_last_click_pos;
+        let dist_sq = (x - px) * (x - px) + (y - py) * (y - py);
+        let is_double = elapsed_ms < 400 && dist_sq < 64.0; // 8px radius
+        self.mseg_last_click_time = now;
+        self.mseg_last_click_pos = (x, y);
+        is_double
+    }
+
+    /// Re-bake the kernel from the current curve + Length and publish it to
+    /// the audio thread. GUI-thread only; called after a curve or Length edit.
+    fn rebake(&self) {
+        if let Ok(curve) = self.params.curve.lock() {
+            let len = self.params.length.value() as usize;
+            let kernel = crate::kernel::bake(&curve, len);
+            self.kernel_handoff.publish(kernel);
+        }
+    }
+
+    /// Commit any active text-edit, applying the value to the appropriate param.
+    fn commit_text_edit(&mut self) {
+        use nih_plug::prelude::Param;
+        let Some((action, text)) = self.text_edit.commit() else {
+            return;
+        };
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        match action {
+            HitAction::MixDial => {
+                let p = &self.params.mix;
+                if let Some(norm) = p.string_to_normalized_value(&text) {
+                    setter.begin_set_parameter(p);
+                    setter.set_parameter_normalized(p, norm);
+                    setter.end_set_parameter(p);
+                }
+            }
+            HitAction::GainDial => {
+                let p = &self.params.gain;
+                if let Some(norm) = p.string_to_normalized_value(&text) {
+                    setter.begin_set_parameter(p);
+                    setter.set_parameter_normalized(p, norm);
+                    setter.end_set_parameter(p);
+                }
+            }
+            HitAction::LengthDial => {
+                let p = &self.params.length;
+                if let Some(norm) = p.string_to_normalized_value(&text) {
+                    setter.begin_set_parameter(p);
+                    setter.set_parameter_normalized(p, norm);
+                    setter.end_set_parameter(p);
+                    self.rebake();
+                }
+            }
+            HitAction::ModeSelector => {
+                // Mode selector is not a text-entry control — no-op.
+            }
+        }
+    }
+
+    /// Apply a mode change (0 = Raw, 1 = Phaseless).
+    fn set_mode(&self, variant: usize) {
+        let target = match variant {
+            0 => crate::MiffMode::Raw,
+            _ => crate::MiffMode::Phaseless,
+        };
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        let norm = self.params.mode.preview_normalized(target);
+        setter.begin_set_parameter(&self.params.mode);
+        setter.set_parameter_normalized(&self.params.mode, norm);
+        setter.end_set_parameter(&self.params.mode);
+    }
+
+    /// Formatted value for a float param without its unit suffix (for text-edit seed).
+    fn dial_value_without_unit(&self, action: HitAction) -> String {
+        use nih_plug::prelude::Param;
+        match action {
+            HitAction::MixDial => {
+                let p = &self.params.mix;
+                p.normalized_value_to_string(p.modulated_normalized_value(), false)
+            }
+            HitAction::GainDial => {
+                let p = &self.params.gain;
+                p.normalized_value_to_string(p.modulated_normalized_value(), false)
+            }
+            HitAction::LengthDial => {
+                let p = &self.params.length;
+                p.normalized_value_to_string(p.modulated_normalized_value(), false)
+            }
+            HitAction::ModeSelector => String::new(),
+        }
     }
 
     /// Draw the bottom control strip: Mode stepped selector + Mix/Gain/Length dials.
@@ -394,6 +529,11 @@ impl baseview::WindowHandler for MiffWindow {
         _window: &mut baseview::Window,
         event: baseview::Event,
     ) -> baseview::EventStatus {
+        let w = self.physical_width as f32;
+        let h = self.physical_height as f32;
+        let s = self.scale_factor;
+        let (mseg_rect, _response_rect, _strip_rect) = layout(w, h);
+
         match &event {
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width.max(MIN_WIDTH);
@@ -403,26 +543,429 @@ impl baseview::WindowHandler for MiffWindow {
                 self.shared_scale.store(sf);
                 self.resize_buffers();
             }
+
             baseview::Event::Mouse(baseview::MouseEvent::CursorEntered) => {
                 self.drag.on_cursor_entered();
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorLeft) => {
                 self.drag.on_cursor_left();
             }
-            baseview::Event::Keyboard(_) => {
-                // Full keyboard routing (TextEditState) is wired in Task 11;
-                // until then, don't swallow the host's keyboard shortcuts.
-                return baseview::EventStatus::Ignored;
+
+            // ── CursorMoved ─────────────────────────────────────────────────
+            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved {
+                position,
+                modifiers,
+            }) => {
+                let x = position.x as f32;
+                let y = position.y as f32;
+                self.drag.set_mouse(x, y);
+
+                // Update modifier state.
+                let new_alt = modifiers.contains(keyboard_types::Modifiers::ALT);
+                let new_shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                if new_alt != self.alt_held {
+                    self.alt_held = new_alt;
+                    self.mseg_state.set_stepped_draw(new_alt);
+                }
+                self.shift_held = new_shift;
+
+                match event_target(mseg_rect, x, y) {
+                    EventTarget::Mseg => {
+                        // MSEG drag-move (if a drag is active the MSEG tracks it
+                        // even outside the rect, which matches the node-drag
+                        // intention; for controls there's no drag into MSEG).
+                        let changed = {
+                            if let Ok(mut curve) = self.params.curve.lock() {
+                                self.mseg_state.on_mouse_move(
+                                    x,
+                                    y,
+                                    &mut curve,
+                                    mseg_rect,
+                                    s,
+                                    self.shift_held,
+                                )
+                            } else {
+                                None
+                            }
+                        };
+                        if changed == Some(MsegEdit::Changed) {
+                            self.rebake();
+                        }
+                    }
+                    EventTarget::Controls => {
+                        // Dial drag — only if a drag is active.
+                        if let Some(action) = self.drag.active_action().copied() {
+                            let shift = self.shift_held;
+                            let current = match action {
+                                HitAction::MixDial => {
+                                    self.params.mix.unmodulated_normalized_value()
+                                }
+                                HitAction::GainDial => {
+                                    self.params.gain.unmodulated_normalized_value()
+                                }
+                                HitAction::LengthDial => {
+                                    self.params.length.unmodulated_normalized_value()
+                                }
+                                HitAction::ModeSelector => 0.0,
+                            };
+                            if let Some(norm) = self.drag.update_drag(shift, current) {
+                                let setter = ParamSetter::new(self.gui_context.as_ref());
+                                match action {
+                                    HitAction::MixDial => {
+                                        setter.set_parameter_normalized(&self.params.mix, norm);
+                                    }
+                                    HitAction::GainDial => {
+                                        setter.set_parameter_normalized(&self.params.gain, norm);
+                                    }
+                                    HitAction::LengthDial => {
+                                        setter.set_parameter_normalized(&self.params.length, norm);
+                                        self.rebake();
+                                    }
+                                    HitAction::ModeSelector => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Also allow MSEG drags that started inside the rect to follow
+                // the pointer even when it leaves the rect — deliver the move
+                // even when the pointer is in the Controls zone if there is an
+                // active MSEG drag.  (The branch above covers Mseg; we handle
+                // the cross-boundary case by re-delivering for Controls zone
+                // when no Controls drag is active but a curve edit might be pending.)
+                // NOTE: The move is already dispatched above for Mseg zone.
+                // For Controls zone during an *active MSEG drag*, we need to
+                // also forward the move. We do this by checking whether a
+                // Controls drag is active; if not and Controls is the target,
+                // we still pass the move to the MSEG state.
+                if event_target(mseg_rect, x, y) == EventTarget::Controls
+                    && self.drag.active_action().is_none()
+                {
+                    // No controls drag active — forward pointer move to MSEG state
+                    // so node drags that stray outside the MSEG rect keep tracking.
+                    let changed = {
+                        if let Ok(mut curve) = self.params.curve.lock() {
+                            self.mseg_state.on_mouse_move(
+                                x,
+                                y,
+                                &mut curve,
+                                mseg_rect,
+                                s,
+                                self.shift_held,
+                            )
+                        } else {
+                            None
+                        }
+                    };
+                    if changed == Some(MsegEdit::Changed) {
+                        self.rebake();
+                    }
+                }
             }
-            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved { .. }) => {
-                // Full mouse routing wired in Task 11.
+
+            // ── Left button pressed ─────────────────────────────────────────
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Left,
+                modifiers,
+            }) => {
+                let (x, y) = self.drag.mouse_pos();
+                let new_alt = modifiers.contains(keyboard_types::Modifiers::ALT);
+                let new_shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                if new_alt != self.alt_held {
+                    self.alt_held = new_alt;
+                    self.mseg_state.set_stepped_draw(new_alt);
+                }
+                self.shift_held = new_shift;
+
+                match event_target(mseg_rect, x, y) {
+                    EventTarget::Mseg => {
+                        // Commit any open text-edit before a new click.
+                        self.commit_text_edit();
+
+                        // Double-click detection: use a local timestamp approach
+                        // since the MSEG actions aren't in DragState.
+                        // We reuse DragState::check_double_click via a sentinel
+                        // HitAction — the MSEG doesn't have a HitAction, so we
+                        // repurpose ModeSelector as a stable sentinel that is
+                        // never in the MSEG region. But actually we need a
+                        // distinct value.  Instead, we maintain a simple
+                        // timestamp/position directly.
+                        let is_double = self.mseg_double_click_check(x, y);
+                        if is_double {
+                            let changed = {
+                                if let Ok(mut curve) = self.params.curve.lock() {
+                                    self.mseg_state.on_double_click(
+                                        x,
+                                        y,
+                                        &mut curve,
+                                        mseg_rect,
+                                        s,
+                                    )
+                                } else {
+                                    None
+                                }
+                            };
+                            if changed == Some(MsegEdit::Changed) {
+                                self.rebake();
+                            }
+                        } else {
+                            let changed = {
+                                if let Ok(mut curve) = self.params.curve.lock() {
+                                    self.mseg_state.on_mouse_down(
+                                        x,
+                                        y,
+                                        &mut curve,
+                                        mseg_rect,
+                                        s,
+                                        self.shift_held,
+                                    )
+                                } else {
+                                    None
+                                }
+                            };
+                            if changed == Some(MsegEdit::Changed) {
+                                self.rebake();
+                            }
+                        }
+                    }
+                    EventTarget::Controls => {
+                        // Commit any open text-edit first.
+                        self.commit_text_edit();
+
+                        // End any previous drag.
+                        if let Some(ended) = self.drag.end_drag() {
+                            let setter = ParamSetter::new(self.gui_context.as_ref());
+                            match ended {
+                                HitAction::MixDial => {
+                                    setter.end_set_parameter(&self.params.mix);
+                                }
+                                HitAction::GainDial => {
+                                    setter.end_set_parameter(&self.params.gain);
+                                }
+                                HitAction::LengthDial => {
+                                    setter.end_set_parameter(&self.params.length);
+                                }
+                                HitAction::ModeSelector => {}
+                            }
+                        }
+
+                        if let Some(region) = self.drag.hit_test().cloned() {
+                            let is_double = self.drag.check_double_click(&region.action);
+                            match region.action {
+                                HitAction::MixDial => {
+                                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                                    if is_double {
+                                        // Double-click resets to default.
+                                        use nih_plug::prelude::Param;
+                                        let p = &self.params.mix;
+                                        setter.begin_set_parameter(p);
+                                        setter.set_parameter_normalized(
+                                            p,
+                                            p.default_normalized_value(),
+                                        );
+                                        setter.end_set_parameter(p);
+                                    } else {
+                                        use nih_plug::prelude::Param;
+                                        let norm =
+                                            self.params.mix.unmodulated_normalized_value();
+                                        self.drag.begin_drag(
+                                            HitAction::MixDial,
+                                            norm,
+                                            self.shift_held,
+                                        );
+                                        setter.begin_set_parameter(&self.params.mix);
+                                    }
+                                }
+                                HitAction::GainDial => {
+                                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                                    if is_double {
+                                        use nih_plug::prelude::Param;
+                                        let p = &self.params.gain;
+                                        setter.begin_set_parameter(p);
+                                        setter.set_parameter_normalized(
+                                            p,
+                                            p.default_normalized_value(),
+                                        );
+                                        setter.end_set_parameter(p);
+                                    } else {
+                                        use nih_plug::prelude::Param;
+                                        let norm =
+                                            self.params.gain.unmodulated_normalized_value();
+                                        self.drag.begin_drag(
+                                            HitAction::GainDial,
+                                            norm,
+                                            self.shift_held,
+                                        );
+                                        setter.begin_set_parameter(&self.params.gain);
+                                    }
+                                }
+                                HitAction::LengthDial => {
+                                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                                    if is_double {
+                                        use nih_plug::prelude::Param;
+                                        let p = &self.params.length;
+                                        setter.begin_set_parameter(p);
+                                        setter.set_parameter_normalized(
+                                            p,
+                                            p.default_normalized_value(),
+                                        );
+                                        setter.end_set_parameter(p);
+                                        self.rebake();
+                                    } else {
+                                        use nih_plug::prelude::Param;
+                                        let norm =
+                                            self.params.length.unmodulated_normalized_value();
+                                        self.drag.begin_drag(
+                                            HitAction::LengthDial,
+                                            norm,
+                                            self.shift_held,
+                                        );
+                                        setter.begin_set_parameter(&self.params.length);
+                                    }
+                                }
+                                HitAction::ModeSelector => {
+                                    // Determine which segment was hit.
+                                    let (_, _, strip_rect) = layout(w, h);
+                                    let strip_regions = strip_regions(strip_rect, s);
+                                    // The ModeSelector region covers the whole selector.
+                                    // Find which half was clicked by x position.
+                                    if let Some(((rx, _, rw, _), _)) = strip_regions
+                                        .iter()
+                                        .find(|(_, a)| *a == HitAction::ModeSelector)
+                                    {
+                                        let local = x - rx;
+                                        let variant = if local < rw * 0.5 { 0 } else { 1 };
+                                        self.set_mode(variant);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed { .. }) => {
-                // Full mouse routing wired in Task 11.
+
+            // ── Left button released ────────────────────────────────────────
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                ..
+            }) => {
+                let (x, y) = self.drag.mouse_pos();
+                match event_target(mseg_rect, x, y) {
+                    EventTarget::Mseg => {
+                        // End any MSEG drag.
+                        let changed = {
+                            if let Ok(mut curve) = self.params.curve.lock() {
+                                self.mseg_state.on_mouse_up(&mut curve)
+                            } else {
+                                None
+                            }
+                        };
+                        if changed == Some(MsegEdit::Changed) {
+                            self.rebake();
+                        }
+                    }
+                    EventTarget::Controls => {
+                        // Also end MSEG drag in case pointer left the MSEG region.
+                        {
+                            if let Ok(mut curve) = self.params.curve.lock() {
+                                let _ = self.mseg_state.on_mouse_up(&mut curve);
+                            }
+                        }
+                        // End controls drag.
+                        if let Some(ended) = self.drag.end_drag() {
+                            let setter = ParamSetter::new(self.gui_context.as_ref());
+                            match ended {
+                                HitAction::MixDial => {
+                                    setter.end_set_parameter(&self.params.mix);
+                                }
+                                HitAction::GainDial => {
+                                    setter.end_set_parameter(&self.params.gain);
+                                }
+                                HitAction::LengthDial => {
+                                    setter.end_set_parameter(&self.params.length);
+                                }
+                                HitAction::ModeSelector => {}
+                            }
+                        }
+                    }
+                }
             }
-            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased { .. }) => {
-                // Full mouse routing wired in Task 11.
+
+            // ── Right button pressed ────────────────────────────────────────
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Right,
+                ..
+            }) => {
+                let (x, y) = self.drag.mouse_pos();
+                // Right-click during a controls drag: ignore (as wavetable-filter does).
+                if self.drag.active_action().is_some() {
+                    return baseview::EventStatus::Captured;
+                }
+
+                match event_target(mseg_rect, x, y) {
+                    EventTarget::Mseg => {
+                        // Right-click in MSEG: toggle segment stepped flag.
+                        let changed = {
+                            if let Ok(mut curve) = self.params.curve.lock() {
+                                self.mseg_state.on_right_click(
+                                    x,
+                                    y,
+                                    &mut curve,
+                                    mseg_rect,
+                                    s,
+                                )
+                            } else {
+                                None
+                            }
+                        };
+                        if changed == Some(MsegEdit::Changed) {
+                            self.rebake();
+                        }
+                    }
+                    EventTarget::Controls => {
+                        // Right-click on a dial opens text entry.
+                        self.commit_text_edit();
+                        if let Some(region) = self.drag.hit_test().cloned() {
+                            match region.action {
+                                HitAction::MixDial
+                                | HitAction::GainDial
+                                | HitAction::LengthDial => {
+                                    let initial = self.dial_value_without_unit(region.action);
+                                    self.text_edit.begin(region.action, &initial);
+                                }
+                                HitAction::ModeSelector => {
+                                    // No text entry on the mode selector.
+                                }
+                            }
+                        }
+                    }
+                }
             }
+
+            // ── Keyboard ────────────────────────────────────────────────────
+            baseview::Event::Keyboard(ev) if self.text_edit.is_active() => {
+                // Key-up events are swallowed while editing so host shortcuts
+                // don't fire on release.
+                if ev.state != keyboard_types::KeyState::Down {
+                    return baseview::EventStatus::Captured;
+                }
+                match &ev.key {
+                    keyboard_types::Key::Character(s) => {
+                        for c in s.chars() {
+                            self.text_edit.insert_char(c);
+                        }
+                    }
+                    keyboard_types::Key::Backspace => self.text_edit.backspace(),
+                    keyboard_types::Key::Escape => self.text_edit.cancel(),
+                    keyboard_types::Key::Enter => {
+                        self.commit_text_edit();
+                    }
+                    _ => return baseview::EventStatus::Ignored,
+                }
+                return baseview::EventStatus::Captured;
+            }
+
             _ => {}
         }
 
@@ -535,6 +1078,19 @@ impl Editor for MiffEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_target_routes_by_region() {
+        let (mseg, _response, strip) = layout(880.0, 620.0);
+        // A point inside the MSEG region routes to Mseg.
+        let mx = mseg.0 + mseg.2 * 0.5;
+        let my = mseg.1 + mseg.3 * 0.5;
+        assert_eq!(event_target(mseg, mx, my), EventTarget::Mseg);
+        // A point in the strip routes to Controls.
+        let sx = strip.0 + strip.2 * 0.5;
+        let sy = strip.1 + strip.3 * 0.5;
+        assert_eq!(event_target(mseg, sx, sy), EventTarget::Controls);
+    }
 
     #[test]
     fn layout_regions_stack_without_overlap() {
