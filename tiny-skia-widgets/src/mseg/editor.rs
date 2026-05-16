@@ -259,7 +259,8 @@ impl MsegEditState {
                 let grid_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
                 self.dropdown.on_mouse_down(x, y, &grid_refs, window_size)
             } else {
-                self.dropdown.on_mouse_down(x, y, style_items(), window_size)
+                self.dropdown
+                    .on_mouse_down(x, y, style_items(), window_size)
             };
             match ev {
                 Some(DropdownEvent::Selected(StripId::TimeGrid, idx)) => {
