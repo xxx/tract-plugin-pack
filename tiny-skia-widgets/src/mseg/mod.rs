@@ -261,6 +261,69 @@ impl MsegData {
     }
 }
 
+/// Compact, `Vec`-backed mirror of `MsegData` used only for (de)serialization.
+/// Lives on the GUI thread at load/save time — never on the audio thread.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MsegDataSerde {
+    nodes: Vec<MsegNode>,
+    play_mode: PlayMode,
+    hold: HoldMode,
+    sync_mode: SyncMode,
+    time_seconds: f32,
+    beats: f32,
+    time_divisions: u32,
+    value_steps: u32,
+    snap: bool,
+}
+
+impl From<&MsegData> for MsegDataSerde {
+    fn from(d: &MsegData) -> Self {
+        Self {
+            nodes: d.active().to_vec(),
+            play_mode: d.play_mode,
+            hold: d.hold,
+            sync_mode: d.sync_mode,
+            time_seconds: d.time_seconds,
+            beats: d.beats,
+            time_divisions: d.time_divisions,
+            value_steps: d.value_steps,
+            snap: d.snap,
+        }
+    }
+}
+
+impl serde::Serialize for MsegData {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        MsegDataSerde::from(self).serialize(s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MsegData {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = MsegDataSerde::deserialize(d)?;
+        let mut data = MsegData {
+            nodes: [MsegNode::default(); MAX_NODES],
+            node_count: raw.nodes.len().clamp(0, MAX_NODES),
+            play_mode: raw.play_mode,
+            hold: raw.hold,
+            sync_mode: raw.sync_mode,
+            time_seconds: raw.time_seconds,
+            beats: raw.beats,
+            time_divisions: raw.time_divisions,
+            value_steps: raw.value_steps,
+            snap: raw.snap,
+        };
+        for (i, n) in raw.nodes.iter().take(MAX_NODES).enumerate() {
+            data.nodes[i] = *n;
+        }
+        // A corrupt or hand-edited blob must not yield an invalid document.
+        if !data.is_valid() {
+            return Err(serde::de::Error::custom("invalid MsegData"));
+        }
+        Ok(data)
+    }
+}
+
 /// Sample the envelope's raw shape at `phase` (0..1, clamped). Pure — used by
 /// both rendering and a consuming plugin's DSP.
 pub fn value_at_phase(data: &MsegData, phase: f32) -> f32 {
@@ -662,5 +725,39 @@ mod tests {
         d.move_node(1, 0.4, 0.2);
         assert_eq!(d.nodes[1].time, 1.0); // time pinned
         assert_eq!(d.nodes[1].value, 0.2);
+    }
+
+    // --- Task 8: serde persistence tests ---
+
+    #[test]
+    fn mseg_data_json_round_trips() {
+        let mut d = MsegData::default();
+        d.insert_node(0.3, 0.7);
+        d.insert_node(0.6, 0.2);
+        d.nodes[1].tension = 0.5;
+        d.nodes[2].stepped = true;
+        d.hold = HoldMode::Sustain(2);
+        d.play_mode = PlayMode::Cyclic;
+        d.sync_mode = SyncMode::Beat;
+        d.beats = 2.0;
+        d.time_divisions = 24;
+        d.value_steps = 6;
+        d.snap = false;
+
+        let json = serde_json::to_string(&d).unwrap();
+        let back: MsegData = serde_json::from_str(&json).unwrap();
+        assert_eq!(d, back);
+        assert!(back.is_valid());
+    }
+
+    #[test]
+    fn mseg_data_json_is_compact() {
+        // The default 2-node document must not serialize all MAX_NODES slots.
+        let json = serde_json::to_string(&MsegData::default()).unwrap();
+        assert!(
+            json.len() < 400,
+            "serialized default unexpectedly large ({} bytes)",
+            json.len()
+        );
     }
 }
