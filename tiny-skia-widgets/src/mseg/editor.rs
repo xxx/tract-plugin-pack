@@ -140,11 +140,10 @@ impl MsegEditState {
         data: &mut MsegData,
         rect: (f32, f32, f32, f32),
         scale: f32,
-        fine: bool,
+        _fine: bool,
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
         let layout = mseg_layout(rect, self.curve_only, scale);
-        let _ = fine;
         match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
             MsegHit::Node(i) => {
                 self.drag = Some(DragTarget::Node(i));
@@ -180,11 +179,10 @@ impl MsegEditState {
         data: &mut MsegData,
         rect: (f32, f32, f32, f32),
         scale: f32,
-        fine: bool,
+        _fine: bool,
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
         let layout = mseg_layout(rect, self.curve_only, scale);
-        let _ = fine;
         // Hover highlight (only when not dragging).
         if self.drag.is_none() {
             self.hover = match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
@@ -212,6 +210,9 @@ impl MsegEditState {
                 let straight_mid = (v_lo + v_hi) * 0.5;
                 let cur = y_to_value(&layout, y);
                 let rising = v_hi >= v_lo;
+                // Sign flip by `rising`: dragging the handle the same screen
+                // direction must bow a rising vs. a falling segment
+                // consistently in tension polarity (positive = slow-start).
                 let delta = (cur - straight_mid) * if rising { -2.0 } else { 2.0 };
                 data.nodes[i].tension = delta.clamp(-1.0, 1.0);
                 data.debug_assert_valid();
@@ -222,8 +223,7 @@ impl MsegEditState {
     }
 
     /// Primary-button release. Ends any drag.
-    pub fn on_mouse_up(&mut self, data: &mut MsegData) -> Option<MsegEdit> {
-        let _ = data;
+    pub fn on_mouse_up(&mut self, _data: &mut MsegData) -> Option<MsegEdit> {
         self.drag = None;
         self.step_last_cell = None;
         None
@@ -297,6 +297,8 @@ mod tests {
             1.0,
             false,
         );
+        // the node inserted at phase 0.5 sorts to index 1 (between the 0.0 and
+        // 1.0 endpoints)
         assert!((data.nodes[1].value - 0.2).abs() < 0.05);
         state.on_mouse_up(&mut data);
     }
@@ -310,5 +312,8 @@ mod tests {
             None
         );
         assert_eq!(data.node_count, 2);
+        // A true no-op: the editor state must not be corrupted either.
+        assert!(state.drag.is_none());
+        assert!(state.hovered_node().is_none());
     }
 }
