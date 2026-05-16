@@ -152,6 +152,20 @@ impl MsegData {
     }
 }
 
+/// Shape factor: tension is scaled by this into the exponential warp exponent.
+const TENSION_K: f32 = 5.0;
+
+/// Warp a 0..1 segment-local position by `tension` (-1..1). `tension == 0`
+/// is linear; positive bows slow-start (concave), negative fast-start.
+/// Always maps 0->0 and 1->1.
+pub fn warp(t: f32, tension: f32) -> f32 {
+    if tension.abs() < 1e-6 {
+        return t;
+    }
+    let k = tension * TENSION_K;
+    ((k * t).exp() - 1.0) / (k.exp() - 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +235,42 @@ mod tests {
         let mut d = MsegData::default(); // node_count == 2, valid indices 0 and 1
         d.hold = HoldMode::Loop { start: 1, end: 1 }; // start == end is invalid
         assert!(!d.is_valid());
+    }
+
+    #[test]
+    fn warp_zero_tension_is_linear() {
+        assert!((warp(0.0, 0.0) - 0.0).abs() < 1e-6);
+        assert!((warp(0.25, 0.0) - 0.25).abs() < 1e-6);
+        assert!((warp(0.5, 0.0) - 0.5).abs() < 1e-6);
+        assert!((warp(1.0, 0.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn warp_pins_endpoints_for_any_tension() {
+        for &k in &[-1.0, -0.5, 0.3, 1.0] {
+            assert!((warp(0.0, k) - 0.0).abs() < 1e-5, "k={k}");
+            assert!((warp(1.0, k) - 1.0).abs() < 1e-5, "k={k}");
+        }
+    }
+
+    #[test]
+    fn warp_is_monotonic() {
+        for &k in &[-1.0, -0.4, 0.4, 1.0] {
+            let mut prev = warp(0.0, k);
+            for step in 1..=20 {
+                let t = step as f32 / 20.0;
+                let w = warp(t, k);
+                assert!(w >= prev - 1e-5, "non-monotonic at t={t}, k={k}");
+                prev = w;
+            }
+        }
+    }
+
+    #[test]
+    fn warp_bows_in_opposite_directions() {
+        // Positive tension: slow start -> midpoint output below 0.5.
+        // Negative tension: fast start -> midpoint output above 0.5.
+        assert!(warp(0.5, 1.0) < 0.5);
+        assert!(warp(0.5, -1.0) > 0.5);
     }
 }
