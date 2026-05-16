@@ -35,7 +35,7 @@ The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` fil
 1. Insert tinylimit on a track
 2. Lower the **Threshold** to push the signal into the limiter. The GR readout shows how much limiting is being applied.
 3. Set **Ceiling** to your desired output maximum (e.g., -0.1 dB for CD, -1.0 dBTP for streaming)
-4. Adjust character controls (Attack, Release, Knee, Transient) to taste, or click a **preset** name to start from a known setting
+4. Adjust character controls (Attack, Release, Knee, Transient) to taste, or pick a **preset** from the dropdown to start from a known setting
 
 ## Controls
 
@@ -123,7 +123,7 @@ Workflow: enable Gain Link, lower Threshold until you like the limiting characte
 
 tinylimit includes 7 built-in character presets that set Attack, Release, Knee, and Transient to tested starting points. They do not change Input, Threshold, Ceiling, Stereo Link, ISP, or Gain Link.
 
-Browse presets with the **<** and **>** arrows. Click the **preset name** to apply it.
+Click the **preset selector** to open a dropdown listing all presets; choosing one applies it immediately. The dropdown is also keyboard-navigable -- arrow keys move the highlight, **Enter** applies the highlighted preset, and **Escape** closes it without changing anything.
 
 | Preset | Attack | Release | Knee | Transient | Use Case |
 |--------|--------|---------|------|-----------|----------|
