@@ -50,7 +50,6 @@ pub enum MarkerHandle {
 }
 
 /// Transient editor state — not persisted.
-#[allow(dead_code)] // fields wired up across Tasks 2-11
 pub struct MsegEditState {
     /// When true, playback/timing controls and the marker lane are hidden.
     curve_only: bool,
@@ -66,8 +65,12 @@ pub struct MsegEditState {
     /// Randomizer style currently chosen in the strip.
     style: RandomStyle,
     /// Style-selector dropdown state.
+    // reserved for the dropdown-style-picker / numeric-entry follow-up
+    #[allow(dead_code)]
     style_dropdown: DropdownState<StripId>,
     /// Numeric strip-field text entry.
+    // reserved for the dropdown-style-picker / numeric-entry follow-up
+    #[allow(dead_code)]
     text_edit: TextEditState<StripId>,
     /// Bumped on each Randomize click so successive clicks differ.
     seed: u32,
@@ -516,16 +519,32 @@ mod tests {
         let l = mseg_layout(RECT, false, 1.0);
         let before = data.node_count;
         // Press, then drag across several grid cells.
-        state.on_mouse_down(phase_to_x(&l, 0.1), value_to_y(&l, 0.8),
-                            &mut data, RECT, 1.0, false);
+        state.on_mouse_down(
+            phase_to_x(&l, 0.1),
+            value_to_y(&l, 0.8),
+            &mut data,
+            RECT,
+            1.0,
+            false,
+        );
         for &p in &[0.3_f32, 0.5, 0.7, 0.9] {
-            state.on_mouse_move(phase_to_x(&l, p), value_to_y(&l, 0.6),
-                                &mut data, RECT, 1.0, false);
+            state.on_mouse_move(
+                phase_to_x(&l, p),
+                value_to_y(&l, 0.6),
+                &mut data,
+                RECT,
+                1.0,
+                false,
+            );
         }
         state.on_mouse_up(&mut data);
         assert!(data.node_count > before, "stepped-draw inserted no nodes");
         // Painted nodes are stepped.
-        assert!(data.active().iter().take(data.node_count - 1).any(|n| n.stepped));
+        assert!(data
+            .active()
+            .iter()
+            .take(data.node_count - 1)
+            .any(|n| n.stepped));
     }
 
     #[test]
@@ -536,8 +555,14 @@ mod tests {
         // Click at phase 0.3, value 0.7 — well away from any existing node or
         // tension handle — so the hit lands on Canvas and triggers a single
         // ordinary insert (not stepped-draw).
-        state.on_mouse_down(phase_to_x(&l, 0.3), value_to_y(&l, 0.7),
-                            &mut data, RECT, 1.0, false);
+        state.on_mouse_down(
+            phase_to_x(&l, 0.3),
+            value_to_y(&l, 0.7),
+            &mut data,
+            RECT,
+            1.0,
+            false,
+        );
         // Without the modifier this is an ordinary single-node insert.
         assert_eq!(data.node_count, 3);
     }
@@ -601,7 +626,10 @@ mod tests {
         let x = l.strip.0 + l.strip.2 * 0.7;
         let y = l.strip.1 + l.strip.3 * 0.5;
         let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
-        assert_eq!(ev, None, "cycling style changes editor state, not the document");
+        assert_eq!(
+            ev, None,
+            "cycling style changes editor state, not the document"
+        );
         assert_ne!(state.style(), before);
         state.on_mouse_up(&mut data);
     }
