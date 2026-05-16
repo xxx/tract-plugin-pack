@@ -166,17 +166,6 @@ impl MsegEditState {
         self.style
     }
 
-    /// Advance the randomizer style to the next of the five variants.
-    pub fn cycle_style(&mut self) {
-        self.style = match self.style {
-            RandomStyle::Smooth => RandomStyle::Ramps,
-            RandomStyle::Ramps => RandomStyle::Stepped,
-            RandomStyle::Stepped => RandomStyle::Spiky,
-            RandomStyle::Spiky => RandomStyle::Chaos,
-            RandomStyle::Chaos => RandomStyle::Smooth,
-        };
-    }
-
     /// Set the randomizer style directly (used by the style dropdown).
     pub fn set_style(&mut self, style: RandomStyle) {
         self.style = style;

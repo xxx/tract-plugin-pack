@@ -238,10 +238,10 @@ fn draw_nodes(
     }
 }
 
-/// The four interactive buttons of the MSEG control strip, each `(x, y, w, h)`.
-/// `snap` / `grid` / `style` are click-to-cycle buttons; `randomize` triggers
-/// the randomizer. Shared by `draw_strip` and hit-testing so the drawn buttons
-/// and the click zones can never drift apart.
+/// The four interactive controls of the MSEG control strip, each `(x, y, w, h)`.
+/// `snap` is a toggle button, `grid` and `style` are dropdown triggers, and
+/// `randomize` triggers the randomizer. Shared by `draw_strip` and hit-testing
+/// so the drawn controls and the click zones can never drift apart.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StripButtons {
     pub snap: (f32, f32, f32, f32),
