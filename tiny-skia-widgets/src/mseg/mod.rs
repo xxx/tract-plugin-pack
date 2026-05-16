@@ -10,7 +10,6 @@
 
 pub mod randomize;
 
-#[allow(unused_imports)]
 pub use randomize::*;
 
 /// Maximum number of envelope nodes.
