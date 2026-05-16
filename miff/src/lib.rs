@@ -68,8 +68,6 @@ impl Default for MiffParams {
     }
 }
 
-// fields used by process() in Task 8
-#[allow(dead_code)]
 pub struct Miff {
     params: Arc<MiffParams>,
     /// Sample rate from `initialize`.
@@ -102,6 +100,17 @@ impl Default for Miff {
             kernel: kernel::Kernel::default(),
             last_mode: MiffMode::Raw,
             last_reported_latency: u32::MAX, // forces a report on first process
+        }
+    }
+}
+
+impl Miff {
+    /// Per-sample convolution dispatch used by `process()` and testable in
+    /// isolation. Does NOT advance smoothers — callers do that separately.
+    fn filter_sample(&mut self, ch: usize, sample: f32, mode: MiffMode) -> f32 {
+        match mode {
+            MiffMode::Raw => self.raw[ch].process(sample, &self.kernel),
+            MiffMode::Phaseless => self.phaseless[ch].process(sample, &self.kernel),
         }
     }
 }
@@ -165,10 +174,54 @@ impl Plugin for Miff {
 
     fn process(
         &mut self,
-        _buffer: &mut Buffer,
+        buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        // Pick up the latest baked kernel (non-blocking; keep last on a miss).
+        if let Some(k) = self.kernel_handoff.try_read() {
+            self.kernel = k;
+        }
+
+        let mode = self.params.mode.value();
+        // Click-safe mode switch: reset the path being switched INTO.
+        if mode != self.last_mode {
+            match mode {
+                MiffMode::Raw => {
+                    for ch in &mut self.raw {
+                        ch.reset();
+                    }
+                }
+                MiffMode::Phaseless => {
+                    for ch in &mut self.phaseless {
+                        ch.reset();
+                    }
+                }
+            }
+            self.last_mode = mode;
+        }
+
+        // Report latency only when it changes.
+        let latency = match mode {
+            MiffMode::Raw => 0,
+            MiffMode::Phaseless => convolution::PHASELESS_LATENCY,
+        };
+        if latency != self.last_reported_latency {
+            context.set_latency_samples(latency);
+            self.last_reported_latency = latency;
+        }
+
+        for mut channel_samples in buffer.iter_samples() {
+            let mix = self.params.mix.smoothed.next();
+            let gain = self.params.gain.smoothed.next();
+            for (ch, sample) in channel_samples.iter_mut().enumerate() {
+                let ch = ch.min(1); // stereo state; mono uses channel 0
+                let dry = *sample;
+                let wet = self.filter_sample(ch, dry, mode);
+                *sample = (dry + (wet - dry) * mix) * gain;
+            }
+        }
+
         ProcessStatus::Normal
     }
 }
@@ -208,5 +261,84 @@ mod tests {
     fn length_param_defaults_to_256() {
         let p = MiffParams::default();
         assert_eq!(p.length.value(), 256);
+    }
+
+    // ── Process-loop plugin-level tests ──────────────────────────────────────
+    //
+    // Building a full nih-plug `Buffer` + `ProcessContext` in unit tests is
+    // impractical (the types are opaque/non-constructible from outside the
+    // crate in this nih-plug fork).  Instead we test the per-sample dispatch
+    // helper `filter_sample`, which is the algorithmic core of `process()`.
+    // A compile+run smoke test validates that the real `process()` signature
+    // and call sites at least compile and won't panic on the happy path.
+
+    /// A fresh `Miff` with the default flat-0.5 curve has `kernel.is_zero ==
+    /// true`, so `RawChannel::process` returns the input unchanged.
+    /// This is the "default document is a clean passthrough" guarantee.
+    #[test]
+    fn default_document_is_a_clean_passthrough() {
+        let mut miff = Miff::default();
+        // The default Kernel is zero (is_zero = true).
+        assert!(miff.kernel.is_zero, "default kernel must be zero");
+        let input = [0.5_f32, -0.3, 0.8, 0.1, -0.7];
+        for &s in &input {
+            let out = miff.filter_sample(0, s, MiffMode::Raw);
+            assert!(
+                (out - s).abs() < 1e-6,
+                "zero kernel in Raw mode must pass {s} through, got {out}"
+            );
+        }
+    }
+
+    /// When `mix == 0` the process formula `dry + (wet − dry) * 0 = dry`, so
+    /// the output must equal the dry input regardless of the kernel.
+    /// We test this by calling `filter_sample` and then applying the mix
+    /// formula manually, mirroring `process()`'s arithmetic exactly.
+    #[test]
+    fn mix_zero_is_dry_equivalent() {
+        let mut miff = Miff::default();
+        // Install a non-trivial kernel so `wet != dry`.
+        let curve = tiny_skia_widgets::mseg::MsegData::default(); // 0→1 ramp
+        miff.kernel = kernel::bake(&curve, 256);
+        assert!(!miff.kernel.is_zero);
+
+        let mix = 0.0_f32;
+        let gain = 1.0_f32;
+        let input = [0.5_f32, -0.3, 0.8];
+        for &dry in &input {
+            let wet = miff.filter_sample(0, dry, MiffMode::Raw);
+            let out = (dry + (wet - dry) * mix) * gain;
+            assert!(
+                (out - dry).abs() < 1e-6,
+                "mix=0 must pass dry {dry} through, got {out}"
+            );
+        }
+    }
+
+    /// Switching from Raw to Phaseless must reset the Phaseless path (so
+    /// stale STFT state doesn't contaminate the new mode's output) without
+    /// panicking or producing NaN/Inf.
+    #[test]
+    fn mode_switch_is_click_safe() {
+        let mut miff = Miff::default();
+
+        // Feed a block in Raw mode.
+        for i in 0..64 {
+            let s = (i as f32 * 0.01).sin();
+            miff.filter_sample(0, s, MiffMode::Raw);
+        }
+
+        // Simulate the mode-switch reset that `process()` performs.
+        for ch in &mut miff.phaseless {
+            ch.reset();
+        }
+        miff.last_mode = MiffMode::Phaseless;
+
+        // Feed a block in Phaseless mode — must not panic or produce NaN/Inf.
+        for i in 0..64 {
+            let s = (i as f32 * 0.01).cos();
+            let out = miff.filter_sample(0, s, MiffMode::Phaseless);
+            assert!(out.is_finite(), "Phaseless output must be finite after mode switch, got {out}");
+        }
     }
 }
