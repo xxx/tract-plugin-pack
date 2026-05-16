@@ -184,14 +184,15 @@ impl MsegEditState {
                 Some(MsegEdit::Changed)
             }
             MsegHit::Strip => {
-                // Left third: snap toggle. Middle third: cycle grid (both
-                // axes). Right third: cycle the randomizer style.
-                let third = layout.strip.2 / 3.0;
-                let local = x - layout.strip.0;
-                if local < third {
+                // Resolve which strip button was clicked via the very layout
+                // the renderer draws — clicks land exactly on the buttons, and
+                // a click in a gap between buttons is a no-op.
+                use crate::mseg::render::{in_rect, strip_buttons};
+                let b = strip_buttons(layout.strip, scale);
+                if in_rect(b.snap, x, y) {
                     data.snap = !data.snap;
                     Some(MsegEdit::Changed)
-                } else if local < third * 2.0 {
+                } else if in_rect(b.grid, x, y) {
                     let (t, v) = match data.time_divisions {
                         0..=4 => (8, 8),
                         5..=8 => (16, 8),
@@ -201,14 +202,11 @@ impl MsegEditState {
                     data.time_divisions = t;
                     data.value_steps = v;
                     Some(MsegEdit::Changed)
-                } else {
+                } else if in_rect(b.style, x, y) {
                     // Style cycle: editor state only — not a document change.
-                    // The style zone is the right third of the strip. It is
-                    // only reachable when strip width > ~270*scale px; below
-                    // that the Randomize button (right ~90*scale px) covers
-                    // the whole right third. Acceptable — style cycling is a
-                    // wide-widget affordance.
                     self.cycle_style();
+                    None
+                } else {
                     None
                 }
             }

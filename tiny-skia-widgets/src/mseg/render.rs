@@ -5,7 +5,8 @@
 use crate::mseg::editor::MsegEditState;
 use crate::mseg::{value_at_phase, HoldMode, MsegData};
 use crate::primitives::{
-    color_accent, color_bg, color_border, color_control_bg, draw_rect, draw_rect_outline,
+    color_accent, color_bg, color_border, color_control_bg, color_muted, draw_rect,
+    draw_rect_outline,
 };
 use crate::text::TextRenderer;
 use tiny_skia::Pixmap;
@@ -201,7 +202,9 @@ fn draw_nodes(
         let mid_phase = (w[0].time + w[1].time) * 0.5;
         let hx = phase_to_x(layout, mid_phase);
         let hy = value_to_y(layout, value_at_phase(data, mid_phase));
-        draw_dot(pixmap, hx, hy, TENSION_R * scale, color_border());
+        // A mid-gray, visible against the dark canvas but clearly secondary
+        // to the bright-accent node dots.
+        draw_dot(pixmap, hx, hy, TENSION_R * scale, color_muted());
     }
     // Node dots; the hovered node is drawn larger / accented.
     for (i, n) in a.iter().enumerate() {
@@ -213,11 +216,47 @@ fn draw_nodes(
     }
 }
 
-/// Draw the control strip background and labels. Strip interaction
-/// (snap/grid/style zones, Randomize) is handled by
-/// `MsegEditState::on_mouse_down`; this draws the static strip and reuses the
-/// crate's button style. Fixed-size literals are multiplied by `scale` for
-/// HiDPI.
+/// The four interactive buttons of the MSEG control strip, each `(x, y, w, h)`.
+/// `snap` / `grid` / `style` are click-to-cycle buttons; `randomize` triggers
+/// the randomizer. Shared by `draw_strip` and hit-testing so the drawn buttons
+/// and the click zones can never drift apart.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StripButtons {
+    pub snap: (f32, f32, f32, f32),
+    pub grid: (f32, f32, f32, f32),
+    pub style: (f32, f32, f32, f32),
+    pub randomize: (f32, f32, f32, f32),
+}
+
+/// Lay out the MSEG control-strip buttons within `strip` (`scale` is the DPI
+/// factor). `randomize` is a fixed width at the right end; `snap`/`grid`/`style`
+/// share the remaining width in three equal segments.
+pub(crate) fn strip_buttons(strip: (f32, f32, f32, f32), scale: f32) -> StripButtons {
+    let (sx, sy, sw, sh) = strip;
+    let pad = 6.0 * scale;
+    let gap = 4.0 * scale;
+    let by = sy + 3.0 * scale;
+    let bh = (sh - 6.0 * scale).max(0.0);
+    let rand_w = 84.0 * scale;
+    let randomize = (sx + sw - rand_w - pad, by, rand_w, bh);
+    let left = sx + pad;
+    let avail = (randomize.0 - gap - left).max(0.0);
+    let seg_w = ((avail - 2.0 * gap) / 3.0).max(0.0);
+    let snap = (left, by, seg_w, bh);
+    let grid = (left + seg_w + gap, by, seg_w, bh);
+    let style = (left + 2.0 * (seg_w + gap), by, seg_w, bh);
+    StripButtons {
+        snap,
+        grid,
+        style,
+        randomize,
+    }
+}
+
+/// Draw the control strip: a row of buttons — `snap` / `grid` / `style`
+/// click-to-cycle buttons and the `Randomize` button. Each is a real button
+/// (readable centred label on a visible box) so the click zone matches what
+/// the user sees. Interaction is handled in `on_mouse_down`.
 fn draw_strip(
     pixmap: &mut Pixmap,
     text_renderer: &mut TextRenderer,
@@ -233,30 +272,52 @@ fn draw_strip(
     draw_rect(pixmap, sx, sy, sw, sh, color_bg());
     draw_rect_outline(pixmap, sx, sy, sw, sh, color_border(), 1.0);
 
-    let pad = 6.0 * scale;
-    let text_size = (sh * 0.42).max(9.0 * scale);
-    let ty = sy + (sh + text_size) * 0.5 - 2.0 * scale;
-    // Three click-cyclable readouts (snap | grid | style) — one per third of
-    // the strip width left of the Randomize button, the three click-cyclable
-    // zones, handled in `on_mouse_down`.
-    let label = format!(
-        "snap {}    grid {}/{}    style {}",
-        if data.snap { "on" } else { "off" },
-        data.time_divisions,
-        data.value_steps,
-        state.style(),
-    );
-    text_renderer.draw_text(pixmap, sx + pad, ty, &label, text_size, color_border());
-
-    // Randomize button at the right end.
-    let btn_w = 84.0 * scale;
-    crate::controls::draw_button(
+    let b = strip_buttons(layout.strip, scale);
+    let snap_label = format!("snap {}", if data.snap { "on" } else { "off" });
+    let grid_label = format!("grid {}/{}", data.time_divisions, data.value_steps);
+    let style_label = format!("style {}", state.style());
+    use crate::controls::draw_button;
+    // The snap button is `active`-highlighted when snapping is on.
+    draw_button(
         pixmap,
         text_renderer,
-        sx + sw - btn_w - pad,
-        sy + 3.0 * scale,
-        btn_w,
-        sh - 6.0 * scale,
+        b.snap.0,
+        b.snap.1,
+        b.snap.2,
+        b.snap.3,
+        &snap_label,
+        data.snap,
+        false,
+    );
+    draw_button(
+        pixmap,
+        text_renderer,
+        b.grid.0,
+        b.grid.1,
+        b.grid.2,
+        b.grid.3,
+        &grid_label,
+        false,
+        false,
+    );
+    draw_button(
+        pixmap,
+        text_renderer,
+        b.style.0,
+        b.style.1,
+        b.style.2,
+        b.style.3,
+        &style_label,
+        false,
+        false,
+    );
+    draw_button(
+        pixmap,
+        text_renderer,
+        b.randomize.0,
+        b.randomize.1,
+        b.randomize.2,
+        b.randomize.3,
         "Randomize",
         false,
         false,
@@ -289,7 +350,7 @@ pub enum MsegHit {
 /// Pointer hit radius (unscaled px) for node / handle picking.
 const HIT_R: f32 = 7.0;
 
-fn in_rect((rx, ry, rw, rh): (f32, f32, f32, f32), x: f32, y: f32) -> bool {
+pub(crate) fn in_rect((rx, ry, rw, rh): (f32, f32, f32, f32), x: f32, y: f32) -> bool {
     x >= rx && x < rx + rw && y >= ry && y < ry + rh
 }
 
@@ -334,11 +395,10 @@ pub fn mseg_hit_test(
         return MsegHit::MarkerLane;
     }
     if in_rect(layout.strip, x, y) {
-        // Randomize button: drawn 6px (pad) from the strip's right edge, 84px
-        // wide. The hitbox extends from the button's left edge to the strip
-        // edge.
-        let btn_x = layout.strip.0 + layout.strip.2 - 84.0 * scale - 6.0 * scale;
-        if x >= btn_x {
+        // The Randomize button is exactly the `strip_buttons` randomize rect.
+        // Everything else in the strip is `Strip`, resolved to a specific
+        // snap/grid/style button by `on_mouse_down` via the same layout.
+        if in_rect(strip_buttons(layout.strip, scale).randomize, x, y) {
             return MsegHit::Randomize;
         }
         return MsegHit::Strip;
