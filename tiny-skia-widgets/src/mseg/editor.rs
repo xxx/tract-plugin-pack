@@ -1,7 +1,8 @@
 //! MSEG editor — transient interaction state and event handlers.
 //!
-//! The editor *owns the document*: handlers mutate `&mut MsegData` directly
-//! and return `MsegEdit::Changed` when something changed.
+//! The editor will own the document: event handlers (added in later tasks)
+//! mutate `&mut MsegData` directly and return `MsegEdit::Changed` when
+//! something changed.
 //!
 //! See `docs/superpowers/specs/2026-05-16-mseg-editor-widget-design.md`.
 
@@ -11,6 +12,7 @@ use crate::text_edit::TextEditState;
 
 /// Returned by an event handler when the document changed and the consuming
 /// plugin should re-persist (and, for `miff`, re-bake).
+#[must_use = "check whether the document changed and re-persist if so"]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MsegEdit {
     Changed,
