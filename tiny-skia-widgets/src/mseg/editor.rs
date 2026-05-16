@@ -170,9 +170,37 @@ impl MsegEditState {
                     None
                 }
             }
+            MsegHit::Randomize => {
+                self.seed = self.seed.wrapping_add(1);
+                crate::mseg::randomize::randomize(data, self.style, self.seed);
+                Some(MsegEdit::Changed)
+            }
+            MsegHit::Strip => {
+                // Left third: snap toggle. Middle third: cycle grid (both
+                // axes). Right third: cycle the randomizer style.
+                let third = layout.strip.2 / 3.0;
+                let local = x - layout.strip.0;
+                if local < third {
+                    data.snap = !data.snap;
+                    Some(MsegEdit::Changed)
+                } else if local < third * 2.0 {
+                    let (t, v) = match data.time_divisions {
+                        0..=4 => (8, 8),
+                        5..=8 => (16, 8),
+                        9..=16 => (32, 16),
+                        _ => (4, 4),
+                    };
+                    data.time_divisions = t;
+                    data.value_steps = v;
+                    Some(MsegEdit::Changed)
+                } else {
+                    // Style cycle: editor state only — not a document change.
+                    self.cycle_style();
+                    None
+                }
+            }
+            MsegHit::MarkerLane => None,
             MsegHit::None => None,
-            // Strip / Randomize / MarkerLane handled in later tasks.
-            _ => None,
         }
     }
 
@@ -506,5 +534,62 @@ mod tests {
                             &mut data, RECT, 1.0, false);
         // Without the modifier this is an ordinary single-node insert.
         assert_eq!(data.node_count, 3);
+    }
+
+    #[test]
+    fn randomize_button_regenerates_and_changes_seed() {
+        let mut data = MsegData::default();
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        let bx = l.strip.0 + l.strip.2 - 48.0;
+        let by = l.strip.1 + l.strip.3 * 0.5;
+        let ev = state.on_mouse_down(bx, by, &mut data, RECT, 1.0, false);
+        assert_eq!(ev, Some(MsegEdit::Changed));
+        assert!(data.is_valid());
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn snap_toggle_zone_flips_snap() {
+        let mut data = MsegData::default();
+        let was = data.snap;
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        // Left third of the strip = snap toggle.
+        let x = l.strip.0 + l.strip.2 * 0.1;
+        let y = l.strip.1 + l.strip.3 * 0.5;
+        state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        assert_eq!(data.snap, !was);
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn grid_zone_cycles_both_axes() {
+        let mut data = MsegData::default(); // time_divisions 16, value_steps 8
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        // Middle third of the strip = grid cycle.
+        let x = l.strip.0 + l.strip.2 * 0.5;
+        let y = l.strip.1 + l.strip.3 * 0.5;
+        state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        // 16 -> (32, 16): both axes advanced.
+        assert_eq!(data.time_divisions, 32);
+        assert_eq!(data.value_steps, 16);
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn style_zone_cycles_the_randomizer_style() {
+        let mut data = MsegData::default();
+        let mut state = MsegEditState::new();
+        let before = state.style();
+        let l = mseg_layout(RECT, false, 1.0);
+        // Right third of the strip (left of the 84px+6px Randomize button).
+        let x = l.strip.0 + l.strip.2 * 0.7;
+        let y = l.strip.1 + l.strip.3 * 0.5;
+        let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        assert_eq!(ev, None, "cycling style changes editor state, not the document");
+        assert_ne!(state.style(), before);
+        state.on_mouse_up(&mut data);
     }
 }
