@@ -150,6 +150,111 @@ impl MsegData {
     pub fn debug_assert_valid(&self) {
         debug_assert!(self.is_valid(), "MsegData invariant violated: {self:?}");
     }
+
+    /// Smallest time gap allowed between adjacent nodes.
+    const MIN_NODE_GAP: f32 = 1e-4;
+
+    /// Insert a node at `(time, value)`, keeping time order. `time`/`value`
+    /// are clamped to 0..1; `time` is clamped strictly between the existing
+    /// nodes it falls between. Returns the new node's index, or `None` if the
+    /// document is already at `MAX_NODES`. The new node's segment is linear
+    /// (tension 0, not stepped).
+    pub fn insert_node(&mut self, time: f32, value: f32) -> Option<usize> {
+        if self.node_count >= MAX_NODES {
+            return None;
+        }
+        let value = value.clamp(0.0, 1.0);
+        // Insertion index: first active node with a strictly greater time.
+        let k = self.nodes[..self.node_count]
+            .iter()
+            .position(|n| n.time > time)
+            .unwrap_or(self.node_count);
+        // Endpoints stay pinned: never insert before index 1 or after the last.
+        let k = k.clamp(1, self.node_count - 1);
+        let lo = self.nodes[k - 1].time + Self::MIN_NODE_GAP;
+        let hi = self.nodes[k].time - Self::MIN_NODE_GAP;
+        let time = time.clamp(lo, hi);
+        // Shift [k..node_count) up by one.
+        let mut i = self.node_count;
+        while i > k {
+            self.nodes[i] = self.nodes[i - 1];
+            i -= 1;
+        }
+        self.nodes[k] = MsegNode { time, value, tension: 0.0, stepped: false };
+        self.node_count += 1;
+        self.shift_hold_for_insert(k);
+        self.debug_assert_valid();
+        Some(k)
+    }
+
+    /// Remove the node at `idx`. Endpoints (index 0 and the last) cannot be
+    /// removed. Returns `true` if a node was removed.
+    pub fn remove_node(&mut self, idx: usize) -> bool {
+        if idx == 0 || idx + 1 >= self.node_count {
+            return false;
+        }
+        // Shift (idx, node_count) down by one.
+        for i in idx..self.node_count - 1 {
+            self.nodes[i] = self.nodes[i + 1];
+        }
+        self.node_count -= 1;
+        self.fix_hold_for_remove(idx);
+        self.debug_assert_valid();
+        true
+    }
+
+    /// Move the node at `idx` to `(time, value)`. `value` is clamped to 0..1.
+    /// Endpoint nodes keep their pinned time (0.0 / 1.0); interior nodes have
+    /// `time` clamped strictly between their neighbours.
+    pub fn move_node(&mut self, idx: usize, time: f32, value: f32) {
+        if idx >= self.node_count {
+            return;
+        }
+        self.nodes[idx].value = value.clamp(0.0, 1.0);
+        let is_endpoint = idx == 0 || idx + 1 == self.node_count;
+        if !is_endpoint {
+            let lo = self.nodes[idx - 1].time + Self::MIN_NODE_GAP;
+            let hi = self.nodes[idx + 1].time - Self::MIN_NODE_GAP;
+            self.nodes[idx].time = time.clamp(lo, hi);
+        }
+        self.debug_assert_valid();
+    }
+
+    /// After inserting a node at index `k`, bump every `hold` index `>= k`.
+    fn shift_hold_for_insert(&mut self, k: usize) {
+        let bump = |i: usize| if i >= k { i + 1 } else { i };
+        self.hold = match self.hold {
+            HoldMode::None => HoldMode::None,
+            HoldMode::Sustain(i) => HoldMode::Sustain(bump(i)),
+            HoldMode::Loop { start, end } => HoldMode::Loop {
+                start: bump(start),
+                end: bump(end),
+            },
+        };
+    }
+
+    /// After removing the node at `idx`, fix up `hold`: a reference to the
+    /// removed node clears `hold`; higher indices shift down.
+    fn fix_hold_for_remove(&mut self, idx: usize) {
+        let adjust = |i: usize| -> Option<usize> {
+            match i.cmp(&idx) {
+                std::cmp::Ordering::Equal => None,
+                std::cmp::Ordering::Greater => Some(i - 1),
+                std::cmp::Ordering::Less => Some(i),
+            }
+        };
+        self.hold = match self.hold {
+            HoldMode::None => HoldMode::None,
+            HoldMode::Sustain(i) => match adjust(i) {
+                Some(i) => HoldMode::Sustain(i),
+                None => HoldMode::None,
+            },
+            HoldMode::Loop { start, end } => match (adjust(start), adjust(end)) {
+                (Some(s), Some(e)) if s < e => HoldMode::Loop { start: s, end: e },
+                _ => HoldMode::None,
+            },
+        };
+    }
 }
 
 /// Sample the envelope's raw shape at `phase` (0..1, clamped). Pure — used by
@@ -453,5 +558,89 @@ mod tests {
         // Released: advances past the loop end toward the real end.
         let (p, _) = advance(&d, 0.2, 0.1, true);
         assert!((p - 0.3).abs() < 1e-6, "released advances freely, got {p}");
+    }
+
+    // --- Task 6: node mutation tests ---
+
+    #[test]
+    fn insert_node_keeps_time_order() {
+        let mut d = MsegData::default(); // nodes at 0.0 and 1.0
+        let idx = d.insert_node(0.5, 0.7).unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(d.node_count, 3);
+        assert_eq!(d.nodes[1].time, 0.5);
+        assert_eq!(d.nodes[1].value, 0.7);
+        assert!(d.is_valid());
+    }
+
+    #[test]
+    fn insert_node_refuses_at_capacity() {
+        let mut d = MsegData::default();
+        while d.node_count < MAX_NODES {
+            let t = d.node_count as f32 / MAX_NODES as f32 * 0.99;
+            d.insert_node(t, 0.5);
+        }
+        assert_eq!(d.node_count, MAX_NODES);
+        assert!(d.insert_node(0.999, 0.5).is_none());
+    }
+
+    #[test]
+    fn insert_node_shifts_hold_indices() {
+        let mut d = MsegData::default();
+        d.insert_node(0.5, 0.5); // node_count 3
+        d.hold = HoldMode::Sustain(2); // the 1.0 endpoint
+        d.insert_node(0.25, 0.5);      // inserts at index 1, pushing others up
+        assert_eq!(d.hold, HoldMode::Sustain(3));
+        assert!(d.is_valid());
+    }
+
+    #[test]
+    fn remove_node_refuses_endpoints() {
+        let mut d = MsegData::default();
+        assert!(!d.remove_node(0));
+        assert!(!d.remove_node(1)); // last node
+        assert_eq!(d.node_count, 2);
+    }
+
+    #[test]
+    fn remove_node_deletes_interior_and_fixes_hold() {
+        let mut d = MsegData::default();
+        d.insert_node(0.3, 0.5); // idx 1
+        d.insert_node(0.6, 0.5); // idx 2
+        d.hold = HoldMode::Sustain(2);
+        assert!(d.remove_node(1)); // remove the 0.3 node
+        assert_eq!(d.node_count, 3);
+        assert_eq!(d.hold, HoldMode::Sustain(1)); // shifted down
+        assert!(d.is_valid());
+    }
+
+    #[test]
+    fn remove_node_clears_hold_referencing_removed_node() {
+        let mut d = MsegData::default();
+        d.insert_node(0.5, 0.5);
+        d.hold = HoldMode::Sustain(1);
+        assert!(d.remove_node(1));
+        assert_eq!(d.hold, HoldMode::None);
+    }
+
+    #[test]
+    fn move_node_clamps_interior_between_neighbors() {
+        let mut d = MsegData::default();
+        d.insert_node(0.5, 0.5); // idx 1
+        d.move_node(1, 5.0, 2.0); // wildly out of range
+        assert!(d.nodes[1].time > 0.0 && d.nodes[1].time < 1.0);
+        assert!(d.nodes[1].value >= 0.0 && d.nodes[1].value <= 1.0);
+        assert!(d.is_valid());
+    }
+
+    #[test]
+    fn move_node_pins_endpoint_time() {
+        let mut d = MsegData::default();
+        d.move_node(0, 0.4, 0.8); // try to move the first node's time
+        assert_eq!(d.nodes[0].time, 0.0); // time pinned
+        assert_eq!(d.nodes[0].value, 0.8); // value moved
+        d.move_node(1, 0.4, 0.2);
+        assert_eq!(d.nodes[1].time, 1.0); // time pinned
+        assert_eq!(d.nodes[1].value, 0.2);
     }
 }
