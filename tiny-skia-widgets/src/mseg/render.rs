@@ -23,7 +23,13 @@ const STRIP_H: f32 = 30.0;
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct MsegLayout {
     pub marker_lane: (f32, f32, f32, f32),
+    /// The full canvas panel — background fill and border.
     pub canvas: (f32, f32, f32, f32),
+    /// The drawable plot area, inset within `canvas` by the node-dot radius.
+    /// Grid lines, the envelope curve, and node/handle positions all map into
+    /// `plot`, so a node at a phase/value extreme (0 or 1) keeps its dot fully
+    /// inside `canvas` instead of half-clipping the edge.
+    pub plot: (f32, f32, f32, f32),
     pub strip: (f32, f32, f32, f32),
 }
 
@@ -38,38 +44,49 @@ pub fn mseg_layout(rect: (f32, f32, f32, f32), curve_only: bool, scale: f32) -> 
     };
     let strip_h = STRIP_H * scale;
     let canvas_h = (h - lane_h - strip_h).max(0.0);
+    let canvas = (x, y + lane_h, w, canvas_h);
+    // Inset the plot by the largest node-dot radius (a hovered node is the
+    // biggest) so node dots at the 0/1 extremes stay fully within `canvas`.
+    let m = (NODE_R + HOVER_BUMP) * scale;
+    let plot = (
+        canvas.0 + m,
+        canvas.1 + m,
+        (canvas.2 - 2.0 * m).max(0.0),
+        (canvas.3 - 2.0 * m).max(0.0),
+    );
     MsegLayout {
         marker_lane: (x, y, w, lane_h),
-        canvas: (x, y + lane_h, w, canvas_h),
+        canvas,
+        plot,
         strip: (x, y + lane_h + canvas_h, w, strip_h),
     }
 }
 
-/// Normalized phase (0..1) → canvas x pixel.
+/// Normalized phase (0..1) → plot x pixel.
 pub fn phase_to_x(layout: &MsegLayout, phase: f32) -> f32 {
     // No zero-width guard needed: phase * 0.0 == 0.0 is already correct here.
-    layout.canvas.0 + phase.clamp(0.0, 1.0) * layout.canvas.2
+    layout.plot.0 + phase.clamp(0.0, 1.0) * layout.plot.2
 }
 
-/// Canvas x pixel → normalized phase (0..1, clamped).
+/// Plot x pixel → normalized phase (0..1, clamped).
 pub fn x_to_phase(layout: &MsegLayout, x: f32) -> f32 {
-    if layout.canvas.2 <= 0.0 {
+    if layout.plot.2 <= 0.0 {
         return 0.0;
     }
-    ((x - layout.canvas.0) / layout.canvas.2).clamp(0.0, 1.0)
+    ((x - layout.plot.0) / layout.plot.2).clamp(0.0, 1.0)
 }
 
-/// Normalized value (0..1) → canvas y pixel (value 1.0 at the top).
+/// Normalized value (0..1) → plot y pixel (value 1.0 at the top).
 pub fn value_to_y(layout: &MsegLayout, value: f32) -> f32 {
-    layout.canvas.1 + (1.0 - value.clamp(0.0, 1.0)) * layout.canvas.3
+    layout.plot.1 + (1.0 - value.clamp(0.0, 1.0)) * layout.plot.3
 }
 
-/// Canvas y pixel → normalized value (0..1, clamped).
+/// Plot y pixel → normalized value (0..1, clamped).
 pub fn y_to_value(layout: &MsegLayout, y: f32) -> f32 {
-    if layout.canvas.3 <= 0.0 {
+    if layout.plot.3 <= 0.0 {
         return 0.0;
     }
-    (1.0 - (y - layout.canvas.1) / layout.canvas.3).clamp(0.0, 1.0)
+    (1.0 - (y - layout.plot.1) / layout.plot.3).clamp(0.0, 1.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -166,26 +183,30 @@ fn draw_canvas(
     }
     draw_rect(pixmap, cx, cy, cw, ch, color_control_bg());
 
+    // Grid lines, the curve, and nodes all live in the inset `plot` area so
+    // edge nodes don't clip. Drawn via the plot-based coordinate mapping.
+    let (px0, py0, pw, ph) = layout.plot;
+
     // Vertical time-grid lines.
     let tdiv = data.time_divisions.max(1);
     for i in 1..tdiv {
-        let gx = cx + (i as f32 / tdiv as f32) * cw;
-        draw_rect(pixmap, gx, cy, 1.0, ch, color_bg());
+        let gx = phase_to_x(layout, i as f32 / tdiv as f32);
+        draw_rect(pixmap, gx, py0, 1.0, ph, color_bg());
     }
     // Horizontal value-grid lines.
     let vsteps = data.value_steps.max(1);
     for i in 1..vsteps {
-        let gy = cy + (i as f32 / vsteps as f32) * ch;
-        draw_rect(pixmap, cx, gy, cw, 1.0, color_bg());
+        let gy = value_to_y(layout, i as f32 / vsteps as f32);
+        draw_rect(pixmap, px0, gy, pw, 1.0, color_bg());
     }
 
-    // Envelope polyline: sample `value_at_phase` per pixel column.
-    let cols = cw.max(1.0) as usize;
+    // Envelope polyline: sample `value_at_phase` per pixel column of the plot.
+    let cols = pw.max(1.0) as usize;
     let mut prev: Option<(f32, f32)> = None;
     for col in 0..=cols {
         let phase = col as f32 / cols as f32;
-        let x = (cx + phase * cw).min(cx + cw - 1.0);
-        let y = (cy + (1.0 - value_at_phase(data, phase)) * ch).min(cy + ch - 1.0);
+        let x = phase_to_x(layout, phase);
+        let y = value_to_y(layout, value_at_phase(data, phase));
         if let Some((px, py)) = prev {
             draw_line(pixmap, px, py, x, y, color_accent());
         }
@@ -501,6 +522,27 @@ mod tests {
         let l = mseg_layout(RECT, false, 1.0);
         // value 1.0 is at the TOP (smaller y) than value 0.0.
         assert!(value_to_y(&l, 1.0) < value_to_y(&l, 0.0));
+    }
+
+    #[test]
+    fn extreme_node_dots_stay_within_the_canvas() {
+        // A node at any phase/value extreme (0 or 1) must have its whole dot
+        // — radius NODE_R — inside the canvas panel, never half-clipped.
+        for &scale in &[1.0_f32, 2.0] {
+            let l = mseg_layout(RECT, false, scale);
+            let (cx, cy, cw, ch) = l.canvas;
+            let r = NODE_R * scale;
+            for &phase in &[0.0_f32, 1.0] {
+                for &value in &[0.0_f32, 1.0] {
+                    let nx = phase_to_x(&l, phase);
+                    let ny = value_to_y(&l, value);
+                    assert!(nx - r >= cx - 0.01, "dot clips left at scale {scale}");
+                    assert!(nx + r <= cx + cw + 0.01, "dot clips right at scale {scale}");
+                    assert!(ny - r >= cy - 0.01, "dot clips top at scale {scale}");
+                    assert!(ny + r <= cy + ch + 0.01, "dot clips bottom at scale {scale}");
+                }
+            }
+        }
     }
 
     #[test]
