@@ -15,7 +15,7 @@ pub const MAX_KERNEL: usize = 4096;
 pub const MAG_BINS: usize = MAX_KERNEL / 2 + 1;
 
 /// A baked, normalized FIR kernel. Fixed-size and `Copy` so it crosses the
-/// GUI→audio boundary with a lock-free copy that never allocates.
+/// GUI→audio boundary with an allocation-free copy.
 ///
 /// `taps[..len]` is the time-domain kernel (Raw mode). `mags` is the
 /// magnitude spectrum of the zero-padded `MAX_KERNEL`-point kernel (Phaseless
