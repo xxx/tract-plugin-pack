@@ -228,6 +228,64 @@ impl MsegEditState {
         self.step_last_cell = None;
         None
     }
+
+    /// Double-click: delete the node under the pointer (endpoints excepted).
+    pub fn on_double_click(
+        &mut self,
+        x: f32,
+        y: f32,
+        data: &mut MsegData,
+        rect: (f32, f32, f32, f32),
+        scale: f32,
+    ) -> Option<MsegEdit> {
+        use crate::mseg::render::{mseg_hit_test, mseg_layout, MsegHit};
+        let layout = mseg_layout(rect, self.curve_only, scale);
+        if let MsegHit::Node(i) = mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
+            if data.remove_node(i) {
+                self.drag = None;
+                self.hover = None;
+                return Some(MsegEdit::Changed);
+            }
+        }
+        None
+    }
+
+    /// Right-click: toggle the `stepped` flag of the segment under the
+    /// pointer. The segment is the one whose time range contains the click.
+    pub fn on_right_click(
+        &mut self,
+        x: f32,
+        y: f32,
+        data: &mut MsegData,
+        rect: (f32, f32, f32, f32),
+        scale: f32,
+    ) -> Option<MsegEdit> {
+        use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, MsegHit};
+        let layout = mseg_layout(rect, self.curve_only, scale);
+        if !matches!(
+            mseg_hit_test(&layout, data, self.curve_only, scale, x, y),
+            MsegHit::Canvas | MsegHit::Tension(_) | MsegHit::Node(_)
+        ) {
+            return None;
+        }
+        let phase = x_to_phase(&layout, x);
+        // Segment i is the last node whose time is <= phase, capped so a
+        // segment always exists. Compute `seg` inside a block so the
+        // immutable borrow of `data` via `active()` ends before the write.
+        let seg = {
+            let a = data.active();
+            let mut seg = 0;
+            for (i, n) in a.iter().enumerate().take(data.node_count - 1) {
+                if n.time <= phase {
+                    seg = i;
+                }
+            }
+            seg
+        };
+        data.nodes[seg].stepped = !data.nodes[seg].stepped;
+        data.debug_assert_valid();
+        Some(MsegEdit::Changed)
+    }
 }
 
 impl Default for MsegEditState {
@@ -315,5 +373,43 @@ mod tests {
         // A true no-op: the editor state must not be corrupted either.
         assert!(state.drag.is_none());
         assert!(state.hovered_node().is_none());
+    }
+
+    #[test]
+    fn double_click_deletes_interior_node() {
+        let mut data = MsegData::default();
+        data.insert_node(0.5, 0.5);
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        let ev = state.on_double_click(phase_to_x(&l, 0.5), value_to_y(&l, 0.5),
+                                       &mut data, RECT, 1.0);
+        assert_eq!(ev, Some(MsegEdit::Changed));
+        assert_eq!(data.node_count, 2);
+    }
+
+    #[test]
+    fn double_click_endpoint_does_nothing() {
+        let mut data = MsegData::default();
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        let ev = state.on_double_click(phase_to_x(&l, 0.0), value_to_y(&l, 0.0),
+                                       &mut data, RECT, 1.0);
+        assert_eq!(ev, None);
+        assert_eq!(data.node_count, 2);
+    }
+
+    #[test]
+    fn right_click_toggles_segment_stepped() {
+        let mut data = MsegData::default();
+        data.insert_node(0.5, 0.5);
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        // Right-click mid-way along segment 0 (phase ~0.25).
+        let x = phase_to_x(&l, 0.25);
+        let y = value_to_y(&l, 0.25);
+        assert!(!data.nodes[0].stepped);
+        let ev = state.on_right_click(x, y, &mut data, RECT, 1.0);
+        assert_eq!(ev, Some(MsegEdit::Changed));
+        assert!(data.nodes[0].stepped);
     }
 }
