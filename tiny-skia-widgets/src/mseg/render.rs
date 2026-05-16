@@ -80,14 +80,20 @@ pub fn draw_mseg(
     scale: f32,
 ) {
     let layout = mseg_layout(rect, state.is_curve_only(), scale);
-    draw_canvas(pixmap, &layout, data, state);
+    draw_canvas(pixmap, &layout, data, state, scale);
     // Marker lane (Task 5) and control strip (Task 6) are drawn here in
-    // later tasks; `text_renderer`/`scale` are used by those.
-    let _ = (text_renderer, scale);
+    // later tasks; `text_renderer` is used by those.
+    let _ = text_renderer;
 }
 
 /// Draw the canvas: background, grid, and the envelope polyline.
-fn draw_canvas(pixmap: &mut Pixmap, layout: &MsegLayout, data: &MsegData, state: &MsegEditState) {
+fn draw_canvas(
+    pixmap: &mut Pixmap,
+    layout: &MsegLayout,
+    data: &MsegData,
+    state: &MsegEditState,
+    scale: f32,
+) {
     let (cx, cy, cw, ch) = layout.canvas;
     if cw <= 0.0 || ch <= 0.0 {
         return;
@@ -120,13 +126,15 @@ fn draw_canvas(pixmap: &mut Pixmap, layout: &MsegLayout, data: &MsegData, state:
         prev = Some((x, y));
     }
 
-    draw_nodes(pixmap, layout, data, state);
+    draw_nodes(pixmap, layout, data, state, scale);
     draw_rect_outline(pixmap, cx, cy, cw, ch, color_border(), 1.0);
 }
 
 /// Node-dot radius and tension-handle radius, unscaled px.
 const NODE_R: f32 = 4.0;
 const TENSION_R: f32 = 3.0;
+/// Extra dot radius (unscaled px) when a node is hovered.
+const HOVER_BUMP: f32 = 1.5;
 
 /// Draw a filled square "dot" centred at `(x, y)`.
 fn draw_dot(pixmap: &mut Pixmap, x: f32, y: f32, r: f32, color: tiny_skia::Color) {
@@ -134,24 +142,30 @@ fn draw_dot(pixmap: &mut Pixmap, x: f32, y: f32, r: f32, color: tiny_skia::Color
 }
 
 /// Draw node dots and per-segment tension handles over the curve.
-fn draw_nodes(pixmap: &mut Pixmap, layout: &MsegLayout, data: &MsegData, state: &MsegEditState) {
+fn draw_nodes(
+    pixmap: &mut Pixmap,
+    layout: &MsegLayout,
+    data: &MsegData,
+    state: &MsegEditState,
+    scale: f32,
+) {
     let a = data.active();
     // Tension handles: midpoint of each non-stepped segment.
-    for i in 0..data.node_count - 1 {
-        if a[i].stepped {
+    for w in a.windows(2) {
+        if w[0].stepped {
             continue;
         }
-        let mid_phase = (a[i].time + a[i + 1].time) * 0.5;
+        let mid_phase = (w[0].time + w[1].time) * 0.5;
         let hx = phase_to_x(layout, mid_phase);
         let hy = value_to_y(layout, value_at_phase(data, mid_phase));
-        draw_dot(pixmap, hx, hy, TENSION_R, color_border());
+        draw_dot(pixmap, hx, hy, TENSION_R * scale, color_border());
     }
     // Node dots; the hovered node is drawn larger / accented.
     for (i, n) in a.iter().enumerate() {
         let nx = phase_to_x(layout, n.time);
         let ny = value_to_y(layout, n.value);
         let hovered = state.hovered_node() == Some(i);
-        let r = if hovered { NODE_R + 1.5 } else { NODE_R };
+        let r = (if hovered { NODE_R + HOVER_BUMP } else { NODE_R }) * scale;
         draw_dot(pixmap, nx, ny, r, color_accent());
     }
 }
