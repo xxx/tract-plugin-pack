@@ -133,7 +133,8 @@ impl MsegEditState {
     /// Primary-button press. Returns `MsegEdit::Changed` when the document
     /// changed. With the stepped-draw modifier held, begins a stepped-draw on
     /// empty canvas; otherwise adds a node on empty canvas, or begins a node
-    /// or tension drag on a hit handle.
+    /// or tension drag on a hit handle. Strip clicks toggle snap, cycle the
+    /// grid, cycle the randomizer style, or fire the randomizer.
     pub fn on_mouse_down(
         &mut self,
         x: f32,
@@ -195,6 +196,11 @@ impl MsegEditState {
                     Some(MsegEdit::Changed)
                 } else {
                     // Style cycle: editor state only — not a document change.
+                    // The style zone is the right third of the strip. It is
+                    // only reachable when strip width > ~270*scale px; below
+                    // that the Randomize button (right ~90*scale px) covers
+                    // the whole right third. Acceptable — style cycling is a
+                    // wide-widget affordance.
                     self.cycle_style();
                     None
                 }
@@ -543,9 +549,16 @@ mod tests {
         let l = mseg_layout(RECT, false, 1.0);
         let bx = l.strip.0 + l.strip.2 - 48.0;
         let by = l.strip.1 + l.strip.3 * 0.5;
+        // Seed starts at 0; each Randomize click does wrapping_add(1).
         let ev = state.on_mouse_down(bx, by, &mut data, RECT, 1.0, false);
         assert_eq!(ev, Some(MsegEdit::Changed));
         assert!(data.is_valid());
+        assert_eq!(state.seed, 1);
+        // A second click bumps the seed again and re-randomizes.
+        let ev = state.on_mouse_down(bx, by, &mut data, RECT, 1.0, false);
+        assert_eq!(ev, Some(MsegEdit::Changed));
+        assert!(data.is_valid());
+        assert_eq!(state.seed, 2);
         state.on_mouse_up(&mut data);
     }
 

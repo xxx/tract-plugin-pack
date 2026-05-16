@@ -2,8 +2,8 @@
 //!
 //! See `docs/superpowers/specs/2026-05-16-mseg-editor-widget-design.md`.
 
-use crate::mseg::{value_at_phase, HoldMode, MsegData};
 use crate::mseg::editor::MsegEditState;
+use crate::mseg::{value_at_phase, HoldMode, MsegData};
 use crate::primitives::{
     color_accent, color_bg, color_border, color_control_bg, draw_rect, draw_rect_outline,
 };
@@ -28,7 +28,11 @@ pub struct MsegLayout {
 /// `scale` is the DPI factor.
 pub fn mseg_layout(rect: (f32, f32, f32, f32), curve_only: bool, scale: f32) -> MsegLayout {
     let (x, y, w, h) = rect;
-    let lane_h = if curve_only { 0.0 } else { MARKER_LANE_H * scale };
+    let lane_h = if curve_only {
+        0.0
+    } else {
+        MARKER_LANE_H * scale
+    };
     let strip_h = STRIP_H * scale;
     let canvas_h = (h - lane_h - strip_h).max(0.0);
     MsegLayout {
@@ -103,7 +107,14 @@ fn draw_marker_lane(
     let mark = |pm: &mut Pixmap, node: usize, color: tiny_skia::Color| {
         if node < data.node_count {
             let mx = phase_to_x(layout, a[node].time);
-            draw_rect(pm, mx - 3.0 * scale, ly + 2.0 * scale, 6.0 * scale, lh - 4.0 * scale, color);
+            draw_rect(
+                pm,
+                mx - 3.0 * scale,
+                ly + 2.0 * scale,
+                6.0 * scale,
+                lh - 4.0 * scale,
+                color,
+            );
         }
     };
     match data.hold {
@@ -200,9 +211,11 @@ fn draw_nodes(
     }
 }
 
-/// Draw the control strip background and labels. Interaction is wired in a
-/// later task; this draws the static strip and reuses the crate's button
-/// style. Fixed-size literals are multiplied by `scale` for HiDPI.
+/// Draw the control strip background and labels. Strip interaction
+/// (snap/grid/style zones, Randomize) is handled by
+/// `MsegEditState::on_mouse_down`; this draws the static strip and reuses the
+/// crate's button style. Fixed-size literals are multiplied by `scale` for
+/// HiDPI.
 fn draw_strip(
     pixmap: &mut Pixmap,
     text_renderer: &mut TextRenderer,
@@ -222,8 +235,8 @@ fn draw_strip(
     let text_size = (sh * 0.42).max(9.0 * scale);
     let ty = sy + (sh + text_size) * 0.5 - 2.0 * scale;
     // Three click-cyclable readouts (snap | grid | style) — one per third of
-    // the strip width left of the Randomize button (a later task wires the
-    // interactive zones).
+    // the strip width left of the Randomize button, the three click-cyclable
+    // zones, handled in `on_mouse_down`.
     let label = format!(
         "snap {}    grid {}/{}    style {}",
         if data.snap { "on" } else { "off" },
@@ -472,7 +485,10 @@ mod tests {
         let l = mseg_layout(RECT, false, 1.0);
         let nx = phase_to_x(&l, 0.5);
         let ny = value_to_y(&l, 0.5);
-        assert_eq!(mseg_hit_test(&l, &data, false, 1.0, nx, ny), MsegHit::Node(1));
+        assert_eq!(
+            mseg_hit_test(&l, &data, false, 1.0, nx, ny),
+            MsegHit::Node(1)
+        );
     }
 
     #[test]
@@ -481,8 +497,14 @@ mod tests {
         let l = mseg_layout(RECT, false, 1.0);
         // The default data has a tension handle at (0.5, 0.5) — probe at (0.25, 0.75)
         // which is well away from any node or handle.
-        let hit = mseg_hit_test(&l, &data, false, 1.0, l.canvas.0 + l.canvas.2 * 0.25,
-                                l.canvas.1 + l.canvas.3 * 0.75);
+        let hit = mseg_hit_test(
+            &l,
+            &data,
+            false,
+            1.0,
+            l.canvas.0 + l.canvas.2 * 0.25,
+            l.canvas.1 + l.canvas.3 * 0.75,
+        );
         assert_eq!(hit, MsegHit::Canvas);
     }
 
@@ -494,13 +516,19 @@ mod tests {
         // edge, 84px wide → centre is 6 + 84/2 px in from the right.
         let bx = l.strip.0 + l.strip.2 - 6.0 - 84.0 * 0.5;
         let by = l.strip.1 + l.strip.3 * 0.5;
-        assert_eq!(mseg_hit_test(&l, &data, false, 1.0, bx, by), MsegHit::Randomize);
+        assert_eq!(
+            mseg_hit_test(&l, &data, false, 1.0, bx, by),
+            MsegHit::Randomize
+        );
     }
 
     #[test]
     fn hit_test_outside_is_none() {
         let data = MsegData::default();
         let l = mseg_layout(RECT, false, 1.0);
-        assert_eq!(mseg_hit_test(&l, &data, false, 1.0, -10.0, -10.0), MsegHit::None);
+        assert_eq!(
+            mseg_hit_test(&l, &data, false, 1.0, -10.0, -10.0),
+            MsegHit::None
+        );
     }
 }
