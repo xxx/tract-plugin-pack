@@ -16,7 +16,7 @@ use tiny_skia::Pixmap;
 /// Marker-lane height in unscaled px (full editor only).
 const MARKER_LANE_H: f32 = 16.0;
 /// Control-strip height in unscaled px.
-const STRIP_H: f32 = 30.0;
+const STRIP_H: f32 = 42.0;
 
 /// Sub-rectangles of the MSEG widget, each `(x, y, w, h)`. `marker_lane` has
 /// height 0 in curve-only mode.
@@ -286,7 +286,7 @@ pub(crate) fn strip_buttons(strip: (f32, f32, f32, f32), scale: f32) -> StripBut
     let gap = 4.0 * scale;
     let by = sy + 3.0 * scale;
     let bh = (sh - 6.0 * scale).max(0.0);
-    let rand_w = 84.0 * scale;
+    let rand_w = 130.0 * scale;
     let randomize = (sx + sw - rand_w - pad, by, rand_w, bh);
     let left = sx + pad;
     let avail = (randomize.0 - gap - left).max(0.0);

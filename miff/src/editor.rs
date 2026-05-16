@@ -1,9 +1,9 @@
 //! Softbuffer-based editor for miff. CPU rendering via tiny-skia.
 //!
 //! Layout (880×620, freely resizable):
-//! - Top region (~55%): MSEG editor (curve-only mode)
-//! - Middle region (~29%): Frequency-response view (Task 12)
-//! - Bottom strip (~16%): Controls placeholder (Task 10)
+//! - Top region (~53%): MSEG editor (curve-only mode)
+//! - Middle region (~28%): Frequency-response view
+//! - Bottom strip (~19%): Mode selector + Mix/Gain/Length dials
 
 pub mod response_view;
 
@@ -76,8 +76,8 @@ pub(crate) fn layout(
     (f32, f32, f32, f32),
 ) {
     // full-width regions; sub-widgets have their own internal padding
-    let mseg_h = h * 0.55;
-    let response_h = h * 0.29;
+    let mseg_h = h * 0.53;
+    let response_h = h * 0.28;
     let strip_h = h - mseg_h - response_h;
 
     let mseg_rect = (0.0, 0.0, w, mseg_h);
@@ -91,9 +91,9 @@ pub(crate) fn layout(
 
 /// Sizing constants for the bottom control strip.
 const STRIP_PAD: f32 = 8.0;
-const MODE_W: f32 = 160.0;
-const MODE_H: f32 = 28.0;
-const DIAL_RADIUS: f32 = 26.0;
+const MODE_W: f32 = 220.0;
+const MODE_H: f32 = 34.0;
+const DIAL_RADIUS: f32 = 36.0;
 
 /// Compute the four control rects within `strip_rect` at `scale`.
 ///
