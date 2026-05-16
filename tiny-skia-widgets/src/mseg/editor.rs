@@ -131,8 +131,9 @@ impl MsegEditState {
     }
 
     /// Primary-button press. Returns `MsegEdit::Changed` when the document
-    /// changed. Adds a node on empty canvas, begins a node or tension drag on
-    /// a hit handle.
+    /// changed. With the stepped-draw modifier held, begins a stepped-draw on
+    /// empty canvas; otherwise adds a node on empty canvas, or begins a node
+    /// or tension drag on a hit handle.
     pub fn on_mouse_down(
         &mut self,
         x: f32,
@@ -300,8 +301,9 @@ impl MsegEditState {
         Some(MsegEdit::Changed)
     }
 
-    /// Paint one stepped node at the pointer if it has entered a new
-    /// time-grid cell since the last paint. Used by stepped-draw.
+    /// Insert a node snapped to the current time-grid cell's left edge and
+    /// mark both it and its predecessor `stepped`, if the pointer has entered
+    /// a new cell since the last paint. Used by stepped-draw.
     fn step_draw_paint(
         &mut self,
         x: f32,
@@ -313,6 +315,8 @@ impl MsegEditState {
         let phase = x_to_phase(layout, x);
         let value = y_to_value(layout, y);
         let tdiv = data.time_divisions.max(1);
+        // At phase 1.0, cell == tdiv and snapped_phase collapses to 1.0,
+        // which insert_node refuses (no room past the end node) — harmless.
         let cell = (phase * tdiv as f32) as u32;
         if self.step_last_cell == Some(cell) {
             return None; // still inside the last painted cell
