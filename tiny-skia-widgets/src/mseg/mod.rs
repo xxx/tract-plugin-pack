@@ -185,6 +185,62 @@ pub fn value_at_phase(data: &MsegData, phase: f32) -> f32 {
     n0.value + (n1.value - n0.value) * warp(t, n0.tension)
 }
 
+/// Wrap `p` into the half-open range `[lo, hi)`.
+fn wrap_into(mut p: f32, lo: f32, hi: f32) -> f32 {
+    let span = (hi - lo).max(1e-9);
+    while p >= hi {
+        p -= span;
+    }
+    while p < lo {
+        p += span;
+    }
+    p
+}
+
+/// Advance the playhead one step, applying the document's playback rules.
+/// Returns `(next_phase, finished)`. `finished` is only ever `true` in
+/// triggered playback once the playhead reaches the end. Pure — the consuming
+/// plugin owns the `phase` value and the `released` flag.
+pub fn advance(data: &MsegData, phase: f32, dt: f32, released: bool) -> (f32, bool) {
+    let a = data.active();
+    match data.play_mode {
+        PlayMode::Cyclic => {
+            let (lo, hi) = match data.hold {
+                HoldMode::Loop { start, end } => (a[start].time, a[end].time),
+                _ => (0.0, 1.0),
+            };
+            (wrap_into(phase + dt, lo, hi), false)
+        }
+        PlayMode::Triggered => {
+            let mut p = phase + dt;
+            if !released {
+                match data.hold {
+                    HoldMode::Sustain(i) => {
+                        let st = a[i].time;
+                        if p > st {
+                            p = st;
+                        }
+                        return (p, false);
+                    }
+                    HoldMode::Loop { start, end } => {
+                        let (lo, hi) = (a[start].time, a[end].time);
+                        if p >= hi {
+                            p = wrap_into(p, lo, hi);
+                        }
+                        return (p, false);
+                    }
+                    HoldMode::None => {}
+                }
+            }
+            if p >= 1.0 {
+                (1.0, true)
+            } else {
+                (p, false)
+            }
+        }
+    }
+}
+
 /// Shape factor: tension is scaled by this into the exponential warp exponent.
 const TENSION_K: f32 = 5.0;
 
@@ -349,5 +405,59 @@ mod tests {
         assert!((value_at_phase(&d, 0.25) - 0.5).abs() < 1e-6); // up-ramp midpoint
         assert!((value_at_phase(&d, 0.5) - 1.0).abs() < 1e-6);  // peak
         assert!((value_at_phase(&d, 0.75) - 0.5).abs() < 1e-6); // down-ramp midpoint
+    }
+
+    #[test]
+    fn advance_triggered_runs_to_end_and_finishes() {
+        let d = MsegData::default(); // Triggered, hold None
+        let (p, finished) = advance(&d, 0.5, 0.25, false);
+        assert!((p - 0.75).abs() < 1e-6);
+        assert!(!finished);
+        let (p, finished) = advance(&d, 0.9, 0.25, false);
+        assert!((p - 1.0).abs() < 1e-6);
+        assert!(finished);
+    }
+
+    #[test]
+    fn advance_cyclic_wraps() {
+        let mut d = MsegData::default();
+        d.play_mode = PlayMode::Cyclic;
+        let (p, finished) = advance(&d, 0.9, 0.25, false);
+        assert!(!finished);
+        assert!((p - 0.15).abs() < 1e-6, "0.9 + 0.25 wraps to 0.15, got {p}");
+    }
+
+    #[test]
+    fn advance_sustain_holds_until_released() {
+        let mut d = MsegData::default();
+        d.node_count = 3;
+        d.nodes[0] = MsegNode { time: 0.0, value: 0.0, tension: 0.0, stepped: false };
+        d.nodes[1] = MsegNode { time: 0.5, value: 1.0, tension: 0.0, stepped: false };
+        d.nodes[2] = MsegNode { time: 1.0, value: 0.0, tension: 0.0, stepped: false };
+        d.hold = HoldMode::Sustain(1); // node 1 is at time 0.5
+        // Held: phase cannot pass the sustain node's time.
+        let (p, finished) = advance(&d, 0.45, 0.25, false);
+        assert!((p - 0.5).abs() < 1e-6, "held at sustain time, got {p}");
+        assert!(!finished);
+        // Released: advances past the sustain point normally.
+        let (p, finished) = advance(&d, 0.5, 0.25, true);
+        assert!((p - 0.75).abs() < 1e-6);
+        assert!(!finished);
+    }
+
+    #[test]
+    fn advance_loop_wraps_while_held_then_exits_on_release() {
+        let mut d = MsegData::default();
+        d.node_count = 3;
+        d.nodes[0] = MsegNode { time: 0.0, value: 0.0, tension: 0.0, stepped: false };
+        d.nodes[1] = MsegNode { time: 0.25, value: 1.0, tension: 0.0, stepped: false };
+        d.nodes[2] = MsegNode { time: 1.0, value: 0.0, tension: 0.0, stepped: false };
+        d.hold = HoldMode::Loop { start: 0, end: 1 }; // loop [0.0, 0.25]
+        // Held: crossing the loop end wraps back toward the loop start.
+        let (p, _) = advance(&d, 0.2, 0.1, false);
+        assert!(p < 0.25 && p >= 0.0, "looped back into [0,0.25], got {p}");
+        // Released: advances past the loop end toward the real end.
+        let (p, _) = advance(&d, 0.2, 0.1, true);
+        assert!((p - 0.3).abs() < 1e-6, "released advances freely, got {p}");
     }
 }
