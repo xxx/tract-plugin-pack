@@ -186,15 +186,9 @@ pub fn value_at_phase(data: &MsegData, phase: f32) -> f32 {
 }
 
 /// Wrap `p` into the half-open range `[lo, hi)`.
-fn wrap_into(mut p: f32, lo: f32, hi: f32) -> f32 {
+fn wrap_into(p: f32, lo: f32, hi: f32) -> f32 {
     let span = (hi - lo).max(1e-9);
-    while p >= hi {
-        p -= span;
-    }
-    while p < lo {
-        p += span;
-    }
-    p
+    lo + (p - lo).rem_euclid(span)
 }
 
 /// Advance the playhead one step, applying the document's playback rules.
