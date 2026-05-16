@@ -54,6 +54,12 @@ drift. This keeps the widget crate UI + pure data/functions, with no
 audio-rate playback state (whose trigger/release semantics are
 plugin-specific anyway).
 
+Because `MsegData` is `Copy` and heap-free (see the data model), the
+GUI→audio handoff is a plain lock-free copy — e.g. a triple buffer of
+pre-allocated `MsegData` slots — that never allocates or deallocates on the
+audio thread. The handoff mechanism itself is the plugin's concern; the
+widget only guarantees the document is cheap and safe to copy.
+
 ## Module Layout
 
 A new `mseg/` folder in `tiny-skia-widgets/src/`:
@@ -68,12 +74,21 @@ A new `mseg/` folder in `tiny-skia-widgets/src/`:
 ## Data Model
 
 ```rust
-/// The editable, serializable envelope document. The plugin persists this as
-/// plugin state and `Clone`s a snapshot for the DSP.
+/// The editable, serializable envelope document.
+///
+/// Fixed-capacity and `Copy` — no heap. This is deliberate: the GUI thread
+/// edits it and the audio thread reads it. A `Copy`, `Vec`-free document
+/// (~2 KB) crosses that boundary with a plain lock-free copy (e.g. a triple
+/// buffer) and never allocates *or deallocates* on the audio thread — a
+/// `Vec`-backed model would allocate on clone and free on drop, both
+/// forbidden inside `process()`.
 pub struct MsegData {
-    /// Ordered by time. `nodes[0].time == 0.0`, `nodes[last].time == 1.0`
-    /// (endpoints move in value only); interior nodes move freely in 0..1.
-    pub nodes: Vec<MsegNode>,
+    /// Storage for up to `MAX_NODES` nodes; only `nodes[..node_count]` are
+    /// active, ordered by time. `nodes[0].time == 0.0` and
+    /// `nodes[node_count - 1].time == 1.0` (endpoints move in value only);
+    /// interior nodes move freely in 0..1. Slots `>= node_count` are unused.
+    pub nodes: [MsegNode; MAX_NODES],
+    pub node_count: usize,
     pub play_mode: PlayMode,             // Triggered | Cyclic
     pub hold: HoldMode,                  // None | Sustain(idx) | Loop { start, end }
     pub sync_mode: SyncMode,             // Time | Beat — interprets the length
@@ -113,20 +128,25 @@ pub const MAX_NODES: usize = 128;
 - `hold` unifies sustain and loop. They are mutually exclusive — you cannot
   simultaneously hold one value and loop a range — so a single enum is the
   honest model.
-- `MsegData`, `MsegNode`, and the enums derive `Clone + Serialize +
+- `MsegData`, `MsegNode`, and the enums derive `Copy + Clone + Serialize +
   Deserialize` (adds a `serde` dependency to `tiny-skia-widgets`; the plugins
-  already use serde).
-- `MsegData::default()` is a sensible starting envelope: two nodes — `(time
-  0.0, value 0.0)` and `(time 1.0, value 1.0)` — a rising ramp; `Triggered`;
+  already use serde). To keep the persisted blob compact and sidestep any
+  large-array serde limitation, the plan may give `MsegData` a small
+  hand-written serde impl that (de)serializes only `nodes[..node_count]`.
+- `MsegData::default()` is a sensible starting envelope: `node_count == 2` —
+  `nodes[0] = (time 0.0, value 0.0)` and `nodes[1] = (time 1.0, value 1.0)` —
+  a rising ramp; remaining slots default; `Triggered`;
   `SyncMode::Time`, `time_seconds 1.0`, `beats 1.0`; `time_divisions 16`,
   `value_steps 8`, `snap true`; `hold None`.
 
-**Validity invariant** — `MsegData` is valid iff: `nodes.len()` in
-`2..=MAX_NODES`; nodes sorted strictly ascending by time; `nodes[0].time ==
-0.0` and `nodes[last].time == 1.0`; all `time`/`value` in 0..1; `tension` in
--1..1; any `hold` node indices in range and (for `Loop`) `start < end`. A
-debug-only `MsegData::debug_assert_valid()` checks this; tests assert it after
-every mutation path.
+**Validity invariant** — `MsegData` is valid iff: `node_count` in
+`2..=MAX_NODES`; the active nodes `nodes[..node_count]` are sorted strictly
+ascending by time; `nodes[0].time == 0.0` and `nodes[node_count - 1].time ==
+1.0`; all active `time`/`value` in 0..1; `tension` in -1..1; any `hold` node
+indices are `< node_count` and (for `Loop`) `start < end`. Slots
+`>= node_count` are not constrained. A debug-only
+`MsegData::debug_assert_valid()` checks this; tests assert it after every
+mutation path.
 
 ## Sampling & Playback
 
@@ -285,8 +305,8 @@ pub enum RandomStyle { Smooth, Ramps, Stepped, Spiky, Chaos }
 pub fn randomize(data: &mut MsegData, style: RandomStyle, seed: u32)
 ```
 
-Regenerates `data.nodes` only — `play_mode`, `sync_mode`, timing, and grid
-settings are left untouched. Deterministic given `seed` (a tiny private
+Regenerates `data.nodes` and `data.node_count` only — `play_mode`,
+`sync_mode`, timing, and grid settings are left untouched. Deterministic given `seed` (a tiny private
 xorshift PRNG, no new dependency — the same pattern the profiling harnesses
 use). The editor bumps a seed counter on each "Randomize" click.
 
