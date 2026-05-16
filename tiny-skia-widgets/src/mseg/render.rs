@@ -2,7 +2,9 @@
 //!
 //! See `docs/superpowers/specs/2026-05-16-mseg-editor-widget-design.md`.
 
-use crate::mseg::editor::MsegEditState;
+use crate::dropdown::draw_dropdown_popup;
+use crate::dropdown::draw_dropdown_trigger;
+use crate::mseg::editor::{grid_items, style_items, MsegEditState, StripId};
 use crate::mseg::{value_at_phase, HoldMode, MsegData};
 use crate::primitives::{
     color_accent, color_bg, color_border, color_control_bg, color_muted, draw_rect,
@@ -75,7 +77,8 @@ pub fn y_to_value(layout: &MsegLayout, y: f32) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// Draw the whole MSEG widget into `rect`. Composes the marker lane (full
-/// mode only), the canvas (grid + curve + nodes), and the control strip.
+/// mode only), the canvas (grid + curve + nodes), the control strip, and any
+/// open dropdown popup (drawn last so it overlays everything else).
 pub fn draw_mseg(
     pixmap: &mut Pixmap,
     text_renderer: &mut TextRenderer,
@@ -90,6 +93,25 @@ pub fn draw_mseg(
     draw_canvas(pixmap, &layout, data, state, scale);
     draw_marker_lane(pixmap, &layout, data, state, scale);
     draw_strip(pixmap, text_renderer, &layout, data, state, scale);
+
+    // Dropdown popup — MUST be drawn last so it overlays everything else.
+    // `window_size` is the far corner of the widget rect, keeping the popup
+    // within the widget bounds (the popup auto-opens upward when near the
+    // bottom).
+    let window_size = (rect.0 + rect.2, rect.1 + rect.3);
+    let items: &[&str] = if state.dropdown_is_open_for(StripId::TimeGrid) {
+        grid_items()
+    } else {
+        // Either the style dropdown is open or nothing is; closed is a no-op.
+        style_items()
+    };
+    draw_dropdown_popup(
+        pixmap,
+        text_renderer,
+        state.dropdown_state(),
+        items,
+        window_size,
+    );
 }
 
 /// Draw the hold marker(s) in the marker lane. No-op in curve-only mode or
@@ -253,10 +275,9 @@ pub(crate) fn strip_buttons(strip: (f32, f32, f32, f32), scale: f32) -> StripBut
     }
 }
 
-/// Draw the control strip: a row of buttons — `snap` / `grid` / `style`
-/// click-to-cycle buttons and the `Randomize` button. Each is a real button
-/// (readable centred label on a visible box) so the click zone matches what
-/// the user sees. Interaction is handled in `on_mouse_down`.
+/// Draw the control strip: `Snap` toggle button, `Grid` and `Style` dropdown
+/// triggers, and the `Randomize` button. Interaction is handled in
+/// `on_mouse_down`.
 fn draw_strip(
     pixmap: &mut Pixmap,
     text_renderer: &mut TextRenderer,
@@ -273,11 +294,9 @@ fn draw_strip(
     draw_rect_outline(pixmap, sx, sy, sw, sh, color_border(), 1.0);
 
     let b = strip_buttons(layout.strip, scale);
-    let snap_label = format!("snap {}", if data.snap { "on" } else { "off" });
-    let grid_label = format!("grid {}/{}", data.time_divisions, data.value_steps);
-    let style_label = format!("style {}", state.style());
+    // Snap: plain toggle button, Title Case, highlighted when active.
+    let snap_label = if data.snap { "Snap On" } else { "Snap Off" };
     use crate::controls::draw_button;
-    // The snap button is `active`-highlighted when snapping is on.
     draw_button(
         pixmap,
         text_renderer,
@@ -285,32 +304,32 @@ fn draw_strip(
         b.snap.1,
         b.snap.2,
         b.snap.3,
-        &snap_label,
+        snap_label,
         data.snap,
         false,
     );
-    draw_button(
+
+    // Grid: dropdown trigger showing the current grid setting.
+    let grid_label = format!("Grid {}/{}", data.time_divisions, data.value_steps);
+    draw_dropdown_trigger(
         pixmap,
         text_renderer,
-        b.grid.0,
-        b.grid.1,
-        b.grid.2,
-        b.grid.3,
+        b.grid,
         &grid_label,
-        false,
-        false,
+        state.dropdown_is_open_for(StripId::TimeGrid),
     );
-    draw_button(
+
+    // Style: dropdown trigger showing the current randomizer style.
+    let style_label = format!("Style {}", state.style());
+    draw_dropdown_trigger(
         pixmap,
         text_renderer,
-        b.style.0,
-        b.style.1,
-        b.style.2,
-        b.style.3,
+        b.style,
         &style_label,
-        false,
-        false,
+        state.dropdown_is_open_for(StripId::Style),
     );
+
+    // Randomize: plain button.
     draw_button(
         pixmap,
         text_renderer,

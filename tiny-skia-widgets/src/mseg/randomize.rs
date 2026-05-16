@@ -15,6 +15,34 @@ pub enum RandomStyle {
     Chaos,
 }
 
+impl RandomStyle {
+    /// All five variants in display order.
+    pub const ALL: [RandomStyle; 5] = [
+        RandomStyle::Smooth,
+        RandomStyle::Ramps,
+        RandomStyle::Stepped,
+        RandomStyle::Spiky,
+        RandomStyle::Chaos,
+    ];
+
+    /// Index of this variant in `ALL`.
+    pub fn index(self) -> usize {
+        match self {
+            RandomStyle::Smooth => 0,
+            RandomStyle::Ramps => 1,
+            RandomStyle::Stepped => 2,
+            RandomStyle::Spiky => 3,
+            RandomStyle::Chaos => 4,
+        }
+    }
+
+    /// Variant at position `i` in `ALL`. Clamps to the last element if out of
+    /// range.
+    pub fn from_index(i: usize) -> RandomStyle {
+        RandomStyle::ALL[i.min(RandomStyle::ALL.len() - 1)]
+    }
+}
+
 impl std::fmt::Display for RandomStyle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {

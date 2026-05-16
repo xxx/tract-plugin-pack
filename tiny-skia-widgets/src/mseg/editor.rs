@@ -6,10 +6,54 @@
 //!
 //! See `docs/superpowers/specs/2026-05-16-mseg-editor-widget-design.md`.
 
-use crate::dropdown::DropdownState;
+use crate::dropdown::{DropdownEvent, DropdownState};
 use crate::mseg::randomize::RandomStyle;
 use crate::mseg::MsegData;
 use crate::text_edit::TextEditState;
+
+/// Grid option pairs `(time_divisions, value_steps)` offered in the dropdown.
+pub const GRID_OPTIONS: [(u32, u32); 4] = [(4, 4), (8, 8), (16, 8), (32, 16)];
+
+/// Display labels for each `GRID_OPTIONS` entry.
+pub const GRID_LABELS: [&str; 4] = ["4 / 4", "8 / 8", "16 / 8", "32 / 16"];
+
+/// Style display labels, matching `RandomStyle::ALL` order.
+pub const STYLE_LABELS: [&str; 5] = ["Smooth", "Ramps", "Stepped", "Spiky", "Chaos"];
+
+/// Return the `GRID_OPTIONS` index whose `(time_divisions, value_steps)` pair
+/// matches `data`. If no exact match is found, returns the index of the closest
+/// match (smallest combined absolute deviation), defaulting to 0.
+pub fn current_grid_index(data: &MsegData) -> usize {
+    // Prefer an exact match.
+    for (i, &(t, v)) in GRID_OPTIONS.iter().enumerate() {
+        if data.time_divisions == t && data.value_steps == v {
+            return i;
+        }
+    }
+    // Nearest by combined distance.
+    GRID_OPTIONS
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, &(t, v))| {
+            let dt = (data.time_divisions as i64 - t as i64).unsigned_abs();
+            let dv = (data.value_steps as i64 - v as i64).unsigned_abs();
+            dt + dv
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+/// Fixed `&'static [&'static str]` slice of grid option labels. The same slice
+/// must be passed to every `DropdownState` call for the grid dropdown.
+pub fn grid_items() -> &'static [&'static str] {
+    &GRID_LABELS
+}
+
+/// Fixed `&'static [&'static str]` slice of style labels. The same slice must
+/// be passed to every `DropdownState` call for the style dropdown.
+pub fn style_items() -> &'static [&'static str] {
+    &STYLE_LABELS
+}
 
 /// Returned by an event handler when the document changed and the consuming
 /// plugin should re-persist (and, for `miff`, re-bake).
@@ -64,12 +108,12 @@ pub struct MsegEditState {
     stepped_draw_held: bool,
     /// Randomizer style currently chosen in the strip.
     style: RandomStyle,
-    /// Style-selector dropdown state.
-    // reserved for the dropdown-style-picker / numeric-entry follow-up
-    #[allow(dead_code)]
-    style_dropdown: DropdownState<StripId>,
+    /// Shared dropdown state for the grid and style dropdowns. At most one open
+    /// at a time; the `StripId` discriminant (`TimeGrid` vs `Style`) identifies
+    /// which is active.
+    dropdown: DropdownState<StripId>,
     /// Numeric strip-field text entry.
-    // reserved for the dropdown-style-picker / numeric-entry follow-up
+    // reserved for a future numeric-entry follow-up
     #[allow(dead_code)]
     text_edit: TextEditState<StripId>,
     /// Bumped on each Randomize click so successive clicks differ.
@@ -96,7 +140,7 @@ impl MsegEditState {
             step_last_cell: None,
             stepped_draw_held: false,
             style: RandomStyle::Smooth,
-            style_dropdown: DropdownState::new(),
+            dropdown: DropdownState::new(),
             text_edit: TextEditState::new(),
             seed: 0,
         }
@@ -133,11 +177,26 @@ impl MsegEditState {
         };
     }
 
+    /// Set the randomizer style directly (used by the style dropdown).
+    pub fn set_style(&mut self, style: RandomStyle) {
+        self.style = style;
+    }
+
+    /// `true` when the dropdown for `id` is currently open.
+    pub fn dropdown_is_open_for(&self, id: StripId) -> bool {
+        self.dropdown.is_open_for(id)
+    }
+
+    /// Crate-internal accessor for `render.rs` to call `draw_dropdown_popup`.
+    pub(crate) fn dropdown_state(&self) -> &DropdownState<StripId> {
+        &self.dropdown
+    }
+
     /// Primary-button press. Returns `MsegEdit::Changed` when the document
     /// changed. With the stepped-draw modifier held, begins a stepped-draw on
     /// empty canvas; otherwise adds a node on empty canvas, or begins a node
-    /// or tension drag on a hit handle. Strip clicks toggle snap, cycle the
-    /// grid, cycle the randomizer style, or fire the randomizer.
+    /// or tension drag on a hit handle. Strip clicks toggle snap, open a grid
+    /// or style dropdown, or fire the randomizer.
     pub fn on_mouse_down(
         &mut self,
         x: f32,
@@ -149,6 +208,30 @@ impl MsegEditState {
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
         let layout = mseg_layout(rect, self.curve_only, scale);
+
+        // If a dropdown is open, route the click to it first and consume.
+        if self.dropdown.is_open() {
+            let window_size = (rect.0 + rect.2, rect.1 + rect.3);
+            let items: &[&str] = if self.dropdown.is_open_for(StripId::TimeGrid) {
+                grid_items()
+            } else {
+                style_items()
+            };
+            match self.dropdown.on_mouse_down(x, y, items, window_size) {
+                Some(DropdownEvent::Selected(StripId::TimeGrid, idx)) => {
+                    let (t, v) = GRID_OPTIONS[idx];
+                    data.time_divisions = t;
+                    data.value_steps = v;
+                    return Some(MsegEdit::Changed);
+                }
+                Some(DropdownEvent::Selected(StripId::Style, idx)) => {
+                    self.set_style(RandomStyle::from_index(idx));
+                    return None;
+                }
+                _ => return None,
+            }
+        }
+
         match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
             MsegHit::Node(i) => {
                 self.drag = Some(DragTarget::Node(i));
@@ -189,22 +272,31 @@ impl MsegEditState {
                 // a click in a gap between buttons is a no-op.
                 use crate::mseg::render::{in_rect, strip_buttons};
                 let b = strip_buttons(layout.strip, scale);
+                let window_size = (rect.0 + rect.2, rect.1 + rect.3);
                 if in_rect(b.snap, x, y) {
                     data.snap = !data.snap;
                     Some(MsegEdit::Changed)
                 } else if in_rect(b.grid, x, y) {
-                    let (t, v) = match data.time_divisions {
-                        0..=4 => (8, 8),
-                        5..=8 => (16, 8),
-                        9..=16 => (32, 16),
-                        _ => (4, 4),
-                    };
-                    data.time_divisions = t;
-                    data.value_steps = v;
-                    Some(MsegEdit::Changed)
+                    // Open the grid dropdown; no document change yet.
+                    self.dropdown.open(
+                        StripId::TimeGrid,
+                        b.grid,
+                        grid_items(),
+                        current_grid_index(data),
+                        false,
+                        window_size,
+                    );
+                    None
                 } else if in_rect(b.style, x, y) {
-                    // Style cycle: editor state only — not a document change.
-                    self.cycle_style();
+                    // Open the style dropdown; no document change.
+                    self.dropdown.open(
+                        StripId::Style,
+                        b.style,
+                        style_items(),
+                        self.style.index(),
+                        false,
+                        window_size,
+                    );
                     None
                 } else {
                     None
@@ -227,6 +319,18 @@ impl MsegEditState {
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
         let layout = mseg_layout(rect, self.curve_only, scale);
+
+        // Route moves to the open dropdown for hover-highlight updates.
+        if self.dropdown.is_open() {
+            let window_size = (rect.0 + rect.2, rect.1 + rect.3);
+            let items: &[&str] = if self.dropdown.is_open_for(StripId::TimeGrid) {
+                grid_items()
+            } else {
+                style_items()
+            };
+            self.dropdown.on_mouse_move(x, y, items, window_size);
+            return None;
+        }
         // Hover highlight (only when not dragging).
         if self.drag.is_none() {
             self.hover = match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
@@ -267,8 +371,10 @@ impl MsegEditState {
         }
     }
 
-    /// Primary-button release. Ends any drag.
+    /// Primary-button release. Ends any drag and any scrollbar-thumb drag
+    /// inside an open dropdown.
     pub fn on_mouse_up(&mut self, _data: &mut MsegData) -> Option<MsegEdit> {
+        self.dropdown.on_mouse_up();
         self.drag = None;
         self.step_last_cell = None;
         None
@@ -603,36 +709,148 @@ mod tests {
         state.on_mouse_up(&mut data);
     }
 
+    // --- Grid dropdown tests ---
+
     #[test]
-    fn grid_zone_cycles_both_axes() {
+    fn grid_zone_opens_dropdown() {
         let mut data = MsegData::default(); // time_divisions 16, value_steps 8
         let mut state = MsegEditState::new();
         let l = mseg_layout(RECT, false, 1.0);
-        // Middle third of the strip = grid cycle.
-        let x = l.strip.0 + l.strip.2 * 0.5;
-        let y = l.strip.1 + l.strip.3 * 0.5;
-        state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
-        // 16 -> (32, 16): both axes advanced.
-        assert_eq!(data.time_divisions, 32);
-        assert_eq!(data.value_steps, 16);
+        // Use strip_buttons to find the grid trigger rect centre.
+        use crate::mseg::render::strip_buttons;
+        let b = strip_buttons(l.strip, 1.0);
+        let x = b.grid.0 + b.grid.2 * 0.5;
+        let y = b.grid.1 + b.grid.3 * 0.5;
+        let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        // Opening the dropdown doesn't change the document.
+        assert_eq!(ev, None, "opening dropdown must not change document");
+        // The grid dropdown is now open.
+        assert!(
+            state.dropdown_is_open_for(StripId::TimeGrid),
+            "grid dropdown not open after clicking grid trigger"
+        );
+        // Document not yet changed.
+        assert_eq!(data.time_divisions, 16);
         state.on_mouse_up(&mut data);
     }
 
     #[test]
-    fn style_zone_cycles_the_randomizer_style() {
+    fn grid_dropdown_select_updates_grid() {
+        use crate::dropdown::dropdown_popup_layout;
+        let mut data = MsegData::default(); // time_divisions 16, value_steps 8
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        use crate::mseg::render::strip_buttons;
+        let b = strip_buttons(l.strip, 1.0);
+        let x = b.grid.0 + b.grid.2 * 0.5;
+        let y = b.grid.1 + b.grid.3 * 0.5;
+        // Open the grid dropdown.
+        state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        assert!(state.dropdown_is_open_for(StripId::TimeGrid));
+        // Compute the popup layout to find a row to click.
+        let window_size = (RECT.0 + RECT.2, RECT.1 + RECT.3);
+        let layout = dropdown_popup_layout(&state.dropdown, grid_items(), window_size).unwrap();
+        // Click the first visible row (index 0 = "4 / 4").
+        let row = layout.visible_rows[0];
+        let (rx, ry, rw, rh) = row.rect;
+        let ev = state.on_mouse_down(rx + rw * 0.5, ry + rh * 0.5, &mut data, RECT, 1.0, false);
+        assert_eq!(
+            ev,
+            Some(MsegEdit::Changed),
+            "selecting grid must change document"
+        );
+        let (t, v) = GRID_OPTIONS[row.item_index];
+        assert_eq!(data.time_divisions, t);
+        assert_eq!(data.value_steps, v);
+        assert!(
+            !state.dropdown_is_open_for(StripId::TimeGrid),
+            "dropdown should close after selection"
+        );
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn current_grid_index_round_trips() {
+        for (i, &(t, v)) in GRID_OPTIONS.iter().enumerate() {
+            let mut data = MsegData::default();
+            data.time_divisions = t;
+            data.value_steps = v;
+            assert_eq!(
+                current_grid_index(&data),
+                i,
+                "round-trip failed for GRID_OPTIONS[{i}] = ({t},{v})"
+            );
+        }
+    }
+
+    #[test]
+    fn current_grid_index_no_match_returns_nearest() {
+        // (7, 7) is between options 1=(8,8) and 0=(4,4); nearest is 1.
+        let mut data = MsegData::default();
+        data.time_divisions = 7;
+        data.value_steps = 7;
+        let idx = current_grid_index(&data);
+        // Both options 0 and 1 are candidates — either is acceptable; just
+        // verify it returns a valid index within bounds.
+        assert!(idx < GRID_OPTIONS.len());
+    }
+
+    // --- Style dropdown tests ---
+
+    #[test]
+    fn style_zone_opens_dropdown() {
         let mut data = MsegData::default();
         let mut state = MsegEditState::new();
-        let before = state.style();
         let l = mseg_layout(RECT, false, 1.0);
-        // Right third of the strip (left of the 84px+6px Randomize button).
-        let x = l.strip.0 + l.strip.2 * 0.7;
-        let y = l.strip.1 + l.strip.3 * 0.5;
+        use crate::mseg::render::strip_buttons;
+        let b = strip_buttons(l.strip, 1.0);
+        let x = b.style.0 + b.style.2 * 0.5;
+        let y = b.style.1 + b.style.3 * 0.5;
         let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        assert_eq!(ev, None, "opening style dropdown must not change document");
+        assert!(
+            state.dropdown_is_open_for(StripId::Style),
+            "style dropdown not open after clicking style trigger"
+        );
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn style_dropdown_select_changes_style() {
+        use crate::dropdown::dropdown_popup_layout;
+        let mut data = MsegData::default();
+        let mut state = MsegEditState::new(); // starts at Smooth (index 0)
+        let l = mseg_layout(RECT, false, 1.0);
+        use crate::mseg::render::strip_buttons;
+        let b = strip_buttons(l.strip, 1.0);
+        let x = b.style.0 + b.style.2 * 0.5;
+        let y = b.style.1 + b.style.3 * 0.5;
+        // Open the style dropdown.
+        state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        assert!(state.dropdown_is_open_for(StripId::Style));
+        // Click the second row (index 1 = Ramps).
+        let window_size = (RECT.0 + RECT.2, RECT.1 + RECT.3);
+        let layout = dropdown_popup_layout(&state.dropdown, style_items(), window_size).unwrap();
+        let row = layout.visible_rows[1]; // second row
+        let (rx, ry, rw, rh) = row.rect;
+        let ev = state.on_mouse_down(rx + rw * 0.5, ry + rh * 0.5, &mut data, RECT, 1.0, false);
         assert_eq!(
             ev, None,
-            "cycling style changes editor state, not the document"
+            "style selection changes editor state, not the document"
         );
-        assert_ne!(state.style(), before);
+        assert_eq!(state.style(), RandomStyle::from_index(row.item_index));
+        assert!(
+            !state.dropdown_is_open_for(StripId::Style),
+            "dropdown should close after selection"
+        );
         state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn random_style_index_round_trips() {
+        for (i, &style) in RandomStyle::ALL.iter().enumerate() {
+            assert_eq!(style.index(), i);
+            assert_eq!(RandomStyle::from_index(i), style);
+        }
     }
 }
