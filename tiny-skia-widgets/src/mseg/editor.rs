@@ -108,6 +108,11 @@ impl MsegEditState {
         self.stepped_draw_held = held;
     }
 
+    /// The currently hovered node index, if any.
+    pub fn hovered_node(&self) -> Option<usize> {
+        self.hover
+    }
+
     /// The randomizer style currently selected in the strip.
     pub fn style(&self) -> RandomStyle {
         self.style

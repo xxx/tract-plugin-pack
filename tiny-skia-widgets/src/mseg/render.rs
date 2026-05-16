@@ -87,7 +87,7 @@ pub fn draw_mseg(
 }
 
 /// Draw the canvas: background, grid, and the envelope polyline.
-fn draw_canvas(pixmap: &mut Pixmap, layout: &MsegLayout, data: &MsegData, _state: &MsegEditState) {
+fn draw_canvas(pixmap: &mut Pixmap, layout: &MsegLayout, data: &MsegData, state: &MsegEditState) {
     let (cx, cy, cw, ch) = layout.canvas;
     if cw <= 0.0 || ch <= 0.0 {
         return;
@@ -120,7 +120,40 @@ fn draw_canvas(pixmap: &mut Pixmap, layout: &MsegLayout, data: &MsegData, _state
         prev = Some((x, y));
     }
 
+    draw_nodes(pixmap, layout, data, state);
     draw_rect_outline(pixmap, cx, cy, cw, ch, color_border(), 1.0);
+}
+
+/// Node-dot radius and tension-handle radius, unscaled px.
+const NODE_R: f32 = 4.0;
+const TENSION_R: f32 = 3.0;
+
+/// Draw a filled square "dot" centred at `(x, y)`.
+fn draw_dot(pixmap: &mut Pixmap, x: f32, y: f32, r: f32, color: tiny_skia::Color) {
+    draw_rect(pixmap, x - r, y - r, r * 2.0, r * 2.0, color);
+}
+
+/// Draw node dots and per-segment tension handles over the curve.
+fn draw_nodes(pixmap: &mut Pixmap, layout: &MsegLayout, data: &MsegData, state: &MsegEditState) {
+    let a = data.active();
+    // Tension handles: midpoint of each non-stepped segment.
+    for i in 0..data.node_count - 1 {
+        if a[i].stepped {
+            continue;
+        }
+        let mid_phase = (a[i].time + a[i + 1].time) * 0.5;
+        let hx = phase_to_x(layout, mid_phase);
+        let hy = value_to_y(layout, value_at_phase(data, mid_phase));
+        draw_dot(pixmap, hx, hy, TENSION_R, color_border());
+    }
+    // Node dots; the hovered node is drawn larger / accented.
+    for (i, n) in a.iter().enumerate() {
+        let nx = phase_to_x(layout, n.time);
+        let ny = value_to_y(layout, n.value);
+        let hovered = state.hovered_node() == Some(i);
+        let r = if hovered { NODE_R + 1.5 } else { NODE_R };
+        draw_dot(pixmap, nx, ny, r, color_accent());
+    }
 }
 
 /// Draw a 1px line by sampling points along it (sufficient for the curve;
@@ -199,5 +232,20 @@ mod tests {
         let l = mseg_layout(RECT, false, 1.0);
         // value 1.0 is at the TOP (smaller y) than value 0.0.
         assert!(value_to_y(&l, 1.0) < value_to_y(&l, 0.0));
+    }
+
+    #[test]
+    fn draw_mseg_paints_node_dots() {
+        let mut pm = Pixmap::new(400, 300).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        let mut data = MsegData::default(); // nodes at (0,0) and (1,1)
+        data.insert_node(0.5, 0.5);
+        let state = MsegEditState::new();
+        draw_mseg(&mut pm, &mut tr, RECT, &data, &state, 1.0);
+        // The interior node at (0.5, 0.5) maps to a dot near canvas centre.
+        let l = mseg_layout(RECT, false, 1.0);
+        let nx = phase_to_x(&l, 0.5) as u32;
+        let ny = value_to_y(&l, 0.5) as u32;
+        assert!(px_alpha(&pm, nx, ny) > 0, "node dot not painted");
     }
 }
