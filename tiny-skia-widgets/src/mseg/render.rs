@@ -2,6 +2,14 @@
 //!
 //! See `docs/superpowers/specs/2026-05-16-mseg-editor-widget-design.md`.
 
+use crate::mseg::{value_at_phase, MsegData};
+use crate::mseg::editor::MsegEditState;
+use crate::primitives::{
+    color_accent, color_bg, color_border, color_control_bg, draw_rect, draw_rect_outline,
+};
+use crate::text::TextRenderer;
+use tiny_skia::Pixmap;
+
 /// Marker-lane height in unscaled px (full editor only).
 const MARKER_LANE_H: f32 = 16.0;
 /// Control-strip height in unscaled px.
@@ -57,11 +65,103 @@ pub fn y_to_value(layout: &MsegLayout, y: f32) -> f32 {
     (1.0 - (y - layout.canvas.1) / layout.canvas.3).clamp(0.0, 1.0)
 }
 
+// ---------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------
+
+/// Draw the whole MSEG widget into `rect`. Composes the marker lane (full
+/// mode only), the canvas (grid + curve + nodes), and the control strip.
+pub fn draw_mseg(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    rect: (f32, f32, f32, f32),
+    data: &MsegData,
+    state: &MsegEditState,
+    scale: f32,
+) {
+    let layout = mseg_layout(rect, state.is_curve_only(), scale);
+    draw_canvas(pixmap, &layout, data, state);
+    // Marker lane (Task 5) and control strip (Task 6) are drawn here in
+    // later tasks; `text_renderer`/`scale` are used by those.
+    let _ = (text_renderer, scale);
+}
+
+/// Draw the canvas: background, grid, and the envelope polyline.
+fn draw_canvas(pixmap: &mut Pixmap, layout: &MsegLayout, data: &MsegData, _state: &MsegEditState) {
+    let (cx, cy, cw, ch) = layout.canvas;
+    if cw <= 0.0 || ch <= 0.0 {
+        return;
+    }
+    draw_rect(pixmap, cx, cy, cw, ch, color_control_bg());
+
+    // Vertical time-grid lines.
+    let tdiv = data.time_divisions.max(1);
+    for i in 1..tdiv {
+        let gx = cx + (i as f32 / tdiv as f32) * cw;
+        draw_rect(pixmap, gx, cy, 1.0, ch, color_bg());
+    }
+    // Horizontal value-grid lines.
+    let vsteps = data.value_steps.max(1);
+    for i in 1..vsteps {
+        let gy = cy + (i as f32 / vsteps as f32) * ch;
+        draw_rect(pixmap, cx, gy, cw, 1.0, color_bg());
+    }
+
+    // Envelope polyline: sample `value_at_phase` per pixel column.
+    let cols = cw.max(1.0) as usize;
+    let mut prev: Option<(f32, f32)> = None;
+    for col in 0..=cols {
+        let phase = col as f32 / cols as f32;
+        let x = cx + phase * cw;
+        let y = cy + (1.0 - value_at_phase(data, phase)) * ch;
+        if let Some((px, py)) = prev {
+            draw_line(pixmap, px, py, x, y, color_accent());
+        }
+        prev = Some((x, y));
+    }
+
+    draw_rect_outline(pixmap, cx, cy, cw, ch, color_border(), 1.0);
+}
+
+/// Draw a 1px line by sampling points along it (sufficient for the curve;
+/// stepped segments produce near-vertical jumps which this still renders).
+fn draw_line(pixmap: &mut Pixmap, x0: f32, y0: f32, x1: f32, y1: f32, color: tiny_skia::Color) {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let steps = dx.abs().max(dy.abs()).ceil().max(1.0) as usize;
+    for s in 0..=steps {
+        let t = s as f32 / steps as f32;
+        draw_rect(pixmap, x0 + dx * t, y0 + dy * t, 1.0, 1.0, color);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mseg::MsegData;
+    use crate::test_font::test_font_data;
+    use crate::text::TextRenderer;
+    use tiny_skia::Pixmap;
 
     const RECT: (f32, f32, f32, f32) = (0.0, 0.0, 400.0, 300.0);
+
+    fn px_alpha(pm: &Pixmap, x: u32, y: u32) -> u8 {
+        pm.pixels()[(y * pm.width() + x) as usize].alpha()
+    }
+
+    #[test]
+    fn draw_mseg_paints_the_canvas() {
+        let mut pm = Pixmap::new(400, 300).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        let data = MsegData::default();
+        let state = MsegEditState::new();
+        draw_mseg(&mut pm, &mut tr, RECT, &data, &state, 1.0);
+        // The canvas interior is filled — sample a pixel well inside it.
+        let l = mseg_layout(RECT, false, 1.0);
+        let cx = (l.canvas.0 + l.canvas.2 * 0.5) as u32;
+        let cy = (l.canvas.1 + l.canvas.3 * 0.5) as u32;
+        assert!(px_alpha(&pm, cx, cy) > 0, "canvas not painted");
+    }
 
     #[test]
     fn full_layout_has_marker_lane() {
