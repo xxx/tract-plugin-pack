@@ -1,6 +1,8 @@
+#![feature(portable_simd)]
 //! miff — a convolution filter whose FIR kernel is hand-drawn with an MSEG
 //! editor. See `docs/superpowers/specs/2026-05-16-miff-design.md`.
 
+pub mod convolution;
 pub mod kernel;
 
 use nih_plug::prelude::*;
