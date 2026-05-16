@@ -152,6 +152,39 @@ impl MsegData {
     }
 }
 
+/// Sample the envelope's raw shape at `phase` (0..1, clamped). Pure — used by
+/// both rendering and a consuming plugin's DSP.
+pub fn value_at_phase(data: &MsegData, phase: f32) -> f32 {
+    let a = data.active();
+    let phase = phase.clamp(0.0, 1.0);
+
+    // At or past the last node -> its value.
+    if phase >= a[data.node_count - 1].time {
+        return a[data.node_count - 1].value;
+    }
+    // Find the segment: the last node whose time is <= phase.
+    let mut i = 0;
+    for (k, node) in a.iter().enumerate().take(data.node_count - 1) {
+        if node.time <= phase {
+            i = k;
+        } else {
+            break;
+        }
+    }
+    let n0 = a[i];
+    let n1 = a[i + 1];
+    if n0.stepped {
+        return n0.value;
+    }
+    let span = n1.time - n0.time;
+    let t = if span > 1e-9 {
+        (phase - n0.time) / span
+    } else {
+        0.0
+    };
+    n0.value + (n1.value - n0.value) * warp(t, n0.tension)
+}
+
 /// Shape factor: tension is scaled by this into the exponential warp exponent.
 const TENSION_K: f32 = 5.0;
 
@@ -272,5 +305,49 @@ mod tests {
         // Negative tension: fast start -> midpoint output above 0.5.
         assert!(warp(0.5, 1.0) < 0.5);
         assert!(warp(0.5, -1.0) > 0.5);
+    }
+
+    #[test]
+    fn value_at_phase_linear_ramp() {
+        let d = MsegData::default(); // 0->1 linear ramp
+        assert!((value_at_phase(&d, 0.0) - 0.0).abs() < 1e-6);
+        assert!((value_at_phase(&d, 0.5) - 0.5).abs() < 1e-6);
+        assert!((value_at_phase(&d, 1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn value_at_phase_clamps_out_of_range() {
+        let d = MsegData::default();
+        assert!((value_at_phase(&d, -0.5) - 0.0).abs() < 1e-6);
+        assert!((value_at_phase(&d, 2.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn value_at_phase_stepped_segment_holds() {
+        let mut d = MsegData::default();
+        d.nodes[0].stepped = true; // segment 0 holds nodes[0].value (0.0)
+        assert!((value_at_phase(&d, 0.0) - 0.0).abs() < 1e-6);
+        assert!((value_at_phase(&d, 0.99) - 0.0).abs() < 1e-6); // still held
+        assert!((value_at_phase(&d, 1.0) - 1.0).abs() < 1e-6);  // last node value
+    }
+
+    #[test]
+    fn value_at_phase_respects_tension() {
+        let mut d = MsegData::default();
+        d.nodes[0].tension = 1.0; // slow-start bow
+        // Midpoint output should sit below the linear 0.5.
+        assert!(value_at_phase(&d, 0.5) < 0.5);
+    }
+
+    #[test]
+    fn value_at_phase_three_nodes() {
+        let mut d = MsegData::default();
+        d.node_count = 3;
+        d.nodes[0] = MsegNode { time: 0.0, value: 0.0, tension: 0.0, stepped: false };
+        d.nodes[1] = MsegNode { time: 0.5, value: 1.0, tension: 0.0, stepped: false };
+        d.nodes[2] = MsegNode { time: 1.0, value: 0.0, tension: 0.0, stepped: false };
+        assert!((value_at_phase(&d, 0.25) - 0.5).abs() < 1e-6); // up-ramp midpoint
+        assert!((value_at_phase(&d, 0.5) - 1.0).abs() < 1e-6);  // peak
+        assert!((value_at_phase(&d, 0.75) - 0.5).abs() < 1e-6); // down-ramp midpoint
     }
 }
