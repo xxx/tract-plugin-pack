@@ -208,7 +208,7 @@ impl Plugin for Miff {
 
         let mode = self.params.mode.value();
         // Click-safe mode switch: reset the path being switched INTO.
-        let _ = self.apply_mode_switch(mode);
+        self.apply_mode_switch(mode);
 
         // Report latency only when it changes.
         let latency = match mode {
@@ -312,14 +312,23 @@ mod tests {
         assert!(!miff.kernel.is_zero);
 
         let mix = 0.0_f32;
-        let gain = 1.0_f32;
         let input = [0.5_f32, -0.3, 0.8];
         for &dry in &input {
+            // gain = 1.0: mix=0 must reproduce the dry input exactly.
             let wet = miff.filter_sample(0, dry, MiffMode::Raw);
-            let out = (dry + (wet - dry) * mix) * gain;
+            let out = (dry + (wet - dry) * mix) * 1.0;
             assert!(
                 (out - dry).abs() < 1e-6,
                 "mix=0 must pass dry {dry} through, got {out}"
+            );
+            // gain = 2.0: gain is applied AFTER the mix, so with mix=0 the
+            // output must be exactly `dry * 2.0` — never `wet`-influenced.
+            let wet = miff.filter_sample(0, dry, MiffMode::Raw);
+            let out = (dry + (wet - dry) * mix) * 2.0;
+            assert!(
+                (out - dry * 2.0).abs() < 1e-6,
+                "mix=0, gain=2 must yield dry*2 ({}) , got {out}",
+                dry * 2.0
             );
         }
     }
