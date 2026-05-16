@@ -723,4 +723,27 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_limiter_handles_large_jack_block() {
+        // Real JACK servers and VST3 hosts routinely deliver blocks far larger
+        // than the other tests' 1024-sample ceiling — 8192 is Bitwig's typical
+        // engine buffer. Provided `set_max_block_size` was given a matching
+        // capacity, `process_block` must handle such a block without panicking
+        // and still respect the ceiling. (Undersizing the scratch is what made
+        // the standalone abort; see `MIN_MAX_BLOCK` in lib.rs.)
+        const BLOCK: usize = 8192;
+        let mut limiter = Limiter::new(48000.0, 10.0);
+        limiter.set_params(5.0, 200.0);
+        limiter.set_max_block_size(BLOCK);
+        let mut left = vec![2.0_f32; BLOCK]; // +6 dBFS
+        let mut right = vec![2.0_f32; BLOCK];
+        let gr = limiter.process_block(&mut left, &mut right, 0.0, 0.5, 1.0, 1.0, None);
+        let la = (48000.0_f32 * 0.005) as usize + 10; // attack + margin
+        for &s in &left[la..] {
+            assert!(s.is_finite(), "output must stay finite");
+            assert!(s.abs() <= 1.01, "output {s} exceeds ceiling");
+        }
+        assert!(gr < 0.0, "should have gain reduction");
+    }
 }
