@@ -82,9 +82,7 @@ pub fn draw_mseg(
     let layout = mseg_layout(rect, state.is_curve_only(), scale);
     draw_canvas(pixmap, &layout, data, state, scale);
     draw_marker_lane(pixmap, &layout, data, state, scale);
-    // Control strip (Task 6) is drawn here in a later task; `text_renderer`
-    // is used by that.
-    let _ = text_renderer;
+    draw_strip(pixmap, text_renderer, &layout, data, state, scale);
 }
 
 /// Draw the hold marker(s) in the marker lane. No-op in curve-only mode or
@@ -200,6 +198,54 @@ fn draw_nodes(
         let r = (if hovered { NODE_R + HOVER_BUMP } else { NODE_R }) * scale;
         draw_dot(pixmap, nx, ny, r, color_accent());
     }
+}
+
+/// Draw the control strip background and labels. Interaction is wired in a
+/// later task; this draws the static strip and reuses the crate's button
+/// style. Fixed-size literals are multiplied by `scale` for HiDPI.
+fn draw_strip(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    layout: &MsegLayout,
+    data: &MsegData,
+    state: &MsegEditState,
+    scale: f32,
+) {
+    let (sx, sy, sw, sh) = layout.strip;
+    if sw <= 0.0 || sh <= 0.0 {
+        return;
+    }
+    draw_rect(pixmap, sx, sy, sw, sh, color_bg());
+    draw_rect_outline(pixmap, sx, sy, sw, sh, color_border(), 1.0);
+
+    let pad = 6.0 * scale;
+    let text_size = (sh * 0.42).max(9.0 * scale);
+    let ty = sy + (sh + text_size) * 0.5 - 2.0 * scale;
+    // Three click-cyclable readouts (snap | grid | style) — one per third of
+    // the strip width left of the Randomize button (a later task wires the
+    // interactive zones).
+    let label = format!(
+        "snap {}    grid {}/{}    style {:?}",
+        if data.snap { "on" } else { "off" },
+        data.time_divisions,
+        data.value_steps,
+        state.style(),
+    );
+    text_renderer.draw_text(pixmap, sx + pad, ty, &label, text_size, color_border());
+
+    // Randomize button at the right end.
+    let btn_w = 84.0 * scale;
+    crate::controls::draw_button(
+        pixmap,
+        text_renderer,
+        sx + sw - btn_w - pad,
+        sy + 3.0 * scale,
+        btn_w,
+        sh - 6.0 * scale,
+        "Randomize",
+        false,
+        false,
+    );
 }
 
 /// Draw a 1px line by sampling points along it (sufficient for the curve;
@@ -321,5 +367,18 @@ mod tests {
         // Must not panic; the marker lane has zero height.
         draw_mseg(&mut pm, &mut tr, RECT, &data, &state, 1.0);
         assert_eq!(mseg_layout(RECT, true, 1.0).marker_lane.3, 0.0);
+    }
+
+    #[test]
+    fn control_strip_is_painted() {
+        let mut pm = Pixmap::new(400, 300).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        let data = MsegData::default();
+        let state = MsegEditState::new();
+        draw_mseg(&mut pm, &mut tr, RECT, &data, &state, 1.0);
+        let l = mseg_layout(RECT, false, 1.0);
+        let sx = (l.strip.0 + 10.0) as u32;
+        let sy = (l.strip.1 + l.strip.3 * 0.5) as u32;
+        assert!(px_alpha(&pm, sx, sy) > 0, "strip not painted");
     }
 }
