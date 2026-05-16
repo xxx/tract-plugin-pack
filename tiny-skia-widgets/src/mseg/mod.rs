@@ -8,9 +8,14 @@
 //!
 //! See `docs/superpowers/specs/2026-05-16-mseg-editor-widget-design.md`.
 
+pub mod editor;
 pub mod randomize;
+pub mod render;
 
+pub use editor::*;
 pub use randomize::*;
+#[allow(unused_imports)] // render.rs is a stub; exports are wired up in later tasks
+pub use render::*;
 
 /// Maximum number of envelope nodes.
 pub const MAX_NODES: usize = 128;
