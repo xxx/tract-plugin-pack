@@ -17,6 +17,9 @@ pub const MAG_BINS: usize = MAX_KERNEL / 2 + 1;
 /// magnitude spectrum of the zero-padded `MAX_KERNEL`-point kernel (Phaseless
 /// mode and the response view). `is_zero` marks an all-zero kernel — miff
 /// treats that as dry passthrough.
+///
+/// It is ~24 KB — designed for a single buffered hand-off copy, not repeated
+/// stack copies in a loop.
 #[derive(Clone, Copy)]
 pub struct Kernel {
     pub taps: [f32; MAX_KERNEL],
@@ -116,6 +119,10 @@ mod tests {
         let len = bake_taps(&d, 256, &mut out);
         assert_eq!(len, 256);
         assert!(out[..len].iter().all(|&t| t.abs() < 1e-6), "flat 0.5 -> zero taps");
+        assert!(
+            out[len..].iter().all(|&t| t == 0.0),
+            "bake_taps must zero-pad the tail beyond len"
+        );
     }
 
     #[test]
