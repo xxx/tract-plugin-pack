@@ -116,6 +116,40 @@ impl MsegData {
     pub fn active(&self) -> &[MsegNode] {
         &self.nodes[..self.node_count]
     }
+
+    /// `true` iff the document satisfies every structural invariant. Slots
+    /// `>= node_count` are not constrained.
+    pub fn is_valid(&self) -> bool {
+        if self.node_count < 2 || self.node_count > MAX_NODES {
+            return false;
+        }
+        let a = self.active();
+        if a[0].time != 0.0 || a[self.node_count - 1].time != 1.0 {
+            return false;
+        }
+        for i in 0..self.node_count {
+            let n = a[i];
+            if !(0.0..=1.0).contains(&n.time)
+                || !(0.0..=1.0).contains(&n.value)
+                || !(-1.0..=1.0).contains(&n.tension)
+            {
+                return false;
+            }
+            if i > 0 && n.time <= a[i - 1].time {
+                return false; // must be strictly ascending
+            }
+        }
+        match self.hold {
+            HoldMode::None => true,
+            HoldMode::Sustain(i) => i < self.node_count,
+            HoldMode::Loop { start, end } => start < end && end < self.node_count,
+        }
+    }
+
+    /// Debug-only assertion of `is_valid`. No-op in release builds.
+    pub fn debug_assert_valid(&self) {
+        debug_assert!(self.is_valid(), "MsegData invariant violated: {self:?}");
+    }
 }
 
 #[cfg(test)]
@@ -139,5 +173,50 @@ mod tests {
         // the GUI/audio boundary without allocating.
         fn assert_copy<T: Copy>() {}
         assert_copy::<MsegData>();
+    }
+
+    #[test]
+    fn default_data_is_valid() {
+        assert!(MsegData::default().is_valid());
+    }
+
+    #[test]
+    fn unsorted_nodes_are_invalid() {
+        let mut d = MsegData::default();
+        d.node_count = 3;
+        d.nodes[0] = MsegNode { time: 0.0, value: 0.0, ..Default::default() };
+        d.nodes[1] = MsegNode { time: 0.8, value: 0.5, ..Default::default() };
+        d.nodes[2] = MsegNode { time: 0.4, value: 1.0, ..Default::default() }; // out of order
+        assert!(!d.is_valid());
+    }
+
+    #[test]
+    fn endpoints_must_be_pinned() {
+        let mut d = MsegData::default();
+        d.nodes[0].time = 0.1; // first node must be at time 0.0
+        assert!(!d.is_valid());
+        let mut d = MsegData::default();
+        d.nodes[1].time = 0.9; // last node must be at time 1.0
+        assert!(!d.is_valid());
+    }
+
+    #[test]
+    fn node_count_must_be_in_range() {
+        let mut d = MsegData::default();
+        d.node_count = 1;
+        assert!(!d.is_valid());
+        let mut d = MsegData::default();
+        d.node_count = MAX_NODES + 1;
+        assert!(!d.is_valid());
+    }
+
+    #[test]
+    fn out_of_range_hold_index_is_invalid() {
+        let mut d = MsegData::default(); // node_count == 2
+        d.hold = HoldMode::Sustain(5);
+        assert!(!d.is_valid());
+        let mut d = MsegData::default();
+        d.hold = HoldMode::Loop { start: 1, end: 0 }; // start >= end
+        assert!(!d.is_valid());
     }
 }
