@@ -8,6 +8,7 @@
 
 use crate::dropdown::DropdownState;
 use crate::mseg::randomize::RandomStyle;
+use crate::mseg::MsegData;
 use crate::text_edit::TextEditState;
 
 /// Returned by an event handler when the document changed and the consuming
@@ -128,6 +129,105 @@ impl MsegEditState {
             RandomStyle::Chaos => RandomStyle::Smooth,
         };
     }
+
+    /// Primary-button press. Returns `MsegEdit::Changed` when the document
+    /// changed. Adds a node on empty canvas, begins a node or tension drag on
+    /// a hit handle.
+    pub fn on_mouse_down(
+        &mut self,
+        x: f32,
+        y: f32,
+        data: &mut MsegData,
+        rect: (f32, f32, f32, f32),
+        scale: f32,
+        fine: bool,
+    ) -> Option<MsegEdit> {
+        use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
+        let layout = mseg_layout(rect, self.curve_only, scale);
+        let _ = fine;
+        match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
+            MsegHit::Node(i) => {
+                self.drag = Some(DragTarget::Node(i));
+                None
+            }
+            MsegHit::Tension(i) => {
+                self.drag = Some(DragTarget::Tension(i));
+                None
+            }
+            MsegHit::Canvas => {
+                // Stepped-draw (a later task) takes over when its modifier is held.
+                let phase = x_to_phase(&layout, x);
+                let value = y_to_value(&layout, y);
+                let inserted = data.insert_node(phase, value);
+                if let Some(idx) = inserted {
+                    self.drag = Some(DragTarget::Node(idx));
+                    Some(MsegEdit::Changed)
+                } else {
+                    None
+                }
+            }
+            MsegHit::None => None,
+            // Strip / Randomize / MarkerLane handled in later tasks.
+            _ => None,
+        }
+    }
+
+    /// Pointer motion. Applies the active drag.
+    pub fn on_mouse_move(
+        &mut self,
+        x: f32,
+        y: f32,
+        data: &mut MsegData,
+        rect: (f32, f32, f32, f32),
+        scale: f32,
+        fine: bool,
+    ) -> Option<MsegEdit> {
+        use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
+        let layout = mseg_layout(rect, self.curve_only, scale);
+        let _ = fine;
+        // Hover highlight (only when not dragging).
+        if self.drag.is_none() {
+            self.hover = match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
+                MsegHit::Node(i) => Some(i),
+                _ => None,
+            };
+        }
+        match self.drag {
+            Some(DragTarget::Node(i)) => {
+                let phase = x_to_phase(&layout, x);
+                let value = y_to_value(&layout, y);
+                data.move_node(i, phase, value);
+                Some(MsegEdit::Changed)
+            }
+            Some(DragTarget::Tension(i)) => {
+                // Drag vertically away from the segment's straight midpoint to
+                // bend it. Map the vertical offset to tension in -1..1.
+                // Copy needed values out of `a` before the mutable write.
+                let (v_lo, v_hi) = if i + 1 < data.node_count {
+                    let a = data.active();
+                    (a[i].value, a[i + 1].value)
+                } else {
+                    return None;
+                };
+                let straight_mid = (v_lo + v_hi) * 0.5;
+                let cur = y_to_value(&layout, y);
+                let rising = v_hi >= v_lo;
+                let delta = (cur - straight_mid) * if rising { -2.0 } else { 2.0 };
+                data.nodes[i].tension = delta.clamp(-1.0, 1.0);
+                data.debug_assert_valid();
+                Some(MsegEdit::Changed)
+            }
+            _ => None,
+        }
+    }
+
+    /// Primary-button release. Ends any drag.
+    pub fn on_mouse_up(&mut self, data: &mut MsegData) -> Option<MsegEdit> {
+        let _ = data;
+        self.drag = None;
+        self.step_last_cell = None;
+        None
+    }
 }
 
 impl Default for MsegEditState {
@@ -139,6 +239,10 @@ impl Default for MsegEditState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mseg::render::{mseg_layout, phase_to_x, value_to_y};
+    use crate::mseg::MsegData;
+
+    const RECT: (f32, f32, f32, f32) = (0.0, 0.0, 400.0, 300.0);
 
     #[test]
     fn new_is_full_editor() {
@@ -148,5 +252,63 @@ mod tests {
     #[test]
     fn new_curve_only_is_curve_only() {
         assert!(MsegEditState::new_curve_only().is_curve_only());
+    }
+
+    // --- Task 8: interaction tests ---
+    //
+    // NOTE: The default 2-node ramp has a tension handle at (phase=0.5, value=0.5)
+    // because value_at_phase(data, 0.5) == 0.5 for a linear ramp. Clicking at
+    // exactly that midpoint hits Tension(0), not Canvas. We use (phase=0.3,
+    // value=0.7) instead — well away from any node or handle — so the hit
+    // lands on Canvas and triggers insertion.
+
+    #[test]
+    fn click_empty_canvas_inserts_a_node() {
+        let mut data = MsegData::default(); // 2 nodes
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        let x = phase_to_x(&l, 0.3);
+        let y = value_to_y(&l, 0.7);
+        let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        assert_eq!(ev, Some(MsegEdit::Changed));
+        assert_eq!(data.node_count, 3);
+    }
+
+    #[test]
+    fn drag_moves_a_node() {
+        let mut data = MsegData::default();
+        data.insert_node(0.5, 0.5);
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        // Press on node 1, drag it down to value ~0.2.
+        state.on_mouse_down(
+            phase_to_x(&l, 0.5),
+            value_to_y(&l, 0.5),
+            &mut data,
+            RECT,
+            1.0,
+            false,
+        );
+        state.on_mouse_move(
+            phase_to_x(&l, 0.5),
+            value_to_y(&l, 0.2),
+            &mut data,
+            RECT,
+            1.0,
+            false,
+        );
+        assert!((data.nodes[1].value - 0.2).abs() < 0.05);
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn handlers_noop_when_pointer_outside() {
+        let mut data = MsegData::default();
+        let mut state = MsegEditState::new();
+        assert_eq!(
+            state.on_mouse_down(-5.0, -5.0, &mut data, RECT, 1.0, false),
+            None
+        );
+        assert_eq!(data.node_count, 2);
     }
 }
