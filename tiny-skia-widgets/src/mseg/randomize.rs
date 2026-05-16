@@ -61,8 +61,11 @@ struct Rng(u32);
 
 impl Rng {
     fn new(seed: u32) -> Self {
-        // Avoid the all-zero state, which xorshift cannot leave.
-        Rng(seed | 1)
+        // xorshift cannot leave the all-zero state, so map seed 0 to a fixed
+        // non-zero constant. Every other seed is used directly. NOT `seed | 1`
+        // — that collapses each pair (2k, 2k+1) onto one state, which made
+        // every other Randomize click reproduce the previous curve.
+        Rng(if seed == 0 { 0x9E37_79B9 } else { seed })
     }
     fn next_u32(&mut self) -> u32 {
         let mut x = self.0;
@@ -249,6 +252,28 @@ mod tests {
         randomize(&mut a, RandomStyle::Chaos, 1);
         randomize(&mut b, RandomStyle::Chaos, 2);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn randomize_consecutive_seeds_all_differ() {
+        // Regression: `Rng::new` must not collapse adjacent seeds. The old
+        // `seed | 1` mapped every pair (2k, 2k+1) to one RNG state, so every
+        // other Randomize click (whose seed simply increments) reproduced the
+        // previous curve. Each seed and its successor must now differ.
+        for style in RandomStyle::ALL {
+            for seed in 0..12u32 {
+                let mut a = MsegData::default();
+                let mut b = MsegData::default();
+                randomize(&mut a, style, seed);
+                randomize(&mut b, style, seed + 1);
+                assert_ne!(
+                    a,
+                    b,
+                    "{style:?}: seeds {seed} and {} produced the same curve",
+                    seed + 1
+                );
+            }
+        }
     }
 
     #[test]
