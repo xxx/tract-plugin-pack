@@ -303,7 +303,7 @@ impl<'de> serde::Deserialize<'de> for MsegData {
         let raw = MsegDataSerde::deserialize(d)?;
         let mut data = MsegData {
             nodes: [MsegNode::default(); MAX_NODES],
-            node_count: raw.nodes.len().clamp(0, MAX_NODES),
+            node_count: raw.nodes.len().min(MAX_NODES),
             play_mode: raw.play_mode,
             hold: raw.hold,
             sync_mode: raw.sync_mode,
@@ -759,5 +759,16 @@ mod tests {
             "serialized default unexpectedly large ({} bytes)",
             json.len()
         );
+    }
+
+    #[test]
+    fn mseg_data_json_rejects_invalid_blob() {
+        // Serialize a deliberately-invalid document (zero active nodes), then
+        // confirm deserialization rejects it instead of yielding a bad MsegData.
+        let mut d = MsegData::default();
+        d.node_count = 0; // invalid: a valid document needs >= 2 nodes
+        let json = serde_json::to_string(&d).unwrap();
+        let result: Result<MsegData, _> = serde_json::from_str(&json);
+        assert!(result.is_err(), "invalid blob must be rejected, got {result:?}");
     }
 }
