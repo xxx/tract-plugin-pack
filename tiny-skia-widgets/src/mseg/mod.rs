@@ -131,6 +131,11 @@ impl MsegData {
 
     /// `true` iff the document satisfies every structural invariant. Slots
     /// `>= node_count` are not constrained.
+    ///
+    /// `MIN_NODE_GAP` is an *insertion* constraint enforced by the node
+    /// mutation operations, NOT a document invariant: `is_valid` requires only
+    /// strictly-ascending times, so a (de)serialized document may legitimately
+    /// have neighbouring nodes closer together than `MIN_NODE_GAP`.
     pub fn is_valid(&self) -> bool {
         if self.node_count < 2 || self.node_count > MAX_NODES {
             return false;
@@ -228,6 +233,10 @@ impl MsegData {
     /// Move the node at `idx` to `(time, value)`. `value` is clamped to 0..1.
     /// Endpoint nodes keep their pinned time (0.0 / 1.0); interior nodes have
     /// `time` clamped strictly between their neighbours.
+    ///
+    /// When the two neighbours are already closer than `2 * MIN_NODE_GAP`,
+    /// the moved node still stays strictly between them, but the
+    /// `MIN_NODE_GAP` clearance is then best-effort.
     pub fn move_node(&mut self, idx: usize, time: f32, value: f32) {
         if idx >= self.node_count {
             return;
@@ -848,5 +857,47 @@ mod tests {
             result.is_err(),
             "invalid blob must be rejected, got {result:?}"
         );
+    }
+
+    #[test]
+    fn randomized_data_serde_round_trips() {
+        // A randomized document (up to MAX_NODES stepped nodes) must survive the
+        // compact serde round-trip unchanged.
+        let mut d = MsegData::default();
+        randomize(&mut d, RandomStyle::Stepped, 999);
+        let json = serde_json::to_string(&d).unwrap();
+        let back: MsegData = serde_json::from_str(&json).unwrap();
+        assert_eq!(d, back);
+        assert!(back.is_valid());
+    }
+
+    #[test]
+    fn advance_sustain_steady_state_holds() {
+        // phase already AT the sustain point and still held: it must stay clamped
+        // there, not drift forward.
+        let mut d = MsegData::default();
+        d.node_count = 3;
+        d.nodes[0] = MsegNode {
+            time: 0.0,
+            value: 0.0,
+            tension: 0.0,
+            stepped: false,
+        };
+        d.nodes[1] = MsegNode {
+            time: 0.5,
+            value: 1.0,
+            tension: 0.0,
+            stepped: false,
+        };
+        d.nodes[2] = MsegNode {
+            time: 1.0,
+            value: 0.0,
+            tension: 0.0,
+            stepped: false,
+        };
+        d.hold = HoldMode::Sustain(1); // sustain at time 0.5
+        let (p, finished) = advance(&d, 0.5, 0.1, false);
+        assert!((p - 0.5).abs() < 1e-6, "steady-state hold, got {p}");
+        assert!(!finished);
     }
 }
