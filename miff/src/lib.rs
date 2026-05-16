@@ -3,6 +3,7 @@
 //! editor. See `docs/superpowers/specs/2026-05-16-miff-design.md`.
 
 pub mod convolution;
+pub mod editor;
 pub mod kernel;
 
 use nih_plug::prelude::*;
@@ -29,6 +30,10 @@ struct MiffParams {
     #[persist = "curve"]
     pub curve: Arc<Mutex<MsegData>>,
 
+    /// Persisted window size (width × height in physical pixels).
+    #[persist = "editor-state"]
+    pub editor_state: Arc<editor::EditorState>,
+
     #[id = "mode"]
     pub mode: EnumParam<MiffMode>,
     #[id = "mix"]
@@ -43,6 +48,7 @@ impl Default for MiffParams {
     fn default() -> Self {
         Self {
             curve: Arc::new(Mutex::new(crate::kernel::default_flat_curve())),
+            editor_state: editor::default_editor_state(),
             mode: EnumParam::new("Mode", MiffMode::Raw),
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(50.0))
