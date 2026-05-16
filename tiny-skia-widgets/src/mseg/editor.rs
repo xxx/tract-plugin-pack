@@ -55,6 +55,21 @@ pub fn style_items() -> &'static [&'static str] {
     &STYLE_LABELS
 }
 
+/// Snap `(phase, value)` to the document's grid when `data.snap` is on, unless
+/// `fine` (the caller's fine-adjust modifier, e.g. Shift) bypasses it. `phase`
+/// snaps to the `time_divisions` columns, `value` to the `value_steps` rows.
+fn snap_point(phase: f32, value: f32, data: &MsegData, fine: bool) -> (f32, f32) {
+    if !data.snap || fine {
+        return (phase, value);
+    }
+    let cols = data.time_divisions.max(1) as f32;
+    let rows = data.value_steps.max(1) as f32;
+    (
+        ((phase * cols).round() / cols).clamp(0.0, 1.0),
+        ((value * rows).round() / rows).clamp(0.0, 1.0),
+    )
+}
+
 /// Returned by an event handler when the document changed and the consuming
 /// plugin should re-persist (and, for `miff`, re-bake).
 #[must_use = "check whether the document changed and re-persist if so"]
@@ -193,7 +208,7 @@ impl MsegEditState {
         data: &mut MsegData,
         rect: (f32, f32, f32, f32),
         scale: f32,
-        _fine: bool,
+        fine: bool,
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
         let layout = mseg_layout(rect, self.curve_only, scale);
@@ -236,8 +251,8 @@ impl MsegEditState {
                 self.step_draw_paint(x, y, data, &layout)
             }
             MsegHit::Canvas => {
-                let phase = x_to_phase(&layout, x);
-                let value = y_to_value(&layout, y);
+                let (phase, value) =
+                    snap_point(x_to_phase(&layout, x), y_to_value(&layout, y), data, fine);
                 let inserted = data.insert_node(phase, value);
                 if let Some(idx) = inserted {
                     self.drag = Some(DragTarget::Node(idx));
@@ -304,7 +319,7 @@ impl MsegEditState {
         data: &mut MsegData,
         rect: (f32, f32, f32, f32),
         scale: f32,
-        _fine: bool,
+        fine: bool,
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
         let layout = mseg_layout(rect, self.curve_only, scale);
@@ -329,8 +344,8 @@ impl MsegEditState {
         }
         match self.drag {
             Some(DragTarget::Node(i)) => {
-                let phase = x_to_phase(&layout, x);
-                let value = y_to_value(&layout, y);
+                let (phase, value) =
+                    snap_point(x_to_phase(&layout, x), y_to_value(&layout, y), data, fine);
                 data.move_node(i, phase, value);
                 Some(MsegEdit::Changed)
             }
@@ -520,6 +535,7 @@ mod tests {
     #[test]
     fn drag_moves_a_node() {
         let mut data = MsegData::default();
+        data.snap = false; // test the raw drag mechanic; snapping has its own tests
         data.insert_node(0.5, 0.5);
         let mut state = MsegEditState::new();
         let l = mseg_layout(RECT, false, 1.0);
@@ -543,6 +559,70 @@ mod tests {
         // the node inserted at phase 0.5 sorts to index 1 (between the 0.0 and
         // 1.0 endpoints)
         assert!((data.nodes[1].value - 0.2).abs() < 0.05);
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn drag_snaps_node_to_grid_when_snap_on() {
+        // Default doc: snap on, time_divisions 16, value_steps 8.
+        let mut data = MsegData::default();
+        data.insert_node(0.5, 0.5);
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        // Grab node 1, drag to an off-grid value 0.61 — must snap to 1/8 = 0.625.
+        state.on_mouse_down(
+            phase_to_x(&l, 0.5),
+            value_to_y(&l, 0.5),
+            &mut data,
+            RECT,
+            1.0,
+            false,
+        );
+        state.on_mouse_move(
+            phase_to_x(&l, 0.5),
+            value_to_y(&l, 0.61),
+            &mut data,
+            RECT,
+            1.0,
+            false,
+        );
+        assert!(
+            (data.nodes[1].value - 0.625).abs() < 0.01,
+            "value {} should snap to the 1/8 grid (0.625)",
+            data.nodes[1].value
+        );
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn fine_modifier_bypasses_snap() {
+        let mut data = MsegData::default(); // snap on
+        data.insert_node(0.5, 0.5);
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        // fine = true on both press and move bypasses snapping.
+        state.on_mouse_down(
+            phase_to_x(&l, 0.5),
+            value_to_y(&l, 0.5),
+            &mut data,
+            RECT,
+            1.0,
+            true,
+        );
+        state.on_mouse_move(
+            phase_to_x(&l, 0.5),
+            value_to_y(&l, 0.61),
+            &mut data,
+            RECT,
+            1.0,
+            true,
+        );
+        // Lands near the raw 0.61, NOT snapped to 0.625.
+        assert!(
+            (data.nodes[1].value - 0.61).abs() < 0.02,
+            "fine should bypass snap; value {}",
+            data.nodes[1].value
+        );
         state.on_mouse_up(&mut data);
     }
 
