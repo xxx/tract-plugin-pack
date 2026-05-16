@@ -539,7 +539,10 @@ mod tests {
                     assert!(nx - r >= cx - 0.01, "dot clips left at scale {scale}");
                     assert!(nx + r <= cx + cw + 0.01, "dot clips right at scale {scale}");
                     assert!(ny - r >= cy - 0.01, "dot clips top at scale {scale}");
-                    assert!(ny + r <= cy + ch + 0.01, "dot clips bottom at scale {scale}");
+                    assert!(
+                        ny + r <= cy + ch + 0.01,
+                        "dot clips bottom at scale {scale}"
+                    );
                 }
             }
         }
