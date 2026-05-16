@@ -57,7 +57,7 @@ fn stroke_line(
 ///   rate here we map linearly from bin 0 (DC) to bin `len−1` (Nyquist = 20 kHz
 ///   limit for display purposes).
 /// * `input_mags` — live input-spectrum magnitudes; may be empty (→ no shadow).
-/// * `scale` — UI scale factor (used to size text).
+/// * `scale` — UI scale factor (scales the logical-constant inner padding).
 pub fn draw_response(
     pixmap: &mut Pixmap,
     text_renderer: &mut TextRenderer,
@@ -122,7 +122,7 @@ pub fn draw_response(
     }
     // 0 dB reference (slightly brighter).
     {
-        let y_norm = (0.0_f32 - DB_FLOOR) / DB_RANGE;
+        let y_norm = (DB_CEIL - DB_FLOOR) / DB_RANGE;
         let gy = y0 + height - y_norm * height;
         stroke_line(pixmap, x0, gy, x0 + width, gy, (120, 120, 140, 180), 0.5);
     }
@@ -232,7 +232,9 @@ pub fn draw_response(
     }
 
     // ── Text labels ─────────────────────────────────────────────────────────
-    let text_size = (h * 0.045 * scale).clamp(11.0, 24.0);
+    // `h` is already a physical pixel dimension, so `h * 0.045` is DPI-proportional
+    // on its own — do NOT multiply by `scale` again (that double-scales at HiDPI).
+    let text_size = (h * 0.045).clamp(11.0, 24.0);
 
     // Frequency labels along the bottom edge.
     let labels_y = y + h - text_size * 0.5;
