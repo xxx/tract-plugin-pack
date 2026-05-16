@@ -3,6 +3,8 @@
 //! A self-contained module — no plugin or GUI types — so a future
 //! workspace-wide shared-DSP refactor can lift it cleanly.
 
+use realfft::RealFftPlanner;
+use rustfft::num_complex::Complex;
 use tiny_skia_widgets::mseg::{warp, MsegData, MsegNode};
 
 /// Maximum kernel length, and the fixed Phaseless STFT frame size.
@@ -107,9 +109,6 @@ pub fn bake_taps(data: &MsegData, len: usize, out: &mut [f32; MAX_KERNEL]) -> us
     len
 }
 
-use realfft::RealFftPlanner;
-use rustfft::num_complex::Complex;
-
 /// Below this peak magnitude the kernel is treated as all-zero (dry
 /// passthrough) — guards the normalization divide.
 const ZERO_EPS: f32 = 1e-9;
@@ -148,7 +147,7 @@ pub fn bake(data: &MsegData, len: usize) -> Kernel {
     }
 
     let inv = 1.0 / peak;
-    for t in taps.iter_mut() {
+    for t in taps[..len].iter_mut() {
         *t *= inv;
     }
     for m in mags.iter_mut() {
@@ -249,7 +248,7 @@ mod tests {
     fn nonzero_kernel_has_unity_peak_magnitude() {
         let k = bake(&MsegData::default(), 512);
         assert!(!k.is_zero);
-        let peak = k.mags[..MAG_BINS].iter().cloned().fold(0.0_f32, f32::max);
+        let peak = k.mags.iter().cloned().fold(0.0_f32, f32::max);
         assert!((peak - 1.0).abs() < 1e-3, "peak magnitude {peak}, expected 1.0");
     }
 
