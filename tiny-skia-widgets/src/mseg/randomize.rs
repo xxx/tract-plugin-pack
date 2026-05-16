@@ -114,10 +114,14 @@ pub fn randomize(data: &mut MsegData, style: RandomStyle, seed: u32) {
     let grid_count = (data.time_divisions as usize + 1).clamp(2, MAX_NODES);
     let count = match style {
         RandomStyle::Stepped | RandomStyle::Spiky => grid_count,
-        RandomStyle::Smooth | RandomStyle::Ramps => rng.range_usize(3, 6),
+        RandomStyle::Smooth => rng.range_usize(4, 8),
+        RandomStyle::Ramps => rng.range_usize(3, 6),
         RandomStyle::Chaos => rng.range_usize(3, 16.min(MAX_NODES)),
     };
 
+    // Tracks the previous node's value so `Smooth` can place each node in the
+    // opposite half — guaranteeing a swing instead of a flat mid-range cluster.
+    let mut prev_value = 0.5_f32;
     for i in 0..count {
         let time = if i == 0 {
             0.0
@@ -134,7 +138,20 @@ pub fn randomize(data: &mut MsegData, style: RandomStyle, seed: u32) {
         };
 
         let (mut value, tension, stepped) = match style {
-            RandomStyle::Smooth => (rng.range(0.25, 0.85), rng.range(-0.6, 0.6), false),
+            RandomStyle::Smooth => {
+                // Dynamic but smooth: the first node is free; every node after
+                // it lands in the opposite half from its predecessor, so the
+                // curve always swings and uses the full range. No steps;
+                // generous tension shapes each segment.
+                let v = if i == 0 {
+                    rng.next_f32()
+                } else if prev_value < 0.5 {
+                    rng.range(0.55, 1.0)
+                } else {
+                    rng.range(0.0, 0.45)
+                };
+                (v, rng.range(-0.85, 0.85), false)
+            }
             RandomStyle::Ramps => (rng.next_f32(), 0.0, false),
             RandomStyle::Stepped => (rng.next_f32(), 0.0, true),
             RandomStyle::Spiky => {
@@ -151,6 +168,7 @@ pub fn randomize(data: &mut MsegData, style: RandomStyle, seed: u32) {
         if data.snap && matches!(style, RandomStyle::Stepped | RandomStyle::Spiky) {
             value = snap_value(value, data.value_steps);
         }
+        prev_value = value;
 
         data.nodes[i] = MsegNode {
             time,
@@ -254,6 +272,22 @@ mod tests {
         randomize(&mut d, RandomStyle::Smooth, 7);
         for i in 0..d.node_count {
             assert!(!d.nodes[i].stepped);
+        }
+    }
+
+    #[test]
+    fn smooth_style_spans_both_halves() {
+        // Smooth must produce a dynamic curve that reaches into both the lower
+        // and upper portions of the range — not a bland mid-band cluster.
+        // Every node after the first lands in the opposite half from its
+        // predecessor, so any Smooth roll touches both halves.
+        for seed in 0..30u32 {
+            let mut d = MsegData::default();
+            randomize(&mut d, RandomStyle::Smooth, seed);
+            let lo = d.active().iter().map(|n| n.value).fold(1.0_f32, f32::min);
+            let hi = d.active().iter().map(|n| n.value).fold(0.0_f32, f32::max);
+            assert!(lo <= 0.45, "seed {seed}: no low node (min {lo})");
+            assert!(hi >= 0.55, "seed {seed}: no high node (max {hi})");
         }
     }
 
