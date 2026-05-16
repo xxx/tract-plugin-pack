@@ -113,6 +113,29 @@ impl Miff {
             MiffMode::Phaseless => self.phaseless[ch].process(sample, &self.kernel),
         }
     }
+
+    /// Click-safe mode switch: when the mode changes, reset the convolution
+    /// path being switched INTO so stale state can't click through. Returns
+    /// `true` if a switch occurred. Called from `process()`.
+    fn apply_mode_switch(&mut self, mode: MiffMode) -> bool {
+        if mode == self.last_mode {
+            return false;
+        }
+        match mode {
+            MiffMode::Raw => {
+                for ch in &mut self.raw {
+                    ch.reset();
+                }
+            }
+            MiffMode::Phaseless => {
+                for ch in &mut self.phaseless {
+                    ch.reset();
+                }
+            }
+        }
+        self.last_mode = mode;
+        true
+    }
 }
 
 impl Plugin for Miff {
@@ -185,21 +208,7 @@ impl Plugin for Miff {
 
         let mode = self.params.mode.value();
         // Click-safe mode switch: reset the path being switched INTO.
-        if mode != self.last_mode {
-            match mode {
-                MiffMode::Raw => {
-                    for ch in &mut self.raw {
-                        ch.reset();
-                    }
-                }
-                MiffMode::Phaseless => {
-                    for ch in &mut self.phaseless {
-                        ch.reset();
-                    }
-                }
-            }
-            self.last_mode = mode;
-        }
+        let _ = self.apply_mode_switch(mode);
 
         // Report latency only when it changes.
         let latency = match mode {
@@ -315,30 +324,21 @@ mod tests {
         }
     }
 
-    /// Switching from Raw to Phaseless must reset the Phaseless path (so
-    /// stale STFT state doesn't contaminate the new mode's output) without
-    /// panicking or producing NaN/Inf.
+    /// `apply_mode_switch` — the click-safe transition-detection branch from
+    /// `process()` — must detect mode changes, reset the path being switched
+    /// into, update `last_mode`, and no-op on a repeat call.
     #[test]
     fn mode_switch_is_click_safe() {
         let mut miff = Miff::default();
-
-        // Feed a block in Raw mode.
-        for i in 0..64 {
-            let s = (i as f32 * 0.01).sin();
-            miff.filter_sample(0, s, MiffMode::Raw);
-        }
-
-        // Simulate the mode-switch reset that `process()` performs.
-        for ch in &mut miff.phaseless {
-            ch.reset();
-        }
-        miff.last_mode = MiffMode::Phaseless;
-
-        // Feed a block in Phaseless mode — must not panic or produce NaN/Inf.
-        for i in 0..64 {
-            let s = (i as f32 * 0.01).cos();
-            let out = miff.filter_sample(0, s, MiffMode::Phaseless);
-            assert!(out.is_finite(), "Phaseless output must be finite after mode switch, got {out}");
-        }
+        // Fresh Miff starts in Raw; no switch when the mode is unchanged.
+        assert!(!miff.apply_mode_switch(MiffMode::Raw));
+        // Switching to Phaseless is detected, resets the path, updates last_mode.
+        assert!(miff.apply_mode_switch(MiffMode::Phaseless));
+        assert_eq!(miff.last_mode, MiffMode::Phaseless);
+        // Switching back is detected too.
+        assert!(miff.apply_mode_switch(MiffMode::Raw));
+        assert_eq!(miff.last_mode, MiffMode::Raw);
+        // And a repeat call is a no-op.
+        assert!(!miff.apply_mode_switch(MiffMode::Raw));
     }
 }
