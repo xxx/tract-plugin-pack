@@ -22,11 +22,14 @@ pub const MAG_BINS: usize = MAX_KERNEL / 2 + 1;
 /// mode and the response view). `is_zero` marks an all-zero kernel — miff
 /// treats that as dry passthrough.
 ///
-/// It is ~24 KB — designed for a single buffered hand-off copy, not repeated
+/// It is ~40 KB — designed for a single buffered hand-off copy, not repeated
 /// stack copies in a loop.
 #[derive(Clone, Copy)]
 pub struct Kernel {
     pub taps: [f32; MAX_KERNEL],
+    /// The first `len` taps of `taps` reversed (`rev_taps[j] == taps[len-1-j]`);
+    /// the convolution MAC reads this contiguously. Zero beyond `len`.
+    pub rev_taps: [f32; MAX_KERNEL],
     pub len: usize,
     pub mags: [f32; MAG_BINS],
     pub is_zero: bool,
@@ -37,6 +40,7 @@ impl Default for Kernel {
     fn default() -> Self {
         Self {
             taps: [0.0; MAX_KERNEL],
+            rev_taps: [0.0; MAX_KERNEL],
             len: 256,
             mags: [0.0; MAG_BINS],
             is_zero: true,
@@ -181,6 +185,7 @@ pub fn bake(data: &MsegData, len: usize) -> Kernel {
     if peak <= ZERO_EPS {
         return Kernel {
             taps: [0.0; MAX_KERNEL],
+            rev_taps: [0.0; MAX_KERNEL],
             len,
             mags: [0.0; MAG_BINS],
             is_zero: true,
@@ -194,8 +199,13 @@ pub fn bake(data: &MsegData, len: usize) -> Kernel {
     for m in mags.iter_mut() {
         *m *= inv;
     }
+    let mut rev_taps = [0.0_f32; MAX_KERNEL];
+    for j in 0..len {
+        rev_taps[j] = taps[len - 1 - j];
+    }
     Kernel {
         taps,
+        rev_taps,
         len,
         mags,
         is_zero: false,

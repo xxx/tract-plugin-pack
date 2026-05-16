@@ -7,6 +7,9 @@ use std::simd::{f32x16, num::SimdFloat};
 /// Per-channel time-domain convolution state: a double-buffered history ring
 /// so the MAC loop gets a contiguous window. Adapted from wavetable-filter's
 /// `FilterState`.
+///
+/// The silence fast-path only re-arms on `reset()`; a host `process()` loop
+/// should call `reset()` after sustained input silence.
 pub struct RawChannel {
     history: Vec<f32>,
     write_pos: usize,
@@ -60,17 +63,15 @@ impl RawChannel {
         // `window` is oldest-first: window[0] = x[n-len+1], window[len-1] = x[n].
         // Convolution: y[n] = sum_k taps[k]*x[n-k]
         //            = taps[0]*window[len-1] + taps[1]*window[len-2] + ...
-        // So window[c*16+j] pairs with taps[len-1-(c*16+j)].
+        // `rev_taps` is `taps` pre-reversed at bake time (rev_taps[j] ==
+        // taps[len-1-j]), so the MAC reads it contiguously — no per-chunk
+        // scatter-rebuild on the audio thread.
         let window = &self.history[start..start + len];
         let mut acc = f32x16::splat(0.0);
         let chunks = len / 16;
         for c in 0..chunks {
             let w = f32x16::from_slice(&window[c * 16..c * 16 + 16]);
-            let mut kchunk = [0.0_f32; 16];
-            for (j, kv) in kchunk.iter_mut().enumerate() {
-                *kv = kernel.taps[len - 1 - (c * 16 + j)];
-            }
-            let k = f32x16::from_slice(&kchunk);
+            let k = f32x16::from_slice(&kernel.rev_taps[c * 16..c * 16 + 16]);
             acc += w * k;
         }
         acc.reduce_sum()
@@ -95,6 +96,9 @@ mod tests {
         k.is_zero = false;
         k.len = taps.len();
         k.taps[..taps.len()].copy_from_slice(taps);
+        for j in 0..taps.len() {
+            k.rev_taps[j] = taps[taps.len() - 1 - j];
+        }
         k
     }
 
