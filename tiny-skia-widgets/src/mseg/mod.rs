@@ -173,6 +173,11 @@ impl MsegData {
         let k = k.clamp(1, self.node_count - 1);
         let lo = self.nodes[k - 1].time + Self::MIN_NODE_GAP;
         let hi = self.nodes[k].time - Self::MIN_NODE_GAP;
+        // The two neighbours are closer than 2*MIN_NODE_GAP — no room for a
+        // node between them that honours the gap on both sides.
+        if lo > hi {
+            return None;
+        }
         let time = time.clamp(lo, hi);
         // Shift [k..node_count) up by one.
         let mut i = self.node_count;
@@ -215,7 +220,7 @@ impl MsegData {
         if !is_endpoint {
             let lo = self.nodes[idx - 1].time + Self::MIN_NODE_GAP;
             let hi = self.nodes[idx + 1].time - Self::MIN_NODE_GAP;
-            self.nodes[idx].time = time.clamp(lo, hi);
+            self.nodes[idx].time = time.clamp(lo.min(hi), lo.max(hi));
         }
         self.debug_assert_valid();
     }
@@ -577,11 +582,27 @@ mod tests {
     fn insert_node_refuses_at_capacity() {
         let mut d = MsegData::default();
         while d.node_count < MAX_NODES {
+            // Spread fill: every gap is ~0.99/MAX_NODES wide, far wider than
+            // 2*MIN_NODE_GAP, so the fill never trips the no-room path.
             let t = d.node_count as f32 / MAX_NODES as f32 * 0.99;
             d.insert_node(t, 0.5);
         }
         assert_eq!(d.node_count, MAX_NODES);
         assert!(d.insert_node(0.999, 0.5).is_none());
+    }
+
+    #[test]
+    fn insert_node_refuses_when_no_room() {
+        let mut d = MsegData::default();
+        d.insert_node(0.5, 0.5).unwrap();   // nodes: 0.0, 0.5, 1.0
+        // Second insert at 0.5 clamps to 0.5 + MIN_NODE_GAP, leaving nodes 1 and 2
+        // exactly MIN_NODE_GAP apart.
+        d.insert_node(0.5, 0.5).unwrap();
+        let before = d.node_count;
+        // No gap-respecting room between those two nodes -> refused, not a panic.
+        assert!(d.insert_node(0.50005, 0.5).is_none());
+        assert_eq!(d.node_count, before);
+        assert!(d.is_valid());
     }
 
     #[test]
