@@ -143,7 +143,7 @@ Tests are inline `#[cfg(test)]` modules:
 | `miff/src/kernel.rs` | Curve → FIR bake: single-walk `bake_taps` (bipolar tap map, monotone segment cursor), `bake` (MAX_KERNEL FFT → peak-magnitude normalization), `KernelHandoff` (Mutex + try_lock GUI→audio transfer), `default_flat_curve` |
 | `miff/src/convolution.rs` | Raw (`RawChannel`: double-buffered history ring, SIMD f32x16 MAC, silence fast-path) and Phaseless (`PhaselessChannel`: fixed 4096-pt STFT, 50% overlap-add, magnitude multiply, constant 2048-sample latency) engines |
 | `miff/src/editor.rs` | Softbuffer + baseview editor (880×620, freely resizable): MSEG editor in curve-only mode (top ~55%), response view (middle ~29%), controls strip (bottom ~16%); event dispatch, re-bake on curve edit, right-click text entry on dials |
-| `miff/src/editor/response_view.rs` | Frequency-response view: baked kernel magnitude curve on log-frequency axis + live input-spectrum shadow; shadow draw skipped when all bins are below the −48 dB floor |
+| `miff/src/editor/response_view.rs` | Frequency-response view: baked kernel magnitude curve on log-frequency axis + live input-spectrum shadow. The −48 dB floor guard skips BOTH the input shadow AND the kernel curve fill/stroke when no bin clears the floor — a fresh miff's flat-0.5 curve bakes to an all-zero kernel, so without the kernel-curve guard tiny-skia would warn "empty paths cannot be filled" every frame |
 
 ### GS Meter
 

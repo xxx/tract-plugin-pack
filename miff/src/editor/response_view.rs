@@ -184,7 +184,13 @@ pub fn draw_response(
     // ── Kernel response curve ───────────────────────────────────────────────
     // Map kernel_mags[k] → frequency using: bin k → k * (FREQ_MAX / (nbins-1)).
     // Then look up the closest kernel_mags bin for each log-spaced x column.
-    if !kernel_mags.is_empty() {
+    //
+    // Same zero-height-polygon guard as the input shadow: a flat-0.5 curve
+    // bakes to an all-zero kernel whose every bin sits on the -48 dB baseline.
+    // Without this guard tiny-skia warns "empty paths cannot be filled" on
+    // every frame — and a freshly-inserted miff is always in that state.
+    let kernel_has_signal = kernel_mags.iter().any(|&m| m > mag_floor);
+    if kernel_has_signal {
         let num_kernel_bins = kernel_mags.len();
         let bin_to_hz = FREQ_MAX / (num_kernel_bins - 1).max(1) as f32;
 
