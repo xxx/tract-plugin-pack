@@ -248,6 +248,87 @@ fn draw_strip(
     );
 }
 
+// ---------------------------------------------------------------------------
+// Hit-testing
+// ---------------------------------------------------------------------------
+
+/// Result of hit-testing a pixel against the MSEG widget.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum MsegHit {
+    /// On the node dot at this index.
+    Node(usize),
+    /// On the tension handle of the segment starting at this node index.
+    Tension(usize),
+    /// On the canvas but not on any node/handle.
+    Canvas,
+    /// On the Randomize button.
+    Randomize,
+    /// On the strip but not on a recognised control.
+    Strip,
+    /// On the marker lane.
+    MarkerLane,
+    /// Outside the widget.
+    None,
+}
+
+/// Pointer hit radius (unscaled px) for node / handle picking.
+const HIT_R: f32 = 7.0;
+
+fn in_rect(r: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
+    x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
+}
+
+/// Hit-test pixel `(x, y)` against the widget. `curve_only` suppresses the
+/// marker lane. `scale` is the DPI factor — the hit radius and the Randomize
+/// button bounds are scaled to match the rendering. Nodes take priority over
+/// tension handles, which take priority over empty canvas.
+pub fn mseg_hit_test(
+    layout: &MsegLayout,
+    data: &MsegData,
+    curve_only: bool,
+    scale: f32,
+    x: f32,
+    y: f32,
+) -> MsegHit {
+    let a = data.active();
+    let hit_r = HIT_R * scale;
+    if in_rect(layout.canvas, x, y) {
+        // Nodes first.
+        for (i, n) in a.iter().enumerate() {
+            let nx = phase_to_x(layout, n.time);
+            let ny = value_to_y(layout, n.value);
+            if (x - nx).abs() <= hit_r && (y - ny).abs() <= hit_r {
+                return MsegHit::Node(i);
+            }
+        }
+        // Then tension handles.
+        for i in 0..data.node_count - 1 {
+            if a[i].stepped {
+                continue;
+            }
+            let mid = (a[i].time + a[i + 1].time) * 0.5;
+            let hx = phase_to_x(layout, mid);
+            let hy = value_to_y(layout, value_at_phase(data, mid));
+            if (x - hx).abs() <= hit_r && (y - hy).abs() <= hit_r {
+                return MsegHit::Tension(i);
+            }
+        }
+        return MsegHit::Canvas;
+    }
+    if !curve_only && in_rect(layout.marker_lane, x, y) {
+        return MsegHit::MarkerLane;
+    }
+    if in_rect(layout.strip, x, y) {
+        // Randomize button — right end, 84px + 6px pad, scaled (matches draw_strip).
+        let btn_x = layout.strip.0 + layout.strip.2 - 84.0 * scale - 6.0 * scale;
+        if x >= btn_x {
+            return MsegHit::Randomize;
+        }
+        return MsegHit::Strip;
+    }
+    MsegHit::None
+}
+
 /// Draw a 1px line by sampling points along it (sufficient for the curve;
 /// stepped segments produce near-vertical jumps which this still renders).
 fn draw_line(pixmap: &mut Pixmap, x0: f32, y0: f32, x1: f32, y1: f32, color: tiny_skia::Color) {
@@ -380,5 +461,43 @@ mod tests {
         let sx = (l.strip.0 + 10.0) as u32;
         let sy = (l.strip.1 + l.strip.3 * 0.5) as u32;
         assert!(px_alpha(&pm, sx, sy) > 0, "strip not painted");
+    }
+
+    #[test]
+    fn hit_test_finds_a_node() {
+        let mut data = MsegData::default();
+        data.insert_node(0.5, 0.5);
+        let l = mseg_layout(RECT, false, 1.0);
+        let nx = phase_to_x(&l, 0.5);
+        let ny = value_to_y(&l, 0.5);
+        assert_eq!(mseg_hit_test(&l, &data, false, 1.0, nx, ny), MsegHit::Node(1));
+    }
+
+    #[test]
+    fn hit_test_empty_canvas() {
+        let data = MsegData::default(); // nodes only at the corners
+        let l = mseg_layout(RECT, false, 1.0);
+        // The default data has a tension handle at (0.5, 0.5) — probe at (0.25, 0.75)
+        // which is well away from any node or handle.
+        let hit = mseg_hit_test(&l, &data, false, 1.0, l.canvas.0 + l.canvas.2 * 0.25,
+                                l.canvas.1 + l.canvas.3 * 0.75);
+        assert_eq!(hit, MsegHit::Canvas);
+    }
+
+    #[test]
+    fn hit_test_randomize_button() {
+        let data = MsegData::default();
+        let l = mseg_layout(RECT, false, 1.0);
+        // The Randomize button is at the strip's right end.
+        let bx = l.strip.0 + l.strip.2 - 48.0;
+        let by = l.strip.1 + l.strip.3 * 0.5;
+        assert_eq!(mseg_hit_test(&l, &data, false, 1.0, bx, by), MsegHit::Randomize);
+    }
+
+    #[test]
+    fn hit_test_outside_is_none() {
+        let data = MsegData::default();
+        let l = mseg_layout(RECT, false, 1.0);
+        assert_eq!(mseg_hit_test(&l, &data, false, 1.0, -10.0, -10.0), MsegHit::None);
     }
 }
