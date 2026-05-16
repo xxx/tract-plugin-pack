@@ -2,7 +2,7 @@
 //!
 //! See `docs/superpowers/specs/2026-05-16-mseg-editor-widget-design.md`.
 
-use crate::mseg::{value_at_phase, MsegData};
+use crate::mseg::{value_at_phase, HoldMode, MsegData};
 use crate::mseg::editor::MsegEditState;
 use crate::primitives::{
     color_accent, color_bg, color_border, color_control_bg, draw_rect, draw_rect_outline,
@@ -81,9 +81,40 @@ pub fn draw_mseg(
 ) {
     let layout = mseg_layout(rect, state.is_curve_only(), scale);
     draw_canvas(pixmap, &layout, data, state, scale);
-    // Marker lane (Task 5) and control strip (Task 6) are drawn here in
-    // later tasks; `text_renderer` is used by those.
+    draw_marker_lane(pixmap, &layout, data, state);
+    // Control strip (Task 6) is drawn here in a later task; `text_renderer`
+    // is used by that.
     let _ = text_renderer;
+}
+
+/// Draw the hold marker(s) in the marker lane. No-op in curve-only mode or
+/// when `hold` is `None`.
+fn draw_marker_lane(
+    pixmap: &mut Pixmap,
+    layout: &MsegLayout,
+    data: &MsegData,
+    state: &MsegEditState,
+) {
+    if state.is_curve_only() || layout.marker_lane.3 <= 0.0 {
+        return;
+    }
+    let (lx, ly, lw, lh) = layout.marker_lane;
+    draw_rect(pixmap, lx, ly, lw, lh, color_bg());
+    let a = data.active();
+    let mark = |pm: &mut Pixmap, node: usize, color: tiny_skia::Color| {
+        if node < data.node_count {
+            let mx = phase_to_x(layout, a[node].time);
+            draw_rect(pm, mx - 3.0, ly + 2.0, 6.0, lh - 4.0, color);
+        }
+    };
+    match data.hold {
+        HoldMode::None => {}
+        HoldMode::Sustain(i) => mark(pixmap, i, color_accent()),
+        HoldMode::Loop { start, end } => {
+            mark(pixmap, start, color_border());
+            mark(pixmap, end, color_border());
+        }
+    }
 }
 
 /// Draw the canvas: background, grid, and the envelope polyline.
@@ -261,5 +292,33 @@ mod tests {
         let nx = phase_to_x(&l, 0.5) as u32;
         let ny = value_to_y(&l, 0.5) as u32;
         assert!(px_alpha(&pm, nx, ny) > 0, "node dot not painted");
+    }
+
+    #[test]
+    fn marker_lane_drawn_for_sustain_in_full_mode() {
+        use crate::mseg::HoldMode;
+        let mut pm = Pixmap::new(400, 300).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        let mut data = MsegData::default();
+        data.insert_node(0.5, 0.5);
+        data.hold = HoldMode::Sustain(1);
+        let state = MsegEditState::new();
+        draw_mseg(&mut pm, &mut tr, RECT, &data, &state, 1.0);
+        // A sustain marker sits in the marker lane above node 1's x.
+        let l = mseg_layout(RECT, false, 1.0);
+        let mx = phase_to_x(&l, 0.5) as u32;
+        let my = (l.marker_lane.1 + l.marker_lane.3 * 0.5) as u32;
+        assert!(px_alpha(&pm, mx, my) > 0, "sustain marker not drawn");
+    }
+
+    #[test]
+    fn marker_lane_skipped_in_curve_only_mode() {
+        let mut pm = Pixmap::new(400, 300).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        let data = MsegData::default();
+        let state = MsegEditState::new_curve_only();
+        // Must not panic; the marker lane has zero height.
+        draw_mseg(&mut pm, &mut tr, RECT, &data, &state, 1.0);
+        assert_eq!(mseg_layout(RECT, true, 1.0).marker_lane.3, 0.0);
     }
 }
