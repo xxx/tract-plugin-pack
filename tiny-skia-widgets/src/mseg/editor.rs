@@ -242,6 +242,7 @@ impl MsegEditState {
         let layout = mseg_layout(rect, self.curve_only, scale);
         if let MsegHit::Node(i) = mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
             if data.remove_node(i) {
+                // drag/hover may reference the just-deleted node's index — clear both.
                 self.drag = None;
                 self.hover = None;
                 return Some(MsegEdit::Changed);
@@ -272,12 +273,19 @@ impl MsegEditState {
         // Segment i is the last node whose time is <= phase, capped so a
         // segment always exists. Compute `seg` inside a block so the
         // immutable borrow of `data` via `active()` ends before the write.
+        // `phase` is clamped to [0,1]; the last node (time==1.0) is excluded
+        // from the loop window because it has no outgoing segment, so a click
+        // at phase 1.0 correctly resolves to the final segment.
         let seg = {
             let a = data.active();
             let mut seg = 0;
             for (i, n) in a.iter().enumerate().take(data.node_count - 1) {
+                // Nodes are time-sorted: once a node's time exceeds `phase`,
+                // no later node can match — mirror `value_at_phase`'s break.
                 if n.time <= phase {
                     seg = i;
+                } else {
+                    break;
                 }
             }
             seg
@@ -381,8 +389,13 @@ mod tests {
         data.insert_node(0.5, 0.5);
         let mut state = MsegEditState::new();
         let l = mseg_layout(RECT, false, 1.0);
-        let ev = state.on_double_click(phase_to_x(&l, 0.5), value_to_y(&l, 0.5),
-                                       &mut data, RECT, 1.0);
+        let ev = state.on_double_click(
+            phase_to_x(&l, 0.5),
+            value_to_y(&l, 0.5),
+            &mut data,
+            RECT,
+            1.0,
+        );
         assert_eq!(ev, Some(MsegEdit::Changed));
         assert_eq!(data.node_count, 2);
     }
@@ -392,8 +405,13 @@ mod tests {
         let mut data = MsegData::default();
         let mut state = MsegEditState::new();
         let l = mseg_layout(RECT, false, 1.0);
-        let ev = state.on_double_click(phase_to_x(&l, 0.0), value_to_y(&l, 0.0),
-                                       &mut data, RECT, 1.0);
+        let ev = state.on_double_click(
+            phase_to_x(&l, 0.0),
+            value_to_y(&l, 0.0),
+            &mut data,
+            RECT,
+            1.0,
+        );
         assert_eq!(ev, None);
         assert_eq!(data.node_count, 2);
     }
