@@ -221,7 +221,12 @@ impl MiffWindow {
             drag: widgets::DragState::new(),
             text_edit: widgets::TextEditState::new(),
             kernel_handoff,
-            mseg_state: MsegEditState::new_curve_only(),
+            // miff owns this grid list — adjust here to change available presets.
+            mseg_state: {
+                let mut s = MsegEditState::new_curve_only();
+                s.set_grid_options(&[(4, 4), (8, 8), (16, 8), (32, 16)]);
+                s
+            },
             input_spectrum,
             last_kernel: initial_kernel,
             alt_held: false,

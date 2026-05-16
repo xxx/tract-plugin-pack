@@ -4,7 +4,7 @@
 
 use crate::dropdown::draw_dropdown_popup;
 use crate::dropdown::draw_dropdown_trigger;
-use crate::mseg::editor::{grid_items, style_items, MsegEditState, StripId};
+use crate::mseg::editor::{style_items, MsegEditState, StripId};
 use crate::mseg::{value_at_phase, HoldMode, MsegData};
 use crate::primitives::{
     color_accent, color_bg, color_border, color_control_bg, color_muted, draw_rect,
@@ -116,19 +116,25 @@ pub fn draw_mseg(
     // within the widget bounds (the popup auto-opens upward when near the
     // bottom).
     let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-    let items: &[&str] = if state.dropdown_is_open_for(StripId::TimeGrid) {
-        grid_items()
+    if state.dropdown_is_open_for(StripId::TimeGrid) {
+        let grid_refs = state.grid_label_refs();
+        draw_dropdown_popup(
+            pixmap,
+            text_renderer,
+            state.dropdown_state(),
+            &grid_refs,
+            window_size,
+        );
     } else {
         // Either the style dropdown is open or nothing is; closed is a no-op.
-        style_items()
-    };
-    draw_dropdown_popup(
-        pixmap,
-        text_renderer,
-        state.dropdown_state(),
-        items,
-        window_size,
-    );
+        draw_dropdown_popup(
+            pixmap,
+            text_renderer,
+            state.dropdown_state(),
+            style_items(),
+            window_size,
+        );
+    }
 }
 
 /// Draw the hold marker(s) in the marker lane. No-op in curve-only mode or

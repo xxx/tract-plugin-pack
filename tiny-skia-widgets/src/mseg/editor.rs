@@ -11,43 +11,11 @@ use crate::mseg::randomize::RandomStyle;
 use crate::mseg::MsegData;
 use crate::text_edit::TextEditState;
 
-/// Grid option pairs `(time_divisions, value_steps)` offered in the dropdown.
-pub const GRID_OPTIONS: [(u32, u32); 4] = [(4, 4), (8, 8), (16, 8), (32, 16)];
-
-/// Display labels for each `GRID_OPTIONS` entry.
-pub const GRID_LABELS: [&str; 4] = ["4 / 4", "8 / 8", "16 / 8", "32 / 16"];
+/// Default grid option pairs used when no custom list is supplied.
+const DEFAULT_GRID_OPTIONS: [(u32, u32); 4] = [(4, 4), (8, 8), (16, 8), (32, 16)];
 
 /// Style display labels, matching `RandomStyle::ALL` order.
 pub const STYLE_LABELS: [&str; 5] = ["Smooth", "Ramps", "Stepped", "Spiky", "Chaos"];
-
-/// Return the `GRID_OPTIONS` index whose `(time_divisions, value_steps)` pair
-/// matches `data`. If no exact match is found, returns the index of the closest
-/// match (smallest combined absolute deviation), defaulting to 0.
-pub fn current_grid_index(data: &MsegData) -> usize {
-    // Prefer an exact match.
-    for (i, &(t, v)) in GRID_OPTIONS.iter().enumerate() {
-        if data.time_divisions == t && data.value_steps == v {
-            return i;
-        }
-    }
-    // Nearest by combined distance.
-    GRID_OPTIONS
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, &(t, v))| {
-            let dt = (data.time_divisions as i64 - t as i64).unsigned_abs();
-            let dv = (data.value_steps as i64 - v as i64).unsigned_abs();
-            dt + dv
-        })
-        .map(|(i, _)| i)
-        .unwrap_or(0)
-}
-
-/// Fixed `&'static [&'static str]` slice of grid option labels. The same slice
-/// must be passed to every `DropdownState` call for the grid dropdown.
-pub fn grid_items() -> &'static [&'static str] {
-    &GRID_LABELS
-}
 
 /// Fixed `&'static [&'static str]` slice of style labels. The same slice must
 /// be passed to every `DropdownState` call for the style dropdown.
@@ -133,6 +101,10 @@ pub struct MsegEditState {
     text_edit: TextEditState<StripId>,
     /// Bumped on each Randomize click so successive clicks differ.
     seed: u32,
+    /// Per-plugin grid presets `(time_divisions, value_steps)`.
+    grid_options: Vec<(u32, u32)>,
+    /// Display labels for `grid_options`, kept in sync by `set_grid_options`.
+    grid_labels: Vec<String>,
 }
 
 impl MsegEditState {
@@ -148,6 +120,8 @@ impl MsegEditState {
     }
 
     fn with_curve_only(curve_only: bool) -> Self {
+        let grid_options: Vec<(u32, u32)> = DEFAULT_GRID_OPTIONS.to_vec();
+        let grid_labels = Self::build_labels(&grid_options);
         Self {
             curve_only,
             drag: None,
@@ -158,7 +132,68 @@ impl MsegEditState {
             dropdown: DropdownState::new(),
             text_edit: TextEditState::new(),
             seed: 0,
+            grid_options,
+            grid_labels,
         }
+    }
+
+    /// Build display labels from a slice of `(time_divisions, value_steps)` pairs.
+    fn build_labels(options: &[(u32, u32)]) -> Vec<String> {
+        options
+            .iter()
+            .map(|&(t, v)| format!("{} / {}", t, v))
+            .collect()
+    }
+
+    /// Replace the grid preset list. If `options` is empty the call is a no-op
+    /// (the default list is kept).
+    ///
+    /// Must be called at setup time, NOT while the grid dropdown is open —
+    /// the dropdown's stable-items invariant (the item list must not change
+    /// while open) would be violated if the list were replaced mid-session.
+    pub fn set_grid_options(&mut self, options: &[(u32, u32)]) {
+        if options.is_empty() {
+            return;
+        }
+        self.grid_options = options.to_vec();
+        self.grid_labels = Self::build_labels(&self.grid_options);
+    }
+
+    /// The current grid presets `(time_divisions, value_steps)`.
+    pub fn grid_options(&self) -> &[(u32, u32)] {
+        &self.grid_options
+    }
+
+    /// Build a `Vec<&str>` of grid label references for passing to dropdown
+    /// calls. A fresh `Vec` is built each call from the unchanged `grid_labels`
+    /// — a GUI-thread allocation, fine. The stable-items invariant (same
+    /// length/order while the dropdown is open) is satisfied because
+    /// `set_grid_options` must not be called while the dropdown is open.
+    pub(crate) fn grid_label_refs(&self) -> Vec<&str> {
+        self.grid_labels.iter().map(String::as_str).collect()
+    }
+
+    /// Return the `grid_options` index whose `(time_divisions, value_steps)`
+    /// pair best matches `data`. Prefers an exact match; falls back to the
+    /// nearest by combined absolute deviation; returns 0 on empty list.
+    pub(crate) fn current_grid_index(&self, data: &MsegData) -> usize {
+        // Prefer an exact match.
+        for (i, &(t, v)) in self.grid_options.iter().enumerate() {
+            if data.time_divisions == t && data.value_steps == v {
+                return i;
+            }
+        }
+        // Nearest by combined distance.
+        self.grid_options
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, &(t, v))| {
+                let dt = (data.time_divisions as i64 - t as i64).unsigned_abs();
+                let dv = (data.value_steps as i64 - v as i64).unsigned_abs();
+                dt + dv
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0)
     }
 
     /// `true` for a curve-only editor.
@@ -216,23 +251,31 @@ impl MsegEditState {
         // If a dropdown is open, route the click to it first and consume.
         if self.dropdown.is_open() {
             let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-            let items: &[&str] = if self.dropdown.is_open_for(StripId::TimeGrid) {
-                grid_items()
+            if self.dropdown.is_open_for(StripId::TimeGrid) {
+                // Clone the labels into an owned Vec<String> so the borrow of
+                // self.grid_labels ends before the mutable self.dropdown call.
+                let owned: Vec<String> = self.grid_labels.clone();
+                let grid_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+                match self.dropdown.on_mouse_down(x, y, &grid_refs, window_size) {
+                    Some(DropdownEvent::Selected(StripId::TimeGrid, idx)) => {
+                        let (t, v) = self.grid_options[idx];
+                        data.time_divisions = t;
+                        data.value_steps = v;
+                        return Some(MsegEdit::Changed);
+                    }
+                    _ => return None,
+                }
             } else {
-                style_items()
-            };
-            match self.dropdown.on_mouse_down(x, y, items, window_size) {
-                Some(DropdownEvent::Selected(StripId::TimeGrid, idx)) => {
-                    let (t, v) = GRID_OPTIONS[idx];
-                    data.time_divisions = t;
-                    data.value_steps = v;
-                    return Some(MsegEdit::Changed);
+                match self
+                    .dropdown
+                    .on_mouse_down(x, y, style_items(), window_size)
+                {
+                    Some(DropdownEvent::Selected(StripId::Style, idx)) => {
+                        self.set_style(RandomStyle::from_index(idx));
+                        return None;
+                    }
+                    _ => return None,
                 }
-                Some(DropdownEvent::Selected(StripId::Style, idx)) => {
-                    self.set_style(RandomStyle::from_index(idx));
-                    return None;
-                }
-                _ => return None,
             }
         }
 
@@ -282,11 +325,16 @@ impl MsegEditState {
                     Some(MsegEdit::Changed)
                 } else if in_rect(b.grid, x, y) {
                     // Open the grid dropdown; no document change yet.
+                    // Clone labels so the borrow of self.grid_labels ends before
+                    // the mutable self.dropdown call.
+                    let owned: Vec<String> = self.grid_labels.clone();
+                    let grid_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+                    let grid_idx = self.current_grid_index(data);
                     self.dropdown.open(
                         StripId::TimeGrid,
                         b.grid,
-                        grid_items(),
-                        current_grid_index(data),
+                        &grid_refs,
+                        grid_idx,
                         false,
                         window_size,
                     );
@@ -327,12 +375,16 @@ impl MsegEditState {
         // Route moves to the open dropdown for hover-highlight updates.
         if self.dropdown.is_open() {
             let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-            let items: &[&str] = if self.dropdown.is_open_for(StripId::TimeGrid) {
-                grid_items()
+            if self.dropdown.is_open_for(StripId::TimeGrid) {
+                // Clone labels so the borrow of self.grid_labels ends before
+                // the mutable self.dropdown call.
+                let owned: Vec<String> = self.grid_labels.clone();
+                let grid_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+                self.dropdown.on_mouse_move(x, y, &grid_refs, window_size);
             } else {
-                style_items()
-            };
-            self.dropdown.on_mouse_move(x, y, items, window_size);
+                self.dropdown
+                    .on_mouse_move(x, y, style_items(), window_size);
+            }
             return None;
         }
         // Hover highlight (only when not dragging).
@@ -818,7 +870,8 @@ mod tests {
         assert!(state.dropdown_is_open_for(StripId::TimeGrid));
         // Compute the popup layout to find a row to click.
         let window_size = (RECT.0 + RECT.2, RECT.1 + RECT.3);
-        let layout = dropdown_popup_layout(&state.dropdown, grid_items(), window_size).unwrap();
+        let grid_refs = state.grid_label_refs();
+        let layout = dropdown_popup_layout(&state.dropdown, &grid_refs, window_size).unwrap();
         // Click the first visible row (index 0 = "4 / 4").
         let row = layout.visible_rows[0];
         let (rx, ry, rw, rh) = row.rect;
@@ -828,7 +881,7 @@ mod tests {
             Some(MsegEdit::Changed),
             "selecting grid must change document"
         );
-        let (t, v) = GRID_OPTIONS[row.item_index];
+        let (t, v) = state.grid_options()[row.item_index];
         assert_eq!(data.time_divisions, t);
         assert_eq!(data.value_steps, v);
         assert!(
@@ -840,28 +893,101 @@ mod tests {
 
     #[test]
     fn current_grid_index_round_trips() {
-        for (i, &(t, v)) in GRID_OPTIONS.iter().enumerate() {
+        let state = MsegEditState::new();
+        for (i, &(t, v)) in state.grid_options().iter().enumerate() {
             let mut data = MsegData::default();
             data.time_divisions = t;
             data.value_steps = v;
             assert_eq!(
-                current_grid_index(&data),
+                state.current_grid_index(&data),
                 i,
-                "round-trip failed for GRID_OPTIONS[{i}] = ({t},{v})"
+                "round-trip failed for grid_options[{i}] = ({t},{v})"
             );
         }
     }
 
     #[test]
     fn current_grid_index_no_match_returns_nearest() {
-        // (7, 7) is between options 1=(8,8) and 0=(4,4); nearest is 1.
+        // (7, 7) is between the default options 1=(8,8) and 0=(4,4); nearest is 1.
+        let state = MsegEditState::new();
         let mut data = MsegData::default();
         data.time_divisions = 7;
         data.value_steps = 7;
-        let idx = current_grid_index(&data);
+        let idx = state.current_grid_index(&data);
         // Both options 0 and 1 are candidates — either is acceptable; just
         // verify it returns a valid index within bounds.
-        assert!(idx < GRID_OPTIONS.len());
+        assert!(idx < state.grid_options().len());
+    }
+
+    #[test]
+    fn set_grid_options_updates_options_and_labels() {
+        let mut state = MsegEditState::new();
+        state.set_grid_options(&[(2, 2), (64, 64)]);
+        assert_eq!(state.grid_options(), &[(2, 2), (64, 64)]);
+        assert_eq!(state.grid_label_refs(), vec!["2 / 2", "64 / 64"]);
+    }
+
+    #[test]
+    fn set_grid_options_empty_slice_keeps_default() {
+        let state_default = MsegEditState::new();
+        let default_opts: Vec<(u32, u32)> = state_default.grid_options().to_vec();
+        let default_labels: Vec<String> = state_default
+            .grid_label_refs()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let mut state = MsegEditState::new();
+        state.set_grid_options(&[]); // no-op
+        assert_eq!(state.grid_options(), default_opts.as_slice());
+        let labels: Vec<String> = state
+            .grid_label_refs()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(labels, default_labels);
+    }
+
+    #[test]
+    fn custom_grid_select_applies_correct_values() {
+        use crate::dropdown::dropdown_popup_layout;
+        use crate::mseg::render::strip_buttons;
+
+        let mut data = MsegData::default();
+        let mut state = MsegEditState::new();
+        // Plugin-supplied custom list: two options, second is (64, 64).
+        state.set_grid_options(&[(2, 2), (64, 64)]);
+
+        let l = mseg_layout(RECT, false, 1.0);
+        let b = strip_buttons(l.strip, 1.0);
+        // Open the grid dropdown.
+        state.on_mouse_down(
+            b.grid.0 + b.grid.2 * 0.5,
+            b.grid.1 + b.grid.3 * 0.5,
+            &mut data,
+            RECT,
+            1.0,
+            false,
+        );
+        assert!(state.dropdown_is_open_for(StripId::TimeGrid));
+
+        // Find and click the second row (index 1 = (64,64)).
+        let window_size = (RECT.0 + RECT.2, RECT.1 + RECT.3);
+        let grid_refs = state.grid_label_refs();
+        let layout = dropdown_popup_layout(&state.dropdown, &grid_refs, window_size).unwrap();
+        // Rows may be ordered; find the row with item_index == 1.
+        let row = layout
+            .visible_rows
+            .iter()
+            .find(|r| r.item_index == 1)
+            .copied()
+            .expect("row with item_index 1 not found");
+        let (rx, ry, rw, rh) = row.rect;
+        let ev = state.on_mouse_down(rx + rw * 0.5, ry + rh * 0.5, &mut data, RECT, 1.0, false);
+        assert_eq!(ev, Some(MsegEdit::Changed));
+        assert_eq!(data.time_divisions, 64);
+        assert_eq!(data.value_steps, 64);
+        state.on_mouse_up(&mut data);
     }
 
     // --- Style dropdown tests ---
