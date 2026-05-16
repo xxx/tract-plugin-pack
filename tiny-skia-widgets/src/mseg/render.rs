@@ -32,6 +32,7 @@ pub fn mseg_layout(rect: (f32, f32, f32, f32), curve_only: bool, scale: f32) -> 
 
 /// Normalized phase (0..1) → canvas x pixel.
 pub fn phase_to_x(layout: &MsegLayout, phase: f32) -> f32 {
+    // No zero-width guard needed: phase * 0.0 == 0.0 is already correct here.
     layout.canvas.0 + phase.clamp(0.0, 1.0) * layout.canvas.2
 }
 
@@ -67,8 +68,8 @@ mod tests {
         let l = mseg_layout(RECT, false, 1.0);
         assert!(l.marker_lane.3 > 0.0, "full editor has a marker lane");
         // canvas sits below the marker lane, above the strip.
-        assert!(l.canvas.1 >= l.marker_lane.1 + l.marker_lane.3 - 0.01);
-        assert!(l.canvas.1 + l.canvas.3 <= l.strip.1 + 0.01);
+        assert!((l.canvas.1 - (l.marker_lane.1 + l.marker_lane.3)).abs() < 1e-6);
+        assert!(l.canvas.1 + l.canvas.3 <= l.strip.1);
     }
 
     #[test]
