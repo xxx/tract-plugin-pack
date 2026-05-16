@@ -1,5 +1,5 @@
 [workspace]
-members = ["wavetable-filter", "gs-meter", "gain-brain", "tinylimit", "satch", "pope-scope", "warp-zone", "six-pack", "imagine", "tiny-skia-widgets", "xtask", "bench-suite"]
+members = ["wavetable-filter", "gs-meter", "gain-brain", "tinylimit", "satch", "pope-scope", "warp-zone", "six-pack", "imagine", "miff", "tiny-skia-widgets", "xtask", "bench-suite"]
 # `nih-plug-widgets` is the legacy vizia widget crate — unreferenced since
 # wavetable-filter's tiny-skia port. Excluded so its old transitive deps
 # (xcb 0.9.0 in particular, which trips a future-incompat lint) don't enter

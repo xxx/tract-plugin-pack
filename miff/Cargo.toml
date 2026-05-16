@@ -1,0 +1,32 @@
+[package]
+name = "miff"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "miff"
+path = "src/main.rs"
+
+[dependencies]
+nih_plug = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr", features = ["simd", "standalone", "assert_process_allocs"] }
+baseview = { git = "https://github.com/RustAudio/baseview.git", rev = "9a0b42c09d712777b2edb4c5e0cb6baf21e988f0", features = ["opengl"] }
+softbuffer = { version = "0.4", default-features = false, features = ["kms", "x11"] }
+raw-window-handle = "0.5"
+raw-window-handle-06 = { package = "raw-window-handle", version = "0.6" }
+tiny-skia = "0.12"
+tiny-skia-widgets = { path = "../tiny-skia-widgets" }
+keyboard-types = "0.6"
+crossbeam = "0.8"
+atomic_float = "1.0"
+realfft = "3.3"
+rustfft = "6.2"
+
+[package.metadata.bundler]
+name = "miff"
+company = "mpd"
+description = "A convolution filter whose kernel is hand-drawn with an MSEG editor"
+license = "GPL-3.0-or-later"
+version = "0.1.0"
