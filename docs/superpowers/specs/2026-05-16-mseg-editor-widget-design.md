@@ -25,7 +25,9 @@ In scope:
   (`advance`) — the single source of truth shared by rendering and any
   consuming plugin's DSP.
 - The randomizer.
-- The editor: rendering + interaction (`MsegEditState`, draw + event handlers).
+- The editor: rendering + interaction (`MsegEditState`, draw + event handlers),
+  including a **curve-only mode** (see Editor: Curve-Only Mode) for consumers
+  that use the MSEG purely as a static shape editor.
 - Inline unit tests and render smoke tests; optionally a standalone example
   for live visual checks.
 
@@ -248,7 +250,8 @@ premature pixel-pushing).
 - a `stepped_draw` modifier flag (set by the plugin from whatever key it
   chooses — the widget does not hardcode a key);
 - composed sub-widget state: a `DropdownState` for the style selector and a
-  `TextEditState` for the numeric strip fields.
+  `TextEditState` for the numeric strip fields;
+- a `curve_only` flag, set at construction (see Editor: Curve-Only Mode).
 
 Event handlers — representative shape; exact parameters are settled in the
 implementation plan:
@@ -294,6 +297,37 @@ a document*: handlers mutate `&mut MsegData` directly and return
 
 Snap, when on, applies to the time axis (grid divisions) and the value axis
 (value steps) for node placement and movement.
+
+## Editor: Curve-Only Mode
+
+Some consumers use the MSEG purely as a static *shape* editor — a hand-drawn
+curve with no playback (the `miff` plugin uses the curve as an FIR filter
+kernel). For them the playback/timing UI is dead weight. The editor therefore
+supports a **curve-only mode**.
+
+`MsegEditState` carries a `curve_only` flag, fixed at construction:
+
+- `MsegEditState::new()` — full editor (default).
+- `MsegEditState::new_curve_only()` — curve-only editor.
+
+`draw_mseg` and every event handler read the flag from `MsegEditState` — no
+signature changes. In curve-only mode:
+
+- The **playback / timing controls are omitted** from the bottom control
+  strip — no `play_mode`, `sync_mode`, `hold-mode`, or duration controls.
+  The grid (time + value divisions), snap toggle, and the randomizer (style +
+  Randomize) **remain**.
+- The **marker lane is not drawn and not interactive** — there are no
+  sustain/loop markers (the `Marker` drag target is unreachable). The vertical
+  space the marker lane would occupy is reclaimed by the canvas.
+- All curve editing is unchanged: add/move/delete nodes, tension handles,
+  toggle stepped, freehand stepped-draw, grid snapping.
+- `MsegData`'s `play_mode` / `sync_mode` / `hold` fields still exist and
+  serialize as normal; a curve-only consumer simply ignores them.
+
+`draw_mseg`'s `rect` argument plus the absence of the marker lane and the
+trimmed strip are the only layout differences; the canvas occupies the freed
+space. Curve-only mode is exercised by its own render smoke test.
 
 ## Randomizer
 
@@ -354,7 +388,8 @@ randomize(&mut MsegData, RandomStyle, seed: u32)
 
 // editor  (mseg/render.rs, mseg/editor.rs)
 struct MsegEditState;  enum MsegEdit;
-MsegEditState::new() -> MsegEditState
+MsegEditState::new() -> MsegEditState              // full editor
+MsegEditState::new_curve_only() -> MsegEditState   // playback/marker UI hidden
 draw_mseg(pixmap, text_renderer, rect, &MsegData, &MsegEditState, scale)
 MsegEditState::on_mouse_down/on_mouse_move/on_mouse_up/on_double_click(...) -> Option<MsegEdit>
 MsegEditState::set_stepped_draw(&mut self, held: bool)
