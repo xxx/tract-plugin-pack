@@ -112,8 +112,8 @@ fn draw_canvas(pixmap: &mut Pixmap, layout: &MsegLayout, data: &MsegData, _state
     let mut prev: Option<(f32, f32)> = None;
     for col in 0..=cols {
         let phase = col as f32 / cols as f32;
-        let x = cx + phase * cw;
-        let y = cy + (1.0 - value_at_phase(data, phase)) * ch;
+        let x = (cx + phase * cw).min(cx + cw - 1.0);
+        let y = (cy + (1.0 - value_at_phase(data, phase)) * ch).min(cy + ch - 1.0);
         if let Some((px, py)) = prev {
             draw_line(pixmap, px, py, x, y, color_accent());
         }
