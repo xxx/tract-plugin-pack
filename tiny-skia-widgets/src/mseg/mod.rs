@@ -216,7 +216,10 @@ mod tests {
         d.hold = HoldMode::Sustain(5);
         assert!(!d.is_valid());
         let mut d = MsegData::default();
-        d.hold = HoldMode::Loop { start: 1, end: 0 }; // start >= end
+        d.hold = HoldMode::Loop { start: 1, end: 0 }; // start > end
+        assert!(!d.is_valid());
+        let mut d = MsegData::default(); // node_count == 2, valid indices 0 and 1
+        d.hold = HoldMode::Loop { start: 1, end: 1 }; // start == end is invalid
         assert!(!d.is_valid());
     }
 }
