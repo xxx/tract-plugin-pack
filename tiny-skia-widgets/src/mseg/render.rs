@@ -274,8 +274,8 @@ pub enum MsegHit {
 /// Pointer hit radius (unscaled px) for node / handle picking.
 const HIT_R: f32 = 7.0;
 
-fn in_rect(r: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
-    x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
+fn in_rect((rx, ry, rw, rh): (f32, f32, f32, f32), x: f32, y: f32) -> bool {
+    x >= rx && x < rx + rw && y >= ry && y < ry + rh
 }
 
 /// Hit-test pixel `(x, y)` against the widget. `curve_only` suppresses the
@@ -319,7 +319,9 @@ pub fn mseg_hit_test(
         return MsegHit::MarkerLane;
     }
     if in_rect(layout.strip, x, y) {
-        // Randomize button — right end, 84px + 6px pad, scaled (matches draw_strip).
+        // Randomize button: drawn 6px (pad) from the strip's right edge, 84px
+        // wide. The hitbox extends from the button's left edge to the strip
+        // edge.
         let btn_x = layout.strip.0 + layout.strip.2 - 84.0 * scale - 6.0 * scale;
         if x >= btn_x {
             return MsegHit::Randomize;
@@ -488,8 +490,9 @@ mod tests {
     fn hit_test_randomize_button() {
         let data = MsegData::default();
         let l = mseg_layout(RECT, false, 1.0);
-        // The Randomize button is at the strip's right end.
-        let bx = l.strip.0 + l.strip.2 - 48.0;
+        // Centre of the Randomize button: drawn 6px from the strip's right
+        // edge, 84px wide → centre is 6 + 84/2 px in from the right.
+        let bx = l.strip.0 + l.strip.2 - 6.0 - 84.0 * 0.5;
         let by = l.strip.1 + l.strip.3 * 0.5;
         assert_eq!(mseg_hit_test(&l, &data, false, 1.0, bx, by), MsegHit::Randomize);
     }
