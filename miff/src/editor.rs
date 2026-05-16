@@ -100,8 +100,7 @@ pub(crate) fn strip_regions(
         (HitAction::GainDial, 1),
         (HitAction::LengthDial, 2),
     ];
-    let n_dials = 3_f32;
-    let slot_w = dials_region_w / n_dials;
+    let slot_w = dials_region_w / dial_labels.len() as f32;
 
     let mut regions = Vec::with_capacity(4);
 
@@ -258,7 +257,22 @@ impl MiffWindow {
             1
         };
 
+        // 1px separator rule along the strip's top edge, visually dividing
+        // the response region from the control strip.
+        let (sx, sy, sw, _sh) = strip_rect;
+        widgets::draw_rect(
+            &mut self.surface.pixmap,
+            sx,
+            sy,
+            sw,
+            1.0,
+            widgets::color_border(),
+        );
+
         for ((rx, ry, rw, rh), action) in regions {
+            // Register the hit region before drawing the control (matches
+            // wavetable-filter's editor ordering).
+            self.drag.push_region(rx, ry, rw, rh, action);
             match action {
                 HitAction::ModeSelector => {
                     widgets::draw_stepped_selector(
@@ -354,8 +368,6 @@ impl MiffWindow {
                     );
                 }
             }
-            // Register hit region for every control.
-            self.drag.push_region(rx, ry, rw, rh, action);
         }
     }
 }
