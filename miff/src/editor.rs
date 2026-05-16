@@ -31,10 +31,10 @@ pub fn default_editor_state() -> Arc<EditorState> {
 
 // ── Hit actions ─────────────────────────────────────────────────────────
 
-/// Hit actions for miff's editor. Tasks 10–12 add the real variants.
+/// Hit actions for miff's editor.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum HitAction {
-    /// Placeholder — no interactive regions defined until Task 10.
+    // placeholder — replaced by the real hit-action variants in Task 10
     #[allow(dead_code)]
     Placeholder,
 }
@@ -43,22 +43,20 @@ pub(crate) enum HitAction {
 
 /// Compute the three editor regions from physical pixel dimensions.
 /// Returns `(mseg_rect, response_rect, strip_rect)` each as `(x, y, w, h)`.
-// Wired up in the draw path; also tested in #[cfg(test)].
-#[allow(dead_code, clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 pub(crate) fn layout(w: f32, h: f32) -> (
     (f32, f32, f32, f32),
     (f32, f32, f32, f32),
     (f32, f32, f32, f32),
 ) {
-    let margin = 0.0; // no outer margin; sub-widgets have their own internal padding
-
+    // full-width regions; sub-widgets have their own internal padding
     let mseg_h = h * 0.55;
     let response_h = h * 0.29;
     let strip_h = h - mseg_h - response_h;
 
-    let mseg_rect = (margin, 0.0, w - margin * 2.0, mseg_h);
-    let response_rect = (margin, mseg_h, w - margin * 2.0, response_h);
-    let strip_rect = (margin, mseg_h + response_h, w - margin * 2.0, strip_h);
+    let mseg_rect = (0.0, 0.0, w, mseg_h);
+    let response_rect = (0.0, mseg_h, w, response_h);
+    let strip_rect = (0.0, mseg_h + response_h, w, strip_h);
 
     (mseg_rect, response_rect, strip_rect)
 }
@@ -246,6 +244,11 @@ impl baseview::WindowHandler for MiffWindow {
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorLeft) => {
                 self.drag.on_cursor_left();
+            }
+            baseview::Event::Keyboard(_) => {
+                // Full keyboard routing (TextEditState) is wired in Task 11;
+                // until then, don't swallow the host's keyboard shortcuts.
+                return baseview::EventStatus::Ignored;
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorMoved { .. }) => {
                 // Full mouse routing wired in Task 11.
