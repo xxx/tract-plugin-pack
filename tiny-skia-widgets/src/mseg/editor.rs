@@ -248,34 +248,39 @@ impl MsegEditState {
         use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
         let layout = mseg_layout(rect, self.curve_only, scale);
 
-        // If a dropdown is open, route the click to it first and consume.
+        // If a dropdown is open, route the click to it first.
+        let mut closed_a_dropdown = false;
         if self.dropdown.is_open() {
             let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-            if self.dropdown.is_open_for(StripId::TimeGrid) {
-                // Clone the labels into an owned Vec<String> so the borrow of
-                // self.grid_labels ends before the mutable self.dropdown call.
+            let ev = if self.dropdown.is_open_for(StripId::TimeGrid) {
+                // Clone the labels so the borrow of self.grid_labels ends
+                // before the mutable self.dropdown call.
                 let owned: Vec<String> = self.grid_labels.clone();
                 let grid_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-                match self.dropdown.on_mouse_down(x, y, &grid_refs, window_size) {
-                    Some(DropdownEvent::Selected(StripId::TimeGrid, idx)) => {
-                        let (t, v) = self.grid_options[idx];
-                        data.time_divisions = t;
-                        data.value_steps = v;
-                        return Some(MsegEdit::Changed);
-                    }
-                    _ => return None,
-                }
+                self.dropdown.on_mouse_down(x, y, &grid_refs, window_size)
             } else {
-                match self
-                    .dropdown
-                    .on_mouse_down(x, y, style_items(), window_size)
-                {
-                    Some(DropdownEvent::Selected(StripId::Style, idx)) => {
-                        self.set_style(RandomStyle::from_index(idx));
-                        return None;
-                    }
-                    _ => return None,
+                self.dropdown.on_mouse_down(x, y, style_items(), window_size)
+            };
+            match ev {
+                Some(DropdownEvent::Selected(StripId::TimeGrid, idx)) => {
+                    let (t, v) = self.grid_options[idx];
+                    data.time_divisions = t;
+                    data.value_steps = v;
+                    return Some(MsegEdit::Changed);
                 }
+                Some(DropdownEvent::Selected(StripId::Style, idx)) => {
+                    self.set_style(RandomStyle::from_index(idx));
+                    return None;
+                }
+                Some(DropdownEvent::Closed(_)) => {
+                    // The click landed outside the popup, closing the dropdown.
+                    // Fall through so the SAME click still acts on whatever it
+                    // hit (Randomize, snap, a node...) — no second click needed.
+                    // The `closed_a_dropdown` guard below stops a click on the
+                    // dropdown's own trigger from immediately reopening it.
+                    closed_a_dropdown = true;
+                }
+                _ => return None,
             }
         }
 
@@ -324,31 +329,39 @@ impl MsegEditState {
                     data.snap = !data.snap;
                     Some(MsegEdit::Changed)
                 } else if in_rect(b.grid, x, y) {
-                    // Open the grid dropdown; no document change yet.
-                    // Clone labels so the borrow of self.grid_labels ends before
-                    // the mutable self.dropdown call.
-                    let owned: Vec<String> = self.grid_labels.clone();
-                    let grid_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-                    let grid_idx = self.current_grid_index(data);
-                    self.dropdown.open(
-                        StripId::TimeGrid,
-                        b.grid,
-                        &grid_refs,
-                        grid_idx,
-                        false,
-                        window_size,
-                    );
+                    // Open the grid dropdown; no document change yet. Skipped
+                    // if this same click just closed a dropdown, so clicking an
+                    // open dropdown's trigger toggles it shut rather than
+                    // closing-then-reopening.
+                    if !closed_a_dropdown {
+                        // Clone labels so the borrow of self.grid_labels ends
+                        // before the mutable self.dropdown call.
+                        let owned: Vec<String> = self.grid_labels.clone();
+                        let grid_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+                        let grid_idx = self.current_grid_index(data);
+                        self.dropdown.open(
+                            StripId::TimeGrid,
+                            b.grid,
+                            &grid_refs,
+                            grid_idx,
+                            false,
+                            window_size,
+                        );
+                    }
                     None
                 } else if in_rect(b.style, x, y) {
-                    // Open the style dropdown; no document change.
-                    self.dropdown.open(
-                        StripId::Style,
-                        b.style,
-                        style_items(),
-                        self.style.index(),
-                        false,
-                        window_size,
-                    );
+                    // Open the style dropdown; no document change. Skipped if
+                    // this click just closed a dropdown (trigger toggle-shut).
+                    if !closed_a_dropdown {
+                        self.dropdown.open(
+                            StripId::Style,
+                            b.style,
+                            style_items(),
+                            self.style.index(),
+                            false,
+                            window_size,
+                        );
+                    }
                     None
                 } else {
                     None
