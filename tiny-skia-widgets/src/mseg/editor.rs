@@ -153,8 +153,12 @@ impl MsegEditState {
                 self.drag = Some(DragTarget::Tension(i));
                 None
             }
+            MsegHit::Canvas if self.stepped_draw_held => {
+                self.drag = Some(DragTarget::StepDraw);
+                self.step_last_cell = None;
+                self.step_draw_paint(x, y, data, &layout)
+            }
             MsegHit::Canvas => {
-                // Stepped-draw (a later task) takes over when its modifier is held.
                 let phase = x_to_phase(&layout, x);
                 let value = y_to_value(&layout, y);
                 let inserted = data.insert_node(phase, value);
@@ -218,6 +222,7 @@ impl MsegEditState {
                 data.debug_assert_valid();
                 Some(MsegEdit::Changed)
             }
+            Some(DragTarget::StepDraw) => self.step_draw_paint(x, y, data, &layout),
             _ => None,
         }
     }
@@ -293,6 +298,40 @@ impl MsegEditState {
         data.nodes[seg].stepped = !data.nodes[seg].stepped;
         data.debug_assert_valid();
         Some(MsegEdit::Changed)
+    }
+
+    /// Paint one stepped node at the pointer if it has entered a new
+    /// time-grid cell since the last paint. Used by stepped-draw.
+    fn step_draw_paint(
+        &mut self,
+        x: f32,
+        y: f32,
+        data: &mut MsegData,
+        layout: &crate::mseg::render::MsegLayout,
+    ) -> Option<MsegEdit> {
+        use crate::mseg::render::{x_to_phase, y_to_value};
+        let phase = x_to_phase(layout, x);
+        let value = y_to_value(layout, y);
+        let tdiv = data.time_divisions.max(1);
+        let cell = (phase * tdiv as f32) as u32;
+        if self.step_last_cell == Some(cell) {
+            return None; // still inside the last painted cell
+        }
+        self.step_last_cell = Some(cell);
+        // Snap the node to the cell's left edge; mark its segment stepped.
+        let snapped_phase = (cell as f32 / tdiv as f32).clamp(0.0, 1.0);
+        if let Some(idx) = data.insert_node(snapped_phase, value) {
+            // The new node and the one before it both belong to the stepped
+            // run — set the *previous* node's segment stepped so the painted
+            // run reads as steps.
+            if idx > 0 {
+                data.nodes[idx - 1].stepped = true;
+            }
+            data.nodes[idx].stepped = true;
+            data.debug_assert_valid();
+            return Some(MsegEdit::Changed);
+        }
+        None
     }
 }
 
@@ -429,5 +468,39 @@ mod tests {
         let ev = state.on_right_click(x, y, &mut data, RECT, 1.0);
         assert_eq!(ev, Some(MsegEdit::Changed));
         assert!(data.nodes[0].stepped);
+    }
+
+    #[test]
+    fn stepped_draw_paints_nodes_across_cells() {
+        let mut data = MsegData::default();
+        let mut state = MsegEditState::new();
+        state.set_stepped_draw(true);
+        let l = mseg_layout(RECT, false, 1.0);
+        let before = data.node_count;
+        // Press, then drag across several grid cells.
+        state.on_mouse_down(phase_to_x(&l, 0.1), value_to_y(&l, 0.8),
+                            &mut data, RECT, 1.0, false);
+        for &p in &[0.3_f32, 0.5, 0.7, 0.9] {
+            state.on_mouse_move(phase_to_x(&l, p), value_to_y(&l, 0.6),
+                                &mut data, RECT, 1.0, false);
+        }
+        state.on_mouse_up(&mut data);
+        assert!(data.node_count > before, "stepped-draw inserted no nodes");
+        // Painted nodes are stepped.
+        assert!(data.active().iter().take(data.node_count - 1).any(|n| n.stepped));
+    }
+
+    #[test]
+    fn stepped_draw_inactive_when_modifier_not_held() {
+        let mut data = MsegData::default();
+        let mut state = MsegEditState::new(); // modifier NOT held
+        let l = mseg_layout(RECT, false, 1.0);
+        // Click at phase 0.3, value 0.7 — well away from any existing node or
+        // tension handle — so the hit lands on Canvas and triggers a single
+        // ordinary insert (not stepped-draw).
+        state.on_mouse_down(phase_to_x(&l, 0.3), value_to_y(&l, 0.7),
+                            &mut data, RECT, 1.0, false);
+        // Without the modifier this is an ordinary single-node insert.
+        assert_eq!(data.node_count, 3);
     }
 }
