@@ -177,6 +177,10 @@ impl MsegEditState {
             MsegHit::Randomize => {
                 self.seed = self.seed.wrapping_add(1);
                 crate::mseg::randomize::randomize(data, self.style, self.seed);
+                // Randomize replaces every node — any drag/hover index is now
+                // stale, so clear them.
+                self.drag = None;
+                self.hover = None;
                 Some(MsegEdit::Changed)
             }
             MsegHit::Strip => {

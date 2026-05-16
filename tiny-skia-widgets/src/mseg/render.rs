@@ -84,6 +84,8 @@ pub fn draw_mseg(
     scale: f32,
 ) {
     let layout = mseg_layout(rect, state.is_curve_only(), scale);
+    // The three sub-rects (marker lane / canvas / strip) are non-overlapping,
+    // so draw order is immaterial — each paints only its own region.
     draw_canvas(pixmap, &layout, data, state, scale);
     draw_marker_lane(pixmap, &layout, data, state, scale);
     draw_strip(pixmap, text_renderer, &layout, data, state, scale);
