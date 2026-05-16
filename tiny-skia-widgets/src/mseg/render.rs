@@ -225,7 +225,7 @@ fn draw_strip(
     // the strip width left of the Randomize button (a later task wires the
     // interactive zones).
     let label = format!(
-        "snap {}    grid {}/{}    style {:?}",
+        "snap {}    grid {}/{}    style {}",
         if data.snap { "on" } else { "off" },
         data.time_divisions,
         data.value_steps,

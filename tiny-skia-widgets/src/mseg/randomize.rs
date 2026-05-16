@@ -15,6 +15,19 @@ pub enum RandomStyle {
     Chaos,
 }
 
+impl std::fmt::Display for RandomStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            RandomStyle::Smooth => "Smooth",
+            RandomStyle::Ramps => "Ramps",
+            RandomStyle::Stepped => "Stepped",
+            RandomStyle::Spiky => "Spiky",
+            RandomStyle::Chaos => "Chaos",
+        };
+        f.write_str(s)
+    }
+}
+
 /// Deterministic xorshift32 PRNG — no dependency, seeded per `randomize` call.
 struct Rng(u32);
 
