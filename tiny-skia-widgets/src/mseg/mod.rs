@@ -40,7 +40,10 @@ pub enum HoldMode {
     /// Triggered playback holds at this node index until released.
     Sustain(usize),
     /// Loop the `[start, end]` node-index range.
-    Loop { start: usize, end: usize },
+    Loop {
+        start: usize,
+        end: usize,
+    },
 }
 
 /// One envelope node. `tension`/`stepped` describe the segment FROM this node
@@ -93,8 +96,18 @@ impl Default for MsegData {
     /// A rising 0→1 ramp: two nodes, `Triggered`, `Time` sync, 1 s long.
     fn default() -> Self {
         let mut nodes = [MsegNode::default(); MAX_NODES];
-        nodes[0] = MsegNode { time: 0.0, value: 0.0, tension: 0.0, stepped: false };
-        nodes[1] = MsegNode { time: 1.0, value: 1.0, tension: 0.0, stepped: false };
+        nodes[0] = MsegNode {
+            time: 0.0,
+            value: 0.0,
+            tension: 0.0,
+            stepped: false,
+        };
+        nodes[1] = MsegNode {
+            time: 1.0,
+            value: 1.0,
+            tension: 0.0,
+            stepped: false,
+        };
         Self {
             nodes,
             node_count: 2,
@@ -184,7 +197,12 @@ impl MsegData {
             self.nodes[i] = self.nodes[i - 1];
             i -= 1;
         }
-        self.nodes[k] = MsegNode { time, value, tension: 0.0, stepped: false };
+        self.nodes[k] = MsegNode {
+            time,
+            value,
+            tension: 0.0,
+            stepped: false,
+        };
         self.node_count += 1;
         self.shift_hold_for_insert(k);
         self.debug_assert_valid();
@@ -453,9 +471,21 @@ mod tests {
     fn unsorted_nodes_are_invalid() {
         let mut d = MsegData::default();
         d.node_count = 3;
-        d.nodes[0] = MsegNode { time: 0.0, value: 0.0, ..Default::default() };
-        d.nodes[1] = MsegNode { time: 0.8, value: 0.5, ..Default::default() };
-        d.nodes[2] = MsegNode { time: 0.4, value: 1.0, ..Default::default() }; // out of order
+        d.nodes[0] = MsegNode {
+            time: 0.0,
+            value: 0.0,
+            ..Default::default()
+        };
+        d.nodes[1] = MsegNode {
+            time: 0.8,
+            value: 0.5,
+            ..Default::default()
+        };
+        d.nodes[2] = MsegNode {
+            time: 0.4,
+            value: 1.0,
+            ..Default::default()
+        }; // out of order
         assert!(!d.is_valid());
     }
 
@@ -550,14 +580,14 @@ mod tests {
         d.nodes[0].stepped = true; // segment 0 holds nodes[0].value (0.0)
         assert!((value_at_phase(&d, 0.0) - 0.0).abs() < 1e-6);
         assert!((value_at_phase(&d, 0.99) - 0.0).abs() < 1e-6); // still held
-        assert!((value_at_phase(&d, 1.0) - 1.0).abs() < 1e-6);  // last node value
+        assert!((value_at_phase(&d, 1.0) - 1.0).abs() < 1e-6); // last node value
     }
 
     #[test]
     fn value_at_phase_respects_tension() {
         let mut d = MsegData::default();
         d.nodes[0].tension = 1.0; // slow-start bow
-        // Midpoint output should sit below the linear 0.5.
+                                  // Midpoint output should sit below the linear 0.5.
         assert!(value_at_phase(&d, 0.5) < 0.5);
     }
 
@@ -565,11 +595,26 @@ mod tests {
     fn value_at_phase_three_nodes() {
         let mut d = MsegData::default();
         d.node_count = 3;
-        d.nodes[0] = MsegNode { time: 0.0, value: 0.0, tension: 0.0, stepped: false };
-        d.nodes[1] = MsegNode { time: 0.5, value: 1.0, tension: 0.0, stepped: false };
-        d.nodes[2] = MsegNode { time: 1.0, value: 0.0, tension: 0.0, stepped: false };
+        d.nodes[0] = MsegNode {
+            time: 0.0,
+            value: 0.0,
+            tension: 0.0,
+            stepped: false,
+        };
+        d.nodes[1] = MsegNode {
+            time: 0.5,
+            value: 1.0,
+            tension: 0.0,
+            stepped: false,
+        };
+        d.nodes[2] = MsegNode {
+            time: 1.0,
+            value: 0.0,
+            tension: 0.0,
+            stepped: false,
+        };
         assert!((value_at_phase(&d, 0.25) - 0.5).abs() < 1e-6); // up-ramp midpoint
-        assert!((value_at_phase(&d, 0.5) - 1.0).abs() < 1e-6);  // peak
+        assert!((value_at_phase(&d, 0.5) - 1.0).abs() < 1e-6); // peak
         assert!((value_at_phase(&d, 0.75) - 0.5).abs() < 1e-6); // down-ramp midpoint
     }
 
@@ -597,11 +642,26 @@ mod tests {
     fn advance_sustain_holds_until_released() {
         let mut d = MsegData::default();
         d.node_count = 3;
-        d.nodes[0] = MsegNode { time: 0.0, value: 0.0, tension: 0.0, stepped: false };
-        d.nodes[1] = MsegNode { time: 0.5, value: 1.0, tension: 0.0, stepped: false };
-        d.nodes[2] = MsegNode { time: 1.0, value: 0.0, tension: 0.0, stepped: false };
+        d.nodes[0] = MsegNode {
+            time: 0.0,
+            value: 0.0,
+            tension: 0.0,
+            stepped: false,
+        };
+        d.nodes[1] = MsegNode {
+            time: 0.5,
+            value: 1.0,
+            tension: 0.0,
+            stepped: false,
+        };
+        d.nodes[2] = MsegNode {
+            time: 1.0,
+            value: 0.0,
+            tension: 0.0,
+            stepped: false,
+        };
         d.hold = HoldMode::Sustain(1); // node 1 is at time 0.5
-        // Held: phase cannot pass the sustain node's time.
+                                       // Held: phase cannot pass the sustain node's time.
         let (p, finished) = advance(&d, 0.45, 0.25, false);
         assert!((p - 0.5).abs() < 1e-6, "held at sustain time, got {p}");
         assert!(!finished);
@@ -615,11 +675,26 @@ mod tests {
     fn advance_loop_wraps_while_held_then_exits_on_release() {
         let mut d = MsegData::default();
         d.node_count = 3;
-        d.nodes[0] = MsegNode { time: 0.0, value: 0.0, tension: 0.0, stepped: false };
-        d.nodes[1] = MsegNode { time: 0.25, value: 1.0, tension: 0.0, stepped: false };
-        d.nodes[2] = MsegNode { time: 1.0, value: 0.0, tension: 0.0, stepped: false };
+        d.nodes[0] = MsegNode {
+            time: 0.0,
+            value: 0.0,
+            tension: 0.0,
+            stepped: false,
+        };
+        d.nodes[1] = MsegNode {
+            time: 0.25,
+            value: 1.0,
+            tension: 0.0,
+            stepped: false,
+        };
+        d.nodes[2] = MsegNode {
+            time: 1.0,
+            value: 0.0,
+            tension: 0.0,
+            stepped: false,
+        };
         d.hold = HoldMode::Loop { start: 0, end: 1 }; // loop [0.0, 0.25]
-        // Held: crossing the loop end wraps back toward the loop start.
+                                                      // Held: crossing the loop end wraps back toward the loop start.
         let (p, _) = advance(&d, 0.2, 0.1, false);
         assert!(p < 0.25 && p >= 0.0, "looped back into [0,0.25], got {p}");
         // Released: advances past the loop end toward the real end.
@@ -656,9 +731,9 @@ mod tests {
     #[test]
     fn insert_node_refuses_when_no_room() {
         let mut d = MsegData::default();
-        d.insert_node(0.5, 0.5).unwrap();   // nodes: 0.0, 0.5, 1.0
-        // Second insert at 0.5 clamps to 0.5 + MIN_NODE_GAP, leaving nodes 1 and 2
-        // exactly MIN_NODE_GAP apart.
+        d.insert_node(0.5, 0.5).unwrap(); // nodes: 0.0, 0.5, 1.0
+                                          // Second insert at 0.5 clamps to 0.5 + MIN_NODE_GAP, leaving nodes 1 and 2
+                                          // exactly MIN_NODE_GAP apart.
         d.insert_node(0.5, 0.5).unwrap();
         let before = d.node_count;
         // No gap-respecting room between those two nodes -> refused, not a panic.
@@ -672,7 +747,7 @@ mod tests {
         let mut d = MsegData::default();
         d.insert_node(0.5, 0.5); // node_count 3
         d.hold = HoldMode::Sustain(2); // the 1.0 endpoint
-        d.insert_node(0.25, 0.5);      // inserts at index 1, pushing others up
+        d.insert_node(0.25, 0.5); // inserts at index 1, pushing others up
         assert_eq!(d.hold, HoldMode::Sustain(3));
         assert!(d.is_valid());
     }
@@ -769,6 +844,9 @@ mod tests {
         d.node_count = 0; // invalid: a valid document needs >= 2 nodes
         let json = serde_json::to_string(&d).unwrap();
         let result: Result<MsegData, _> = serde_json::from_str(&json);
-        assert!(result.is_err(), "invalid blob must be rejected, got {result:?}");
+        assert!(
+            result.is_err(),
+            "invalid blob must be rejected, got {result:?}"
+        );
     }
 }

@@ -97,7 +97,11 @@ pub fn randomize(data: &mut MsegData, style: RandomStyle, seed: u32) {
             RandomStyle::Ramps => (rng.next_f32(), 0.0, false),
             RandomStyle::Stepped => (rng.next_f32(), 0.0, true),
             RandomStyle::Spiky => {
-                let v = if i % 2 == 0 { rng.range(0.0, 0.15) } else { rng.range(0.85, 1.0) };
+                let v = if i % 2 == 0 {
+                    rng.range(0.0, 0.15)
+                } else {
+                    rng.range(0.85, 1.0)
+                };
                 (v, rng.range(-1.0, 1.0), rng.bool())
             }
             RandomStyle::Chaos => (rng.next_f32(), rng.range(-1.0, 1.0), rng.bool()),
@@ -107,7 +111,12 @@ pub fn randomize(data: &mut MsegData, style: RandomStyle, seed: u32) {
             value = snap_value(value, data.value_steps);
         }
 
-        data.nodes[i] = MsegNode { time, value, tension, stepped };
+        data.nodes[i] = MsegNode {
+            time,
+            value,
+            tension,
+            stepped,
+        };
     }
     data.node_count = count;
 
