@@ -23,15 +23,20 @@ pub fn default_editor_state() -> Arc<EditorState> {
 enum HitAction {
     Dial(ParamId),
     Button(ButtonAction),
+    /// The preset dropdown's collapsed trigger.
+    PresetDropdown,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum ButtonAction {
     ToggleIsp,
     ToggleGainLink,
-    PresetPrev,
-    PresetNext,
-    PresetApply,
+}
+
+/// Identifies a dropdown for `DropdownState`. tinylimit has exactly one.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum DropdownId {
+    Preset,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -108,6 +113,11 @@ const PRESETS: &[LimiterPreset] = &[
     },
 ];
 
+/// Preset display names, as a slice for the dropdown widget.
+fn preset_names() -> Vec<&'static str> {
+    PRESETS.iter().map(|p| p.name).collect()
+}
+
 // ── Window Handler ──────────────────────────────────────────────────────
 
 struct TinylimitWindow {
@@ -125,6 +135,7 @@ struct TinylimitWindow {
 
     drag: widgets::DragState<HitAction>,
     text_edit: widgets::TextEditState<HitAction>,
+    dropdown: widgets::DropdownState<DropdownId>,
     /// Currently selected preset index (editor-only state, not persisted).
     current_preset: usize,
 }
@@ -159,6 +170,7 @@ impl TinylimitWindow {
             text_renderer,
             drag: widgets::DragState::new(),
             text_edit: widgets::TextEditState::new(),
+            dropdown: widgets::DropdownState::new(),
             current_preset: 0,
         }
     }
@@ -543,7 +555,10 @@ impl TinylimitWindow {
                 caret,
             );
             let hit_w = dial_col_spacing;
-            let hit_h = meter_h * 0.35;
+            // Bound the dial's visual extent (circle + value readout). The old
+            // `meter_h * 0.35` was far taller than the dial and bled into the
+            // preset dropdown row below it, stealing clicks meant for the trigger.
+            let hit_h = dial_radius * 3.0;
             self.drag.push_region(
                 cx - hit_w / 2.0,
                 dial_row_cy1 - hit_h / 2.0,
@@ -575,7 +590,10 @@ impl TinylimitWindow {
                 caret,
             );
             let hit_w = dial_col_spacing;
-            let hit_h = meter_h * 0.35;
+            // Bound the dial's visual extent (circle + value readout). The old
+            // `meter_h * 0.35` was far taller than the dial and bled into the
+            // preset dropdown row below it, stealing clicks meant for the trigger.
+            let hit_h = dial_radius * 3.0;
             self.drag.push_region(
                 cx - hit_w / 2.0,
                 dial_row_cy2 - hit_h / 2.0,
@@ -585,74 +603,31 @@ impl TinylimitWindow {
             );
         }
 
-        // ── Preset selector: [<]  Name  [>] ──
+        // ── Preset dropdown ──
         let center_mid = center_x + center_w / 2.0;
-        let preset_arrow_w = 28.0 * s;
-        let preset_arrow_h = 24.0 * s;
-        let preset_label_w = 110.0 * s;
-        let preset_total_w = preset_arrow_w * 2.0 + preset_label_w + 4.0 * s * 2.0;
+        let preset_trigger_w = 160.0 * s;
+        let preset_trigger_h = 24.0 * s;
         let preset_row_y = dial_row_cy2 + dial_radius + 45.0 * s;
-        let preset_left_x = center_mid - preset_total_w / 2.0;
+        let preset_trigger_x = center_mid - preset_trigger_w / 2.0;
 
-        // Left arrow "<"
-        widgets::draw_button(
+        widgets::draw_dropdown_trigger(
             &mut self.surface.pixmap,
             tr,
-            preset_left_x,
-            preset_row_y,
-            preset_arrow_w,
-            preset_arrow_h,
-            "<",
-            false,
-            false,
-        );
-        self.drag.push_region(
-            preset_left_x,
-            preset_row_y,
-            preset_arrow_w,
-            preset_arrow_h,
-            HitAction::Button(ButtonAction::PresetPrev),
-        );
-
-        // Preset name label (clickable — applies the preset)
-        let preset_name_x = preset_left_x + preset_arrow_w + 4.0 * s;
-        widgets::draw_button(
-            &mut self.surface.pixmap,
-            tr,
-            preset_name_x,
-            preset_row_y,
-            preset_label_w,
-            preset_arrow_h,
+            (
+                preset_trigger_x,
+                preset_row_y,
+                preset_trigger_w,
+                preset_trigger_h,
+            ),
             PRESETS[self.current_preset].name,
-            false,
-            false,
+            self.dropdown.is_open_for(DropdownId::Preset),
         );
         self.drag.push_region(
-            preset_name_x,
+            preset_trigger_x,
             preset_row_y,
-            preset_label_w,
-            preset_arrow_h,
-            HitAction::Button(ButtonAction::PresetApply),
-        );
-        // Right arrow ">"
-        let preset_right_x = preset_name_x + preset_label_w + 4.0 * s;
-        widgets::draw_button(
-            &mut self.surface.pixmap,
-            tr,
-            preset_right_x,
-            preset_row_y,
-            preset_arrow_w,
-            preset_arrow_h,
-            ">",
-            false,
-            false,
-        );
-        self.drag.push_region(
-            preset_right_x,
-            preset_row_y,
-            preset_arrow_w,
-            preset_arrow_h,
-            HitAction::Button(ButtonAction::PresetNext),
+            preset_trigger_w,
+            preset_trigger_h,
+            HitAction::PresetDropdown,
         );
 
         // ── Toggle buttons: ISP and Gain Link ──
@@ -716,6 +691,16 @@ impl TinylimitWindow {
             &gr_text,
             font_size,
             widgets::color_accent(),
+        );
+
+        // Preset dropdown popup — drawn last so it overlays every other widget.
+        let preset_names = preset_names();
+        widgets::draw_dropdown_popup(
+            &mut self.surface.pixmap,
+            tr,
+            &self.dropdown,
+            &preset_names,
+            (self.physical_width as f32, self.physical_height as f32),
         );
     }
 
@@ -807,6 +792,12 @@ impl baseview::WindowHandler for TinylimitWindow {
                 modifiers,
             }) => {
                 self.drag.set_mouse(position.x as f32, position.y as f32);
+                if self.dropdown.is_open() {
+                    let names = preset_names();
+                    let win = (self.physical_width as f32, self.physical_height as f32);
+                    self.dropdown
+                        .on_mouse_move(position.x as f32, position.y as f32, &names, win);
+                }
                 if let Some(HitAction::Dial(param_id)) = self.drag.active_action().copied() {
                     let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
                     let current = self.float_param(param_id).unmodulated_normalized_value();
@@ -820,6 +811,22 @@ impl baseview::WindowHandler for TinylimitWindow {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
+                // While the preset dropdown is open it owns every click:
+                // selecting a row applies the preset, clicking outside closes.
+                if self.dropdown.is_open() {
+                    let (mx, my) = self.drag.mouse_pos();
+                    let names = preset_names();
+                    let win = (self.physical_width as f32, self.physical_height as f32);
+                    if let Some(widgets::DropdownEvent::Selected(_, idx)) =
+                        self.dropdown.on_mouse_down(mx, my, &names, win)
+                    {
+                        self.current_preset = idx;
+                        let setter = ParamSetter::new(self.gui_context.as_ref());
+                        self.apply_preset(&setter);
+                    }
+                    return baseview::EventStatus::Captured;
+                }
+
                 // Auto-commit any in-flight edit before starting a drag
                 self.commit_text_edit();
 
@@ -857,18 +864,16 @@ impl baseview::WindowHandler for TinylimitWindow {
                             setter.set_parameter(&self.params.gain_link, !current);
                             setter.end_set_parameter(&self.params.gain_link);
                         }
-                        HitAction::Button(ButtonAction::PresetPrev) => {
-                            self.current_preset = if self.current_preset == 0 {
-                                PRESETS.len() - 1
-                            } else {
-                                self.current_preset - 1
-                            };
-                        }
-                        HitAction::Button(ButtonAction::PresetNext) => {
-                            self.current_preset = (self.current_preset + 1) % PRESETS.len();
-                        }
-                        HitAction::Button(ButtonAction::PresetApply) => {
-                            self.apply_preset(&setter);
+                        HitAction::PresetDropdown => {
+                            let win = (self.physical_width as f32, self.physical_height as f32);
+                            self.dropdown.open(
+                                DropdownId::Preset,
+                                (region.x, region.y, region.w, region.h),
+                                PRESETS.len(),
+                                self.current_preset,
+                                false, // 7 presets — no typeahead filter
+                                win,
+                            );
                         }
                     }
                 }
@@ -877,6 +882,7 @@ impl baseview::WindowHandler for TinylimitWindow {
                 button: baseview::MouseButton::Left,
                 ..
             }) => {
+                self.dropdown.on_mouse_up();
                 if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
                     self.end_set_param(&setter, id);
@@ -898,6 +904,35 @@ impl baseview::WindowHandler for TinylimitWindow {
                         self.text_edit.begin(HitAction::Dial(param_id), &initial);
                     }
                 }
+            }
+            baseview::Event::Keyboard(ev) if self.dropdown.is_open() => {
+                if ev.state != keyboard_types::KeyState::Down {
+                    // Swallow key-up so the host doesn't see Enter/Esc releases.
+                    return baseview::EventStatus::Captured;
+                }
+                let dd_key = match &ev.key {
+                    keyboard_types::Key::ArrowUp => Some(widgets::DropdownKey::Up),
+                    keyboard_types::Key::ArrowDown => Some(widgets::DropdownKey::Down),
+                    keyboard_types::Key::Home => Some(widgets::DropdownKey::Home),
+                    keyboard_types::Key::End => Some(widgets::DropdownKey::End),
+                    keyboard_types::Key::PageUp => Some(widgets::DropdownKey::PageUp),
+                    keyboard_types::Key::PageDown => Some(widgets::DropdownKey::PageDown),
+                    keyboard_types::Key::Enter => Some(widgets::DropdownKey::Enter),
+                    keyboard_types::Key::Escape => Some(widgets::DropdownKey::Esc),
+                    _ => None,
+                };
+                if let Some(dd_key) = dd_key {
+                    let names = preset_names();
+                    let win = (self.physical_width as f32, self.physical_height as f32);
+                    if let Some(widgets::DropdownEvent::Selected(_, idx)) =
+                        self.dropdown.on_key(dd_key, &names, win)
+                    {
+                        self.current_preset = idx;
+                        let setter = ParamSetter::new(self.gui_context.as_ref());
+                        self.apply_preset(&setter);
+                    }
+                }
+                return baseview::EventStatus::Captured;
             }
             baseview::Event::Keyboard(ev) if self.text_edit.is_active() => {
                 if ev.state != keyboard_types::KeyState::Down {

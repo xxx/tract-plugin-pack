@@ -59,6 +59,20 @@ const MAX_LOOKAHEAD_MS: f32 = 10.0;
 /// Default sample rate for initialization before the host calls initialize().
 const DEFAULT_SAMPLE_RATE: f32 = 48000.0;
 
+/// Floor on the limiter's per-block scratch (`gr_buffer`) capacity.
+///
+/// `BufferConfig.max_buffer_size` cannot be trusted as the true upper bound:
+/// the standalone JACK backend reports `config.period_size` (CLI default 512)
+/// to `initialize()`, but then delivers blocks of the JACK server's actual
+/// buffer size — routinely larger. Bitwig and other VST3 hosts can likewise
+/// resize the engine buffer at runtime without round-tripping `initialize()`.
+/// Either way, `process()` can receive a block bigger than `initialize()`
+/// advertised. `assert_process_allocs` forbids growing the scratch inside
+/// `process()`, so it must be sized generously once. 16384 covers realistic
+/// JACK periods and Bitwig engine buffers (up to 8192) plus headroom, at a
+/// cost of 64 KB per instance. Mirrors `six-pack`'s `MIN_MAX_BLOCK`.
+const MIN_MAX_BLOCK: usize = 16384;
+
 // ── Plugin struct ──────────────────────────────────────────────────────────────
 
 pub struct Tinylimit {
@@ -279,7 +293,7 @@ impl Plugin for Tinylimit {
         let sr = buffer_config.sample_rate;
         self.limiter.set_sample_rate(sr);
         self.limiter
-            .set_max_block_size(buffer_config.max_buffer_size as usize);
+            .set_max_block_size((buffer_config.max_buffer_size as usize).max(MIN_MAX_BLOCK));
         self.limiter
             .set_params(self.params.attack.value(), self.params.release.value());
         self.limiter.reset();
