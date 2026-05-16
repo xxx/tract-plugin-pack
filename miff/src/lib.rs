@@ -7,6 +7,8 @@ pub mod editor;
 pub mod kernel;
 
 use nih_plug::prelude::*;
+use realfft::RealFftPlanner;
+use rustfft::num_complex::Complex;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use tiny_skia_widgets::mseg::MsegData;
@@ -74,6 +76,10 @@ impl Default for MiffParams {
     }
 }
 
+/// Fixed FFT size for the input-spectrum visualizer. 2048 matches
+/// wavetable-filter's `KERNEL_LEN`. Must be a power of two.
+const ISPECTRUM_FFT: usize = 2048;
+
 pub struct Miff {
     params: Arc<MiffParams>,
     /// Sample rate from `initialize`.
@@ -90,10 +96,44 @@ pub struct Miff {
     last_mode: MiffMode,
     /// Last latency reported to the host (re-report only on change).
     last_reported_latency: u32,
+
+    // ── Input-spectrum visualiser (audio → GUI) ──────────────────────────
+    /// Shared magnitude bins read by the GUI's response view (ISPECTRUM_FFT/2+1 bins).
+    /// Published by `process()` via `try_lock` at ~30 Hz when the editor is open.
+    pub(crate) input_spectrum: Arc<Mutex<Vec<f32>>>,
+    /// Ring buffer accumulating the most recent `ISPECTRUM_FFT` mono input samples.
+    input_ring: Vec<f32>,
+    /// Write position in `input_ring` (wraps at ISPECTRUM_FFT).
+    input_ring_pos: usize,
+    /// Countdown (samples) until the next spectrum FFT update.
+    input_countdown: usize,
+    /// Pre-computed Hann window for the input-spectrum FFT.
+    input_window: Vec<f32>,
+    /// Pre-allocated time-domain scratch reused by the input FFT.
+    input_fft_time: Vec<f32>,
+    /// Pre-allocated complex output scratch for the input FFT.
+    input_fft_freq: Vec<Complex<f32>>,
+    /// Pre-allocated FFT scratch buffer (avoids per-call heap alloc from `process()`).
+    input_fft_scratch: Vec<Complex<f32>>,
+    /// The realfft forward plan for `ISPECTRUM_FFT`. Stored so the plan object
+    /// (and its scratch requirement) can be created once in `default()`.
+    input_fft_plan: std::sync::Arc<dyn realfft::RealToComplex<f32>>,
 }
 
 impl Default for Miff {
     fn default() -> Self {
+        let mut planner = RealFftPlanner::<f32>::new();
+        let input_fft_plan = planner.plan_fft_forward(ISPECTRUM_FFT);
+        let input_fft_scratch = input_fft_plan.make_scratch_vec();
+        let num_bins = ISPECTRUM_FFT / 2 + 1;
+
+        let input_window: Vec<f32> = (0..ISPECTRUM_FFT)
+            .map(|i| {
+                0.5 * (1.0
+                    - (2.0 * std::f32::consts::PI * i as f32 / ISPECTRUM_FFT as f32).cos())
+            })
+            .collect();
+
         Self {
             params: Arc::new(MiffParams::default()),
             sample_rate: 44100.0,
@@ -106,6 +146,15 @@ impl Default for Miff {
             kernel: kernel::Kernel::default(),
             last_mode: MiffMode::Raw,
             last_reported_latency: u32::MAX, // forces a report on first process
+            input_spectrum: Arc::new(Mutex::new(vec![0.0; num_bins])),
+            input_ring: vec![0.0; ISPECTRUM_FFT],
+            input_ring_pos: 0,
+            input_countdown: 0,
+            input_window,
+            input_fft_time: vec![0.0; ISPECTRUM_FFT],
+            input_fft_freq: vec![Complex::new(0.0, 0.0); num_bins],
+            input_fft_scratch,
+            input_fft_plan,
         }
     }
 }
@@ -226,14 +275,64 @@ impl Plugin for Miff {
             self.last_reported_latency = latency;
         }
 
+        let host_samples = buffer.samples();
+
         for mut channel_samples in buffer.iter_samples() {
             let mix = self.params.mix.smoothed.next();
             let gain = self.params.gain.smoothed.next();
+            let mut mono_sum = 0.0_f32;
+            let mut ch_count = 0usize;
             for (ch, sample) in channel_samples.iter_mut().enumerate() {
                 let ch = ch.min(1); // stereo state; mono uses channel 0
                 let dry = *sample;
+                mono_sum += dry;
+                ch_count += 1;
                 let wet = self.filter_sample(ch, dry, mode);
                 *sample = (dry + (wet - dry) * mix) * gain;
+            }
+            // Accumulate mono input into the ring buffer.
+            let mono_in = if ch_count > 0 {
+                mono_sum / ch_count as f32
+            } else {
+                0.0
+            };
+            self.input_ring[self.input_ring_pos] = mono_in;
+            self.input_ring_pos = (self.input_ring_pos + 1) & (ISPECTRUM_FFT - 1);
+        }
+
+        // Input-spectrum FFT: throttled to ~30 Hz, only when editor is open.
+        self.input_countdown = self.input_countdown.saturating_sub(host_samples);
+        if self.input_countdown == 0 && self.params.editor_state.is_open() {
+            self.input_countdown = (self.sample_rate / 30.0) as usize;
+
+            // Reorder ring into input_fft_time and apply Hann window.
+            let pos = self.input_ring_pos;
+            let n = ISPECTRUM_FFT;
+            for i in 0..n {
+                let ring_idx = (pos + i) & (n - 1);
+                self.input_fft_time[i] = self.input_ring[ring_idx] * self.input_window[i];
+            }
+            // process_with_scratch reuses pre-allocated scratch — no heap allocation.
+            if self
+                .input_fft_plan
+                .process_with_scratch(
+                    &mut self.input_fft_time,
+                    &mut self.input_fft_freq,
+                    &mut self.input_fft_scratch,
+                )
+                .is_ok()
+            {
+                if let Ok(mut shared) = self.input_spectrum.try_lock() {
+                    let peak = self
+                        .input_fft_freq
+                        .iter()
+                        .map(|c| c.norm())
+                        .fold(0.0_f32, f32::max)
+                        .max(1e-10);
+                    for (dst, c) in shared.iter_mut().zip(self.input_fft_freq.iter()) {
+                        *dst = c.norm() / peak;
+                    }
+                }
             }
         }
 

@@ -2,8 +2,10 @@
 //!
 //! Layout (880×620, freely resizable):
 //! - Top region (~55%): MSEG editor (curve-only mode)
-//! - Middle region (~29%): Filter response view placeholder (Task 12)
+//! - Middle region (~29%): Frequency-response view (Task 12)
 //! - Bottom strip (~16%): Controls placeholder (Task 10)
+
+pub mod response_view;
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use crossbeam::atomic::AtomicCell;
@@ -168,6 +170,8 @@ struct MiffWindow {
     mseg_state: MsegEditState,
     /// Input spectrum shadow for the response view (Task 12).
     input_spectrum: Arc<Mutex<Vec<f32>>>,
+    /// The most recently baked kernel — used to draw the response curve.
+    last_kernel: crate::kernel::Kernel,
 
     /// Whether the Alt modifier is currently held (enables stepped-draw in the MSEG).
     alt_held: bool,
@@ -201,6 +205,18 @@ impl MiffWindow {
         let font_data = include_bytes!("fonts/DejaVuSans.ttf");
         let text_renderer = widgets::TextRenderer::new(font_data);
 
+        // Bake the initial kernel so the response view has something to draw.
+        let initial_kernel = {
+            params
+                .curve
+                .lock()
+                .map(|c| {
+                    let len = params.length.value() as usize;
+                    crate::kernel::bake(&c, len)
+                })
+                .unwrap_or_default()
+        };
+
         Self {
             gui_context,
             surface,
@@ -216,6 +232,7 @@ impl MiffWindow {
             kernel_handoff,
             mseg_state: MsegEditState::new_curve_only(),
             input_spectrum,
+            last_kernel: initial_kernel,
             alt_held: false,
             shift_held: false,
             mseg_last_click_time: std::time::Instant::now(),
@@ -251,25 +268,22 @@ impl MiffWindow {
             s,
         );
 
-        // ── Response region (middle ~29%) — placeholder until Task 12 ──────
+        // ── Response region (middle ~29%) — frequency-response view ────────
         {
-            let (rx, ry, rw, rh) = response_rect;
-            widgets::draw_rect(
+            // Read the latest input spectrum from the audio thread (non-blocking).
+            let input_mags: Vec<f32> = self
+                .input_spectrum
+                .try_lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default();
+
+            response_view::draw_response(
                 &mut self.surface.pixmap,
-                rx,
-                ry,
-                rw,
-                rh,
-                widgets::color_control_bg(),
-            );
-            widgets::draw_rect_outline(
-                &mut self.surface.pixmap,
-                rx,
-                ry,
-                rw,
-                rh,
-                widgets::color_border(),
-                1.0,
+                &mut self.text_renderer,
+                response_rect,
+                &self.last_kernel.mags,
+                &input_mags,
+                s,
             );
         }
 
@@ -310,13 +324,15 @@ impl MiffWindow {
         self.shift_held = new_shift;
     }
 
-    /// Re-bake the kernel from the current curve + Length and publish it to
-    /// the audio thread. GUI-thread only; called after a curve or Length edit.
-    fn rebake(&self) {
+    /// Re-bake the kernel from the current curve + Length, publish it to the
+    /// audio thread, and cache it in `self.last_kernel` for the response view.
+    /// GUI-thread only; called after a curve or Length edit.
+    fn rebake(&mut self) {
         if let Ok(curve) = self.params.curve.lock() {
             let len = self.params.length.value() as usize;
             let kernel = crate::kernel::bake(&curve, len);
             self.kernel_handoff.publish(kernel);
+            self.last_kernel = kernel;
         }
     }
 
