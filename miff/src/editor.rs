@@ -690,8 +690,18 @@ impl baseview::WindowHandler for MiffWindow {
                         // Commit any open text-edit before a new click.
                         self.commit_text_edit();
 
-                        // MSEG clicks use a per-window timestamp/position double-click heuristic.
-                        let is_double = self.mseg_double_click_check(x, y);
+                        // Double-click only means something on the canvas
+                        // (delete a node). The strip buttons — snap / grid /
+                        // style / Randomize — are single immediate actions;
+                        // classifying a rapid re-click there as a double-click
+                        // would route every other click to `on_double_click`
+                        // (a no-op for buttons) and silently eat it.
+                        let strip = tiny_skia_widgets::mseg::mseg_layout(mseg_rect, true, s).strip;
+                        let on_strip = x >= strip.0
+                            && x < strip.0 + strip.2
+                            && y >= strip.1
+                            && y < strip.1 + strip.3;
+                        let is_double = !on_strip && self.mseg_double_click_check(x, y);
                         if is_double {
                             let changed = {
                                 if let Ok(mut curve) = self.params.curve.lock() {
