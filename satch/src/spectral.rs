@@ -21,7 +21,6 @@
 
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
-use std::f32::consts::PI;
 use std::sync::Arc;
 
 /// Ratio of spectral peak above which bins are classified as 100% loud.
@@ -150,9 +149,7 @@ impl SpectralClipper {
             .max(fft_inverse.get_inplace_scratch_len());
 
         // Hann window
-        let analysis_window: Vec<f32> = (0..fft_size)
-            .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / fft_size as f32).cos()))
-            .collect();
+        let analysis_window: Vec<f32> = tract_dsp::window::hann_periodic(fft_size);
 
         // COLA normalization for Hann window at 75% overlap (hop = N/4):
         // sum of Hann[i]² across 4 overlapping frames = 1.5 (constant).
@@ -446,6 +443,7 @@ impl SpectralClipper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::PI;
 
     const SR: f32 = 48000.0;
 
@@ -754,8 +752,7 @@ mod tests {
         let input: Vec<f32> = (0..num)
             .map(|i| {
                 let t = i as f32 / sr;
-                0.8 * (2.0 * std::f32::consts::PI * 100.0 * t).sin()
-                    + 0.05 * (2.0 * std::f32::consts::PI * 5000.0 * t).sin()
+                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
             })
             .collect();
 
