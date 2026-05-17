@@ -44,7 +44,10 @@ mod tests {
         assert!(w[0].abs() < 1e-6, "symmetric Hann starts at 0");
         assert!(w[8].abs() < 1e-6, "symmetric Hann ends at 0");
         for i in 0..9 {
-            assert!((w[i] - w[8 - i]).abs() < 1e-6, "not mirror-symmetric at {i}");
+            assert!(
+                (w[i] - w[8 - i]).abs() < 1e-6,
+                "not mirror-symmetric at {i}"
+            );
         }
     }
 
