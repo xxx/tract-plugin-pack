@@ -7,6 +7,7 @@ use std::simd::f32x16;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tract_dsp::fir::FirRing;
+use tract_dsp::stft::StftConvolver;
 
 mod editor;
 pub mod wavetable;
@@ -83,23 +84,18 @@ pub struct WavetableFilter {
     reset_fade_remaining: usize,
     reset_fade_total: usize,
 
-    // ── STFT state for magnitude-only (Phaseless) mode ──────────────
+    // ── Phaseless convolver + input-spectrum analyzer state ─────────
     /// Forward real FFT plan for STFT input blocks (size KERNEL_LEN).
+    /// Used by the input-spectrum analyzer; not by the convolver.
     stft_fft: Arc<dyn RealToComplex<f32>>,
-    /// Per-channel circular input buffer for STFT (KERNEL_LEN samples each).
-    stft_in: [Vec<f32>; 2],
-    /// Per-channel overlap-add output accumulator (KERNEL_LEN samples each).
-    stft_out: [Vec<f32>; 2],
     /// Current filter magnitude spectrum for STFT mode (KERNEL_LEN/2+1 real gains).
     stft_magnitudes: Vec<f32>,
     /// Pre-computed Hann analysis window (KERNEL_LEN samples).
     stft_window: Vec<f32>,
-    /// Time-domain scratch buffer for STFT FFT/IFFT (KERNEL_LEN).
+    /// Scratch buffer reused by the input-spectrum analyzer FFT (KERNEL_LEN samples).
     stft_scratch: Vec<f32>,
-    /// Write position in STFT input circular buffer (0..KERNEL_LEN-1).
-    stft_in_pos: usize,
-    /// Read position within current STFT output hop (0..HOP-1).
-    stft_out_pos: usize,
+    /// Per-channel STFT magnitude convolvers (Phaseless mode).
+    stft: [StftConvolver; 2],
     /// Tracks the last mode to detect runtime mode switches.
     last_mode: FilterMode,
 
@@ -206,13 +202,13 @@ impl Default for WavetableFilter {
             reset_fade_remaining: 0,
             reset_fade_total: 1, // avoid division by zero
             stft_fft,
-            stft_in: [vec![0.0; KERNEL_LEN], vec![0.0; KERNEL_LEN]],
-            stft_out: [vec![0.0; KERNEL_LEN], vec![0.0; KERNEL_LEN]],
             stft_magnitudes: vec![0.0; KERNEL_LEN / 2 + 1],
             stft_window: tract_dsp::window::hann_periodic(KERNEL_LEN),
             stft_scratch: vec![0.0; KERNEL_LEN],
-            stft_in_pos: 0,
-            stft_out_pos: 0,
+            stft: [
+                StftConvolver::new(KERNEL_LEN),
+                StftConvolver::new(KERNEL_LEN),
+            ],
             last_mode: FilterMode::Raw,
             shared_input_spectrum: Arc::new(Mutex::new((48000.0, vec![0.0; KERNEL_LEN / 2 + 1]))),
             input_spectrum_buf: vec![0.0; KERNEL_LEN],
@@ -561,38 +557,6 @@ impl WavetableFilter {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn process_stft_frame(
-        stft_in: &[f32],
-        in_pos: usize,
-        stft_out: &mut [f32],
-        magnitudes: &[f32],
-        window: &[f32],
-        fft: &Arc<dyn RealToComplex<f32>>,
-        ifft: &Arc<dyn ComplexToReal<f32>>,
-        scratch_time: &mut [f32],
-        scratch_freq: &mut [Complex<f32>],
-    ) {
-        let n = KERNEL_LEN;
-        let mask = n - 1;
-        for i in 0..n {
-            scratch_time[i] = stft_in[(in_pos + i) & mask] * window[i];
-        }
-        if fft.process(scratch_time, scratch_freq).is_err() {
-            return;
-        }
-        for (bin, &mag) in scratch_freq.iter_mut().zip(magnitudes.iter()) {
-            *bin *= mag;
-        }
-        if ifft.process(scratch_freq, scratch_time).is_err() {
-            return;
-        }
-        let scale = 1.0 / n as f32;
-        for i in 0..n {
-            stft_out[i] += scratch_time[i] * scale;
-        }
-    }
-
     pub fn set_wavetable_path(&self, path: String) {
         if let Ok(mut path_lock) = self.params.wavetable_path.lock() {
             *path_lock = path;
@@ -811,14 +775,9 @@ impl Plugin for WavetableFilter {
             self.first_process = false;
         }
 
-        for buf in &mut self.stft_in {
-            buf.fill(0.0);
+        for c in &mut self.stft {
+            c.reset();
         }
-        for buf in &mut self.stft_out {
-            buf.fill(0.0);
-        }
-        self.stft_in_pos = 0;
-        self.stft_out_pos = 0;
         self.last_mode = self.params.mode.value();
 
         true
@@ -885,14 +844,9 @@ impl Plugin for WavetableFilter {
 
         if filter_mode != self.last_mode {
             if filter_mode != FilterMode::Raw {
-                for buf in &mut self.stft_in {
-                    buf.fill(0.0);
+                for c in &mut self.stft {
+                    c.reset();
                 }
-                for buf in &mut self.stft_out {
-                    buf.fill(0.0);
-                }
-                self.stft_in_pos = 0;
-                self.stft_out_pos = 0;
             }
             self.last_mode = filter_mode;
         }
@@ -979,7 +933,6 @@ impl Plugin for WavetableFilter {
         }
 
         let host_samples = buffer.samples();
-        let num_channels = buffer.channels();
 
         {
             for mut channel_samples in buffer.iter_samples() {
@@ -997,25 +950,6 @@ impl Plugin for WavetableFilter {
                 } else {
                     1.0
                 };
-
-                // STFT hop processing: when the output position wraps to 0, process the next frame.
-                if filter_mode != FilterMode::Raw && self.stft_out_pos == 0 {
-                    for ch in 0..num_channels.min(2) {
-                        self.stft_out[ch].copy_within(HOP..KERNEL_LEN, 0);
-                        self.stft_out[ch][HOP..].fill(0.0);
-                        Self::process_stft_frame(
-                            &self.stft_in[ch],
-                            self.stft_in_pos,
-                            &mut self.stft_out[ch],
-                            &self.stft_magnitudes,
-                            &self.stft_window,
-                            &self.stft_fft,
-                            &self.kernel_ifft,
-                            &mut self.stft_scratch,
-                            &mut self.spectrum_work,
-                        );
-                    }
-                }
 
                 // Process each channel in this sample
                 let mut mono_input = 0.0f32;
@@ -1050,8 +984,11 @@ impl Plugin for WavetableFilter {
 
                         *sample = (input * (1.0 - mix) + filtered * mix * reset_gain) * gain;
                     } else {
-                        self.stft_in[state_idx][self.stft_in_pos] = input;
-                        let filtered = self.stft_out[state_idx][self.stft_out_pos];
+                        let filtered = self.stft[state_idx].process(
+                            input,
+                            &self.stft_magnitudes,
+                            /* apply = */ true,
+                        );
                         *sample = (input * (1.0 - mix) + filtered * mix * reset_gain) * gain;
                     }
                 }
@@ -1085,12 +1022,6 @@ impl Plugin for WavetableFilter {
                             self.crossfade_alpha = 0.0;
                         }
                     }
-                } else {
-                    self.stft_in_pos = (self.stft_in_pos + 1) & (KERNEL_LEN - 1);
-                    self.stft_out_pos += 1;
-                    if self.stft_out_pos >= HOP {
-                        self.stft_out_pos = 0;
-                    }
                 }
             }
         }
@@ -1102,14 +1033,9 @@ impl Plugin for WavetableFilter {
                 for state in &mut self.filter_state {
                     state.reset();
                 }
-                for buf in &mut self.stft_in {
-                    buf.fill(0.0);
+                for c in &mut self.stft {
+                    c.reset();
                 }
-                for buf in &mut self.stft_out {
-                    buf.fill(0.0);
-                }
-                self.stft_in_pos = 0;
-                self.stft_out_pos = 0;
                 self.silence_samples = 0; // Reset so we don't clear every buffer
             }
         } else {
@@ -1695,34 +1621,10 @@ mod tests {
     // ── STFT integration tests ──────────────────────────────────────────
 
     fn run_stft_mono(plugin: &mut WavetableFilter, input: &[f32]) -> Vec<f32> {
-        let mut output = vec![0.0f32; input.len()];
-        for i in 0..input.len() {
-            if plugin.stft_out_pos == 0 {
-                plugin.stft_out[0].copy_within(HOP..KERNEL_LEN, 0);
-                plugin.stft_out[0][HOP..].fill(0.0);
-                WavetableFilter::process_stft_frame(
-                    &plugin.stft_in[0],
-                    plugin.stft_in_pos,
-                    &mut plugin.stft_out[0],
-                    &plugin.stft_magnitudes,
-                    &plugin.stft_window,
-                    &plugin.stft_fft,
-                    &plugin.kernel_ifft,
-                    &mut plugin.stft_scratch,
-                    &mut plugin.spectrum_work,
-                );
-            }
-
-            plugin.stft_in[0][plugin.stft_in_pos] = input[i];
-            output[i] = plugin.stft_out[0][plugin.stft_out_pos];
-
-            plugin.stft_in_pos = (plugin.stft_in_pos + 1) & (KERNEL_LEN - 1);
-            plugin.stft_out_pos += 1;
-            if plugin.stft_out_pos >= HOP {
-                plugin.stft_out_pos = 0;
-            }
-        }
-        output
+        input
+            .iter()
+            .map(|&s| plugin.stft[0].process(s, &plugin.stft_magnitudes, /* apply = */ true))
+            .collect()
     }
 
     #[test]

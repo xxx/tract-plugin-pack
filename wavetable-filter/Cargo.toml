@@ -25,7 +25,7 @@ atomic_float = "1.0"
 rfd = "0.17.2"
 realfft = "3.3"
 rustfft = "6.2"
-tract-dsp = { path = "../tract-dsp" }
+tract-dsp = { path = "../tract-dsp", features = ["stft"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
