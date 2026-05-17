@@ -537,20 +537,29 @@ impl MsegEditState {
             return None; // still inside the last painted cell
         }
         self.step_last_cell = Some(cell);
-        // Snap the node to the cell's left edge; mark its segment stepped.
         let snapped_phase = (cell as f32 / tdiv as f32).clamp(0.0, 1.0);
-        if let Some(idx) = data.insert_node(snapped_phase, value) {
-            // The new node and the one before it both belong to the stepped
-            // run — set the *previous* node's segment stepped so the painted
-            // run reads as steps.
-            if idx > 0 {
-                data.nodes[idx - 1].stepped = true;
+        let value = value.clamp(0.0, 1.0);
+
+        // If an interior node already sits in this grid cell, repaint its
+        // value in place instead of inserting a duplicate. Without this,
+        // every pass over a cell stacks a fresh MIN_NODE_GAP-spaced node
+        // until the cell packs tight enough that insert_node returns None and
+        // drawing appears to stop — with several dots piled on one grid line.
+        let last = data.node_count - 1;
+        let in_cell = (1..last).find(|&i| (data.nodes[i].time * tdiv as f32) as u32 == cell);
+        let idx = match in_cell {
+            Some(i) => {
+                data.nodes[i].value = value;
+                i
             }
-            data.nodes[idx].stepped = true;
-            data.debug_assert_valid();
-            return Some(MsegEdit::Changed);
-        }
-        None
+            None => data.insert_node(snapped_phase, value)?,
+        };
+        // The painted node and its predecessor both belong to the stepped
+        // run — mark both segments stepped so the run reads as steps.
+        data.nodes[idx - 1].stepped = true;
+        data.nodes[idx].stepped = true;
+        data.debug_assert_valid();
+        Some(MsegEdit::Changed)
     }
 }
 
@@ -788,6 +797,70 @@ mod tests {
             .iter()
             .take(data.node_count - 1)
             .any(|n| n.stepped));
+    }
+
+    #[test]
+    fn stepped_draw_is_idempotent_across_passes() {
+        let mut data = MsegData::default();
+        let mut state = MsegEditState::new();
+        state.set_stepped_draw(true);
+        let l = mseg_layout(RECT, false, 1.0);
+
+        // First pass — press, drag across cells (with a back-and-forth).
+        state.on_mouse_down(
+            phase_to_x(&l, 0.1),
+            value_to_y(&l, 0.8),
+            &mut data,
+            RECT,
+            1.0,
+            false,
+        );
+        for &p in &[0.3_f32, 0.5, 0.7, 0.9, 0.5, 0.3] {
+            state.on_mouse_move(
+                phase_to_x(&l, p),
+                value_to_y(&l, 0.8),
+                &mut data,
+                RECT,
+                1.0,
+                false,
+            );
+        }
+        state.on_mouse_up(&mut data);
+        let after_first = data.node_count;
+        assert!(after_first > 2, "first pass inserted nodes");
+
+        // A second identical pass at a different value must NOT stack new
+        // nodes — each cell already holds one, so it repaints in place.
+        state.on_mouse_down(
+            phase_to_x(&l, 0.1),
+            value_to_y(&l, 0.2),
+            &mut data,
+            RECT,
+            1.0,
+            false,
+        );
+        for &p in &[0.3_f32, 0.5, 0.7, 0.9, 0.5, 0.3] {
+            state.on_mouse_move(
+                phase_to_x(&l, p),
+                value_to_y(&l, 0.2),
+                &mut data,
+                RECT,
+                1.0,
+                false,
+            );
+        }
+        state.on_mouse_up(&mut data);
+        assert_eq!(
+            data.node_count, after_first,
+            "repeated stepped-draw passes must not stack duplicate nodes"
+        );
+        // The repaint took effect — interior nodes carry the second value.
+        assert!(
+            data.active()[1..data.node_count - 1]
+                .iter()
+                .any(|n| (n.value - 0.2).abs() < 1e-3),
+            "second pass should have repainted cell values"
+        );
     }
 
     #[test]
