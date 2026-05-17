@@ -317,7 +317,7 @@ mod tests {
         w.push(0.5);
         assert_eq!(w.mean(), 0.5);
         w.push(0.3);
-        assert!((w.mean() - 0.3).abs() < 1e-9);
+        assert!((w.mean() - 0.3).abs() < 1e-6); // 1e-6: 0.3 is inexact in f32
     }
 
     #[test]
