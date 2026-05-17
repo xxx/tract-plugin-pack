@@ -228,6 +228,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_dot12_simd_matches_scalar() {
+        let history: [f32; 12] = [
+            0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8, 0.9, -1.0, 0.5, -0.3,
+        ];
+        for phase in 0..4 {
+            let simd_result = dot12_simd(&history, &ITU_COEFFS_PADDED[phase]);
+            let scalar_result: f32 = history
+                .iter()
+                .zip(ITU_COEFFS[phase].iter())
+                .map(|(h, c)| h * c)
+                .sum();
+            assert!(
+                (simd_result - scalar_result).abs() < 1e-5,
+                "phase {phase}: simd={simd_result}, scalar={scalar_result}"
+            );
+        }
+    }
+
+    #[test]
     fn test_true_peak_detects_intersample() {
         let mut det = TruePeakDetector::new();
         det.set_sample_rate(48000.0);
