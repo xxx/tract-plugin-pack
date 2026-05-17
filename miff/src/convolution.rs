@@ -4,80 +4,41 @@
 use crate::kernel::{Kernel, MAG_BINS, MAX_KERNEL};
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use rustfft::num_complex::Complex;
-use std::simd::{f32x16, num::SimdFloat};
 use std::sync::Arc;
 
-/// Per-channel time-domain convolution state: a double-buffered history ring
-/// so the MAC loop gets a contiguous window. Adapted from wavetable-filter's
-/// `FilterState`.
+/// Per-channel time-domain convolution state. A thin wrapper over
+/// `tract_dsp::fir::FirRing`.
 ///
 /// The silence fast-path only re-arms on `reset()`; a host `process()` loop
 /// should call `reset()` after sustained input silence.
 pub struct RawChannel {
-    history: Vec<f32>,
-    write_pos: usize,
-    mask: usize,
-    is_silent: bool,
+    ring: tract_dsp::fir::FirRing,
 }
 
 impl RawChannel {
     /// A channel sized for kernels up to `MAX_KERNEL` taps.
     pub fn new() -> Self {
-        let cap = MAX_KERNEL.next_power_of_two();
         Self {
-            history: vec![0.0; cap * 2],
-            write_pos: 0,
-            mask: cap - 1,
-            is_silent: true,
+            ring: tract_dsp::fir::FirRing::new(MAX_KERNEL),
         }
     }
 
     /// Zero the history.
     pub fn reset(&mut self) {
-        self.history.iter_mut().for_each(|s| *s = 0.0);
-        self.write_pos = 0;
-        self.is_silent = true;
-    }
-
-    /// Push one input sample (double-buffered write).
-    fn push(&mut self, sample: f32) {
-        if sample.abs() > 1e-6 {
-            self.is_silent = false;
-        }
-        let cap = self.mask + 1;
-        self.history[self.write_pos] = sample;
-        self.history[self.write_pos + cap] = sample;
-        self.write_pos = (self.write_pos + 1) & self.mask;
+        self.ring.reset();
     }
 
     /// Process one sample through `kernel`; returns the filtered output.
     /// All-zero kernel -> the input is returned unchanged (dry passthrough).
     pub fn process(&mut self, sample: f32, kernel: &Kernel) -> f32 {
-        self.push(sample);
+        self.ring.push(sample);
         if kernel.is_zero {
             return sample; // dry passthrough — see the miff spec
         }
-        if self.is_silent {
+        if self.ring.is_silent() {
             return 0.0; // silence fast-path: history is all zero
         }
-        let len = kernel.len;
-        let cap = self.mask + 1;
-        let start = (self.write_pos + cap - len) & self.mask;
-        // `window` is oldest-first: window[0] = x[n-len+1], window[len-1] = x[n].
-        // Convolution: y[n] = sum_k taps[k]*x[n-k]
-        //            = taps[0]*window[len-1] + taps[1]*window[len-2] + ...
-        // `rev_taps` is `taps` pre-reversed at bake time (rev_taps[j] ==
-        // taps[len-1-j]), so the MAC reads it contiguously — no per-chunk
-        // scatter-rebuild on the audio thread.
-        let window = &self.history[start..start + len];
-        let mut acc = f32x16::splat(0.0);
-        let chunks = len / 16;
-        for c in 0..chunks {
-            let w = f32x16::from_slice(&window[c * 16..c * 16 + 16]);
-            let k = f32x16::from_slice(&kernel.rev_taps[c * 16..c * 16 + 16]);
-            acc += w * k;
-        }
-        acc.reduce_sum()
+        self.ring.mac(&kernel.rev_taps[..kernel.len])
     }
 }
 
