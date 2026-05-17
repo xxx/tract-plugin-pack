@@ -206,6 +206,7 @@ tract-plugin-pack/
 ├── wavetable-filter/       # Wavetable-based filter plugin
 ├── nih-plug-widgets/       # Legacy vizia widgets (no longer used; kept on disk for reference, excluded from the workspace build)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets, editor base scaffolding
+├── tract-dsp/              # Shared GUI-free DSP primitives (true-peak, FIR, STFT, ...)
 ├── docs/                   # Plugin manuals
 │   ├── gain-brain/
 │   ├── gs-meter/
@@ -223,7 +224,7 @@ tract-plugin-pack/
 ## Testing
 
 ```bash
-cargo nextest run --workspace   # All tests (752) -- parallel runner
+cargo nextest run --workspace   # All tests -- parallel runner
 cargo clippy --workspace        # Lint check
 ```
 

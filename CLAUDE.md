@@ -21,7 +21,7 @@ Tract Plugin Pack — a Cargo workspace of audio effect plugins (VST3, CLAP, sta
 
 ## Workspace Structure
 
-Each plugin is a crate (`<plugin>/`). Plus: `tiny-skia-widgets/` (shared CPU-rendered widgets), `docs/` (manuals md+PDF), `xtask/` (build tooling), `nih-plug-widgets/` (legacy vizia widgets, workspace-excluded so its old transitive deps stay out of the lock file).
+Each plugin is a crate (`<plugin>/`). Plus: `tiny-skia-widgets/` (shared CPU-rendered widgets), `tract-dsp/` (shared GUI-free DSP primitives), `docs/` (manuals md+PDF), `xtask/` (build tooling), `nih-plug-widgets/` (legacy vizia widgets, workspace-excluded so its old transitive deps stay out of the lock file).
 
 ## Build / Test / Lint
 
@@ -73,6 +73,8 @@ Common shape per plugin: `lib.rs` (plugin struct, params, `process()`), `editor.
 **imagine** — `midside.rs` (M/S encode/decode); `crossover.rs` (`CrossoverIir` Linkwitz-Riley + Lipshitz/Vanderkooy comp, `CrossoverFir` double-buffered + crossfade); `hilbert.rs` (FIR 90° rotator, len 65); `decorrelator.rs` (Schroeder/Gerzon 6-stage all-pass); `bands.rs` (Ozone Width, Stereoize Mode I/II, S_removed accumulator); `spectrum.rs` (M+jS FFT trick, coherence); `vectorscope.rs` (SPSC AtomicU32 ring); `polar_rays.rs` (SPSC emit ring); `theme.rs` (Cassiopeia A gold/teal); `editor/{spectrum_view,vectorscope_view,band_strip,global_strip}.rs`.
 
 **tiny-skia-widgets** (shared) — `primitives.rs` (color palette, `draw_rect` opaque fast-path, `fill_pixmap_opaque`, `fill_column_opaque`); `text.rs` (fontdue glyph cache); `controls.rs` (button/slider/stepped-selector); `param_dial.rs` (rotary dial); `editor_base.rs` (EditorState size persistence, SurfaceState); `drag.rs` (DragState hit regions, `mouse_in_window`); `text_edit.rs` (`TextEditState<A>` right-click-to-type machine).
+
+**tract-dsp** (shared, GUI-free DSP) — `true_peak.rs` (ITU-R BS.1770-4 detector, used by gs-meter/tinylimit); `spsc.rs` (lock-free SPSC ring); `db.rs`; `window.rs` (`hann_periodic` D=N / `hann_symmetric` D=N−1); `boxcar.rs` (`RunningSumWindow`, f64 accumulator); `fir.rs` (`FirRing` — double-buffered SIMD MAC, used by miff/wavetable-filter); `stft.rs` (`StftConvolver` — magnitude-multiply overlap-add; `stft` feature); `stft_analysis.rs` (`StftAnalyzer` — STFT analysis front-end: input ring + periodic-Hann + COLA window + forward FFT; `stft-analysis` feature; used by satch/warp-zone). Zero external deps by default; the FFT modules are feature-gated. `examples/tract_dsp_profile.rs` is the profiling harness.
 
 ## Key Design Decisions
 
