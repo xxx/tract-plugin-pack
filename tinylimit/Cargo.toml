@@ -21,6 +21,7 @@ tiny-skia = "0.12"
 tiny-skia-widgets = { path = "../tiny-skia-widgets" }
 keyboard-types = "0.6"
 serde = { version = "1.0", features = ["derive"] }
+tract-dsp = { path = "../tract-dsp" }
 
 [package.metadata.bundler]
 name = "Tinylimit"

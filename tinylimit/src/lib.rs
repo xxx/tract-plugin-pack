@@ -1,15 +1,11 @@
-#![feature(portable_simd)]
-
 use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
 mod editor;
 pub mod limiter;
-pub mod true_peak;
-
 use limiter::Limiter;
-use true_peak::TruePeakDetector;
+use tract_dsp::true_peak::TruePeakDetector;
 
 // ── Meter readings ───────────────────────────────────────────────────────────
 

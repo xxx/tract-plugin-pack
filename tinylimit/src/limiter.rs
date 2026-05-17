@@ -291,7 +291,7 @@ impl Limiter {
         transient_mix: f32,
         _stereo_link: f32, // reserved for future per-channel limiting; v1 always uses max(|L|,|R|)
         ceiling_linear: f32,
-        true_peak: Option<&mut [crate::true_peak::TruePeakDetector; 2]>,
+        true_peak: Option<&mut [tract_dsp::true_peak::TruePeakDetector; 2]>,
     ) -> f32 {
         let num_samples = left.len().min(right.len());
         if num_samples == 0 {

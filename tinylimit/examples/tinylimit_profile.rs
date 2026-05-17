@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use tinylimit::limiter::Limiter;
-use tinylimit::true_peak::TruePeakDetector;
+use tract_dsp::true_peak::TruePeakDetector;
 
 const BLOCK: usize = 1024;
 const N_BLOCKS: usize = 50_000; // ~1067 s of audio at 48 kHz
