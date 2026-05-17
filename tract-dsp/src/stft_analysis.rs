@@ -54,8 +54,9 @@ pub struct StftAnalyzer {
 
 impl StftAnalyzer {
     /// Create an `fft_size`-point analyzer. `hop_size` is used only to compute
-    /// the COLA synthesis window. `fft_size` must be a power of two, and
-    /// `fft_size` must be an exact multiple of `hop_size`.
+    /// the COLA synthesis window. `fft_size` must be an exact multiple of
+    /// `hop_size` (the COLA sum is only constant across `fft_size / hop_size`
+    /// whole frames).
     pub fn new(fft_size: usize, hop_size: usize) -> Self {
         assert!(
             fft_size > 0
