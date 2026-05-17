@@ -4,9 +4,9 @@ use nih_plug::prelude::*;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use rustfft::num_complex::Complex;
 use std::simd::f32x16;
-use std::simd::num::SimdFloat;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tract_dsp::fir::FirRing;
 
 mod editor;
 pub mod wavetable;
@@ -34,7 +34,7 @@ pub struct WavetableFilter {
     wavetable: Option<Wavetable>,
     sample_rate: f32,
     // Circular buffer for convolution (per channel)
-    filter_state: [FilterState; 2],
+    filter_state: [FirRing; 2],
     should_reload: Arc<AtomicBool>,
     // Pre-prepared reload data from the GUI thread — audio thread takes with try_lock
     pending_reload: Arc<Mutex<Option<PendingReload>>>,
@@ -120,19 +120,6 @@ pub struct WavetableFilter {
     last_reported_latency: u32,
 }
 
-struct FilterState {
-    // Double-buffered circular history: 2×len elements so that a contiguous
-    // len-sized window starting at write_pos is always valid for zero-copy SIMD reads.
-    history: Vec<f32>,
-    write_pos: usize,
-    len: usize,
-    mask: usize,
-    /// `true` iff only zero-amplitude samples have been pushed since the last
-    /// `reset()`. When set, the convolution output is guaranteed to be zero and
-    /// the per-sample SIMD MAC loop can be skipped.
-    is_silent: bool,
-}
-
 #[derive(Params)]
 struct WavetableFilterParams {
     /// Persisted wavetable file path — restored by the DAW on session reload.
@@ -191,7 +178,7 @@ impl Default for WavetableFilter {
             params: Arc::new(WavetableFilterParams::new(current_frame_count.clone())),
             wavetable: Some(default_wt.clone()),
             sample_rate: 48000.0,
-            filter_state: [FilterState::new(KERNEL_LEN), FilterState::new(KERNEL_LEN)],
+            filter_state: [FirRing::new(KERNEL_LEN), FirRing::new(KERNEL_LEN)],
             should_reload: Arc::new(AtomicBool::new(false)),
             pending_reload: Arc::new(Mutex::new(None)),
             shared_wavetable: Arc::new(Mutex::new(default_wt)),
@@ -237,14 +224,8 @@ impl Default for WavetableFilter {
     }
 }
 
-/// Horizontal sum of an f32x16 SIMD vector using pairwise tree reduction.
-#[inline(always)]
-fn hsum(v: f32x16) -> f32 {
-    v.reduce_sum()
-}
-
 /// Reverse a buffer in place. Converts forward-order IFFT output into the
-/// time-reversed kernel layout expected by the SIMD convolution loop.
+/// time-reversed kernel layout expected by `FirRing::mac`.
 #[inline]
 fn reverse_in_place(buf: &mut [f32]) {
     let n = buf.len();
@@ -542,11 +523,9 @@ impl WavetableFilter {
 
         let new_size = wavetable.frame_size;
 
-        // Resize history buffer only if necessary (kernel is always KERNEL_LEN)
+        // Reset history buffers on wavetable reload.
         for state in &mut self.filter_state {
-            if state.len != KERNEL_LEN {
-                *state = FilterState::new(KERNEL_LEN);
-            }
+            state.reset();
         }
 
         self.current_frame_count
@@ -660,88 +639,6 @@ impl WavetableFilter {
                 }
             }
         }
-    }
-}
-
-impl FilterState {
-    fn new(size: usize) -> Self {
-        let power_of_2_size = size.next_power_of_two();
-        Self {
-            history: vec![0.0; 2 * power_of_2_size],
-            write_pos: 0,
-            len: power_of_2_size,
-            mask: power_of_2_size - 1,
-            is_silent: true,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.history.fill(0.0);
-        self.write_pos = 0;
-        self.is_silent = true;
-    }
-
-    #[inline(always)]
-    fn push(&mut self, sample: f32) {
-        self.history[self.write_pos] = sample;
-        self.history[self.write_pos + self.len] = sample;
-        self.write_pos = (self.write_pos + 1) & self.mask;
-        if sample.abs() > 1e-6 {
-            self.is_silent = false;
-        }
-    }
-
-    /// Returns true when the history is all-zero (no non-trivial sample pushed
-    /// since the last reset). Convolution output is guaranteed to be zero,
-    /// so callers may skip the MAC loop.
-    #[inline(always)]
-    fn is_silent(&self) -> bool {
-        self.is_silent
-    }
-
-    #[cfg(test)]
-    fn get(&self, offset: usize) -> f32 {
-        let idx = (self
-            .write_pos
-            .wrapping_add(self.len)
-            .wrapping_sub(offset)
-            .wrapping_sub(1))
-            & self.mask;
-        self.history[idx]
-    }
-
-    #[cfg(test)]
-    fn get_bulk<const N: usize>(&self, start_offset: usize) -> [f32; N] {
-        let mut result = [0.0f32; N];
-
-        let start_idx = (self
-            .write_pos
-            .wrapping_add(self.len)
-            .wrapping_sub(start_offset)
-            .wrapping_sub(1))
-            & self.mask;
-
-        if start_idx >= N - 1 {
-            // No wrap-around in this window; index directly without mask.
-            // Decrement to produce newest-first order, matching the slow path below.
-            for (i, slot) in result.iter_mut().enumerate() {
-                *slot = self.history[start_idx - i];
-            }
-        } else {
-            for i in 0..N {
-                let idx = (start_idx.wrapping_sub(i)) & self.mask;
-                result[i] = self.history[idx];
-            }
-        }
-
-        result
-    }
-
-    /// Contiguous slice of the last `len` samples in chronological order (oldest first).
-    /// Use with a time-reversed kernel for SIMD convolution without per-element copies.
-    #[inline(always)]
-    fn history_slice(&self) -> &[f32] {
-        &self.history[self.write_pos..self.write_pos + self.len]
     }
 }
 
@@ -961,9 +858,7 @@ impl Plugin for WavetableFilter {
                     self.frame_mags = reload.frame_mags;
 
                     for state in &mut self.filter_state {
-                        if state.len != KERNEL_LEN {
-                            *state = FilterState::new(KERNEL_LEN);
-                        }
+                        state.reset();
                     }
 
                     self.first_process = true;
@@ -1138,43 +1033,19 @@ impl Plugin for WavetableFilter {
                     if filter_mode == FilterMode::Raw {
                         self.filter_state[state_idx].push(input);
 
-                        // SIMD convolution: forward dot product of the double-buffered
-                        // history and time-reversed kernel. No per-element copies needed.
-                        const SIMD_LANES: usize = 16;
-                        const SIMD_CHUNKS: usize = KERNEL_LEN / SIMD_LANES;
-                        let history = self.filter_state[state_idx].history_slice();
-
+                        // SIMD convolution against the time-reversed kernel(s).
                         let filtered: f32 = if self.filter_state[state_idx].is_silent() {
-                            // History is all-zero (filter cleared after 100 ms of
-                            // silence). Convolution output is zero; skip the
-                            // 128-chunk SIMD MAC loop that otherwise runs every
-                            // sample regardless of input level.
+                            // History is all-zero (filter cleared after 100 ms
+                            // of silence) — convolution output is zero; skip the
+                            // MAC entirely.
                             0.0
                         } else if self.crossfade_active {
-                            let mut acc = f32x16::splat(0.0);
-                            let mut acc2 = f32x16::splat(0.0);
-                            for chunk_idx in 0..SIMD_CHUNKS {
-                                let k = chunk_idx * SIMD_LANES;
-                                let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
-                                acc += h * f32x16::from_slice(
-                                    &self.synthesized_kernel[k..k + SIMD_LANES],
-                                );
-                                acc2 += h * f32x16::from_slice(
-                                    &self.crossfade_target_kernel[k..k + SIMD_LANES],
-                                );
-                            }
                             let a = self.crossfade_alpha;
-                            hsum(acc) * (1.0 - a) + hsum(acc2) * a
+                            self.filter_state[state_idx].mac(&self.synthesized_kernel) * (1.0 - a)
+                                + self.filter_state[state_idx].mac(&self.crossfade_target_kernel)
+                                    * a
                         } else {
-                            let mut acc = f32x16::splat(0.0);
-                            for chunk_idx in 0..SIMD_CHUNKS {
-                                let k = chunk_idx * SIMD_LANES;
-                                let h = f32x16::from_slice(&history[k..k + SIMD_LANES]);
-                                acc += h * f32x16::from_slice(
-                                    &self.synthesized_kernel[k..k + SIMD_LANES],
-                                );
-                            }
-                            hsum(acc)
+                            self.filter_state[state_idx].mac(&self.synthesized_kernel)
                         };
 
                         *sample = (input * (1.0 - mix) + filtered * mix * reset_gain) * gain;
@@ -1314,107 +1185,31 @@ nih_export_vst3!(WavetableFilter);
 mod tests {
     use super::*;
 
-    // ── FilterState helpers ────────────────────────────────────────────────
+    // ── Convolution helper ─────────────────────────────────────────────────
 
-    /// Push a sequence of f32 values where push_samples[0] is the OLDEST.
-    fn push_sequence(state: &mut FilterState, samples: &[f32]) {
-        for &s in samples {
-            state.push(s);
-        }
-    }
-
-    /// Oracle: build expected get_bulk result using the scalar `get`.
-    fn expected_bulk<const N: usize>(state: &FilterState, start_offset: usize) -> [f32; N] {
-        let mut out = [0.0f32; N];
-        for i in 0..N {
-            out[i] = state.get(start_offset + i);
-        }
-        out
-    }
-
-    // ── get_bulk correctness ───────────────────────────────────────────────
-
-    /// get_bulk fast path: start_idx >= N-1 (no circular wrap in the window).
-    #[test]
-    fn test_get_bulk_fast_path_matches_scalar_get() {
-        let mut state = FilterState::new(2048);
-        // Push 64 distinct values; write_pos will be 64, well above the N-1=15 threshold.
-        let vals: Vec<f32> = (1..=64).map(|i| i as f32).collect();
-        push_sequence(&mut state, &vals);
-
-        // start_offset=0: start_idx = (64 + 2048 - 0 - 1) & 2047 = 63 ≥ 15 → fast path.
-        assert_eq!(state.get_bulk::<16>(0), expected_bulk::<16>(&state, 0));
-        // start_offset=16: start_idx = 47 ≥ 15 → still fast path.
-        assert_eq!(state.get_bulk::<16>(16), expected_bulk::<16>(&state, 16));
-        // start_offset=48: start_idx = 15 (edge: exactly the boundary) → fast path.
-        assert_eq!(state.get_bulk::<16>(48), expected_bulk::<16>(&state, 48));
-    }
-
-    /// get_bulk slow path: start_idx < N-1 (window crosses the circular-buffer boundary).
-    #[test]
-    fn test_get_bulk_slow_path_matches_scalar_get() {
-        let mut state = FilterState::new(2048);
-        // Push only 14 values so write_pos=14.
-        // start_offset=0: start_idx = (14 + 2048 - 0 - 1) & 2047 = 13 < 15 → slow path.
-        let vals: Vec<f32> = (1..=14).map(|i| i as f32).collect();
-        push_sequence(&mut state, &vals);
-
-        assert_eq!(state.get_bulk::<16>(0), expected_bulk::<16>(&state, 0));
-    }
-
-    /// get_bulk must agree with scalar get across ALL offsets, including the circular
-    /// wrap region, to catch any fast/slow path ordering mismatch.
-    #[test]
-    fn test_get_bulk_agrees_with_scalar_get_at_wrap() {
-        let mut state = FilterState::new(2048);
-        // Fill almost all of history so write_pos wraps around.
-        let vals: Vec<f32> = (1..=2048).map(|i| i as f32 * 0.001).collect();
-        push_sequence(&mut state, &vals);
-        // write_pos = 0 now (wrapped). For start_offset=0:
-        // start_idx = (0 + 2048 - 0 - 1) & 2047 = 2047 ≥ 15 → fast path.
-        assert_eq!(state.get_bulk::<16>(0), expected_bulk::<16>(&state, 0));
-        // For start_offset=2040: start_idx = (2048 - 2040 - 1) & 2047 = 7 < 15 → slow path.
-        assert_eq!(
-            state.get_bulk::<16>(2040),
-            expected_bulk::<16>(&state, 2040)
-        );
-        // Check many offsets to cover both branches exhaustively.
-        for off in (0..2032).step_by(16) {
-            let bulk = state.get_bulk::<16>(off);
-            let expected = expected_bulk::<16>(&state, off);
-            assert_eq!(bulk, expected, "get_bulk({off}) mismatch");
-        }
+    /// Compute one convolution output sample over a `FirRing`.
+    ///
+    /// `kernel` is in forward (impulse-response) order; `FirRing::mac` expects
+    /// the time-reversed kernel, so this helper reverses it. This reproduces
+    /// exactly the convolution the Raw-mode `process()` path performs (which
+    /// stores the kernel pre-reversed and feeds it straight to `mac`).
+    fn convolve_sample(state: &FirRing, kernel: &[f32]) -> f32 {
+        let rev_kernel: Vec<f32> = kernel.iter().rev().copied().collect();
+        state.mac(&rev_kernel)
     }
 
     // ── Convolution impulse response ───────────────────────────────────────
 
-    /// Compute one convolution output sample by calling get_bulk as the audio loop does.
-    fn convolve_sample(state: &FilterState, kernel: &[f32]) -> f32 {
-        let n = kernel.len();
-        let rev_kernel: Vec<f32> = kernel.iter().rev().copied().collect();
-        let history = state.history_slice();
-        const LANES: usize = 16;
-        let chunks = n / LANES;
-        let mut acc = f32x16::splat(0.0);
-        for c in 0..chunks {
-            let k = c * LANES;
-            let h = f32x16::from_slice(&history[k..k + LANES]);
-            let kr = f32x16::from_slice(&rev_kernel[k..k + LANES]);
-            acc += h * kr;
-        }
-        hsum(acc)
-    }
-
     /// Feed a unit impulse into the filter; the output stream should equal the kernel.
     #[test]
     fn test_convolution_impulse_response() {
-        let kernel_len = 2048;
+        let kernel_len = KERNEL_LEN;
         // A simple non-trivial kernel: decaying ramp.
         let kernel: Vec<f32> = (0..kernel_len)
             .map(|i| (kernel_len - i) as f32 / kernel_len as f32)
             .collect();
 
-        let mut state = FilterState::new(kernel_len);
+        let mut state = FirRing::new(kernel_len);
 
         // t=0: push impulse, then convolve.
         state.push(1.0);
@@ -1436,7 +1231,7 @@ mod tests {
             y1
         );
 
-        // t=15..16 (straddles the fast/slow boundary for chunk 0).
+        // t=2..32: verify multiple successive convolution outputs.
         for t in 2..=32usize {
             state.push(0.0);
             let yt = convolve_sample(&state, &kernel);
@@ -1452,12 +1247,12 @@ mod tests {
     /// A pure delay kernel (kernel[d]=1, rest 0) passes x[n-d] unmodified.
     #[test]
     fn test_convolution_delay_kernel() {
-        let kernel_len = 2048;
+        let kernel_len = KERNEL_LEN;
         let delay = 100usize;
         let mut kernel = vec![0.0f32; kernel_len];
         kernel[delay] = 1.0;
 
-        let mut state = FilterState::new(kernel_len);
+        let mut state = FirRing::new(kernel_len);
 
         // Push 'delay+1' known samples: values 1.0, 2.0, …, (delay+1).
         for i in 1..=(delay + 1) {
@@ -1602,7 +1397,7 @@ mod tests {
 
             // Convolve a worst-case full-scale sine through the kernel.
             // With |H(f)| ≤ 1 the output must be bounded by 1.0.
-            let mut state = FilterState::new(KERNEL_LEN);
+            let mut state = FirRing::new(KERNEL_LEN);
             for n in 0..KERNEL_LEN {
                 // Use a sine at the cutoff frequency (worst case for filter gain).
                 let v = (n as f32 * cutoff / 48000.0 * 2.0 * std::f32::consts::PI).sin();
@@ -1628,7 +1423,7 @@ mod tests {
         let kernel_a = make_test_kernel(500.0);
         let kernel_b = make_test_kernel(5000.0);
 
-        let mut state = FilterState::new(KERNEL_LEN);
+        let mut state = FirRing::new(KERNEL_LEN);
         // Pre-warm history with a 440 Hz sine.
         for n in 0..KERNEL_LEN {
             state.push((n as f32 * 440.0 / 48000.0 * 2.0 * std::f32::consts::PI).sin());
@@ -1666,7 +1461,7 @@ mod tests {
         let sample_rate = 48000.0f32;
         let alpha_step = 1.0 / (sample_rate * 0.020);
 
-        let mut state = FilterState::new(KERNEL_LEN);
+        let mut state = FirRing::new(KERNEL_LEN);
         for n in 0..KERNEL_LEN {
             state.push((n as f32 * 440.0 / 48000.0 * 2.0 * std::f32::consts::PI).sin());
         }
@@ -2028,33 +1823,6 @@ mod tests {
         let mut empty: [f32; 0] = [];
         reverse_in_place(&mut empty);
         assert_eq!(empty, [] as [f32; 0]);
-    }
-
-    // ── FilterState::reset ──────────────────────────────────────────────
-
-    #[test]
-    fn test_filter_state_reset() {
-        let mut state = FilterState::new(2048);
-
-        // Push some samples to make the history non-zero.
-        push_sequence(&mut state, &[1.0, 2.0, 3.0, 4.0, 5.0]);
-
-        // Verify non-zero history and non-zero write_pos before reset.
-        assert_eq!(state.write_pos, 5);
-        let has_nonzero = state.history.iter().any(|&v| v != 0.0);
-        assert!(
-            has_nonzero,
-            "history should contain non-zero samples before reset"
-        );
-
-        state.reset();
-
-        // After reset, all history should be zero and write_pos should be 0.
-        assert_eq!(state.write_pos, 0);
-        assert!(
-            state.history.iter().all(|&v| v == 0.0),
-            "all history samples should be zero after reset"
-        );
     }
 
     // ── Low cutoff downsampling branch in compute_base_spectrum_into ───
