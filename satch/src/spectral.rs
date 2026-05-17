@@ -22,6 +22,7 @@
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
+use tract_dsp::stft_analysis::StftAnalyzer;
 
 /// Ratio of spectral peak above which bins are classified as 100% loud.
 /// -6 dB relative to the frame's peak magnitude.
@@ -85,48 +86,44 @@ pub fn saturate_td_with_tanh_fast(
 ///
 /// Architecture:
 ///
-/// - `input_ring` (size `fft_size`): circular buffer of recent input samples.
+/// - The STFT analysis front-end (input ring, analysis window, forward FFT,
+///   COLA synthesis window) is owned by the [`StftAnalyzer`] field `stft`.
 /// - `loud_output_ring` / `quiet_output_ring` (size `2 * fft_size` each):
 ///   separate overlap-add accumulation buffers for the loud and quiet spectral
 ///   paths. The waveshaper clips the FULL signal (loud + quiet = delayed input)
 ///   at ±threshold, then the quiet (detail) component is added on top. This
 ///   produces flat-top clipping with symmetric detail ripple around the clip
 ///   level.
-/// - `read_pos` advances one sample at a time; `write_pos` leads by `fft_size`.
-/// - Every `hop_size` samples, an FFT frame is extracted from `input_ring`,
+/// - `read_pos` advances one sample at a time through the output rings.
+/// - Every `hop_size` samples, the analyzer produces an FFT frame, which is
 ///   split into loud/quiet bins, and each path is ISTFT'd and overlap-added
 ///   into its respective output ring buffer.
 pub struct SpectralClipper {
     fft_size: usize,
     hop_size: usize,
 
-    // FFT plans
-    fft_forward: Arc<dyn Fft<f32>>,
+    /// Shared STFT analysis front-end (input ring, analysis window, forward
+    /// FFT, COLA synthesis window).
+    stft: StftAnalyzer,
+
+    // Inverse FFT plan + its in-place scratch.
     fft_inverse: Arc<dyn Fft<f32>>,
     scratch: Vec<Complex<f32>>,
 
-    // Windows & normalization
-    analysis_window: Vec<f32>,
-    /// Pre-multiplied synthesis window: analysis_window[i] / cola_factor.
-    synthesis_window: Vec<f32>,
     // Pre-allocated workspace for per-bin magnitudes (avoids recomputing norm)
     mag_buf: Vec<f32>,
 
     // Ring buffers
-    input_ring: Vec<f32>,
     /// Overlap-add accumulation buffer for loud bins (above threshold). Size = 2 x fft_size.
     loud_output_ring: Vec<f64>,
     /// Overlap-add accumulation buffer for quiet bins (below threshold). Size = 2 x fft_size.
     quiet_output_ring: Vec<f64>,
-    /// Current read position in input_ring (also indexes input_ring).
-    input_pos: usize,
     /// Current read position in output rings.
     read_pos: usize,
     /// Sample counter within current hop.
     hop_counter: usize,
 
-    // Pre-allocated FFT workspace
-    fft_buf: Vec<Complex<f32>>,
+    // Pre-allocated inverse-FFT (ISTFT) input buffers
     /// Loud bins (above threshold) for separate ISTFT.
     loud_buf: Vec<Complex<f32>>,
     /// Quiet bins (below threshold) for separate ISTFT.
@@ -142,48 +139,22 @@ impl SpectralClipper {
         assert!(fft_size > 0 && hop_size > 0 && fft_size >= hop_size);
 
         let mut planner = FftPlanner::new();
-        let fft_forward = planner.plan_fft_forward(fft_size);
         let fft_inverse = planner.plan_fft_inverse(fft_size);
-        let scratch_len = fft_forward
-            .get_inplace_scratch_len()
-            .max(fft_inverse.get_inplace_scratch_len());
-
-        // Hann window
-        let analysis_window: Vec<f32> = tract_dsp::window::hann_periodic(fft_size);
-
-        // COLA normalization for Hann window at 75% overlap (hop = N/4):
-        // sum of Hann[i]² across 4 overlapping frames = 1.5 (constant).
-        let num_frames = fft_size / hop_size;
-        let mut cola_check = vec![0.0_f64; hop_size];
-        for frame in 0..num_frames {
-            let offset = frame * hop_size;
-            for p in 0..hop_size {
-                let w = analysis_window[p + offset] as f64;
-                cola_check[p] += w * w;
-            }
-        }
-        let cola_factor = cola_check[0] as f32;
-        let inv_cola = 1.0 / cola_factor;
-        let synthesis_window: Vec<f32> = analysis_window.iter().map(|&w| w * inv_cola).collect();
+        let scratch_len = fft_inverse.get_inplace_scratch_len();
 
         let out_ring_size = 2 * fft_size;
 
         Self {
             fft_size,
             hop_size,
-            fft_forward,
+            stft: StftAnalyzer::new(fft_size, hop_size),
             fft_inverse,
             scratch: vec![Complex::new(0.0, 0.0); scratch_len],
-            analysis_window,
-            synthesis_window,
             mag_buf: vec![0.0; fft_size],
-            input_ring: vec![0.0; fft_size],
             loud_output_ring: vec![0.0; out_ring_size],
             quiet_output_ring: vec![0.0; out_ring_size],
-            input_pos: 0,
             read_pos: 0,
             hop_counter: 0,
-            fft_buf: vec![Complex::new(0.0, 0.0); fft_size],
             loud_buf: vec![Complex::new(0.0, 0.0); fft_size],
             quiet_buf: vec![Complex::new(0.0, 0.0); fft_size],
         }
@@ -196,20 +167,16 @@ impl SpectralClipper {
 
     /// Reset all internal state (ring buffers, counters) to zero.
     pub fn reset(&mut self) {
-        self.input_ring.fill(0.0);
+        self.stft.reset();
         self.loud_output_ring.fill(0.0);
         self.quiet_output_ring.fill(0.0);
-        self.input_pos = 0;
         self.read_pos = 0;
         self.hop_counter = 0;
-        for bin in self.fft_buf.iter_mut() {
-            *bin = rustfft::num_complex::Complex::new(0.0, 0.0);
-        }
         for bin in self.loud_buf.iter_mut() {
-            *bin = rustfft::num_complex::Complex::new(0.0, 0.0);
+            *bin = Complex::new(0.0, 0.0);
         }
         for bin in self.quiet_buf.iter_mut() {
-            *bin = rustfft::num_complex::Complex::new(0.0, 0.0);
+            *bin = Complex::new(0.0, 0.0);
         }
     }
 
@@ -280,9 +247,8 @@ impl SpectralClipper {
     ) -> f32 {
         let out_len = self.loud_output_ring.len();
 
-        // Write input into the input ring
-        self.input_ring[self.input_pos] = input;
-        self.input_pos = (self.input_pos + 1) % self.fft_size;
+        // Write input into the analyzer's input ring.
+        self.stft.write(input);
 
         // Read from both output ring buffers (properly reconstructed via COLA)
         let loud_td = self.loud_output_ring[self.read_pos] as f32;
@@ -335,46 +301,37 @@ impl SpectralClipper {
 
     /// Loud/quiet split spectral clipper with detail preservation.
     ///
-    /// **Step 1:** Forward FFT of windowed input frame.
+    /// **Step 1+2:** The windowed-frame extract and forward FFT are owned by
+    /// the [`StftAnalyzer`]; `analyze()` returns the spectrum (not yet
+    /// normalised) and the COLA synthesis window. This frame normalises the
+    /// spectrum by `1/N` and caches per-bin magnitudes.
     ///
-    /// **Step 2:** Split bins into loud (above threshold) and quiet (below).
+    /// **Step 3:** Split bins into loud (above threshold) and quiet (below).
     /// Threshold is peak-relative: loud bins are within 6 dB of the frame's
     /// spectral peak; quiet bins are more than 20 dB below the peak.
     ///
-    /// **Step 3:** ISTFT both paths separately.
+    /// **Step 4:** ISTFT both paths separately.
     ///
-    /// **Step 4:** Overlap-add each path linearly (with synthesis window and
+    /// **Step 5:** Overlap-add each path linearly (with the synthesis window and
     /// COLA normalization) into separate output ring buffers. No nonlinear
     /// processing here — tanh is applied AFTER reconstruction in
     /// `process_sample()` to preserve COLA normalization.
-    ///
-    /// The split threshold is peak-relative (not drive-dependent).
-    /// The actual tanh saturation happens post-reconstruction in
-    /// `process_sample()`.
     fn process_frame(&mut self) {
         let n = self.fft_size;
         let out_len = self.loud_output_ring.len();
 
-        // 1. Extract frame from input ring with analysis window.
-        for i in 0..n {
-            let idx = (self.input_pos + i) % n;
-            let windowed = self.input_ring[idx] * self.analysis_window[i];
-            self.fft_buf[i] = Complex::new(windowed, 0.0);
-        }
-
-        // 2. Forward FFT (in-place), normalize by 1/N, and cache magnitudes.
-        //    Merging normalization with magnitude computation avoids a separate
-        //    pass over the data. Using norm_sqr (no sqrt) for threshold comparisons
-        //    eliminates ~4096 sqrt calls per frame; sqrt is only computed for the
-        //    small number of bins in the transition band.
-        self.fft_forward
-            .process_with_scratch(&mut self.fft_buf, &mut self.scratch);
+        // 1+2. Analysis front-end (windowed extract + forward FFT) is owned by
+        //      the StftAnalyzer. Normalize the spectrum by 1/N and cache
+        //      magnitudes. Using norm_sqr (no sqrt) for threshold comparisons
+        //      eliminates ~4096 sqrt calls per frame; sqrt is only computed for
+        //      the small number of bins in the transition band.
+        let frame = self.stft.analyze();
 
         let inv_n = 1.0 / n as f32;
         let mut max_mag_sq = 0.0_f32;
         for k in 0..n {
-            self.fft_buf[k] *= inv_n;
-            let mag_sq = self.fft_buf[k].norm_sqr();
+            frame.spectrum[k] *= inv_n;
+            let mag_sq = frame.spectrum[k].norm_sqr();
             self.mag_buf[k] = mag_sq;
             if mag_sq > max_mag_sq {
                 max_mag_sq = mag_sq;
@@ -400,19 +357,19 @@ impl SpectralClipper {
             let mag_sq = self.mag_buf[k];
             if mag_sq >= hi_sq {
                 // Clearly loud — 100% to loud path
-                self.loud_buf[k] = self.fft_buf[k];
+                self.loud_buf[k] = frame.spectrum[k];
                 self.quiet_buf[k] = Complex::new(0.0, 0.0);
             } else if mag_sq <= lo_sq {
                 // Clearly quiet — 100% to quiet path (detail preserved)
                 self.loud_buf[k] = Complex::new(0.0, 0.0);
-                self.quiet_buf[k] = self.fft_buf[k];
+                self.quiet_buf[k] = frame.spectrum[k];
             } else {
                 // Transition band — smooth crossfade (sqrt only here).
                 // quiet = fft - loud avoids a second complex multiply.
                 let mag = mag_sq.sqrt();
                 let t = (mag - lo) * inv_band; // 0 at lo, 1 at hi
-                self.loud_buf[k] = self.fft_buf[k] * t;
-                self.quiet_buf[k] = self.fft_buf[k] - self.loud_buf[k];
+                self.loud_buf[k] = frame.spectrum[k] * t;
+                self.quiet_buf[k] = frame.spectrum[k] - self.loud_buf[k];
             }
         }
 
@@ -425,13 +382,13 @@ impl SpectralClipper {
             .process_with_scratch(&mut self.quiet_buf, &mut self.scratch);
 
         // 5. Overlap-add both paths LINEARLY into their respective output rings.
-        //    Synthesis window (= analysis_window / cola_factor) is pre-computed
-        //    at construction to avoid a per-sample multiply.
-        //    No nonlinear processing here — tanh is applied post-reconstruction
-        //    in process_sample() to preserve COLA normalization.
+        //    The synthesis window (= analysis_window / cola_factor) comes from
+        //    the analyzer. No nonlinear processing here — tanh is applied
+        //    post-reconstruction in process_sample() to preserve COLA
+        //    normalization.
         for i in 0..n {
             let out_idx = (self.read_pos + i) % out_len;
-            let w = self.synthesis_window[i];
+            let w = frame.synthesis_window[i];
             self.loud_output_ring[out_idx] += (self.loud_buf[i].re * w) as f64;
             self.quiet_output_ring[out_idx] += (self.quiet_buf[i].re * w) as f64;
         }
