@@ -2,6 +2,7 @@
 //! All levels are in linear amplitude; dB conversion happens at display time.
 
 use std::simd::{f32x16, num::SimdFloat};
+use tract_dsp::boxcar::RunningSumWindow;
 pub use tract_dsp::db::linear_to_db;
 use tract_dsp::true_peak::TruePeakDetector;
 
@@ -48,16 +49,8 @@ pub struct ChannelMeter {
     rms_sum: f64,
     /// Number of samples accumulated in rms_sum.
     rms_count: u64,
-    /// Ring buffer of squared samples, pre-allocated to MAX_WINDOW_SAMPLES.
-    rms_ring: Vec<f32>,
-    /// Running sum of squared samples in the ring (f64 for precision).
-    rms_ring_sum: f64,
-    /// Logical window size (may be smaller than rms_ring.len()).
-    rms_window_size: usize,
-    /// Write position in the ring buffer (0..rms_window_size-1).
-    rms_ring_pos: usize,
-    /// Number of valid samples in the ring buffer (up to rms_window_size).
-    rms_ring_filled: usize,
+    /// Sliding window of squared samples for momentary RMS.
+    rms_window: RunningSumWindow<f32>,
     /// Highest momentary RMS (linear) since last reset.
     rms_momentary_max: f32,
 }
@@ -70,11 +63,7 @@ impl ChannelMeter {
             true_peak: TruePeakDetector::new(),
             rms_sum: 0.0,
             rms_count: 0,
-            rms_ring: vec![0.0; MAX_WINDOW_SAMPLES],
-            rms_ring_sum: 0.0,
-            rms_window_size: size,
-            rms_ring_pos: 0,
-            rms_ring_filled: 0,
+            rms_window: RunningSumWindow::new(MAX_WINDOW_SAMPLES, size),
             rms_momentary_max: 0.0,
         }
     }
@@ -85,10 +74,7 @@ impl ChannelMeter {
         self.true_peak.reset();
         self.rms_sum = 0.0;
         self.rms_count = 0;
-        self.rms_ring[..self.rms_window_size].fill(0.0);
-        self.rms_ring_sum = 0.0;
-        self.rms_ring_pos = 0;
-        self.rms_ring_filled = 0;
+        self.rms_window.reset();
         self.rms_momentary_max = 0.0;
     }
 
@@ -101,12 +87,8 @@ impl ChannelMeter {
     /// Resets the ring buffer state and momentary max.
     pub fn set_window_size(&mut self, window_samples: usize) {
         let size = window_samples.clamp(1, MAX_WINDOW_SAMPLES);
-        if self.rms_window_size != size {
-            self.rms_window_size = size;
-            self.rms_ring[..size].fill(0.0);
-            self.rms_ring_sum = 0.0;
-            self.rms_ring_pos = 0;
-            self.rms_ring_filled = 0;
+        if self.rms_window.window() != size {
+            self.rms_window.set_window(size);
             self.rms_momentary_max = 0.0;
         }
     }
@@ -129,21 +111,8 @@ impl ChannelMeter {
         self.rms_sum += sq;
         self.rms_count += 1;
 
-        // Momentary RMS ring buffer with O(1) running sum
-        let sq_f32 = sample * sample;
-        // Subtract the sample being evicted (if ring is full)
-        if self.rms_ring_filled == self.rms_window_size {
-            self.rms_ring_sum -= self.rms_ring[self.rms_ring_pos] as f64;
-        }
-        self.rms_ring[self.rms_ring_pos] = sq_f32;
-        self.rms_ring_sum += sq_f32 as f64;
-        self.rms_ring_pos += 1;
-        if self.rms_ring_pos >= self.rms_window_size {
-            self.rms_ring_pos = 0;
-        }
-        if self.rms_ring_filled < self.rms_window_size {
-            self.rms_ring_filled += 1;
-        }
+        // Momentary RMS sliding window (O(1) running sum)
+        self.rms_window.push(sample * sample);
     }
 
     /// Process a full buffer slice. Uses SIMD for peak finding and sum-of-squares,
@@ -162,19 +131,7 @@ impl ChannelMeter {
         for &sample in samples {
             self.true_peak.process_sample(sample);
 
-            let sq_f32 = sample * sample;
-            if self.rms_ring_filled == self.rms_window_size {
-                self.rms_ring_sum -= self.rms_ring[self.rms_ring_pos] as f64;
-            }
-            self.rms_ring[self.rms_ring_pos] = sq_f32;
-            self.rms_ring_sum += sq_f32 as f64;
-            self.rms_ring_pos += 1;
-            if self.rms_ring_pos >= self.rms_window_size {
-                self.rms_ring_pos = 0;
-            }
-            if self.rms_ring_filled < self.rms_window_size {
-                self.rms_ring_filled += 1;
-            }
+            self.rms_window.push(sample * sample);
         }
     }
 
@@ -209,10 +166,7 @@ impl ChannelMeter {
 
     /// Momentary RMS in linear amplitude (over the current window).
     pub fn rms_momentary_linear(&self) -> f32 {
-        if self.rms_ring_filled == 0 {
-            return 0.0;
-        }
-        (self.rms_ring_sum.max(0.0) / self.rms_ring_filled as f64).sqrt() as f32
+        (self.rms_window.mean().sqrt()) as f32
     }
 
     /// Highest momentary RMS (linear) since last reset.
@@ -227,12 +181,7 @@ impl ChannelMeter {
 
     /// Mean-square of the current momentary window and the filled count.
     pub fn rms_momentary_raw(&self) -> (f64, usize) {
-        let ms = if self.rms_ring_filled > 0 {
-            self.rms_ring_sum.max(0.0) / self.rms_ring_filled as f64
-        } else {
-            0.0
-        };
-        (ms, self.rms_ring_filled)
+        (self.rms_window.mean(), self.rms_window.filled())
     }
 
     /// Current crest factor in dB: peak_max_dB - rms_integrated_dB.
