@@ -13,5 +13,7 @@ pub mod boxcar;
 pub mod db;
 pub mod fir;
 pub mod spsc;
+#[cfg(feature = "stft")]
+pub mod stft;
 pub mod true_peak;
 pub mod window;
