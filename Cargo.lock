@@ -910,6 +910,7 @@ dependencies = [
  "softbuffer",
  "tiny-skia",
  "tiny-skia-widgets",
+ "tract-dsp",
 ]
 
 [[package]]
@@ -2327,6 +2328,10 @@ name = "tracing-core"
 version = "0.1.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+
+[[package]]
+name = "tract-dsp"
+version = "0.1.0"
 
 [[package]]
 name = "transpose"

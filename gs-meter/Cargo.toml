@@ -23,6 +23,7 @@ keyboard-types = "0.6"
 crossbeam = "0.8"
 atomic_float = "0.1"
 serde = { version = "1.0", features = ["derive"] }
+tract-dsp = { path = "../tract-dsp" }
 
 [package.metadata.bundler]
 name = "GS Meter"
