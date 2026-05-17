@@ -11,6 +11,7 @@
 
 pub mod boxcar;
 pub mod db;
+pub mod fir;
 pub mod spsc;
 pub mod true_peak;
 pub mod window;
