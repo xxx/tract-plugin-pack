@@ -131,13 +131,7 @@ impl PhaselessChannel {
         let mut planner = RealFftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(STFT_FRAME);
         let ifft = planner.plan_fft_inverse(STFT_FRAME);
-        // Hann window: w[i] = 0.5 * (1 − cos(2π·i/N))
-        // Matches wavetable-filter's `stft_window` construction exactly.
-        let window: Vec<f32> = (0..STFT_FRAME)
-            .map(|i| {
-                0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / STFT_FRAME as f32).cos())
-            })
-            .collect();
+        let window: Vec<f32> = tract_dsp::window::hann_periodic(STFT_FRAME);
         let scratch_fwd = fft.make_scratch_vec();
         let scratch_inv = ifft.make_scratch_vec();
         Self {
