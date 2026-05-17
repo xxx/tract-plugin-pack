@@ -9,6 +9,8 @@
 //! via `rust-toolchain.toml`.
 #![feature(portable_simd)]
 
+pub mod boxcar;
 pub mod db;
 pub mod spsc;
 pub mod true_peak;
+pub mod window;
