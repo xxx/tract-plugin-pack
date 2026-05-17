@@ -36,12 +36,7 @@ impl SpectrumAnalyzer {
         let scratch_len = fft.get_inplace_scratch_len();
 
         // Hann window
-        let window = (0..FFT_SIZE)
-            .map(|n| {
-                0.5 - 0.5
-                    * (2.0 * std::f32::consts::PI * (n as f32) / ((FFT_SIZE - 1) as f32)).cos()
-            })
-            .collect();
+        let window = tract_dsp::window::hann_symmetric(FFT_SIZE);
 
         // Random offset for FFT throttle phase staggering across instances.
         // Seed deterministically from the input value so tests are stable.
