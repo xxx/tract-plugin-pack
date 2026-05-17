@@ -64,6 +64,17 @@ This is the largest plugin in the collection and is built in phases.
 
 Each phase ends in something that builds, tests, and plays.
 
+### 1.3 Future directions noted during brainstorming
+
+- **Game-of-Life routing mode.** A future routing mode where the wavefront
+  evolves by Conway's-Game-of-Life neighbour-count rules instead of the manual
+  send arrows, still confined by the loop-region borders. To keep this cheap
+  to add later, Phase 1 isolates the next-wavefront computation (`step_manual`,
+  §5.1) from the lifecycle state machine and the clock: a future `step_life`
+  becomes an alternative step function selected by a routing-mode setting,
+  with arming, dead-end handling, and timing untouched. No Game-of-Life code
+  is written in Phase 1 (YAGNI) — only the seam is preserved.
+
 ## 2. Phase 1 scope
 
 Deliver a working routing sequencer: draw a routing on a 16×32 grid, press
@@ -92,6 +103,9 @@ sequencer audible.
 - `output_gain` — post-mix gain, in dB.
 - `effect_bank` — stepped enum selecting which throwaway effect all rows use:
   `Lowpass` or `Bitcrush`.
+- `auto_restart` — bool toggle. When on, a dead-ended wavefront re-arms the
+  start cells automatically; when off, a dead end stops the sequence until
+  Reset. See §5.1. Default: on.
 
 **Plugin state** (not params — too large and structural to be params):
 
@@ -162,20 +176,34 @@ argument (no external crate; same spirit as the MSEG `randomize` module).
 
 ### 5.1 Wavefront & lifecycle
 
-- `Wavefront` (`Copy`) — a `[bool; 512]` (or packed bitset) of currently-lit
-  cells.
-- Sequence state machine:
+- `Wavefront` (`Copy`) — a `[bool; 512]` bitset of currently-lit cells.
+- The **next-wavefront computation** is isolated as a pure function
+  `step_manual(grid, &Wavefront) -> Wavefront`:
+  `next = ⋃ { grid.next_cell(r, c, dir) | (r,c) lit, dir ∈ cell.sends }`.
+  Keeping it separate from the lifecycle below is deliberate — see §1.3.
+- Sequence state machine — `Initial`, `Running`, `Stopped`:
   - **Initial** — wavefront empty. The next tick *arms* it: wavefront = every
-    cell with `is_start = true`. (If there are no start cells, the wavefront
-    stays empty and nothing plays — this is how the plugin knows what is next
-    in its initial state.)
-  - **Running** — each tick computes
-    `next = ⋃ { next_cell(grid, r, c, dir) | cell (r,c) lit, dir ∈ cell.sends }`.
-    If `next` is non-empty it becomes the wavefront. If `next` is empty (every
-    lit cell is a dead end) the wavefront **dies** and the state returns to
-    *Initial* — output is silent until the sequence is reset.
-- `reset()` — empty the wavefront and return to *Initial*, re-arming start
-  cells on the following tick.
+    cell with `is_start = true`, and the state becomes `Running`. If there are
+    no start cells the wavefront stays empty and the state stays `Initial` —
+    nothing plays. This is how the plugin knows what is next in its initial
+    state.
+  - **Running** — each tick runs `step_manual`. A non-empty result becomes the
+    new wavefront. An empty result is a **dead end** (every lit cell routes
+    nowhere). A dead end cannot be attributed to any one start cell, since
+    wavefronts split and merge freely, so the response depends on the
+    `auto_restart` parameter (§3.1):
+    - `auto_restart` **on** → the state returns to `Initial`; the next tick
+      re-arms the *entire* start-cell set. A genuinely dead-ended routing
+      therefore becomes a repeating pattern — one silent step, then restart.
+    - `auto_restart` **off** → the state becomes `Stopped`.
+  - **Stopped** — wavefront empty; every tick is a no-op. Only `reset()`
+    leaves this state.
+- `reset()` — empty the wavefront and return to `Initial` (re-arming on the
+  following tick). Triggered by the manual Reset button and by the host
+  transport's stopped→playing edge.
+
+`tick` takes the current `auto_restart` value as an argument; the parameter
+itself lives on the plugin (§3.1) and is read on the audio thread.
 
 ### 5.2 Clock
 
