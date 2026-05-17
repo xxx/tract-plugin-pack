@@ -123,11 +123,7 @@ impl Analyzer {
         let mut planner = FftPlanner::new();
         let fft = planner.plan_fft_forward(FFT_SIZE);
         let scratch_len = fft.get_inplace_scratch_len();
-        let window = (0..FFT_SIZE)
-            .map(|i| {
-                0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE - 1) as f32).cos()
-            })
-            .collect();
+        let window = tract_dsp::window::hann_symmetric(FFT_SIZE);
 
         let mut log_bin_starts = [0_usize; NUM_LOG_BINS];
         let mut log_bin_ends = [0_usize; NUM_LOG_BINS];
