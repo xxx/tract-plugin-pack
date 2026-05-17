@@ -1007,7 +1007,7 @@ impl Editor for MiffEditor {
         let window = baseview::Window::open_parented(
             &widgets::ParentWindowHandleAdapter(parent),
             WindowOpenOptions {
-                title: String::from("miff"),
+                title: String::from("Miff"),
                 size: baseview::Size::new(persisted_w as f64, persisted_h as f64),
                 scale: WindowScalePolicy::ScaleFactor(1.0),
                 gl_config: None,

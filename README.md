@@ -39,6 +39,18 @@ A multiband stereo imager modeled on iZotope Ozone Imager. Four fixed bands with
 - CPU-rendered GUI (tiny-skia + softbuffer), freely resizable, Cassiopeia A gold/teal palette
 - Inspired by [iZotope Ozone Imager](https://www.izotope.com/en/products/ozone/features/imager.html)
 
+### Miff
+
+A convolution filter whose FIR kernel you draw by hand with an MSEG editor — a sibling of Wavetable Filter, but the kernel comes from a sketched curve instead of a wavetable file.
+
+- The drawn curve **is** the FIR impulse response; a bipolar tap map (`2·value − 1`) places the editor's 0.5 midline at a zero tap, enabling highpass/bandpass/comb shapes by drawing above or below centre
+- **Raw Mode**: direct time-domain SIMD convolution (zero latency)
+- **Phaseless Mode**: fixed 4096-point STFT magnitude-only filtering (constant 2048-sample latency)
+- Adjustable kernel **Length** (64–4096 taps); peak-magnitude normalization keeps loudness consistent and never boosts above 0 dB
+- MSEG editor with grid snap, Alt-drag stepped-draw, and a styled randomizer; frequency-response view with live input-spectrum shadow
+- A flat default curve bakes to an all-zero kernel — a fresh instance is clean dry passthrough
+- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable
+
 ### Pope Scope
 
 A multichannel real-time oscilloscope with beat sync. Multiple instances share audio data through a global store, allowing one window to display waveforms from up to 16 tracks simultaneously.
@@ -140,6 +152,7 @@ sudo apt install libxcb1-dev libx11-xcb-dev libx11-dev libxcursor-dev \
 cargo nih-plug bundle gain-brain --release
 cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle imagine --release
+cargo nih-plug bundle miff --release
 cargo nih-plug bundle pope-scope --release
 cargo nih-plug bundle satch --release
 cargo nih-plug bundle six-pack --release
@@ -151,6 +164,7 @@ cargo nih-plug bundle wavetable-filter --release
 cargo build --bin gain-brain --release
 cargo build --bin gs-meter --release
 cargo build --bin imagine --release
+cargo build --bin miff --release
 cargo build --bin pope-scope --release
 cargo build --bin satch --release
 cargo build --bin six-pack --release
@@ -183,6 +197,7 @@ tract-plugin-pack/
 ├── gain-brain/             # Gain utility with group linking
 ├── gs-meter/               # Loudness meter + gain utility
 ├── imagine/                # Multiband stereo imager modeled on Ozone Imager
+├── miff/                   # MSEG hand-drawn FIR convolution filter
 ├── pope-scope/             # Multichannel real-time oscilloscope
 ├── satch/                  # Spectral saturator with detail preservation
 ├── six-pack/               # Six-band parallel multiband saturator
@@ -195,6 +210,7 @@ tract-plugin-pack/
 │   ├── gain-brain/
 │   ├── gs-meter/
 │   ├── imagine/
+│   ├── miff/
 │   ├── pope-scope/
 │   ├── satch/
 │   ├── six-pack/
@@ -207,7 +223,7 @@ tract-plugin-pack/
 ## Testing
 
 ```bash
-cargo nextest run --workspace   # All tests (461) -- parallel runner
+cargo nextest run --workspace   # All tests (752) -- parallel runner
 cargo clippy --workspace        # Lint check
 ```
 
@@ -218,6 +234,7 @@ Install nextest via `cargo install cargo-nextest --locked`. Config lives in `.co
 - [Gain Brain Manual](docs/gain-brain/gain-brain-manual.md)
 - [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
 - [Imagine Manual](docs/imagine/imagine-manual.md)
+- [Miff Manual](docs/miff/miff-manual.md)
 - [Pope Scope Manual](docs/pope-scope/pope-scope-manual.md)
 - [Satch Manual](docs/satch/satch-manual.md)
 - [Six Pack Manual](docs/six-pack/six-pack-manual.md)

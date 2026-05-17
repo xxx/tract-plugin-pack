@@ -1,5 +1,5 @@
 ---
-title: "miff"
+title: "Miff"
 subtitle: "User Manual"
 author: "Michael Dungan"
 geometry: margin=2.5cm
@@ -11,14 +11,14 @@ header-includes:
 
 # Overview
 
-miff is an audio effect plugin (VST3/CLAP) that filters audio through a FIR
+Miff is an audio effect plugin (VST3/CLAP) that filters audio through a FIR
 kernel you draw by hand. Instead of loading a wavetable or dialing in a
 conventional EQ, you sketch a curve in a multi-segment envelope (MSEG) editor,
 and that curve *becomes* the filter's impulse response.
 
-This makes miff a sibling of Wavetable Filter — both are wavetable-style FIR
+This makes Miff a sibling of Wavetable Filter — both are wavetable-style FIR
 convolution filters — but where Wavetable Filter takes its kernel from a loaded
-wavetable file, miff takes its kernel from a shape you draw.
+wavetable file, Miff takes its kernel from a shape you draw.
 
 The plugin supports two filtering modes:
 
@@ -26,11 +26,11 @@ The plugin supports two filtering modes:
 - **Phaseless** — STFT magnitude-only filtering. No pre-ringing, at a constant
   2048-sample latency.
 
-![miff interface](screenshot.png){ width=100% }
+![Miff interface](screenshot.png){ width=100% }
 
-# How miff works
+# How Miff works
 
-Understanding one idea makes everything else in miff make sense:
+Understanding one idea makes everything else in Miff make sense:
 
 **The curve you draw is the filter's impulse response — the kernel itself, in
 the time domain.** It is *not* a picture of the frequency response. The
@@ -40,7 +40,7 @@ curve (its Fourier transform), not something you draw directly.
 ## The bipolar midline
 
 The MSEG editor's vertical range is 0 to 1, but FIR taps are bipolar (they can
-be positive or negative). miff bridges this with a simple mapping applied to
+be positive or negative). Miff bridges this with a simple mapping applied to
 every point of the curve:
 
 $$\text{tap} = 2 \times \text{value} - 1$$
@@ -52,8 +52,8 @@ So:
 - Values **below 0.5** produce **negative** taps.
 
 A flat curve sitting on the 0.5 midline therefore bakes to an all-zero kernel,
-and miff treats an all-zero kernel as **dry passthrough**. A freshly inserted
-miff colours nothing until you draw something — it is safe to place on any
+and Miff treats an all-zero kernel as **dry passthrough**. A freshly inserted
+Miff colours nothing until you draw something — it is safe to place on any
 track.
 
 Because the midline is a true zero, drawing *across* it — partly above, partly
@@ -62,7 +62,7 @@ an editor whose Y axis only runs 0 to 1.
 
 ## Peak-magnitude normalisation
 
-After baking the curve into taps, miff measures the kernel's strongest
+After baking the curve into taps, Miff measures the kernel's strongest
 frequency-response magnitude and scales the whole kernel so that peak sits at
 exactly 0 dB. The filter therefore **never boosts** any frequency above unity,
 and loudness stays consistent no matter what shape you draw.
@@ -92,7 +92,7 @@ by **segments**.
   start node's value flat until the next node, instead of interpolating.
 - **Shift+drag** — fine adjustment (smaller movement per pixel).
 - **Alt+drag** — **stepped-draw**: paint a staircase directly. As the pointer
-  crosses each grid cell, miff places one stepped node at your cursor height.
+  crosses each grid cell, Miff places one stepped node at your cursor height.
   Dragging back over cells you have already painted *repaints* them — it does
   not stack extra nodes.
 
@@ -237,7 +237,7 @@ tap-to-tap variation:
 
 # Tips
 
-- **A fresh miff does nothing on purpose.** The default flat-0.5 curve bakes to
+- **A fresh Miff does nothing on purpose.** The default flat-0.5 curve bakes to
   an all-zero kernel — dry passthrough. Draw a shape to hear the filter.
 - **Draw across the midline for highpass and comb filters.** Shapes that stay
   entirely above 0.5 behave lowpass-ish; crossing the midline opens up

@@ -7,6 +7,7 @@ Each plugin keeps its user manual under `docs/<plugin>/`:
 | Gain Brain | [gain-brain-manual.md](gain-brain/gain-brain-manual.md) | [gain-brain-manual.pdf](gain-brain/gain-brain-manual.pdf) |
 | GS Meter | [gs-meter-manual.md](gs-meter/gs-meter-manual.md) | [gs-meter-manual.pdf](gs-meter/gs-meter-manual.pdf) |
 | Imagine | [imagine/imagine-manual.md](imagine/imagine-manual.md) | [imagine/imagine-manual.pdf](imagine/imagine-manual.pdf) |
+| Miff | [miff-manual.md](miff/miff-manual.md) | [miff-manual.pdf](miff/miff-manual.pdf) |
 | Pope Scope | [pope-scope-manual.md](pope-scope/pope-scope-manual.md) | [pope-scope-manual.pdf](pope-scope/pope-scope-manual.pdf) |
 | Satch | [satch/satch-manual.md](satch/satch-manual.md) | [satch/satch-manual.pdf](satch/satch-manual.pdf) |
 | Six Pack | [six-pack/six-pack-manual.md](six-pack/six-pack-manual.md) | [six-pack/six-pack-manual.pdf](six-pack/six-pack-manual.pdf) |

@@ -1,5 +1,5 @@
 #![feature(portable_simd)]
-//! miff — a convolution filter whose FIR kernel is hand-drawn with an MSEG
+//! Miff — a convolution filter whose FIR kernel is hand-drawn with an MSEG
 //! editor. See `docs/superpowers/specs/2026-05-16-miff-design.md`.
 
 pub mod convolution;
@@ -196,7 +196,7 @@ impl Miff {
 }
 
 impl Plugin for Miff {
-    const NAME: &'static str = "miff";
+    const NAME: &'static str = "Miff";
     const VENDOR: &'static str = "Michael Dungan";
     const URL: &'static str = "https://github.com/xxx/miff";
     const EMAIL: &'static str = "no-reply@example.com";
