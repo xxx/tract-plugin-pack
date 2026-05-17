@@ -1,12 +1,13 @@
 //! Profiling harness for `tract-dsp`.
 //!
 //! Drives the crate's audio-thread hot paths directly — the ITU-R BS.1770-4
-//! true-peak detector and the lock-free SPSC ring — with no plugin or GUI
-//! plumbing. Measures the same code `gs-meter`, `tinylimit`, and `imagine`
-//! run in a host.
+//! true-peak detector, the lock-free SPSC ring, and the STFT analysis
+//! front-end — with no plugin or GUI plumbing. Measures the same code
+//! `gs-meter`, `tinylimit`, `imagine`, `satch`, and `warp-zone` run in a host.
 //!
-//! Build (with target-cpu auto-detected via xtask):
-//!     cargo xtask native build --profile profiling --example tract_dsp_profile -p tract-dsp
+//! Build (with target-cpu auto-detected via xtask; the example requires the
+//! `stft-analysis` feature):
+//!     cargo xtask native build --profile profiling --example tract_dsp_profile -p tract-dsp --features stft-analysis
 //!
 //! Profile a single scenario with perf (comment out the others in `main`):
 //!     perf record -F 999 -g -- target/profiling/examples/tract_dsp_profile
@@ -26,11 +27,15 @@
 //!  - SPSC ring `push` — the per-sample audio-thread cost imagine's
 //!    vectorscope pays. The consumer-side `snapshot` is timed separately
 //!    (GUI-thread, not a per-sample cost) and reported as ns/call.
+//!  - `StftAnalyzer` `write` every sample + per-hop `analyze` at satch's
+//!    2048/512 and warp-zone's 4096/1024 frame/hop sizes — the forward-FFT
+//!    analysis-side cost both spectral plugins pay.
 
 use std::hint::black_box;
 use std::time::Instant;
 
 use tract_dsp::spsc;
+use tract_dsp::stft_analysis::StftAnalyzer;
 use tract_dsp::true_peak::TruePeakDetector;
 
 const BLOCK: usize = 1024;
@@ -45,6 +50,8 @@ enum Path {
     TruePeakPeak,
     /// `spsc::Producer::push` — one (L, R) pair per sample.
     SpscPush,
+    /// `StftAnalyzer::write` every sample + `analyze` once per `hop` samples.
+    StftAnalyze { fft_size: usize, hop: usize },
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -108,6 +115,21 @@ fn run(scenario: Scenario) -> RunResult {
                 let s = signal[n % signal.len()];
                 prod.push(black_box(s), black_box(-s));
             }
+        }
+        Path::StftAnalyze { fft_size, hop } => {
+            let mut analyzer = StftAnalyzer::new(fft_size, hop);
+            let mut hop_counter = 0_usize;
+            let mut acc = 0.0_f32;
+            for n in 0..total_samples {
+                analyzer.write(black_box(signal[n % signal.len()]));
+                hop_counter += 1;
+                if hop_counter >= hop {
+                    hop_counter = 0;
+                    let frame = analyzer.analyze();
+                    acc += frame.spectrum[1].re;
+                }
+            }
+            black_box(acc);
         }
     }
     let elapsed = start.elapsed();
@@ -189,6 +211,22 @@ fn main() {
         Scenario {
             name: "SPSC push / 48k",
             path: Path::SpscPush,
+            sample_rate: 48_000.0,
+        },
+        Scenario {
+            name: "StftAnalyzer write+analyze / 2048-512",
+            path: Path::StftAnalyze {
+                fft_size: 2048,
+                hop: 512,
+            },
+            sample_rate: 48_000.0,
+        },
+        Scenario {
+            name: "StftAnalyzer write+analyze / 4096-1024",
+            path: Path::StftAnalyze {
+                fft_size: 4096,
+                hop: 1024,
+            },
             sample_rate: 48_000.0,
         },
     ];

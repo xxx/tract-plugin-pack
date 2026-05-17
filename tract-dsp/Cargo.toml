@@ -8,6 +8,12 @@ license = "GPL-3.0-or-later"
 # No [lib] section: default rlib. No cdylib, no bin — this is a library only.
 # No [dependencies]: pure std + std::simd (nightly, pinned by rust-toolchain.toml).
 
+# The profiling harness drives the StftAnalyzer hot path, so it needs the
+# `stft-analysis` feature; declared here so a featureless build skips it.
+[[example]]
+name = "tract_dsp_profile"
+required-features = ["stft-analysis"]
+
 [features]
 # Gates the FFT-based `stft` module so non-FFT consumers don't pull realfft/rustfft.
 stft = ["dep:realfft", "dep:rustfft"]
