@@ -23,7 +23,7 @@ crossbeam = "0.8"
 atomic_float = "1.0"
 realfft = "3.3"
 rustfft = "6.2"
-tract-dsp = { path = "../tract-dsp" }
+tract-dsp = { path = "../tract-dsp", features = ["stft"] }
 
 [package.metadata.bundler]
 name = "miff"

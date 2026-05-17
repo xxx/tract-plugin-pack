@@ -1,10 +1,7 @@
 //! Raw + Phaseless convolution engines, adapted from wavetable-filter's
 //! proven DSP. A self-contained module — no plugin or GUI types.
 
-use crate::kernel::{Kernel, MAG_BINS, MAX_KERNEL};
-use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
-use rustfft::num_complex::Complex;
-use std::sync::Arc;
+use crate::kernel::{Kernel, MAX_KERNEL};
 
 /// Per-channel time-domain convolution state. A thin wrapper over
 /// `tract_dsp::fir::FirRing`.
@@ -57,169 +54,30 @@ pub const PHASELESS_HOP: usize = STFT_FRAME / 2; // 2048
 /// Reported plugin latency in Phaseless mode, in samples.
 pub const PHASELESS_LATENCY: u32 = PHASELESS_HOP as u32;
 
-/// Per-channel STFT magnitude-only convolution state. Fixed `STFT_FRAME`-point
-/// transform; the kernel's magnitude spectrum is applied to each frame, phase
-/// preserved. Adapted from wavetable-filter's STFT path.
-///
-/// The forward FFT input is the latest `STFT_FRAME` input samples, windowed
-/// by a Hann window. Each bin is multiplied by the kernel's magnitude (real
-/// scalar — phase preserved). The result is IFFT'd and overlap-add'd with
-/// scale `1/STFT_FRAME`. Output is delayed by `PHASELESS_HOP` samples.
+/// Per-channel STFT magnitude-only convolution state. A thin wrapper over
+/// `tract_dsp::stft::StftConvolver` with a fixed `STFT_FRAME`-point transform.
 pub struct PhaselessChannel {
-    fft: Arc<dyn RealToComplex<f32>>,
-    ifft: Arc<dyn ComplexToReal<f32>>,
-    window: Vec<f32>,
-    /// Circular input buffer: STFT_FRAME samples.
-    in_buf: Vec<f32>,
-    /// Position where the NEXT sample will be written (oldest is `in_pos`).
-    in_pos: usize,
-    /// Overlap-add output accumulator: STFT_FRAME samples.
-    out_buf: Vec<f32>,
-    /// Read/write position within the current hop (0..PHASELESS_HOP).
-    out_pos: usize,
-    scratch_time: Vec<f32>,
-    scratch_freq: Vec<Complex<f32>>,
-    /// Pre-allocated FFT scratch buffers. `realfft`'s short-form `process()`
-    /// heap-allocates a scratch vec per call; `process_with_scratch` reuses
-    /// these so the audio-thread frame path never allocates. The forward and
-    /// inverse transforms can require different scratch sizes — kept separate.
-    scratch_fwd: Vec<Complex<f32>>,
-    scratch_inv: Vec<Complex<f32>>,
+    conv: tract_dsp::stft::StftConvolver,
 }
 
 impl PhaselessChannel {
     pub fn new() -> Self {
-        let mut planner = RealFftPlanner::<f32>::new();
-        let fft = planner.plan_fft_forward(STFT_FRAME);
-        let ifft = planner.plan_fft_inverse(STFT_FRAME);
-        let window: Vec<f32> = tract_dsp::window::hann_periodic(STFT_FRAME);
-        let scratch_fwd = fft.make_scratch_vec();
-        let scratch_inv = ifft.make_scratch_vec();
         Self {
-            fft,
-            ifft,
-            window,
-            in_buf: vec![0.0; STFT_FRAME],
-            in_pos: 0,
-            out_buf: vec![0.0; STFT_FRAME],
-            out_pos: 0,
-            scratch_time: vec![0.0; STFT_FRAME],
-            scratch_freq: vec![Complex::new(0.0, 0.0); MAG_BINS],
-            scratch_fwd,
-            scratch_inv,
+            conv: tract_dsp::stft::StftConvolver::new(STFT_FRAME),
         }
     }
 
     /// Zero all state.
     pub fn reset(&mut self) {
-        self.in_buf.iter_mut().for_each(|s| *s = 0.0);
-        self.out_buf.iter_mut().for_each(|s| *s = 0.0);
-        self.in_pos = 0;
-        self.out_pos = 0;
+        self.conv.reset();
     }
 
     /// Process one sample. Output is always delayed by `PHASELESS_HOP` samples.
     ///
-    /// Both zero and non-zero kernels route through the STFT — the engine's
-    /// inherent `PHASELESS_HOP` latency is uniform regardless of kernel, so it
-    /// matches the fixed latency miff reports to the host in Phaseless mode.
-    /// A zero kernel maps to per-bin gain 1.0 (identity) inside `process_frame`,
-    /// so it becomes a *delayed* dry passthrough — never a 0-delay bypass,
-    /// which would play 2048 samples early against the host's delay
-    /// compensation.
+    /// A zero kernel maps to per-bin gain 1.0 (identity) — a *delayed* dry
+    /// passthrough, never a 0-delay bypass.
     pub fn process(&mut self, sample: f32, kernel: &Kernel) -> f32 {
-        // When out_pos is 0 (start of a new hop), process the next STFT frame.
-        if self.out_pos == 0 {
-            // Shift the second hop of out_buf into the first half, clear second.
-            self.out_buf.copy_within(PHASELESS_HOP..STFT_FRAME, 0);
-            self.out_buf[PHASELESS_HOP..].fill(0.0);
-            Self::process_frame_static(
-                &self.in_buf,
-                self.in_pos,
-                &mut self.out_buf,
-                kernel,
-                &self.window,
-                self.fft.as_ref(),
-                self.ifft.as_ref(),
-                &mut self.scratch_time,
-                &mut self.scratch_freq,
-                &mut self.scratch_fwd,
-                &mut self.scratch_inv,
-            );
-        }
-
-        // Write the new input sample into the circular buffer.
-        self.in_buf[self.in_pos] = sample;
-        // Read the current (delayed) output sample.
-        let out = self.out_buf[self.out_pos];
-
-        // Advance positions.
-        self.in_pos = (self.in_pos + 1) & (STFT_FRAME - 1);
-        self.out_pos += 1;
-        if self.out_pos >= PHASELESS_HOP {
-            self.out_pos = 0;
-        }
-
-        out
-    }
-
-    /// STFT frame: window → FFT → magnitude multiply → IFFT → overlap-add.
-    ///
-    /// Faithfully reproduced from wavetable-filter's `process_stft_frame`.
-    /// Scale factor: `1/N` where N = STFT_FRAME. With a Hann window at 50%
-    /// overlap the OLA sum is `N/2` (half the window's squared-sum), and the
-    /// `1/N` scale reduces this to a flat `0.5` gain — which is the correct
-    /// normalization for Hann-windowed 50% OLA.
-    ///
-    /// Per-bin gain: `1.0` when `kernel.is_zero` (identity — a delayed dry
-    /// passthrough), otherwise `kernel.mags[bin]`. A zero kernel has all-zero
-    /// `mags`, so blindly multiplying would produce silence — the `is_zero`
-    /// branch is what keeps the zero-kernel path a passthrough.
-    #[allow(clippy::too_many_arguments)]
-    fn process_frame_static(
-        in_buf: &[f32],
-        in_pos: usize,
-        out_buf: &mut [f32],
-        kernel: &Kernel,
-        window: &[f32],
-        fft: &dyn RealToComplex<f32>,
-        ifft: &dyn ComplexToReal<f32>,
-        scratch_time: &mut [f32],
-        scratch_freq: &mut [Complex<f32>],
-        scratch_fwd: &mut [Complex<f32>],
-        scratch_inv: &mut [Complex<f32>],
-    ) {
-        let n = STFT_FRAME;
-        let mask = n - 1;
-        // Copy the circular buffer into scratch, oldest-first, and apply window.
-        for i in 0..n {
-            scratch_time[i] = in_buf[(in_pos + i) & mask] * window[i];
-        }
-        if fft
-            .process_with_scratch(scratch_time, scratch_freq, scratch_fwd)
-            .is_err()
-        {
-            return;
-        }
-        // Multiply each bin by the kernel magnitude (real scalar, preserves
-        // phase). A zero kernel is unity gain everywhere — the identity — so
-        // skip the multiply entirely and leave the bins unchanged.
-        if !kernel.is_zero {
-            for (bin, &mag) in scratch_freq.iter_mut().zip(kernel.mags.iter()) {
-                *bin *= mag;
-            }
-        }
-        if ifft
-            .process_with_scratch(scratch_freq, scratch_time, scratch_inv)
-            .is_err()
-        {
-            return;
-        }
-        // Overlap-add with 1/N normalization (matches wavetable-filter exactly).
-        let scale = 1.0 / n as f32;
-        for i in 0..n {
-            out_buf[i] += scratch_time[i] * scale;
-        }
+        self.conv.process(sample, &kernel.mags, !kernel.is_zero)
     }
 }
 
