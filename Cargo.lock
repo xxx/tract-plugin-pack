@@ -2414,6 +2414,7 @@ dependencies = [
  "softbuffer",
  "tiny-skia",
  "tiny-skia-widgets",
+ "tract-dsp",
 ]
 
 [[package]]

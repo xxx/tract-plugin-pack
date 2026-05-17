@@ -55,9 +55,7 @@ impl SpectralShifter {
             .get_inplace_scratch_len()
             .max(fft_inverse.get_inplace_scratch_len());
 
-        let analysis_window: Vec<f32> = (0..fft_size)
-            .map(|i| 0.5 * (1.0 - (TAU * i as f32 / fft_size as f32).cos()))
-            .collect();
+        let analysis_window: Vec<f32> = tract_dsp::window::hann_periodic(fft_size);
 
         // COLA normalization (same approach as satch)
         let num_frames = fft_size / hop_size;
