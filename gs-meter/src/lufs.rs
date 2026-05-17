@@ -6,6 +6,8 @@
 //! All accumulation uses f64 for numerical stability. No allocations occur
 //! after construction (audio-thread safe).
 
+use tract_dsp::boxcar::RunningSumWindow;
+
 /// Maximum supported sample rate for pre-allocation sizing.
 const MAX_SAMPLE_RATE: f64 = 192_000.0;
 
@@ -148,19 +150,11 @@ pub struct LufsMeter {
 
     // Momentary loudness: 400ms sliding window of K-weighted squared samples.
     // At 192kHz, 400ms = 76800 samples. Uses O(1) running sum.
-    momentary_ring: Vec<f64>,
-    momentary_ring_pos: usize,
-    momentary_ring_filled: usize,
-    momentary_ring_sum: f64,
-    momentary_window_size: usize,
+    momentary: RunningSumWindow<f64>,
     momentary_max: f64,
 
     // Short-term loudness: 3000ms sliding window.
-    short_term_ring: Vec<f64>,
-    short_term_ring_pos: usize,
-    short_term_ring_filled: usize,
-    short_term_ring_sum: f64,
-    short_term_window_size: usize,
+    short_term: RunningSumWindow<f64>,
     short_term_max: f64,
 
     // Integrated loudness: gated block energies.
@@ -213,18 +207,10 @@ impl LufsMeter {
             filter_l: KWeightFilter::new(sample_rate),
             filter_r: KWeightFilter::new(sample_rate),
 
-            momentary_ring: vec![0.0; momentary_max_size],
-            momentary_ring_pos: 0,
-            momentary_ring_filled: 0,
-            momentary_ring_sum: 0.0,
-            momentary_window_size,
+            momentary: RunningSumWindow::new(momentary_max_size, momentary_window_size),
             momentary_max: 0.0,
 
-            short_term_ring: vec![0.0; short_term_max_size],
-            short_term_ring_pos: 0,
-            short_term_ring_filled: 0,
-            short_term_ring_sum: 0.0,
-            short_term_window_size,
+            short_term: RunningSumWindow::new(short_term_max_size, short_term_window_size),
             short_term_max: 0.0,
 
             block_ring: vec![0.0; MAX_BLOCK_ENTRIES],
@@ -259,17 +245,11 @@ impl LufsMeter {
         self.filter_r.reset();
 
         // Momentary
-        self.momentary_ring[..self.momentary_window_size].fill(0.0);
-        self.momentary_ring_pos = 0;
-        self.momentary_ring_filled = 0;
-        self.momentary_ring_sum = 0.0;
+        self.momentary.reset();
         self.momentary_max = 0.0;
 
         // Short-term
-        self.short_term_ring[..self.short_term_window_size].fill(0.0);
-        self.short_term_ring_pos = 0;
-        self.short_term_ring_filled = 0;
-        self.short_term_ring_sum = 0.0;
+        self.short_term.reset();
         self.short_term_max = 0.0;
 
         // Integrated
@@ -295,8 +275,8 @@ impl LufsMeter {
         self.filter_l.set_sample_rate(sample_rate);
         self.filter_r.set_sample_rate(sample_rate);
 
-        self.momentary_window_size = (sample_rate * 0.4) as usize;
-        self.short_term_window_size = (sample_rate * 3.0) as usize;
+        self.momentary.set_window((sample_rate * 0.4) as usize);
+        self.short_term.set_window((sample_rate * 3.0) as usize);
         self.samples_per_block = (sample_rate * 0.4) as usize;
         self.samples_per_hop = (sample_rate * 0.1) as usize;
         self.samples_per_st_block = (sample_rate * 3.0) as usize;
@@ -316,32 +296,10 @@ impl LufsMeter {
         let sq = kl * kl + kr * kr;
 
         // ── Momentary (400ms) sliding window ──
-        if self.momentary_ring_filled == self.momentary_window_size {
-            self.momentary_ring_sum -= self.momentary_ring[self.momentary_ring_pos];
-        }
-        self.momentary_ring[self.momentary_ring_pos] = sq;
-        self.momentary_ring_sum += sq;
-        self.momentary_ring_pos += 1;
-        if self.momentary_ring_pos >= self.momentary_window_size {
-            self.momentary_ring_pos = 0;
-        }
-        if self.momentary_ring_filled < self.momentary_window_size {
-            self.momentary_ring_filled += 1;
-        }
+        self.momentary.push(sq);
 
         // ── Short-term (3000ms) sliding window ──
-        if self.short_term_ring_filled == self.short_term_window_size {
-            self.short_term_ring_sum -= self.short_term_ring[self.short_term_ring_pos];
-        }
-        self.short_term_ring[self.short_term_ring_pos] = sq;
-        self.short_term_ring_sum += sq;
-        self.short_term_ring_pos += 1;
-        if self.short_term_ring_pos >= self.short_term_window_size {
-            self.short_term_ring_pos = 0;
-        }
-        if self.short_term_ring_filled < self.short_term_window_size {
-            self.short_term_ring_filled += 1;
-        }
+        self.short_term.push(sq);
 
         // ── Integrated loudness: accumulate block energy ──
         self.block_sample_count += 1;
@@ -353,9 +311,9 @@ impl LufsMeter {
 
             if self.block_sample_count >= self.samples_per_block {
                 // Mean-square energy over the 400ms block.
-                // Use the momentary ring's running sum for the 400ms block energy.
-                let block_energy = if self.momentary_ring_filled >= self.momentary_window_size {
-                    self.momentary_ring_sum.max(0.0) / self.momentary_window_size as f64
+                // Use the momentary window's running sum for the 400ms block energy.
+                let block_energy = if self.momentary.filled() >= self.momentary.window() {
+                    self.momentary.sum().max(0.0) / self.momentary.window() as f64
                 } else {
                     0.0
                 };
@@ -373,9 +331,8 @@ impl LufsMeter {
         if self.st_hop_counter >= self.samples_per_st_hop {
             self.st_hop_counter = 0;
 
-            if self.short_term_ring_filled >= self.short_term_window_size {
-                let st_energy =
-                    self.short_term_ring_sum.max(0.0) / self.short_term_window_size as f64;
+            if self.short_term.filled() >= self.short_term.window() {
+                let st_energy = self.short_term.sum().max(0.0) / self.short_term.window() as f64;
 
                 let st_pos = if self.st_block_count < MAX_ST_ENTRIES {
                     self.st_block_count
@@ -391,10 +348,10 @@ impl LufsMeter {
     /// Current momentary loudness in LUFS (400ms window).
     /// Returns -inf until a full 400ms window has been accumulated.
     pub fn momentary_lufs(&self) -> f64 {
-        if self.momentary_ring_filled < self.momentary_window_size {
+        if self.momentary.filled() < self.momentary.window() {
             return f64::NEG_INFINITY;
         }
-        let mean_sq = self.momentary_ring_sum.max(0.0) / self.momentary_window_size as f64;
+        let mean_sq = self.momentary.sum().max(0.0) / self.momentary.window() as f64;
         energy_to_loudness(mean_sq)
     }
 
@@ -406,10 +363,10 @@ impl LufsMeter {
     /// Current short-term loudness in LUFS (3000ms window).
     /// Returns -inf until a full 3000ms window has been accumulated.
     pub fn short_term_lufs(&self) -> f64 {
-        if self.short_term_ring_filled < self.short_term_window_size {
+        if self.short_term.filled() < self.short_term.window() {
             return f64::NEG_INFINITY;
         }
-        let mean_sq = self.short_term_ring_sum.max(0.0) / self.short_term_window_size as f64;
+        let mean_sq = self.short_term.sum().max(0.0) / self.short_term.window() as f64;
         energy_to_loudness(mean_sq)
     }
 
@@ -555,16 +512,16 @@ impl LufsMeter {
     /// Call once per audio buffer.
     pub fn update_maxes(&mut self) {
         // Momentary max: track highest energy, not LUFS, to avoid log in hot path
-        if self.momentary_ring_filled > 0 {
-            let mean_sq = self.momentary_ring_sum.max(0.0) / self.momentary_ring_filled as f64;
+        if self.momentary.filled() > 0 {
+            let mean_sq = self.momentary.mean();
             if mean_sq > self.momentary_max {
                 self.momentary_max = mean_sq;
             }
         }
 
         // Short-term max
-        if self.short_term_ring_filled > 0 {
-            let mean_sq = self.short_term_ring_sum.max(0.0) / self.short_term_ring_filled as f64;
+        if self.short_term.filled() > 0 {
+            let mean_sq = self.short_term.mean();
             if mean_sq > self.short_term_max {
                 self.short_term_max = mean_sq;
             }
@@ -732,9 +689,10 @@ mod tests {
         // At 48kHz, 400ms = 19200 samples
         let meter = LufsMeter::new(48000.0);
         assert_eq!(
-            meter.momentary_window_size, 19200,
+            meter.momentary.window(),
+            19200,
             "400ms at 48kHz should be 19200 samples, got {}",
-            meter.momentary_window_size
+            meter.momentary.window()
         );
     }
 
@@ -743,9 +701,10 @@ mod tests {
         // At 48kHz, 3000ms = 144000 samples
         let meter = LufsMeter::new(48000.0);
         assert_eq!(
-            meter.short_term_window_size, 144000,
+            meter.short_term.window(),
+            144000,
             "3000ms at 48kHz should be 144000 samples, got {}",
-            meter.short_term_window_size
+            meter.short_term.window()
         );
     }
 
@@ -773,15 +732,17 @@ mod tests {
     #[test]
     fn test_set_sample_rate_updates_windows() {
         let mut meter = LufsMeter::new(48000.0);
-        assert_eq!(meter.momentary_window_size, 19200);
+        assert_eq!(meter.momentary.window(), 19200);
 
         meter.set_sample_rate(96000.0);
         assert_eq!(
-            meter.momentary_window_size, 38400,
+            meter.momentary.window(),
+            38400,
             "400ms at 96kHz should be 38400 samples"
         );
         assert_eq!(
-            meter.short_term_window_size, 288000,
+            meter.short_term.window(),
+            288000,
             "3000ms at 96kHz should be 288000 samples"
         );
     }
