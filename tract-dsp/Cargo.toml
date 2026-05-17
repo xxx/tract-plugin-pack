@@ -11,6 +11,8 @@ license = "GPL-3.0-or-later"
 [features]
 # Gates the FFT-based `stft` module so non-FFT consumers don't pull realfft/rustfft.
 stft = ["dep:realfft", "dep:rustfft"]
+# Gates the `stft_analysis` module (rustfft only — complex transforms, no realfft).
+stft-analysis = ["dep:rustfft"]
 
 [dependencies]
 realfft = { version = "3.3", optional = true }
