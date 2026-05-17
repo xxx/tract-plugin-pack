@@ -2,8 +2,9 @@
 //! workspace.
 //!
 //! This crate contains pure signal-processing code only. It has no
-//! `nih-plug`, `tiny-skia`, `softbuffer`, or editor dependency, and no
-//! external crates at all — just `std` and `std::simd`.
+//! `nih-plug`, `tiny-skia`, `softbuffer`, or editor dependency. By default it
+//! pulls no external crates at all — just `std` and `std::simd`. The optional
+//! `stft` feature adds `realfft`/`rustfft` and enables the `stft` module.
 //!
 //! Requires nightly Rust for `std::simd`; the workspace already pins nightly
 //! via `rust-toolchain.toml`.
