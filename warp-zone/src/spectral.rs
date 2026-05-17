@@ -9,6 +9,7 @@ use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 use std::f32::consts::{PI, TAU};
 use std::sync::Arc;
+use tract_dsp::stft_analysis::StftAnalyzer;
 
 /// Zero complex value. Defined as a function because `Complex::new` is not
 /// const-compatible in this version of num_complex.
@@ -21,20 +22,18 @@ pub struct SpectralShifter {
     fft_size: usize,
     hop_size: usize,
 
-    fft_forward: Arc<dyn Fft<f32>>,
+    /// Shared STFT analysis front-end (input ring, analysis window, forward
+    /// FFT, COLA synthesis window).
+    stft: StftAnalyzer,
+
     fft_inverse: Arc<dyn Fft<f32>>,
+    /// Inverse-FFT in-place scratch.
     scratch: Vec<Complex<f32>>,
 
-    analysis_window: Vec<f32>,
-    synthesis_window: Vec<f32>,
-
-    input_ring: Vec<f32>,
     output_ring: Vec<f64>,
-    input_pos: usize,
     read_pos: usize,
     hop_counter: usize,
 
-    fft_buf: Vec<Complex<f32>>,
     out_buf: Vec<Complex<f32>>,
 
     last_input_phase: Vec<f32>,
@@ -49,27 +48,8 @@ impl SpectralShifter {
         assert!(fft_size > 0 && hop_size > 0 && fft_size >= hop_size);
 
         let mut planner = FftPlanner::new();
-        let fft_forward = planner.plan_fft_forward(fft_size);
         let fft_inverse = planner.plan_fft_inverse(fft_size);
-        let scratch_len = fft_forward
-            .get_inplace_scratch_len()
-            .max(fft_inverse.get_inplace_scratch_len());
-
-        let analysis_window: Vec<f32> = tract_dsp::window::hann_periodic(fft_size);
-
-        // COLA normalization (same approach as satch)
-        let num_frames = fft_size / hop_size;
-        let mut cola_check = vec![0.0_f64; hop_size];
-        for frame in 0..num_frames {
-            let offset = frame * hop_size;
-            for p in 0..hop_size {
-                let w = analysis_window[p + offset] as f64;
-                cola_check[p] += w * w;
-            }
-        }
-        let cola_factor = cola_check[0] as f32;
-        let inv_cola = 1.0 / cola_factor;
-        let synthesis_window: Vec<f32> = analysis_window.iter().map(|&w| w * inv_cola).collect();
+        let scratch_len = fft_inverse.get_inplace_scratch_len();
 
         let out_ring_size = 2 * fft_size;
         let half_plus_one = fft_size / 2 + 1;
@@ -77,17 +57,12 @@ impl SpectralShifter {
         Self {
             fft_size,
             hop_size,
-            fft_forward,
+            stft: StftAnalyzer::new(fft_size, hop_size),
             fft_inverse,
             scratch: vec![zero(); scratch_len],
-            analysis_window,
-            synthesis_window,
-            input_ring: vec![0.0; fft_size],
             output_ring: vec![0.0; out_ring_size],
-            input_pos: 0,
             read_pos: 0,
             hop_counter: 0,
-            fft_buf: vec![zero(); fft_size],
             out_buf: vec![zero(); fft_size],
             last_input_phase: vec![0.0; half_plus_one],
             accumulated_output_phase: vec![0.0; half_plus_one],
@@ -100,15 +75,13 @@ impl SpectralShifter {
     }
 
     pub fn reset(&mut self) {
-        self.input_ring.fill(0.0);
+        self.stft.reset();
         self.output_ring.fill(0.0);
-        self.input_pos = 0;
         self.read_pos = 0;
         self.hop_counter = 0;
         self.last_input_phase.fill(0.0);
         self.accumulated_output_phase.fill(0.0);
         self.last_output_magnitudes.fill(0.0);
-        self.fft_buf.fill(zero());
         self.out_buf.fill(zero());
     }
 
@@ -133,8 +106,7 @@ impl SpectralShifter {
         let out_len = self.output_ring.len();
 
         if !freeze {
-            self.input_ring[self.input_pos] = input;
-            self.input_pos = (self.input_pos + 1) % self.fft_size;
+            self.stft.write(input);
         }
 
         let output = self.output_ring[self.read_pos] as f32;
@@ -154,16 +126,10 @@ impl SpectralShifter {
         let n = self.fft_size;
         let out_len = self.output_ring.len();
 
-        // Extract frame from input ring, apply analysis window
-        for i in 0..n {
-            let ring_idx = (self.input_pos + i) % n;
-            self.fft_buf[i] =
-                Complex::new(self.input_ring[ring_idx] * self.analysis_window[i], 0.0);
-        }
-
-        // Forward FFT
-        self.fft_forward
-            .process_with_scratch(&mut self.fft_buf, &mut self.scratch);
+        // Analysis front-end (windowed extract + forward FFT) owned by the
+        // StftAnalyzer; `frame` stays live to the overlap-add below, which
+        // needs `frame.synthesis_window`.
+        let frame = self.stft.analyze();
 
         // Identity short-circuit: skip phase vocoder when no shift/stretch.
         //
@@ -186,12 +152,23 @@ impl SpectralShifter {
         if is_identity {
             for k in 0..n {
                 self.out_buf[k] = Complex::new(
-                    self.fft_buf[k].re * IDENTITY_TRIM,
-                    self.fft_buf[k].im * IDENTITY_TRIM,
+                    frame.spectrum[k].re * IDENTITY_TRIM,
+                    frame.spectrum[k].im * IDENTITY_TRIM,
                 );
             }
         } else {
-            self.remap_bins(shift, stretch, low_bin, high_bin);
+            Self::remap_bins(
+                frame.spectrum,
+                &mut self.out_buf,
+                &mut self.last_input_phase,
+                &mut self.accumulated_output_phase,
+                n,
+                self.hop_size,
+                shift,
+                stretch,
+                low_bin,
+                high_bin,
+            );
         }
 
         // Capture output magnitudes for visualization (before IFFT).
@@ -211,7 +188,8 @@ impl SpectralShifter {
         let write_start = self.read_pos;
         for i in 0..n {
             let idx = (write_start + i) % out_len;
-            self.output_ring[idx] += (self.out_buf[i].re * inv_n * self.synthesis_window[i]) as f64;
+            self.output_ring[idx] +=
+                (self.out_buf[i].re * inv_n * frame.synthesis_window[i]) as f64;
         }
     }
 
@@ -224,12 +202,24 @@ impl SpectralShifter {
     /// 3. Distribute magnitude to adjacent target bins via linear interpolation.
     /// 4. Max-magnitude-wins per target bin (prevents runaway phase accumulation).
     /// 5. Accumulate output phases and construct final complex spectrum.
-    fn remap_bins(&mut self, shift: f32, stretch: f32, low_bin: usize, high_bin: usize) {
-        let n = self.fft_size;
+    #[allow(clippy::too_many_arguments)]
+    fn remap_bins(
+        spectrum: &[Complex<f32>],
+        out_buf: &mut [Complex<f32>],
+        last_input_phase: &mut [f32],
+        accumulated_output_phase: &mut [f32],
+        fft_size: usize,
+        hop_size: usize,
+        shift: f32,
+        stretch: f32,
+        low_bin: usize,
+        high_bin: usize,
+    ) {
+        let n = fft_size;
         let half_plus_one = n / 2 + 1;
 
         // Clear output buffer
-        for bin in self.out_buf.iter_mut() {
+        for bin in out_buf.iter_mut() {
             *bin = zero();
         }
 
@@ -239,39 +229,39 @@ impl SpectralShifter {
 
         // Pass through bins outside the active range (no shift/stretch)
         for k in 1..lo.min(half_plus_one) {
-            self.out_buf[k] = self.fft_buf[k];
+            out_buf[k] = spectrum[k];
             if k < n / 2 {
-                self.out_buf[n - k] = self.fft_buf[n - k];
+                out_buf[n - k] = spectrum[n - k];
             }
             // Keep phase tracking consistent
-            self.last_input_phase[k] = self.fft_buf[k].arg();
-            self.accumulated_output_phase[k] = self.fft_buf[k].arg();
+            last_input_phase[k] = spectrum[k].arg();
+            accumulated_output_phase[k] = spectrum[k].arg();
         }
         for k in hi..half_plus_one {
-            self.out_buf[k] = self.fft_buf[k];
+            out_buf[k] = spectrum[k];
             if k < n / 2 {
-                self.out_buf[n - k] = self.fft_buf[n - k];
+                out_buf[n - k] = spectrum[n - k];
             }
-            self.last_input_phase[k] = self.fft_buf[k].arg();
-            self.accumulated_output_phase[k] = self.fft_buf[k].arg();
+            last_input_phase[k] = spectrum[k].arg();
+            accumulated_output_phase[k] = spectrum[k].arg();
         }
 
         // Phase 1: Remap bins within the active range.
         // We use out_buf as temporary workspace for in-range bins:
         //   out_buf[k].re = best magnitude so far for target bin k
         //   out_buf[k].im = corresponding phase increment
-        let phase_per_bin = TAU * self.hop_size as f32 / n as f32;
+        let phase_per_bin = TAU * hop_size as f32 / n as f32;
 
         for k in lo..hi {
-            let mag = self.fft_buf[k].norm();
-            let phase = self.fft_buf[k].arg();
+            let mag = spectrum[k].norm();
+            let phase = spectrum[k].arg();
 
             // Phase deviation from expected
             let expected_phase_inc = phase_per_bin * k as f32;
-            let phase_diff = phase - self.last_input_phase[k];
+            let phase_diff = phase - last_input_phase[k];
             let phase_dev = wrap_phase(phase_diff - expected_phase_inc);
 
-            self.last_input_phase[k] = phase;
+            last_input_phase[k] = phase;
 
             // Target bin: stretch first, then shift
             let target_f = k as f32 * stretch * shift_ratio;
@@ -288,46 +278,46 @@ impl SpectralShifter {
             // Low bin contribution (max-magnitude-wins)
             if target_lo > 0 && target_lo < half_plus_one {
                 let contrib_mag = mag * (1.0 - frac);
-                if contrib_mag > self.out_buf[target_lo].re {
-                    self.out_buf[target_lo] = Complex::new(contrib_mag, phase_inc_lo);
+                if contrib_mag > out_buf[target_lo].re {
+                    out_buf[target_lo] = Complex::new(contrib_mag, phase_inc_lo);
                 }
             }
 
             // High bin contribution (max-magnitude-wins)
             if target_hi > 0 && target_hi < half_plus_one {
                 let contrib_mag = mag * frac;
-                if contrib_mag > self.out_buf[target_hi].re {
-                    self.out_buf[target_hi] = Complex::new(contrib_mag, phase_inc_hi);
+                if contrib_mag > out_buf[target_hi].re {
+                    out_buf[target_hi] = Complex::new(contrib_mag, phase_inc_hi);
                 }
             }
         }
 
         // Phase 2: accumulate phases and construct final complex output
         for k in 1..half_plus_one {
-            let mag = self.out_buf[k].re;
-            let phase_inc = self.out_buf[k].im;
+            let mag = out_buf[k].re;
+            let phase_inc = out_buf[k].im;
 
             if mag > 0.0 {
-                self.accumulated_output_phase[k] += phase_inc;
-                let out_phase = self.accumulated_output_phase[k];
+                accumulated_output_phase[k] += phase_inc;
+                let out_phase = accumulated_output_phase[k];
 
                 let (sin_val, cos_val) = out_phase.sin_cos();
-                self.out_buf[k] = Complex::new(mag * cos_val, mag * sin_val);
+                out_buf[k] = Complex::new(mag * cos_val, mag * sin_val);
 
                 // Mirror for negative frequencies
                 if k < n / 2 {
-                    self.out_buf[n - k] = self.out_buf[k].conj();
+                    out_buf[n - k] = out_buf[k].conj();
                 }
             } else {
-                self.out_buf[k] = zero();
+                out_buf[k] = zero();
                 if k < n / 2 {
-                    self.out_buf[n - k] = zero();
+                    out_buf[n - k] = zero();
                 }
             }
         }
 
         // DC bin: pass through
-        self.out_buf[0] = self.fft_buf[0];
+        out_buf[0] = spectrum[0];
     }
 }
 

@@ -22,7 +22,7 @@ keyboard-types = "0.6"
 crossbeam = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 rustfft = "6"
-tract-dsp = { path = "../tract-dsp" }
+tract-dsp = { path = "../tract-dsp", features = ["stft-analysis"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
