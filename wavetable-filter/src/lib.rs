@@ -222,14 +222,7 @@ impl Default for WavetableFilter {
             stft_in: [vec![0.0; KERNEL_LEN], vec![0.0; KERNEL_LEN]],
             stft_out: [vec![0.0; KERNEL_LEN], vec![0.0; KERNEL_LEN]],
             stft_magnitudes: vec![0.0; KERNEL_LEN / 2 + 1],
-            stft_window: {
-                let mut w = vec![0.0f32; KERNEL_LEN];
-                for (i, w_i) in w.iter_mut().enumerate() {
-                    *w_i = 0.5
-                        * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / KERNEL_LEN as f32).cos());
-                }
-                w
-            },
+            stft_window: tract_dsp::window::hann_periodic(KERNEL_LEN),
             stft_scratch: vec![0.0; KERNEL_LEN],
             stft_in_pos: 0,
             stft_out_pos: 0,
