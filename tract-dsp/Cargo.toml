@@ -1,0 +1,9 @@
+[package]
+name = "tract-dsp"
+version = "0.1.0"
+edition = "2021"
+description = "Shared GUI-free DSP primitives for the tract-plugin-pack workspace"
+license = "GPL-3.0-or-later"
+
+# No [lib] section: default rlib. No cdylib, no bin — this is a library only.
+# No [dependencies]: pure std + std::simd (nightly, pinned by rust-toolchain.toml).
