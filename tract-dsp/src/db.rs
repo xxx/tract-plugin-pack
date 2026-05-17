@@ -57,7 +57,10 @@ mod tests {
     fn db_roundtrip() {
         for db in [-40.0, -20.0, -6.0, 0.0, 6.0, 20.0] {
             let rt = linear_to_db(db_to_linear(db));
-            assert!((rt - db).abs() < 0.001, "roundtrip failed for {db} dB: got {rt}");
+            assert!(
+                (rt - db).abs() < 0.001,
+                "roundtrip failed for {db} dB: got {rt}"
+            );
         }
     }
 
