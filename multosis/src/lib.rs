@@ -170,11 +170,8 @@ impl Plugin for Multosis {
             self.grid = grid;
         }
 
-        let sps = crate::clock::samples_per_step(
-            self.params.speed.value(),
-            bpm,
-            self.sample_rate as f64,
-        );
+        let sps =
+            crate::clock::samples_per_step(self.params.speed.value(), bpm, self.sample_rate as f64);
         let bank = self.params.effect_bank.value();
         let mix = self.params.mix.value();
         let auto_restart = self.params.auto_restart.value();
@@ -186,7 +183,14 @@ impl Plugin for Multosis {
         let right = &mut rest[0][..n];
 
         self.engine.process(
-            &mut *left, &mut *right, playing, sps, bank, mix, auto_restart, &self.grid,
+            &mut *left,
+            &mut *right,
+            playing,
+            sps,
+            bank,
+            mix,
+            auto_restart,
+            &self.grid,
         );
 
         // Post-mix output gain (smoothed per sample).
@@ -214,8 +218,7 @@ impl ClapPlugin for Multosis {
 
 impl Vst3Plugin for Multosis {
     const VST3_CLASS_ID: [u8; 16] = *b"MultosisMpdPlg\0\0";
-    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
-        &[Vst3SubCategory::Fx];
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] = &[Vst3SubCategory::Fx];
 }
 
 nih_export_clap!(Multosis);
