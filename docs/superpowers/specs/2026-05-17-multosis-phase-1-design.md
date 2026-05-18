@@ -115,9 +115,10 @@ sequencer audible.
   `KernelHandoff` pattern). The audio thread copies the snapshot when the lock
   is free; it never blocks.
 - Audio→GUI: the audio thread owns the live wavefront and publishes it to the
-  editor through an atomic bitset (8 × `AtomicU64` = 512 bits), so the editor
-  can draw the wavefront without locking (the pope-scope / warp-zone
-  atomic-display pattern).
+  editor through an atomic bitset — one `AtomicU32` per grid row, bit `col` set
+  when the cell is lit (`[AtomicU32; 16]` = 512 bits) — so the editor can draw
+  the wavefront without locking (the pope-scope / warp-zone atomic-display
+  pattern).
 
 ## 4. Grid data model — milestone 1a (pure logic)
 
