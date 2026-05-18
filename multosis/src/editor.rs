@@ -244,7 +244,12 @@ impl MultosisWindow {
     fn draw(&mut self) {
         widgets::fill_pixmap_opaque(&mut self.surface.pixmap, widgets::color_bg());
         let grid = self.params.grid.lock().map(|g| *g).unwrap_or_default();
-        grid_view::draw_grid(&mut self.surface.pixmap, &grid, self.scale_factor);
+        grid_view::draw_grid(
+            &mut self.surface.pixmap,
+            &grid,
+            self.scale_factor,
+            Some(self.mouse_pos),
+        );
         grid_view::draw_wavefront(
             &mut self.surface.pixmap,
             &self.wavefront_display,

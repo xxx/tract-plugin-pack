@@ -290,7 +290,7 @@ fn draw_cell(pixmap: &mut Pixmap, row: usize, col: usize, cell: &crate::grid::Ce
 }
 
 /// Draw the whole grid — every cell, then the loop-region outline.
-pub fn draw_grid(pixmap: &mut Pixmap, grid: &Grid, scale: f32) {
+pub fn draw_grid(pixmap: &mut Pixmap, grid: &Grid, scale: f32, cursor: Option<(f32, f32)>) {
     for r in 0..ROWS {
         for c in 0..COLS {
             draw_cell(pixmap, r, c, grid.cell(r, c), scale);
@@ -350,6 +350,14 @@ pub fn draw_grid(pixmap: &mut Pixmap, grid: &Grid, scale: f32) {
         thick,
         nub,
     );
+
+    // Move grip — drawn only while the cursor is inside the loop region.
+    if let Some((cur_x, cur_y)) = cursor {
+        if cur_x >= x0 && cur_x <= (x1 + w1) && cur_y >= y0 && cur_y <= (y1 + h1) {
+            let (gx, gy, gw, gh) = region_grip_rect(lr, scale);
+            widgets::draw_rect(pixmap, gx, gy, gw, gh, color_loop());
+        }
+    }
 }
 
 /// A lit wavefront cell.
