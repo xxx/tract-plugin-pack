@@ -133,6 +133,21 @@ pub fn row_at(py: f32, scale: f32) -> usize {
     row.clamp(0.0, (ROWS - 1) as f32) as usize
 }
 
+/// Resize the loop region by dragging `edge` to grid `index` (a column index
+/// for `Left`/`Right`, a row index for `Top`/`Bottom`, expected already
+/// clamped to `0..=COLS-1` / `0..=ROWS-1`). The moved bound is clamped against
+/// its opposite so the region can never invert and can shrink to 1×1.
+pub fn apply_region_drag(region: LoopRegion, edge: RegionEdge, index: usize) -> LoopRegion {
+    let mut r = region;
+    match edge {
+        RegionEdge::Left => r.col0 = index.min(r.col1),
+        RegionEdge::Right => r.col1 = index.max(r.col0).min(COLS - 1),
+        RegionEdge::Top => r.row0 = index.min(r.row1),
+        RegionEdge::Bottom => r.row1 = index.max(r.row0).min(ROWS - 1),
+    }
+    r
+}
+
 /// Apply a click on cell `(row, col)`'s `zone` to the grid. A left click
 /// (`right == false`) toggles a send direction (octant) or the `enabled`
 /// flag (centre); a right click toggles the `is_start` flag (centre only)
@@ -457,5 +472,81 @@ mod tests {
         assert_eq!(row_at(STATUS_H, 1.0), 0); // exactly at the grid's top
         assert_eq!(row_at(STATUS_H + CELL * 3.5, 1.0), 3);
         assert_eq!(row_at(STATUS_H + CELL * 10_000.0, 1.0), ROWS - 1);
+    }
+
+    #[test]
+    fn apply_region_drag_left_edge_moves_col0() {
+        let r = LoopRegion {
+            row0: 0,
+            row1: 15,
+            col0: 5,
+            col1: 20,
+        };
+        let out = apply_region_drag(r, RegionEdge::Left, 8);
+        assert_eq!((out.col0, out.col1), (8, 20));
+    }
+
+    #[test]
+    fn apply_region_drag_right_edge_moves_col1() {
+        let r = LoopRegion {
+            row0: 0,
+            row1: 15,
+            col0: 5,
+            col1: 20,
+        };
+        let out = apply_region_drag(r, RegionEdge::Right, 12);
+        assert_eq!((out.col0, out.col1), (5, 12));
+    }
+
+    #[test]
+    fn apply_region_drag_top_and_bottom_move_rows() {
+        let r = LoopRegion {
+            row0: 3,
+            row1: 12,
+            col0: 0,
+            col1: 31,
+        };
+        assert_eq!(apply_region_drag(r, RegionEdge::Top, 6).row0, 6);
+        assert_eq!(apply_region_drag(r, RegionEdge::Bottom, 9).row1, 9);
+    }
+
+    #[test]
+    fn apply_region_drag_cannot_invert_bounds() {
+        let r = LoopRegion {
+            row0: 4,
+            row1: 10,
+            col0: 6,
+            col1: 18,
+        };
+        // Drag the left edge past the right edge -> clamps to col1.
+        assert_eq!(apply_region_drag(r, RegionEdge::Left, 25).col0, 18);
+        // Drag the right edge past the left edge -> clamps to col0.
+        assert_eq!(apply_region_drag(r, RegionEdge::Right, 2).col1, 6);
+        // Same for the row edges.
+        assert_eq!(apply_region_drag(r, RegionEdge::Top, 15).row0, 10);
+        assert_eq!(apply_region_drag(r, RegionEdge::Bottom, 1).row1, 4);
+    }
+
+    #[test]
+    fn apply_region_drag_can_collapse_to_1x1() {
+        let r = LoopRegion {
+            row0: 4,
+            row1: 10,
+            col0: 6,
+            col1: 18,
+        };
+        // Collapse to the single cell (10, 18).
+        let a = apply_region_drag(r, RegionEdge::Left, 18);
+        let b = apply_region_drag(a, RegionEdge::Top, 10);
+        assert_eq!((b.row0, b.row1, b.col0, b.col1), (10, 10, 18, 18));
+        assert!(b.contains(10, 18));
+        assert!(!b.contains(9, 18));
+    }
+
+    #[test]
+    fn apply_region_drag_result_is_already_normalized() {
+        let r = LoopRegion::full();
+        let out = apply_region_drag(r, RegionEdge::Right, 5);
+        assert_eq!(out, out.normalized());
     }
 }
