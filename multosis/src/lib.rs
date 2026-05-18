@@ -144,6 +144,7 @@ impl Plugin for Multosis {
             self.params.clone(),
             self.wavefront_display.clone(),
             self.grid_handoff.clone(),
+            self.reset_request.clone(),
         )
     }
 

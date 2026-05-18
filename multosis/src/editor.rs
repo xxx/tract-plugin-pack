@@ -5,9 +5,10 @@
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::editor::toolbar::ToolbarControl;
 use crate::handoff::GridHandoff;
 use crate::wavefront_display::WavefrontDisplay;
 use crate::MultosisParams;
@@ -36,6 +37,9 @@ struct MultosisWindow {
     /// Latest cursor position in physical pixels, updated on CursorMoved.
     mouse_pos: (f32, f32),
     text_renderer: widgets::TextRenderer,
+    gui_context: Arc<dyn GuiContext>,
+    reset_request: Arc<AtomicBool>,
+    toolbar_drag: widgets::DragState<ToolbarControl>,
 }
 
 impl MultosisWindow {
@@ -45,6 +49,8 @@ impl MultosisWindow {
         wavefront_display: Arc<WavefrontDisplay>,
         grid_handoff: Arc<GridHandoff>,
         pending_resize: Arc<AtomicU64>,
+        gui_context: Arc<dyn GuiContext>,
+        reset_request: Arc<AtomicBool>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -62,6 +68,9 @@ impl MultosisWindow {
             grid_handoff,
             mouse_pos: (0.0, 0.0),
             text_renderer,
+            gui_context,
+            reset_request,
+            toolbar_drag: widgets::DragState::new(),
         }
     }
 
@@ -160,6 +169,7 @@ struct MultosisEditor {
     params: Arc<MultosisParams>,
     wavefront_display: Arc<WavefrontDisplay>,
     grid_handoff: Arc<GridHandoff>,
+    reset_request: Arc<AtomicBool>,
     pending_resize: Arc<AtomicU64>,
 }
 
@@ -168,11 +178,13 @@ pub fn create(
     params: Arc<MultosisParams>,
     wavefront_display: Arc<WavefrontDisplay>,
     grid_handoff: Arc<GridHandoff>,
+    reset_request: Arc<AtomicBool>,
 ) -> Option<Box<dyn Editor>> {
     Some(Box::new(MultosisEditor {
         params,
         wavefront_display,
         grid_handoff,
+        reset_request,
         pending_resize: Arc::new(AtomicU64::new(0)),
     }))
 }
@@ -181,7 +193,7 @@ impl Editor for MultosisEditor {
     fn spawn(
         &self,
         parent: ParentWindowHandle,
-        _context: Arc<dyn GuiContext>,
+        context: Arc<dyn GuiContext>,
     ) -> Box<dyn std::any::Any + Send> {
         let (persisted_w, persisted_h) = self.params.editor_state.size();
         let sf = (persisted_w as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
@@ -190,6 +202,8 @@ impl Editor for MultosisEditor {
         let wavefront_display = Arc::clone(&self.wavefront_display);
         let grid_handoff = Arc::clone(&self.grid_handoff);
         let pending_resize = Arc::clone(&self.pending_resize);
+        let gui_context = Arc::clone(&context);
+        let reset_request = Arc::clone(&self.reset_request);
 
         let window = baseview::Window::open_parented(
             &widgets::ParentWindowHandleAdapter(parent),
@@ -206,6 +220,8 @@ impl Editor for MultosisEditor {
                     wavefront_display,
                     grid_handoff,
                     pending_resize,
+                    gui_context,
+                    reset_request,
                     sf,
                 )
             },
