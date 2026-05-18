@@ -188,7 +188,10 @@ impl Plugin for Multosis {
         self.was_playing = playing;
 
         // A Reset request from the editor resets the sequence.
-        if self.reset_request.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        if self
+            .reset_request
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
             self.engine.reset();
         }
 

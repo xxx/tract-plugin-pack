@@ -108,18 +108,34 @@ pub fn draw_toolbar(
             ToolbarControl::Mix => {
                 let v = params.mix.value();
                 widgets::draw_slider(
-                    pixmap, tr, x, y, w, h, "Mix",
+                    pixmap,
+                    tr,
+                    x,
+                    y,
+                    w,
+                    h,
+                    "Mix",
                     &format!("{}%", (v * 100.0).round() as i32),
-                    v, None, false,
+                    v,
+                    None,
+                    false,
                 );
             }
             ToolbarControl::Output => {
                 let norm = params.output_gain.unmodulated_normalized_value();
                 let db = nih_plug::util::gain_to_db(params.output_gain.value());
                 widgets::draw_slider(
-                    pixmap, tr, x, y, w, h, "Out",
+                    pixmap,
+                    tr,
+                    x,
+                    y,
+                    w,
+                    h,
+                    "Out",
                     &format!("{db:.1} dB"),
-                    norm, None, false,
+                    norm,
+                    None,
+                    false,
                 );
             }
             ToolbarControl::Reset => {
