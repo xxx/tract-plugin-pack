@@ -130,7 +130,7 @@ impl MultosisWindow {
                 self.reset_request
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            // Mix/Output are drag sliders — handled in the next task, not here.
+            // Mix/Output drags are begun in on_event's ButtonPressed arm.
             ToolbarControl::Mix | ToolbarControl::Output => {}
         }
     }
@@ -144,19 +144,34 @@ impl MultosisWindow {
         }
     }
 
-    /// Set a slider control to a normalized value via the host.
+    /// Begin a host parameter gesture for a slider control.
+    fn begin_slider(&self, ctrl: ToolbarControl) {
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        match ctrl {
+            ToolbarControl::Mix => setter.begin_set_parameter(&self.params.mix),
+            ToolbarControl::Output => setter.begin_set_parameter(&self.params.output_gain),
+            _ => {}
+        }
+    }
+
+    /// End a host parameter gesture for a slider control.
+    fn end_slider(&self, ctrl: ToolbarControl) {
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        match ctrl {
+            ToolbarControl::Mix => setter.end_set_parameter(&self.params.mix),
+            ToolbarControl::Output => setter.end_set_parameter(&self.params.output_gain),
+            _ => {}
+        }
+    }
+
+    /// Set a slider control to a normalized value mid-gesture. `begin_slider`
+    /// and `end_slider` bracket the whole drag.
     fn set_slider(&self, ctrl: ToolbarControl, norm: f32) {
         let setter = ParamSetter::new(self.gui_context.as_ref());
         match ctrl {
-            ToolbarControl::Mix => {
-                setter.begin_set_parameter(&self.params.mix);
-                setter.set_parameter_normalized(&self.params.mix, norm);
-                setter.end_set_parameter(&self.params.mix);
-            }
+            ToolbarControl::Mix => setter.set_parameter_normalized(&self.params.mix, norm),
             ToolbarControl::Output => {
-                setter.begin_set_parameter(&self.params.output_gain);
-                setter.set_parameter_normalized(&self.params.output_gain, norm);
-                setter.end_set_parameter(&self.params.output_gain);
+                setter.set_parameter_normalized(&self.params.output_gain, norm)
             }
             _ => {}
         }
@@ -230,6 +245,7 @@ impl baseview::WindowHandler for MultosisWindow {
                     Some(ctrl @ (ToolbarControl::Mix | ToolbarControl::Output)) => {
                         let current = self.slider_normalized(ctrl);
                         self.toolbar_drag.begin_drag(ctrl, current, false);
+                        self.begin_slider(ctrl);
                     }
                     Some(ctrl) => self.handle_toolbar_button(ctrl),
                     None => self.handle_grid_click(false),
@@ -245,7 +261,9 @@ impl baseview::WindowHandler for MultosisWindow {
                 button: baseview::MouseButton::Left,
                 ..
             }) => {
-                self.toolbar_drag.end_drag();
+                if let Some(ctrl) = self.toolbar_drag.end_drag() {
+                    self.end_slider(ctrl);
+                }
             }
             _ => {}
         }

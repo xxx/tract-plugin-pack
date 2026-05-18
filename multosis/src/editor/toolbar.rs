@@ -107,6 +107,7 @@ pub fn draw_toolbar(
             }
             ToolbarControl::Mix => {
                 let v = params.mix.value();
+                let norm = params.mix.unmodulated_normalized_value();
                 widgets::draw_slider(
                     pixmap,
                     tr,
@@ -116,7 +117,7 @@ pub fn draw_toolbar(
                     h,
                     "Mix",
                     &format!("{}%", (v * 100.0).round() as i32),
-                    v,
+                    norm,
                     None,
                     false,
                 );
