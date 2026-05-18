@@ -25,6 +25,10 @@ use std::sync::{Arc, Mutex};
 /// The Multosis plugin's parameters and persisted state.
 #[derive(Params)]
 pub struct MultosisParams {
+    /// Persisted editor window size.
+    #[persist = "editor-state"]
+    pub editor_state: std::sync::Arc<tiny_skia_widgets::EditorState>,
+
     /// The routing grid — persisted plugin state, edited by the GUI (Milestone
     /// 1b-ii). `Arc<Mutex<Grid>>` is nih-plug's `PersistentField` shape.
     #[persist = "grid"]
@@ -54,6 +58,7 @@ pub struct MultosisParams {
 impl Default for MultosisParams {
     fn default() -> Self {
         Self {
+            editor_state: tiny_skia_widgets::EditorState::from_size(1056, 576),
             grid: Arc::new(Mutex::new(Grid::default())),
             speed: EnumParam::new("Speed", Speed::Div16),
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
@@ -90,6 +95,8 @@ pub struct Multosis {
     sample_rate: f32,
     /// Previous block's transport state, for stopped→playing edge detection.
     was_playing: bool,
+    /// Audio→GUI wavefront mirror, shared with the editor.
+    wavefront_display: Arc<crate::wavefront_display::WavefrontDisplay>,
 }
 
 impl Default for Multosis {
@@ -101,6 +108,7 @@ impl Default for Multosis {
             engine: AudioEngine::new(),
             sample_rate: 44_100.0,
             was_playing: false,
+            wavefront_display: Arc::new(crate::wavefront_display::WavefrontDisplay::new()),
         }
     }
 }
@@ -193,6 +201,9 @@ impl Plugin for Multosis {
             auto_restart,
             &self.grid,
         );
+
+        // Publish the wavefront for the editor to draw.
+        self.wavefront_display.publish(self.engine.wavefront());
 
         // Post-mix output gain (smoothed per sample).
         for i in 0..n {
