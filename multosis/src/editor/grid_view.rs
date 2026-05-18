@@ -143,6 +143,24 @@ pub fn apply_region_drag(region: LoopRegion, edge: RegionEdge, index: usize) -> 
     r
 }
 
+/// Translate the loop region by `(drow, dcol)` grid cells, preserving its
+/// size. The translation is clamped so the region always stays fully within
+/// the 16×32 grid — dragging past an edge parks the region against it.
+pub fn apply_region_move(region: LoopRegion, drow: i32, dcol: i32) -> LoopRegion {
+    let height = region.row1 - region.row0;
+    let width = region.col1 - region.col0;
+    let max_row0 = (ROWS - 1 - height) as i32;
+    let max_col0 = (COLS - 1 - width) as i32;
+    let row0 = (region.row0 as i32 + drow).clamp(0, max_row0) as usize;
+    let col0 = (region.col0 as i32 + dcol).clamp(0, max_col0) as usize;
+    LoopRegion {
+        row0,
+        row1: row0 + height,
+        col0,
+        col1: col0 + width,
+    }
+}
+
 /// Apply a click on cell `(row, col)`'s `zone` to the grid. A left click
 /// (`right == false`) toggles a send direction (octant) or the `enabled`
 /// flag (centre); a right click toggles the `is_start` flag (centre only)
@@ -584,5 +602,69 @@ mod tests {
         let r = LoopRegion::full();
         let out = apply_region_drag(r, RegionEdge::Right, 5);
         assert_eq!(out, out.normalized());
+    }
+
+    #[test]
+    fn apply_region_move_translates_in_each_direction() {
+        let r = LoopRegion {
+            row0: 4,
+            row1: 7,
+            col0: 5,
+            col1: 9,
+        };
+        let right = apply_region_move(r, 0, 3);
+        assert_eq!((right.col0, right.col1), (8, 12));
+        assert_eq!((right.row0, right.row1), (4, 7));
+        let down = apply_region_move(r, 2, 0);
+        assert_eq!((down.row0, down.row1), (6, 9));
+    }
+
+    #[test]
+    fn apply_region_move_preserves_size() {
+        let r = LoopRegion {
+            row0: 4,
+            row1: 7,
+            col0: 5,
+            col1: 9,
+        };
+        let moved = apply_region_move(r, -3, 4);
+        assert_eq!(moved.row1 - moved.row0, r.row1 - r.row0);
+        assert_eq!(moved.col1 - moved.col0, r.col1 - r.col0);
+    }
+
+    #[test]
+    fn apply_region_move_clamps_at_grid_edges() {
+        let r = LoopRegion {
+            row0: 4,
+            row1: 7,
+            col0: 5,
+            col1: 9,
+        };
+        // Far negative -> parks at the top-left.
+        let tl = apply_region_move(r, -100, -100);
+        assert_eq!((tl.row0, tl.col0), (0, 0));
+        assert_eq!((tl.row1, tl.col1), (3, 4));
+        // Far positive -> parks at the bottom-right (ROWS-1=15, COLS-1=31).
+        let br = apply_region_move(r, 100, 100);
+        assert_eq!((br.row1, br.col1), (15, 31));
+        assert_eq!((br.row0, br.col0), (12, 27));
+    }
+
+    #[test]
+    fn apply_region_move_full_region_cannot_move() {
+        let r = LoopRegion::full();
+        assert_eq!(apply_region_move(r, 5, -8), r);
+    }
+
+    #[test]
+    fn apply_region_move_1x1_region_moves() {
+        let r = LoopRegion {
+            row0: 0,
+            row1: 0,
+            col0: 0,
+            col1: 0,
+        };
+        let moved = apply_region_move(r, 9, 20);
+        assert_eq!((moved.row0, moved.row1, moved.col0, moved.col1), (9, 9, 20, 20));
     }
 }
