@@ -41,6 +41,26 @@ pub fn randomize_activations(grid: &mut Grid, seed: u32) {
     }
 }
 
+/// Randomize `sends` for every cell inside the loop region, guaranteeing no
+/// dead ends — every randomized cell keeps at least one send. Deterministic in
+/// `seed`. Leaves `enabled`, `is_start`, and cells outside the region
+/// untouched.
+pub fn randomize_routing(grid: &mut Grid, seed: u32) {
+    let mut rng = Rng::new(seed);
+    let lr = grid.loop_region;
+    for r in lr.row0..=lr.row1 {
+        for c in lr.col0..=lr.col1 {
+            let mut sends = (rng.next_u32() & 0xFF) as u8;
+            if sends == 0 {
+                // No dead ends: force at least one direction.
+                let bit = (rng.next_u32() % 8) as u8;
+                sends = 1u8 << bit;
+            }
+            grid.cell_mut(r, c).sends = sends;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +103,55 @@ mod tests {
                 // Outside the region, enabled is left at its default (true).
                 if !g.loop_region.contains(r, c) {
                     assert!(cell.enabled, "cell ({r},{c}) outside region changed");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn randomize_routing_is_deterministic() {
+        let mut a = Grid::default_routing();
+        let mut b = Grid::default_routing();
+        randomize_routing(&mut a, 777);
+        randomize_routing(&mut b, 777);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn randomize_routing_never_creates_a_dead_end() {
+        // Every randomized cell must keep at least one send, for every seed.
+        for seed in 0..200u32 {
+            let mut g = Grid::default_routing();
+            randomize_routing(&mut g, seed);
+            for r in 0..crate::grid::ROWS {
+                for c in 0..crate::grid::COLS {
+                    assert!(
+                        g.cell(r, c).has_send(),
+                        "seed {seed}: cell ({r},{c}) is a dead end"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn randomize_routing_only_touches_sends_inside_the_region() {
+        let mut g = Grid::default_routing();
+        g.loop_region = LoopRegion {
+            row0: 2,
+            row1: 4,
+            col0: 6,
+            col1: 9,
+        };
+        randomize_routing(&mut g, 55);
+        for r in 0..crate::grid::ROWS {
+            for c in 0..crate::grid::COLS {
+                let cell = g.cell(r, c);
+                assert!(cell.enabled);
+                assert_eq!(cell.is_start, c == 0);
+                if !g.loop_region.contains(r, c) {
+                    // Outside the region routing is the default East-only.
+                    assert_eq!(cell.sends, 1u8 << crate::grid::Direction::E.bit());
                 }
             }
         }
