@@ -65,6 +65,14 @@ impl Direction {
             Direction::NW => 7,
         }
     }
+
+    /// The direction whose `delta()` equals `(drow, dcol)`, or `None` when the
+    /// pair is not one of the 8 unit steps. The inverse of `delta`.
+    pub fn from_delta(drow: i32, dcol: i32) -> Option<Direction> {
+        Direction::ALL
+            .into_iter()
+            .find(|d| d.delta() == (drow, dcol))
+    }
 }
 
 /// One grid cell. `sends` is a bitmask over `Direction::bit()` positions.
@@ -649,5 +657,20 @@ mod tests {
         let lr = g.loop_region;
         assert!(lr.row0 <= lr.row1 && lr.row1 < ROWS);
         assert!(lr.col0 <= lr.col1 && lr.col1 < COLS);
+    }
+
+    #[test]
+    fn direction_from_delta_is_the_inverse_of_delta() {
+        for dir in Direction::ALL {
+            let (dr, dc) = dir.delta();
+            assert_eq!(Direction::from_delta(dr, dc), Some(dir));
+        }
+    }
+
+    #[test]
+    fn direction_from_delta_rejects_non_unit_steps() {
+        assert_eq!(Direction::from_delta(0, 0), None); // no movement
+        assert_eq!(Direction::from_delta(2, 0), None); // too far
+        assert_eq!(Direction::from_delta(-1, 2), None);
     }
 }
