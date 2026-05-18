@@ -64,6 +64,26 @@ pub fn cell_zone(px: f32, py: f32, scale: f32) -> Option<(usize, usize, CellZone
     Some((row, col, CellZone::Send(dir)))
 }
 
+/// Apply a click on cell `(row, col)`'s `zone` to the grid. A left click
+/// (`right == false`) toggles a send direction (octant) or the `enabled`
+/// flag (centre); a right click toggles the `is_start` flag (centre only)
+/// and does nothing on an octant.
+pub fn apply_grid_click(
+    grid: &mut Grid,
+    row: usize,
+    col: usize,
+    zone: CellZone,
+    right: bool,
+) {
+    let cell = grid.cell_mut(row, col);
+    match (zone, right) {
+        (CellZone::Send(dir), false) => cell.toggle_send(dir),
+        (CellZone::Center, false) => cell.enabled = !cell.enabled,
+        (CellZone::Center, true) => cell.is_start = !cell.is_start,
+        (CellZone::Send(_), true) => {} // right-click on an octant: ignored
+    }
+}
+
 /// Cell background when the cell is enabled.
 fn color_cell_enabled() -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(0x33, 0x37, 0x42, 0xFF)
@@ -270,5 +290,45 @@ mod tests {
     fn cell_zone_outside_the_grid_is_none() {
         assert_eq!(cell_zone(10.0, 5.0, 1.0), None); // status strip
         assert_eq!(cell_zone(-5.0, 200.0, 1.0), None); // left of grid
+    }
+
+    #[test]
+    fn left_click_octant_toggles_a_send() {
+        let mut g = Grid::default_routing(); // every cell sends E only
+        apply_grid_click(&mut g, 2, 3, CellZone::Send(Direction::S), false);
+        assert!(g.cell(2, 3).sends_to(Direction::S));
+        // A second left click on the same octant toggles it back off.
+        apply_grid_click(&mut g, 2, 3, CellZone::Send(Direction::S), false);
+        assert!(!g.cell(2, 3).sends_to(Direction::S));
+        // The pre-existing East send is untouched.
+        assert!(g.cell(2, 3).sends_to(Direction::E));
+    }
+
+    #[test]
+    fn left_click_centre_toggles_enabled() {
+        let mut g = Grid::default_routing(); // every cell enabled
+        apply_grid_click(&mut g, 5, 5, CellZone::Center, false);
+        assert!(!g.cell(5, 5).enabled);
+        apply_grid_click(&mut g, 5, 5, CellZone::Center, false);
+        assert!(g.cell(5, 5).enabled);
+    }
+
+    #[test]
+    fn right_click_centre_toggles_start() {
+        let mut g = Grid::default_routing();
+        // Column 7 is not a start cell by default.
+        assert!(!g.cell(1, 7).is_start);
+        apply_grid_click(&mut g, 1, 7, CellZone::Center, true);
+        assert!(g.cell(1, 7).is_start);
+        apply_grid_click(&mut g, 1, 7, CellZone::Center, true);
+        assert!(!g.cell(1, 7).is_start);
+    }
+
+    #[test]
+    fn right_click_octant_is_ignored() {
+        let mut g = Grid::default_routing();
+        let before = *g.cell(3, 3);
+        apply_grid_click(&mut g, 3, 3, CellZone::Send(Direction::W), true);
+        assert_eq!(*g.cell(3, 3), before, "right-click on an octant does nothing");
     }
 }
