@@ -60,6 +60,55 @@ impl Direction {
     }
 }
 
+/// One grid cell. `sends` is a bitmask over `Direction::bit()` positions.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Cell {
+    /// When false, a lit cell produces silence but still routes.
+    pub enabled: bool,
+    /// When true, this cell is armed by the `Initial` state.
+    pub is_start: bool,
+    /// Bitmask of the 8 send directions.
+    pub sends: u8,
+}
+
+impl Default for Cell {
+    /// An enabled, non-start cell with no sends.
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            is_start: false,
+            sends: 0,
+        }
+    }
+}
+
+impl Cell {
+    /// Does this cell send in `dir`?
+    pub fn sends_to(self, dir: Direction) -> bool {
+        self.sends & (1u8 << dir.bit()) != 0
+    }
+
+    /// Turn the send in `dir` on or off.
+    pub fn set_send(&mut self, dir: Direction, on: bool) {
+        let bit = 1u8 << dir.bit();
+        if on {
+            self.sends |= bit;
+        } else {
+            self.sends &= !bit;
+        }
+    }
+
+    /// Flip the send in `dir`.
+    pub fn toggle_send(&mut self, dir: Direction) {
+        self.sends ^= 1u8 << dir.bit();
+    }
+
+    /// True when the cell sends in at least one direction.
+    pub fn has_send(self) -> bool {
+        self.sends != 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,5 +130,35 @@ mod tests {
         assert_eq!(Direction::W.delta(), (0, -1));
         assert_eq!(Direction::NE.delta(), (-1, 1));
         assert_eq!(Direction::SW.delta(), (1, -1));
+    }
+
+    #[test]
+    fn cell_default_is_enabled_with_no_sends() {
+        let c = Cell::default();
+        assert!(c.enabled);
+        assert!(!c.is_start);
+        assert_eq!(c.sends, 0);
+        assert!(!c.has_send());
+    }
+
+    #[test]
+    fn cell_send_toggles_one_direction_at_a_time() {
+        let mut c = Cell::default();
+        c.set_send(Direction::E, true);
+        assert!(c.sends_to(Direction::E));
+        assert!(!c.sends_to(Direction::W));
+        assert!(c.has_send());
+
+        c.set_send(Direction::S, true);
+        assert!(c.sends_to(Direction::E));
+        assert!(c.sends_to(Direction::S));
+
+        c.set_send(Direction::E, false);
+        assert!(!c.sends_to(Direction::E));
+        assert!(c.sends_to(Direction::S));
+
+        c.toggle_send(Direction::S);
+        assert!(!c.sends_to(Direction::S));
+        assert!(!c.has_send());
     }
 }
