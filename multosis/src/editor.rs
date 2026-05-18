@@ -25,6 +25,22 @@ pub const WINDOW_HEIGHT: u32 = 616;
 
 pub use widgets::EditorState;
 
+/// The in-progress left-button gesture on the grid or loop region. The press
+/// dispatch in `on_event` selects exactly one; `None` means no left drag.
+#[derive(Clone, Copy, Debug)]
+enum LeftGesture {
+    /// Dragging a loop-region edge to resize it.
+    ResizeRegion(grid_view::RegionEdge),
+    /// A left press on a grid cell that has not moved yet — a click in
+    /// waiting. Becomes a click on release, or a paint drag if the cursor
+    /// leaves the cell (later task).
+    GridPending {
+        row: usize,
+        col: usize,
+        zone: grid_view::CellZone,
+    },
+}
+
 /// The baseview window handler — owns the surface and draws each frame.
 struct MultosisWindow {
     surface: widgets::SoftbufferSurface,
@@ -47,8 +63,8 @@ struct MultosisWindow {
     clipboard: Option<RegionSnapshot>,
     /// Seed advanced on each randomize op so successive clicks differ.
     rng_seed: u32,
-    /// The loop-region edge currently being dragged, if any.
-    region_drag: Option<grid_view::RegionEdge>,
+    /// The active left-button gesture, if any.
+    left_gesture: Option<LeftGesture>,
 }
 
 impl MultosisWindow {
@@ -85,7 +101,7 @@ impl MultosisWindow {
             toolbar_drag: widgets::DragState::new(),
             clipboard: None,
             rng_seed: 1,
-            region_drag: None,
+            left_gesture: None,
         }
     }
 
@@ -96,17 +112,20 @@ impl MultosisWindow {
         self.params.editor_state.store_size(pw, ph);
     }
 
-    /// Apply a grid click at the current cursor position. `right` selects the
-    /// right-button behaviour (toggle start). Edits the persisted grid and
-    /// republishes it so the audio thread picks up the change.
-    fn handle_grid_click(&mut self, right: bool) {
-        let (px, py) = self.mouse_pos;
-        let Some((row, col, zone)) = grid_view::cell_zone(px, py, self.scale_factor) else {
-            return;
-        };
+    /// Apply a resolved cell edit and republish the grid.
+    fn commit_click(&mut self, row: usize, col: usize, zone: grid_view::CellZone, right: bool) {
         if let Ok(mut grid) = self.params.grid.lock() {
             grid_view::apply_grid_click(&mut grid, row, col, zone, right);
             self.grid_handoff.publish(*grid);
+        }
+    }
+
+    /// Apply a click at the current cursor position (used for right-click,
+    /// which still edits on press).
+    fn handle_grid_click(&mut self, right: bool) {
+        let (px, py) = self.mouse_pos;
+        if let Some((row, col, zone)) = grid_view::cell_zone(px, py, self.scale_factor) {
+            self.commit_click(row, col, zone, right);
         }
     }
 
@@ -305,8 +324,10 @@ impl baseview::WindowHandler for MultosisWindow {
                         self.set_slider(ctrl, norm);
                     }
                 }
-                if let Some(edge) = self.region_drag {
-                    self.update_region_drag(edge);
+                match self.left_gesture {
+                    Some(LeftGesture::ResizeRegion(edge)) => self.update_region_drag(edge),
+                    Some(LeftGesture::GridPending { .. }) => {}
+                    None => {}
                 }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
@@ -325,9 +346,12 @@ impl baseview::WindowHandler for MultosisWindow {
                         Some(op) => self.handle_toolbar_op(op),
                         None => {
                             if let Some(edge) = self.region_edge_under_cursor() {
-                                self.region_drag = Some(edge);
-                            } else {
-                                self.handle_grid_click(false);
+                                self.left_gesture = Some(LeftGesture::ResizeRegion(edge));
+                            } else if let Some((row, col, zone)) =
+                                grid_view::cell_zone(px, py, self.scale_factor)
+                            {
+                                self.left_gesture =
+                                    Some(LeftGesture::GridPending { row, col, zone });
                             }
                         }
                     },
@@ -346,7 +370,10 @@ impl baseview::WindowHandler for MultosisWindow {
                 if let Some(ctrl) = self.toolbar_drag.end_drag() {
                     self.end_slider(ctrl);
                 }
-                self.region_drag = None;
+                if let Some(LeftGesture::GridPending { row, col, zone }) = self.left_gesture {
+                    self.commit_click(row, col, zone, false);
+                }
+                self.left_gesture = None;
             }
             _ => {}
         }
