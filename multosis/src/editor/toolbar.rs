@@ -144,6 +144,22 @@ pub fn op_hit(px: f32, py: f32, scale: f32) -> Option<ToolbarOp> {
     })
 }
 
+/// Apply a grid-mutating operation in place. `ResetRouting`/`ReinitCells`
+/// ignore `seed`; the randomize ops are deterministic in it. `Copy`/`Paste`
+/// are NOT handled here — they need the editor's clipboard, so this is a
+/// no-op for them.
+pub fn apply_grid_op(grid: &mut crate::grid::Grid, op: ToolbarOp, seed: u32) {
+    match op {
+        ToolbarOp::ResetRouting => grid.reset_routing(),
+        ToolbarOp::ReinitCells => grid.reinit_activations(),
+        ToolbarOp::RandomizeActivations => {
+            crate::randomize::randomize_activations(grid, seed)
+        }
+        ToolbarOp::RandomizeRouting => crate::randomize::randomize_routing(grid, seed),
+        ToolbarOp::Copy | ToolbarOp::Paste => {}
+    }
+}
+
 /// Draw the toolbar strip and its six upper-row controls.
 pub fn draw_toolbar(
     pixmap: &mut Pixmap,
@@ -314,5 +330,43 @@ mod tests {
         assert_eq!(op_hit(20.0, 10.0, 1.0), None);
         // A point in the grid (below the strip) is not an op hit.
         assert_eq!(op_hit(500.0, 400.0, 1.0), None);
+    }
+
+    #[test]
+    fn apply_grid_op_reset_routing_restores_east() {
+        use crate::grid::{Direction, Grid};
+        let mut g = Grid::default_routing();
+        g.cell_mut(2, 2).sends = 0b1010_1010;
+        apply_grid_op(&mut g, ToolbarOp::ResetRouting, 0);
+        assert_eq!(g.cell(2, 2).sends, 1u8 << Direction::E.bit());
+    }
+
+    #[test]
+    fn apply_grid_op_reinit_cells_restores_activations() {
+        use crate::grid::Grid;
+        let mut g = Grid::default_routing();
+        g.cell_mut(4, 4).enabled = false;
+        apply_grid_op(&mut g, ToolbarOp::ReinitCells, 0);
+        assert!(g.cell(4, 4).enabled);
+    }
+
+    #[test]
+    fn apply_grid_op_randomize_is_deterministic_in_seed() {
+        use crate::grid::Grid;
+        let mut a = Grid::default_routing();
+        let mut b = Grid::default_routing();
+        apply_grid_op(&mut a, ToolbarOp::RandomizeRouting, 1234);
+        apply_grid_op(&mut b, ToolbarOp::RandomizeRouting, 1234);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn apply_grid_op_copy_and_paste_do_not_mutate_the_grid() {
+        use crate::grid::Grid;
+        let mut g = Grid::default_routing();
+        let before = g;
+        apply_grid_op(&mut g, ToolbarOp::Copy, 0);
+        apply_grid_op(&mut g, ToolbarOp::Paste, 0);
+        assert_eq!(g, before, "Copy/Paste are handled by the editor, not apply_grid_op");
     }
 }
