@@ -68,13 +68,7 @@ pub fn cell_zone(px: f32, py: f32, scale: f32) -> Option<(usize, usize, CellZone
 /// (`right == false`) toggles a send direction (octant) or the `enabled`
 /// flag (centre); a right click toggles the `is_start` flag (centre only)
 /// and does nothing on an octant.
-pub fn apply_grid_click(
-    grid: &mut Grid,
-    row: usize,
-    col: usize,
-    zone: CellZone,
-    right: bool,
-) {
+pub fn apply_grid_click(grid: &mut Grid, row: usize, col: usize, zone: CellZone, right: bool) {
     let cell = grid.cell_mut(row, col);
     match (zone, right) {
         (CellZone::Send(dir), false) => cell.toggle_send(dir),
@@ -329,6 +323,10 @@ mod tests {
         let mut g = Grid::default_routing();
         let before = *g.cell(3, 3);
         apply_grid_click(&mut g, 3, 3, CellZone::Send(Direction::W), true);
-        assert_eq!(*g.cell(3, 3), before, "right-click on an octant does nothing");
+        assert_eq!(
+            *g.cell(3, 3),
+            before,
+            "right-click on an octant does nothing"
+        );
     }
 }

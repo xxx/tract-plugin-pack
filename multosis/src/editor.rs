@@ -76,8 +76,7 @@ impl MultosisWindow {
     /// republishes it so the audio thread picks up the change.
     fn handle_grid_click(&mut self, right: bool) {
         let (px, py) = self.mouse_pos;
-        let Some((row, col, zone)) = grid_view::cell_zone(px, py, self.scale_factor)
-        else {
+        let Some((row, col, zone)) = grid_view::cell_zone(px, py, self.scale_factor) else {
             return;
         };
         if let Ok(mut grid) = self.params.grid.lock() {
@@ -199,7 +198,14 @@ impl Editor for MultosisEditor {
                 gl_config: None,
             },
             move |window| {
-                MultosisWindow::new(window, params, wavefront_display, grid_handoff, pending_resize, sf)
+                MultosisWindow::new(
+                    window,
+                    params,
+                    wavefront_display,
+                    grid_handoff,
+                    pending_resize,
+                    sf,
+                )
             },
         );
 
