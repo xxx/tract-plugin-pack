@@ -47,6 +47,8 @@ struct MultosisWindow {
     clipboard: Option<RegionSnapshot>,
     /// Seed advanced on each randomize op so successive clicks differ.
     rng_seed: u32,
+    /// The loop-region edge currently being dragged, if any.
+    region_drag: Option<grid_view::RegionEdge>,
 }
 
 impl MultosisWindow {
@@ -83,6 +85,7 @@ impl MultosisWindow {
             toolbar_drag: widgets::DragState::new(),
             clipboard: None,
             rng_seed: 1,
+            region_drag: None,
         }
     }
 
@@ -103,6 +106,31 @@ impl MultosisWindow {
         };
         if let Ok(mut grid) = self.params.grid.lock() {
             grid_view::apply_grid_click(&mut grid, row, col, zone, right);
+            self.grid_handoff.publish(*grid);
+        }
+    }
+
+    /// The loop-region edge under the cursor, if the cursor is over one.
+    fn region_edge_under_cursor(&self) -> Option<grid_view::RegionEdge> {
+        let (px, py) = self.mouse_pos;
+        let region = self.params.grid.lock().ok()?.loop_region;
+        grid_view::region_edge_hit(px, py, region, self.scale_factor)
+    }
+
+    /// Resize the loop region for the in-progress drag of `edge`, then
+    /// republish the grid so the audio thread picks up the new region.
+    fn update_region_drag(&mut self, edge: grid_view::RegionEdge) {
+        let (px, py) = self.mouse_pos;
+        let index = match edge {
+            grid_view::RegionEdge::Left | grid_view::RegionEdge::Right => {
+                grid_view::column_at(px, self.scale_factor)
+            }
+            grid_view::RegionEdge::Top | grid_view::RegionEdge::Bottom => {
+                grid_view::row_at(py, self.scale_factor)
+            }
+        };
+        if let Ok(mut grid) = self.params.grid.lock() {
+            grid.loop_region = grid_view::apply_region_drag(grid.loop_region, edge, index);
             self.grid_handoff.publish(*grid);
         }
     }
@@ -272,6 +300,9 @@ impl baseview::WindowHandler for MultosisWindow {
                         self.set_slider(ctrl, norm);
                     }
                 }
+                if let Some(edge) = self.region_drag {
+                    self.update_region_drag(edge);
+                }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
                 button: baseview::MouseButton::Left,
@@ -287,7 +318,13 @@ impl baseview::WindowHandler for MultosisWindow {
                     Some(ctrl) => self.handle_toolbar_button(ctrl),
                     None => match toolbar::op_hit(px, py, self.scale_factor) {
                         Some(op) => self.handle_toolbar_op(op),
-                        None => self.handle_grid_click(false),
+                        None => {
+                            if let Some(edge) = self.region_edge_under_cursor() {
+                                self.region_drag = Some(edge);
+                            } else {
+                                self.handle_grid_click(false);
+                            }
+                        }
                     },
                 }
             }
@@ -304,6 +341,7 @@ impl baseview::WindowHandler for MultosisWindow {
                 if let Some(ctrl) = self.toolbar_drag.end_drag() {
                     self.end_slider(ctrl);
                 }
+                self.region_drag = None;
             }
             _ => {}
         }
