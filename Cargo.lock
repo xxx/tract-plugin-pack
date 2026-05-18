@@ -1275,6 +1275,7 @@ name = "multosis"
 version = "0.1.0"
 dependencies = [
  "baseview",
+ "keyboard-types",
  "nih_plug",
  "raw-window-handle 0.5.2",
  "raw-window-handle 0.6.2",
