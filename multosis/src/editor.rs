@@ -67,7 +67,14 @@ impl MultosisWindow {
 
     fn draw(&mut self) {
         widgets::fill_pixmap_opaque(&mut self.surface.pixmap, widgets::color_bg());
-        // Grid, wavefront, and status drawing are added in later tasks.
+        let grid = self
+            .params
+            .grid
+            .lock()
+            .map(|g| *g)
+            .unwrap_or_default();
+        grid_view::draw_grid(&mut self.surface.pixmap, &grid, self.scale_factor);
+        // The wavefront overlay and status strip are added in Task 7.
     }
 }
 

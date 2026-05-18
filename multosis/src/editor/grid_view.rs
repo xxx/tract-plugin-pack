@@ -40,6 +40,89 @@ pub fn cell_at(px: f32, py: f32, scale: f32) -> Option<(usize, usize)> {
     }
 }
 
+/// Cell background when the cell is enabled.
+fn color_cell_enabled() -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(0x33, 0x37, 0x42, 0xFF)
+}
+/// Cell background when the cell is disabled.
+fn color_cell_disabled() -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(0x20, 0x22, 0x29, 0xFF)
+}
+/// A lit send-direction pip.
+fn color_send() -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(0x6f, 0x8a, 0xb8, 0xFF)
+}
+/// A start-cell marker.
+fn color_start() -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(0x5f, 0xd0, 0x9a, 0xFF)
+}
+/// The loop-region outline.
+fn color_loop() -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(0x4f, 0xc3, 0xf7, 0xFF)
+}
+
+/// Draw one cell's background, send pips, and start marker.
+fn draw_cell(pixmap: &mut Pixmap, row: usize, col: usize, cell: &crate::grid::Cell, scale: f32) {
+    let (x, y, w, h) = cell_rect(row, col, scale);
+    let gap = 1.0 * scale;
+    // Background (inset by the gap so cells read as a grid).
+    let bg = if cell.enabled {
+        color_cell_enabled()
+    } else {
+        color_cell_disabled()
+    };
+    widgets::draw_rect(pixmap, x + gap, y + gap, w - 2.0 * gap, h - 2.0 * gap, bg);
+
+    // Send pips: a small square pulled toward each sent direction.
+    let cx = x + w / 2.0;
+    let cy = y + h / 2.0;
+    let pip = w * 0.16;
+    for dir in Direction::ALL {
+        if !cell.sends_to(dir) {
+            continue;
+        }
+        let (dr, dc) = dir.delta();
+        let px = cx + dc as f32 * w * 0.34 - pip / 2.0;
+        let py = cy + dr as f32 * h * 0.34 - pip / 2.0;
+        widgets::draw_rect(pixmap, px, py, pip, pip, color_send());
+    }
+
+    // Start marker: a thin inset outline.
+    if cell.is_start {
+        widgets::draw_rect_outline(
+            pixmap,
+            x + gap,
+            y + gap,
+            w - 2.0 * gap,
+            h - 2.0 * gap,
+            color_start(),
+            1.5 * scale,
+        );
+    }
+}
+
+/// Draw the whole grid — every cell, then the loop-region outline.
+pub fn draw_grid(pixmap: &mut Pixmap, grid: &Grid, scale: f32) {
+    for r in 0..ROWS {
+        for c in 0..COLS {
+            draw_cell(pixmap, r, c, grid.cell(r, c), scale);
+        }
+    }
+    // Loop-region outline: a rectangle spanning the region's cells.
+    let lr = grid.loop_region;
+    let (x0, y0, _, _) = cell_rect(lr.row0, lr.col0, scale);
+    let (x1, y1, w1, h1) = cell_rect(lr.row1, lr.col1, scale);
+    widgets::draw_rect_outline(
+        pixmap,
+        x0,
+        y0,
+        (x1 + w1) - x0,
+        (y1 + h1) - y0,
+        color_loop(),
+        2.0 * scale,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
