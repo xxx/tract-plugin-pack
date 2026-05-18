@@ -32,6 +32,8 @@ struct MultosisWindow {
     params: Arc<MultosisParams>,
     wavefront_display: Arc<WavefrontDisplay>,
     grid_handoff: Arc<GridHandoff>,
+    /// Latest cursor position in physical pixels, updated on CursorMoved.
+    mouse_pos: (f32, f32),
     text_renderer: widgets::TextRenderer,
 }
 
@@ -57,6 +59,7 @@ impl MultosisWindow {
             params,
             wavefront_display,
             grid_handoff,
+            mouse_pos: (0.0, 0.0),
             text_renderer,
         }
     }
@@ -66,6 +69,21 @@ impl MultosisWindow {
         let ph = self.physical_height.max(1);
         self.surface.resize(pw, ph);
         self.params.editor_state.store_size(pw, ph);
+    }
+
+    /// Apply a grid click at the current cursor position. `right` selects the
+    /// right-button behaviour (toggle start). Edits the persisted grid and
+    /// republishes it so the audio thread picks up the change.
+    fn handle_grid_click(&mut self, right: bool) {
+        let (px, py) = self.mouse_pos;
+        let Some((row, col, zone)) = grid_view::cell_zone(px, py, self.scale_factor)
+        else {
+            return;
+        };
+        if let Ok(mut grid) = self.params.grid.lock() {
+            grid_view::apply_grid_click(&mut grid, row, col, zone, right);
+            self.grid_handoff.publish(*grid);
+        }
     }
 
     fn draw(&mut self) {
@@ -107,11 +125,30 @@ impl baseview::WindowHandler for MultosisWindow {
         _window: &mut baseview::Window,
         event: baseview::Event,
     ) -> baseview::EventStatus {
-        if let baseview::Event::Window(baseview::WindowEvent::Resized(info)) = &event {
-            self.physical_width = info.physical_size().width;
-            self.physical_height = info.physical_size().height;
-            self.scale_factor = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
-            self.resize_buffers();
+        match &event {
+            baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
+                self.physical_width = info.physical_size().width;
+                self.physical_height = info.physical_size().height;
+                self.scale_factor =
+                    (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+                self.resize_buffers();
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved { position, .. }) => {
+                self.mouse_pos = (position.x as f32, position.y as f32);
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Left,
+                ..
+            }) => {
+                self.handle_grid_click(false);
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Right,
+                ..
+            }) => {
+                self.handle_grid_click(true);
+            }
+            _ => {}
         }
         baseview::EventStatus::Captured
     }
