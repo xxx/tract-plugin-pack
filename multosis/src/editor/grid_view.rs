@@ -85,12 +85,7 @@ const EDGE_BAND: f32 = 6.0;
 /// The loop-region edge under physical-pixel point `(px, py)` at `scale`, or
 /// `None`. The cursor must be within the grid drawing area — points in the
 /// toolbar strip never hit an edge.
-pub fn region_edge_hit(
-    px: f32,
-    py: f32,
-    region: LoopRegion,
-    scale: f32,
-) -> Option<RegionEdge> {
+pub fn region_edge_hit(px: f32, py: f32, region: LoopRegion, scale: f32) -> Option<RegionEdge> {
     // Reject the toolbar strip and anything outside the grid.
     let grid_top = STATUS_H * scale;
     let grid_bottom = (STATUS_H + ROWS as f32 * CELL) * scale;
@@ -251,7 +246,14 @@ pub fn draw_grid(pixmap: &mut Pixmap, grid: &Grid, scale: f32) {
     let thick = 4.0 * scale;
     let nub = color_loop();
     // Left and right edges: vertical nubs.
-    widgets::draw_rect(pixmap, x0 - thick / 2.0, mid_y - long / 2.0, thick, long, nub);
+    widgets::draw_rect(
+        pixmap,
+        x0 - thick / 2.0,
+        mid_y - long / 2.0,
+        thick,
+        long,
+        nub,
+    );
     widgets::draw_rect(
         pixmap,
         (x1 + w1) - thick / 2.0,
@@ -261,7 +263,14 @@ pub fn draw_grid(pixmap: &mut Pixmap, grid: &Grid, scale: f32) {
         nub,
     );
     // Top and bottom edges: horizontal nubs.
-    widgets::draw_rect(pixmap, mid_x - long / 2.0, y0 - thick / 2.0, long, thick, nub);
+    widgets::draw_rect(
+        pixmap,
+        mid_x - long / 2.0,
+        y0 - thick / 2.0,
+        long,
+        thick,
+        nub,
+    );
     widgets::draw_rect(
         pixmap,
         mid_x - long / 2.0,
