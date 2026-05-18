@@ -248,6 +248,29 @@ impl Grid {
     }
 }
 
+impl Grid {
+    /// Restore default sends (East only) on every cell; leave `enabled` and
+    /// `is_start` untouched. Recovers from user-created dead ends.
+    pub fn reset_routing(&mut self) {
+        for cell in self.cells.iter_mut() {
+            cell.sends = 0;
+            cell.set_send(Direction::E, true);
+        }
+    }
+
+    /// Restore default activations: every cell `enabled`, the left column the
+    /// start cells. Leaves `sends` untouched.
+    pub fn reinit_activations(&mut self) {
+        for r in 0..ROWS {
+            for c in 0..COLS {
+                let cell = self.cell_mut(r, c);
+                cell.enabled = true;
+                cell.is_start = c == 0;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,5 +522,48 @@ mod tests {
                 "direction {dir:?} did not loop onto itself"
             );
         }
+    }
+
+    #[test]
+    fn reset_routing_restores_east_and_keeps_activations() {
+        let mut g = Grid::default_routing();
+        // Scramble routing and activations.
+        g.cell_mut(2, 2).sends = 0b1010_1010;
+        g.cell_mut(2, 2).enabled = false;
+        g.cell_mut(2, 2).is_start = true;
+        g.cell_mut(7, 9).sends = 0;
+
+        g.reset_routing();
+
+        // Every cell sends East only again.
+        for r in 0..ROWS {
+            for c in 0..COLS {
+                assert_eq!(g.cell(r, c).sends, 1u8 << Direction::E.bit());
+            }
+        }
+        // Activations are untouched.
+        assert!(!g.cell(2, 2).enabled);
+        assert!(g.cell(2, 2).is_start);
+    }
+
+    #[test]
+    fn reinit_activations_restores_defaults_and_keeps_routing() {
+        let mut g = Grid::default_routing();
+        g.cell_mut(4, 4).sends = 0b0001_1000;
+        g.cell_mut(4, 4).enabled = false;
+        g.cell_mut(0, 5).is_start = true; // a stray start away from col 0
+        g.cell_mut(3, 0).is_start = false; // clear a default start
+
+        g.reinit_activations();
+
+        // Activations back to default: all enabled, left column the starts.
+        for r in 0..ROWS {
+            for c in 0..COLS {
+                assert!(g.cell(r, c).enabled);
+                assert_eq!(g.cell(r, c).is_start, c == 0);
+            }
+        }
+        // Routing is untouched.
+        assert_eq!(g.cell(4, 4).sends, 0b0001_1000);
     }
 }
