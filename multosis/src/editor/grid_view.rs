@@ -243,6 +243,33 @@ pub fn draw_grid(pixmap: &mut Pixmap, grid: &Grid, scale: f32) {
         color_loop(),
         2.0 * scale,
     );
+
+    // Drag-handle nubs at the midpoint of each region edge.
+    let mid_x = (x0 + (x1 + w1)) / 2.0;
+    let mid_y = (y0 + (y1 + h1)) / 2.0;
+    let long = 16.0 * scale;
+    let thick = 4.0 * scale;
+    let nub = color_loop();
+    // Left and right edges: vertical nubs.
+    widgets::draw_rect(pixmap, x0 - thick / 2.0, mid_y - long / 2.0, thick, long, nub);
+    widgets::draw_rect(
+        pixmap,
+        (x1 + w1) - thick / 2.0,
+        mid_y - long / 2.0,
+        thick,
+        long,
+        nub,
+    );
+    // Top and bottom edges: horizontal nubs.
+    widgets::draw_rect(pixmap, mid_x - long / 2.0, y0 - thick / 2.0, long, thick, nub);
+    widgets::draw_rect(
+        pixmap,
+        mid_x - long / 2.0,
+        (y1 + h1) - thick / 2.0,
+        long,
+        thick,
+        nub,
+    );
 }
 
 /// A lit wavefront cell.
