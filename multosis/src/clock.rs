@@ -2,20 +2,35 @@
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §5.2.
 
-/// How fast the wavefront advances — a musical note division.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+use nih_plug::prelude::Enum;
+
+/// How fast the wavefront advances — a musical note division. Backs the
+/// plugin's `speed` parameter, so it derives nih-plug's `Enum`.
+#[derive(Enum, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Speed {
     /// 1/32 note.
+    #[id = "div32"]
+    #[name = "1/32"]
     Div32,
     /// 1/16 note.
+    #[id = "div16"]
+    #[name = "1/16"]
     Div16,
     /// 1/8 note.
+    #[id = "div8"]
+    #[name = "1/8"]
     Div8,
     /// 1/4 note.
+    #[id = "div4"]
+    #[name = "1/4"]
     Div4,
     /// 1/2 note.
+    #[id = "div2"]
+    #[name = "1/2"]
     Div2,
     /// Whole note.
+    #[id = "div1"]
+    #[name = "1/1"]
     Div1,
 }
 

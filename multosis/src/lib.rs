@@ -5,6 +5,7 @@
 //! propagation engine, and the step clock. No GUI, no audio, no nih-plug.
 
 pub mod clock;
+pub mod effects;
 pub mod grid;
 pub mod handoff;
 pub mod propagation;
