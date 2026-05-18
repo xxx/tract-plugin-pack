@@ -69,6 +69,94 @@ pub fn step_manual(grid: &Grid, current: &Wavefront) -> Wavefront {
     next
 }
 
+/// Lifecycle state of the sequence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SequenceState {
+    /// Fresh or reset — the next tick arms the start cells.
+    Initial,
+    /// A non-empty wavefront is propagating.
+    Running,
+    /// A dead end reached with `auto_restart` off — silent until `reset()`.
+    Stopped,
+}
+
+/// Drives the wavefront through its Initial/Running/Stopped lifecycle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Propagator {
+    pub state: SequenceState,
+    pub wavefront: Wavefront,
+    /// Steps since the wavefront was last armed — for display.
+    pub step: u64,
+}
+
+impl Propagator {
+    /// A fresh propagator in the `Initial` state.
+    pub fn new() -> Self {
+        Self {
+            state: SequenceState::Initial,
+            wavefront: Wavefront::empty(),
+            step: 0,
+        }
+    }
+
+    /// Clear the wavefront and return to `Initial`. Triggered by the manual
+    /// Reset button and the host transport's stopped→playing edge.
+    pub fn reset(&mut self) {
+        self.state = SequenceState::Initial;
+        self.wavefront = Wavefront::empty();
+        self.step = 0;
+    }
+
+    /// Advance the sequence one step. `auto_restart` governs the dead-end
+    /// response (design doc §5.1).
+    pub fn tick(&mut self, grid: &Grid, auto_restart: bool) {
+        match self.state {
+            SequenceState::Initial => {
+                // Arm every start cell.
+                let mut wf = Wavefront::empty();
+                for r in 0..ROWS {
+                    for c in 0..COLS {
+                        if grid.cell(r, c).is_start {
+                            wf.set(r, c, true);
+                        }
+                    }
+                }
+                self.wavefront = wf;
+                self.step = 0;
+                if !wf.is_empty() {
+                    self.state = SequenceState::Running;
+                }
+                // No start cells -> stay Initial with an empty wavefront.
+            }
+            SequenceState::Running => {
+                let next = step_manual(grid, &self.wavefront);
+                if next.is_empty() {
+                    // Dead end: every lit cell routed nowhere.
+                    self.wavefront = Wavefront::empty();
+                    if auto_restart {
+                        self.state = SequenceState::Initial;
+                        self.step = 0;
+                    } else {
+                        self.state = SequenceState::Stopped;
+                    }
+                } else {
+                    self.wavefront = next;
+                    self.step += 1;
+                }
+            }
+            SequenceState::Stopped => {
+                // No-op until reset().
+            }
+        }
+    }
+}
+
+impl Default for Propagator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +195,121 @@ mod tests {
         }
         g.loop_region = LoopRegion::full();
         g
+    }
+
+    /// A grid with exactly one start cell at `(row, col)` and no sends — it
+    /// dead-ends one tick after arming.
+    fn one_start_no_sends(row: usize, col: usize) -> Grid {
+        let mut g = blank_grid();
+        g.cell_mut(row, col).is_start = true;
+        g
+    }
+
+    #[test]
+    fn propagator_new_is_initial_and_empty() {
+        let p = Propagator::new();
+        assert_eq!(p.state, SequenceState::Initial);
+        assert!(p.wavefront.is_empty());
+        assert_eq!(p.step, 0);
+    }
+
+    #[test]
+    fn tick_from_initial_arms_every_start_cell() {
+        let g = Grid::default_routing(); // left column = 16 start cells
+        let mut p = Propagator::new();
+        p.tick(&g, true);
+        assert_eq!(p.state, SequenceState::Running);
+        assert_eq!(p.wavefront.count(), ROWS);
+        for r in 0..ROWS {
+            assert!(p.wavefront.is_lit(r, 0));
+        }
+    }
+
+    #[test]
+    fn tick_from_initial_with_no_start_cells_stays_initial() {
+        let g = blank_grid(); // nothing is a start cell
+        let mut p = Propagator::new();
+        p.tick(&g, true);
+        assert_eq!(p.state, SequenceState::Initial);
+        assert!(p.wavefront.is_empty());
+    }
+
+    #[test]
+    fn tick_running_propagates_the_wavefront() {
+        let g = Grid::default_routing(); // every cell sends East
+        let mut p = Propagator::new();
+        p.tick(&g, true); // arm: column 0
+        p.tick(&g, true); // propagate East: column 1
+        assert_eq!(p.state, SequenceState::Running);
+        assert_eq!(p.step, 1);
+        for r in 0..ROWS {
+            assert!(p.wavefront.is_lit(r, 1));
+            assert!(!p.wavefront.is_lit(r, 0));
+        }
+    }
+
+    #[test]
+    fn dead_end_with_auto_restart_returns_to_initial() {
+        let g = one_start_no_sends(0, 0);
+        let mut p = Propagator::new();
+        p.tick(&g, true); // arm (0,0) -> Running
+        assert_eq!(p.state, SequenceState::Running);
+        p.tick(&g, true); // (0,0) sends nowhere -> dead end
+        assert_eq!(p.state, SequenceState::Initial);
+        assert!(p.wavefront.is_empty());
+        // The next tick re-arms the start cells.
+        p.tick(&g, true);
+        assert_eq!(p.state, SequenceState::Running);
+        assert!(p.wavefront.is_lit(0, 0));
+    }
+
+    #[test]
+    fn dead_end_without_auto_restart_stops() {
+        let g = one_start_no_sends(2, 4);
+        let mut p = Propagator::new();
+        p.tick(&g, false); // arm -> Running
+        p.tick(&g, false); // dead end
+        assert_eq!(p.state, SequenceState::Stopped);
+        assert!(p.wavefront.is_empty());
+        // Further ticks are no-ops.
+        p.tick(&g, false);
+        assert_eq!(p.state, SequenceState::Stopped);
+    }
+
+    #[test]
+    fn reset_returns_a_stopped_propagator_to_initial() {
+        let g = one_start_no_sends(2, 4);
+        let mut p = Propagator::new();
+        p.tick(&g, false);
+        p.tick(&g, false); // -> Stopped
+        p.reset();
+        assert_eq!(p.state, SequenceState::Initial);
+        assert!(p.wavefront.is_empty());
+        p.tick(&g, false); // arms again
+        assert_eq!(p.state, SequenceState::Running);
+    }
+
+    #[test]
+    fn propagator_loops_forever_in_a_1x1_self_routing_region() {
+        // A 1×1 loop region whose single cell is a start and sends East: East
+        // wraps onto itself, so the wavefront never dead-ends.
+        let mut g = blank_grid();
+        g.loop_region = LoopRegion {
+            row0: 5,
+            row1: 5,
+            col0: 6,
+            col1: 6,
+        };
+        g.cell_mut(5, 6).is_start = true;
+        g.cell_mut(5, 6).set_send(Direction::E, true);
+        let mut p = Propagator::new();
+        p.tick(&g, false); // arm
+        for _ in 0..50 {
+            p.tick(&g, false);
+            assert_eq!(p.state, SequenceState::Running);
+            assert_eq!(p.wavefront.count(), 1);
+            assert!(p.wavefront.is_lit(5, 6));
+        }
     }
 
     #[test]
