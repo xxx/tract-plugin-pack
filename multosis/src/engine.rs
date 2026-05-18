@@ -54,6 +54,18 @@ impl AudioEngine {
         &self.propagator.wavefront
     }
 
+    /// The current sequence lifecycle state — exposed for the editor's status
+    /// readout.
+    pub fn sequence_state(&self) -> crate::propagation::SequenceState {
+        self.propagator.state
+    }
+
+    /// Steps since the wavefront was last armed — exposed for the editor's
+    /// status readout.
+    pub fn step(&self) -> u64 {
+        self.propagator.step
+    }
+
     /// Bitmask (bit `R`) of rows holding at least one cell that is both lit in
     /// `wf` and `enabled` in `grid`. A disabled lit cell contributes nothing;
     /// two lit cells in one row collapse to a single bit.
@@ -308,5 +320,29 @@ mod tests {
         );
         assert!(left.iter().all(|&s| s == 0.0));
         assert!(right.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn new_engine_reports_initial_state_and_zero_step() {
+        let engine = AudioEngine::new();
+        assert_eq!(engine.sequence_state(), crate::propagation::SequenceState::Initial);
+        assert_eq!(engine.step(), 0);
+    }
+
+    #[test]
+    fn engine_reports_running_after_arming() {
+        let grid = Grid::default_routing(); // left column = start cells
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let mut left = [0.0_f32; 64];
+        let mut right = [0.0_f32; 64];
+        // One short step arms the start cells -> Running.
+        engine.process(
+            &mut left, &mut right, true, 10.0, EffectBank::Lowpass, 0.0, true, &grid,
+        );
+        assert_eq!(
+            engine.sequence_state(),
+            crate::propagation::SequenceState::Running
+        );
     }
 }
