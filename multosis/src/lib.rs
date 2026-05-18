@@ -199,3 +199,24 @@ impl Plugin for Multosis {
         ProcessStatus::Normal
     }
 }
+
+impl ClapPlugin for Multosis {
+    const CLAP_ID: &'static str = "com.mpd.multosis";
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("A multi-FX routing sequencer");
+    const CLAP_MANUAL_URL: Option<&'static str> = None;
+    const CLAP_SUPPORT_URL: Option<&'static str> = None;
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::AudioEffect,
+        ClapFeature::Stereo,
+        ClapFeature::Utility,
+    ];
+}
+
+impl Vst3Plugin for Multosis {
+    const VST3_CLASS_ID: [u8; 16] = *b"MultosisMpdPlg\0\0";
+    const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
+        &[Vst3SubCategory::Fx];
+}
+
+nih_export_clap!(Multosis);
+nih_export_vst3!(Multosis);
