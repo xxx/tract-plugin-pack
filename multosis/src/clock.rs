@@ -51,6 +51,58 @@ pub fn samples_per_step(speed: Speed, bpm: f64, sample_rate: f64) -> f64 {
     speed.quarter_notes() * seconds_per_quarter * sample_rate
 }
 
+/// Accumulates elapsed samples and reports when step boundaries are crossed.
+/// The accumulator is the number of samples elapsed since the last boundary;
+/// it is always kept in `[0, samples_per_step)`.
+#[derive(Clone, Copy, Debug)]
+pub struct StepClock {
+    accum: f64,
+}
+
+impl StepClock {
+    /// A clock with its accumulator at zero — the first boundary is a full
+    /// step away.
+    pub fn new() -> Self {
+        Self { accum: 0.0 }
+    }
+
+    /// Clear the accumulator. Used when the sequence is reset so the next
+    /// step boundary is a full step away.
+    pub fn reset(&mut self) {
+        self.accum = 0.0;
+    }
+
+    /// Advance the clock across a process block of `block_len` samples at the
+    /// given `samples_per_step`. `on_step` is called once per step boundary
+    /// that falls within the block, with the sample offset of the boundary
+    /// inside the block. A non-positive `samples_per_step` fires nothing.
+    pub fn advance(
+        &mut self,
+        block_len: usize,
+        samples_per_step: f64,
+        mut on_step: impl FnMut(usize),
+    ) {
+        if samples_per_step <= 0.0 {
+            return;
+        }
+        let block = block_len as f64;
+        // The first boundary lands `samples_per_step - accum` samples in.
+        let mut boundary = samples_per_step - self.accum;
+        while boundary < block {
+            let offset = if boundary < 0.0 { 0 } else { boundary as usize };
+            on_step(offset);
+            boundary += samples_per_step;
+        }
+        self.accum = (self.accum + block).rem_euclid(samples_per_step);
+    }
+}
+
+impl Default for StepClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,5 +131,55 @@ mod tests {
         // A 1/4 step at 120 BPM is 0.5 s -> 24000 samples.
         let q = samples_per_step(Speed::Div4, 120.0, 48_000.0);
         assert!((q - 24_000.0).abs() < 1e-6, "got {q}");
+    }
+
+    #[test]
+    fn step_clock_fires_at_each_boundary_with_offsets() {
+        let mut clk = StepClock::new();
+        let mut offsets = Vec::new();
+        // 100 samples per step; a 250-sample block crosses two boundaries.
+        clk.advance(250, 100.0, |off| offsets.push(off));
+        assert_eq!(offsets, vec![100, 200]);
+    }
+
+    #[test]
+    fn step_clock_carries_the_remainder_across_blocks() {
+        let mut clk = StepClock::new();
+        let mut offsets = Vec::new();
+        clk.advance(250, 100.0, |off| offsets.push(off)); // accum left at 50
+        offsets.clear();
+        // Next boundary is 50 samples in (100 - 50 carried).
+        clk.advance(100, 100.0, |off| offsets.push(off));
+        assert_eq!(offsets, vec![50]);
+    }
+
+    #[test]
+    fn step_clock_block_shorter_than_a_step_fires_nothing() {
+        let mut clk = StepClock::new();
+        let mut count = 0;
+        clk.advance(40, 100.0, |_| count += 1);
+        clk.advance(40, 100.0, |_| count += 1);
+        assert_eq!(count, 0); // 80 samples total, no boundary yet
+        clk.advance(40, 100.0, |_| count += 1);
+        assert_eq!(count, 1); // 120 samples total crosses the 100 boundary
+    }
+
+    #[test]
+    fn step_clock_zero_samples_per_step_fires_nothing() {
+        let mut clk = StepClock::new();
+        let mut count = 0;
+        clk.advance(1000, 0.0, |_| count += 1);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn step_clock_reset_clears_the_accumulator() {
+        let mut clk = StepClock::new();
+        clk.advance(70, 100.0, |_| {});
+        clk.reset();
+        let mut offsets = Vec::new();
+        // After reset the next boundary is a full step away.
+        clk.advance(150, 100.0, |off| offsets.push(off));
+        assert_eq!(offsets, vec![100]);
     }
 }
