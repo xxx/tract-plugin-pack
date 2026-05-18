@@ -95,9 +95,10 @@ impl MultosisWindow {
             &self.wavefront_display,
             self.scale_factor,
         );
-        grid_view::draw_status(
+        toolbar::draw_toolbar(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
+            &self.params,
             self.scale_factor,
         );
     }

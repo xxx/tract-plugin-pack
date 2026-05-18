@@ -5,6 +5,7 @@
 
 use crate::editor::grid_view::TOOLBAR_ROW_H;
 use crate::MultosisParams;
+use nih_plug::prelude::Param;
 use tiny_skia::Pixmap;
 use tiny_skia_widgets as widgets;
 
@@ -69,6 +70,85 @@ pub fn toolbar_hit(px: f32, py: f32, scale: f32) -> Option<ToolbarControl> {
         let (x, y, w, h) = control_rect(ctrl, scale);
         px >= x && px < x + w && py >= y && py < y + h
     })
+}
+
+/// Draw the toolbar strip and its six upper-row controls.
+pub fn draw_toolbar(
+    pixmap: &mut Pixmap,
+    tr: &mut widgets::TextRenderer,
+    params: &MultosisParams,
+    scale: f32,
+) {
+    // The whole two-row strip background.
+    let strip_h = crate::editor::grid_view::STATUS_H * scale;
+    widgets::draw_rect(
+        pixmap,
+        0.0,
+        0.0,
+        pixmap.width() as f32,
+        strip_h,
+        widgets::color_control_bg(),
+    );
+
+    for ctrl in ToolbarControl::ALL {
+        let (x, y, w, h) = control_rect(ctrl, scale);
+        match ctrl {
+            ToolbarControl::Speed => {
+                let label = format!("Speed: {}", speed_label(params.speed.value()));
+                widgets::draw_button(pixmap, tr, x, y, w, h, &label, false, false);
+            }
+            ToolbarControl::Bank => {
+                let label = format!("Effect: {}", bank_label(params.effect_bank.value()));
+                widgets::draw_button(pixmap, tr, x, y, w, h, &label, false, false);
+            }
+            ToolbarControl::AutoRestart => {
+                let on = params.auto_restart.value();
+                widgets::draw_button(pixmap, tr, x, y, w, h, "Auto-Restart", on, false);
+            }
+            ToolbarControl::Mix => {
+                let v = params.mix.value();
+                widgets::draw_slider(
+                    pixmap, tr, x, y, w, h, "Mix",
+                    &format!("{}%", (v * 100.0).round() as i32),
+                    v, None, false,
+                );
+            }
+            ToolbarControl::Output => {
+                let norm = params.output_gain.unmodulated_normalized_value();
+                let db = nih_plug::util::gain_to_db(params.output_gain.value());
+                widgets::draw_slider(
+                    pixmap, tr, x, y, w, h, "Out",
+                    &format!("{db:.1} dB"),
+                    norm, None, false,
+                );
+            }
+            ToolbarControl::Reset => {
+                widgets::draw_button(pixmap, tr, x, y, w, h, "Reset", false, false);
+            }
+        }
+    }
+}
+
+/// Short label for a `Speed`.
+fn speed_label(s: crate::clock::Speed) -> &'static str {
+    use crate::clock::Speed;
+    match s {
+        Speed::Div32 => "1/32",
+        Speed::Div16 => "1/16",
+        Speed::Div8 => "1/8",
+        Speed::Div4 => "1/4",
+        Speed::Div2 => "1/2",
+        Speed::Div1 => "1/1",
+    }
+}
+
+/// Short label for an `EffectBank`.
+fn bank_label(b: crate::effects::EffectBank) -> &'static str {
+    use crate::effects::EffectBank;
+    match b {
+        EffectBank::Lowpass => "Lowpass",
+        EffectBank::Bitcrush => "Bitcrush",
+    }
 }
 
 #[cfg(test)]
