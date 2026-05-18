@@ -69,6 +69,96 @@ impl AudioEngine {
         }
         mask
     }
+
+    /// Apply the active rows' effects to one dry stereo sample and sum them.
+    /// The sum is deliberately un-normalised — with many rows active the wet
+    /// signal can exceed the dry level; the `mix` and output-gain controls
+    /// manage that (design doc §6).
+    fn process_sample(
+        &mut self,
+        dry_l: f32,
+        dry_r: f32,
+        active: u16,
+        bank: EffectBank,
+    ) -> (f32, f32) {
+        let mut wet_l = 0.0;
+        let mut wet_r = 0.0;
+        for r in 0..ROWS {
+            if active & (1 << r) == 0 {
+                continue;
+            }
+            match bank {
+                EffectBank::Lowpass => {
+                    wet_l += self.lowpass.process(r, 0, dry_l);
+                    wet_r += self.lowpass.process(r, 1, dry_r);
+                }
+                EffectBank::Bitcrush => {
+                    wet_l += self.bitcrush.process(r, dry_l);
+                    wet_r += self.bitcrush.process(r, dry_r);
+                }
+            }
+        }
+        (wet_l, wet_r)
+    }
+
+    /// Process one stereo block in place. `left`/`right` carry the dry input
+    /// on entry and the mixed `dry + (wet - dry) * mix` output on return.
+    ///
+    /// While `playing`, the clock advances and the wavefront propagates at
+    /// each step boundary; while stopped, the wavefront is frozen and the
+    /// block is processed with the current lit set. `samples_per_step` comes
+    /// from `clock::samples_per_step`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        playing: bool,
+        samples_per_step: f64,
+        bank: EffectBank,
+        mix: f32,
+        auto_restart: bool,
+        grid: &Grid,
+    ) {
+        let n = left.len().min(right.len());
+
+        // Gather this block's step-boundary offsets (only while playing).
+        let mut boundaries = [0usize; MAX_BOUNDARIES];
+        let mut n_boundaries = 0usize;
+        if playing {
+            self.clock.advance(n, samples_per_step, |offset| {
+                if n_boundaries < MAX_BOUNDARIES {
+                    boundaries[n_boundaries] = offset;
+                    n_boundaries += 1;
+                }
+            });
+        }
+
+        // Walk the block in segments split at each boundary; the wavefront is
+        // constant within a segment.
+        let mut active = Self::active_rows(grid, &self.propagator.wavefront);
+        let mut cursor = 0usize;
+        let mut bi = 0usize;
+        while cursor < n {
+            let seg_end = if bi < n_boundaries {
+                boundaries[bi].clamp(cursor, n)
+            } else {
+                n
+            };
+            for i in cursor..seg_end {
+                let (dry_l, dry_r) = (left[i], right[i]);
+                let (wet_l, wet_r) = self.process_sample(dry_l, dry_r, active, bank);
+                left[i] = dry_l + (wet_l - dry_l) * mix;
+                right[i] = dry_r + (wet_r - dry_r) * mix;
+            }
+            cursor = seg_end;
+            if bi < n_boundaries {
+                self.propagator.tick(grid, auto_restart);
+                active = Self::active_rows(grid, &self.propagator.wavefront);
+                bi += 1;
+            }
+        }
+    }
 }
 
 impl Default for AudioEngine {
@@ -113,5 +203,110 @@ mod tests {
     fn new_engine_has_an_empty_wavefront() {
         let engine = AudioEngine::new();
         assert!(engine.wavefront().is_empty());
+    }
+
+    #[test]
+    fn process_at_mix_zero_is_dry_passthrough() {
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let grid = Grid::default_routing();
+        let mut left = [0.1_f32; 64];
+        let mut right = [-0.2_f32; 64];
+        engine.process(
+            &mut left,
+            &mut right,
+            true,
+            10.0,
+            EffectBank::Lowpass,
+            0.0,
+            true,
+            &grid,
+        );
+        assert!(left.iter().all(|&s| (s - 0.1).abs() < 1e-6));
+        assert!(right.iter().all(|&s| (s + 0.2).abs() < 1e-6));
+    }
+
+    #[test]
+    fn process_empty_wavefront_full_wet_is_silent() {
+        // Not playing, fresh engine: the wavefront is empty, so no row is
+        // active and the fully-wet output is silence.
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let grid = Grid::default_routing();
+        let mut left = [0.5_f32; 64];
+        let mut right = [0.5_f32; 64];
+        engine.process(
+            &mut left,
+            &mut right,
+            false,
+            10.0,
+            EffectBank::Lowpass,
+            1.0,
+            true,
+            &grid,
+        );
+        assert!(left.iter().all(|&s| s == 0.0));
+        assert!(right.iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn process_arms_and_produces_wet_signal() {
+        // Playing, default grid, a short step: once the clock crosses its
+        // first boundary the start cells arm, rows become active, and the
+        // fully-wet output is no longer silent.
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let grid = Grid::default_routing();
+        let mut left = [0.3_f32; 128];
+        let mut right = [0.3_f32; 128];
+        engine.process(
+            &mut left,
+            &mut right,
+            true,
+            10.0,
+            EffectBank::Lowpass,
+            1.0,
+            true,
+            &grid,
+        );
+        assert!(
+            left[127] != 0.0,
+            "after arming, a fully-wet block should not be silent"
+        );
+    }
+
+    #[test]
+    fn process_reset_returns_to_silence() {
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let grid = Grid::default_routing();
+        let mut buf = [0.3_f32; 128];
+        let mut buf2 = [0.3_f32; 128];
+        engine.process(
+            &mut buf,
+            &mut buf2,
+            true,
+            10.0,
+            EffectBank::Lowpass,
+            1.0,
+            true,
+            &grid,
+        );
+        engine.reset();
+        // After reset, not playing: empty wavefront -> silent at full wet.
+        let mut left = [0.4_f32; 64];
+        let mut right = [0.4_f32; 64];
+        engine.process(
+            &mut left,
+            &mut right,
+            false,
+            10.0,
+            EffectBank::Lowpass,
+            1.0,
+            true,
+            &grid,
+        );
+        assert!(left.iter().all(|&s| s == 0.0));
+        assert!(right.iter().all(|&s| s == 0.0));
     }
 }
