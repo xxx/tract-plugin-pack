@@ -95,6 +95,45 @@ impl MultosisWindow {
         }
     }
 
+    /// Handle a left click on a non-slider toolbar control.
+    fn handle_toolbar_button(&mut self, ctrl: ToolbarControl) {
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        match ctrl {
+            ToolbarControl::Speed => {
+                // Cycle to the next speed division.
+                let all = crate::clock::Speed::ALL;
+                let cur = self.params.speed.value();
+                let idx = all.iter().position(|&s| s == cur).unwrap_or(0);
+                let next = all[(idx + 1) % all.len()];
+                setter.begin_set_parameter(&self.params.speed);
+                setter.set_parameter(&self.params.speed, next);
+                setter.end_set_parameter(&self.params.speed);
+            }
+            ToolbarControl::Bank => {
+                use crate::effects::EffectBank;
+                let next = match self.params.effect_bank.value() {
+                    EffectBank::Lowpass => EffectBank::Bitcrush,
+                    EffectBank::Bitcrush => EffectBank::Lowpass,
+                };
+                setter.begin_set_parameter(&self.params.effect_bank);
+                setter.set_parameter(&self.params.effect_bank, next);
+                setter.end_set_parameter(&self.params.effect_bank);
+            }
+            ToolbarControl::AutoRestart => {
+                let next = !self.params.auto_restart.value();
+                setter.begin_set_parameter(&self.params.auto_restart);
+                setter.set_parameter(&self.params.auto_restart, next);
+                setter.end_set_parameter(&self.params.auto_restart);
+            }
+            ToolbarControl::Reset => {
+                self.reset_request
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            // Mix/Output are drag sliders — handled in the next task, not here.
+            ToolbarControl::Mix | ToolbarControl::Output => {}
+        }
+    }
+
     fn draw(&mut self) {
         widgets::fill_pixmap_opaque(&mut self.surface.pixmap, widgets::color_bg());
         let grid = self.params.grid.lock().map(|g| *g).unwrap_or_default();
@@ -150,7 +189,12 @@ impl baseview::WindowHandler for MultosisWindow {
                 button: baseview::MouseButton::Left,
                 ..
             }) => {
-                self.handle_grid_click(false);
+                let (px, py) = self.mouse_pos;
+                if let Some(ctrl) = toolbar::toolbar_hit(px, py, self.scale_factor) {
+                    self.handle_toolbar_button(ctrl);
+                } else {
+                    self.handle_grid_click(false);
+                }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
                 button: baseview::MouseButton::Right,
