@@ -16,6 +16,7 @@ path = "src/main.rs"
 nih_plug = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr", features = ["standalone", "assert_process_allocs"] }
 serde = { version = "1.0", features = ["derive"] }
 baseview = { git = "https://github.com/RustAudio/baseview.git", tag = "v0.1.1", features = ["opengl"] }
+keyboard-types = "0.6"
 softbuffer = { version = "0.4", default-features = false, features = ["kms", "x11"] }
 raw-window-handle = "0.5"
 raw-window-handle-06 = { package = "raw-window-handle", version = "0.6" }

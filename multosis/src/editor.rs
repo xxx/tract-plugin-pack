@@ -39,6 +39,9 @@ enum LeftGesture {
         col: usize,
         zone: grid_view::CellZone,
     },
+    /// An active paint drag — `value` is the `enabled` state being painted
+    /// across the stroke, `last` is the most recently painted cell.
+    GridPaint { value: bool, last: (usize, usize) },
 }
 
 /// The baseview window handler — owns the surface and draws each frame.
@@ -116,6 +119,19 @@ impl MultosisWindow {
     fn commit_click(&mut self, row: usize, col: usize, zone: grid_view::CellZone, right: bool) {
         if let Ok(mut grid) = self.params.grid.lock() {
             grid_view::apply_grid_click(&mut grid, row, col, zone, right);
+            self.grid_handoff.publish(*grid);
+        }
+    }
+
+    /// Set `enabled = value` on every given cell and republish the grid.
+    fn paint_cells(&mut self, value: bool, cells: &[(usize, usize)]) {
+        if cells.is_empty() {
+            return;
+        }
+        if let Ok(mut grid) = self.params.grid.lock() {
+            for &(row, col) in cells {
+                grid.cell_mut(row, col).enabled = value;
+            }
             self.grid_handoff.publish(*grid);
         }
     }
@@ -314,7 +330,10 @@ impl baseview::WindowHandler for MultosisWindow {
                     (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
                 self.resize_buffers();
             }
-            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved { position, .. }) => {
+            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved {
+                position,
+                modifiers,
+            }) => {
                 let (px, py) = (position.x as f32, position.y as f32);
                 self.mouse_pos = (px, py);
                 self.toolbar_drag.set_mouse(px, py);
@@ -324,9 +343,35 @@ impl baseview::WindowHandler for MultosisWindow {
                         self.set_slider(ctrl, norm);
                     }
                 }
+                let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
                 match self.left_gesture {
                     Some(LeftGesture::ResizeRegion(edge)) => self.update_region_drag(edge),
-                    Some(LeftGesture::GridPending { .. }) => {}
+                    Some(LeftGesture::GridPending { row, col, zone: _ }) => {
+                        let cur = (
+                            grid_view::row_at(py, self.scale_factor),
+                            grid_view::column_at(px, self.scale_factor),
+                        );
+                        if cur != (row, col) {
+                            // The press has become a paint drag.
+                            let value = !shift;
+                            let cells = grid_view::cells_between((row, col), cur);
+                            self.paint_cells(value, &cells);
+                            self.left_gesture =
+                                Some(LeftGesture::GridPaint { value, last: cur });
+                        }
+                    }
+                    Some(LeftGesture::GridPaint { value, last }) => {
+                        let cur = (
+                            grid_view::row_at(py, self.scale_factor),
+                            grid_view::column_at(px, self.scale_factor),
+                        );
+                        if cur != last {
+                            let cells = grid_view::cells_between(last, cur);
+                            self.paint_cells(value, &cells);
+                            self.left_gesture =
+                                Some(LeftGesture::GridPaint { value, last: cur });
+                        }
+                    }
                     None => {}
                 }
             }
