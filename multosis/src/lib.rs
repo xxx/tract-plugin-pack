@@ -4,6 +4,7 @@
 //! Milestone 1a is the headless routing model: the grid, the wavefront
 //! propagation engine, and the step clock. No GUI, no audio, no nih-plug.
 
+pub mod clock;
 pub mod grid;
 pub mod propagation;
 pub mod randomize;
