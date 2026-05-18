@@ -6,6 +6,7 @@
 
 pub mod clock;
 pub mod effects;
+pub mod engine;
 pub mod grid;
 pub mod handoff;
 pub mod propagation;
