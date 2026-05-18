@@ -98,6 +98,8 @@ pub struct Multosis {
     was_playing: bool,
     /// Audio→GUI wavefront mirror, shared with the editor.
     wavefront_display: Arc<crate::wavefront_display::WavefrontDisplay>,
+    /// Set by the editor's Reset button; consumed once per process block.
+    reset_request: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for Multosis {
@@ -110,6 +112,7 @@ impl Default for Multosis {
             sample_rate: 44_100.0,
             was_playing: false,
             wavefront_display: Arc::new(crate::wavefront_display::WavefrontDisplay::new()),
+            reset_request: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -182,6 +185,11 @@ impl Plugin for Multosis {
             self.engine.reset();
         }
         self.was_playing = playing;
+
+        // A Reset request from the editor resets the sequence.
+        if self.reset_request.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            self.engine.reset();
+        }
 
         // Pick up the latest grid (non-blocking; keep the last on a miss).
         if let Some(grid) = self.grid_handoff.try_read() {
