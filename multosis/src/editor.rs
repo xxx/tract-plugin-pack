@@ -44,8 +44,7 @@ impl MultosisWindow {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
         let ph = (WINDOW_HEIGHT as f32 * scale_factor).round() as u32;
         let surface = widgets::SoftbufferSurface::new(window, pw, ph);
-        let text_renderer =
-            widgets::TextRenderer::new(include_bytes!("fonts/DejaVuSans.ttf"));
+        let text_renderer = widgets::TextRenderer::new(include_bytes!("fonts/DejaVuSans.ttf"));
         Self {
             surface,
             physical_width: pw,
@@ -67,12 +66,7 @@ impl MultosisWindow {
 
     fn draw(&mut self) {
         widgets::fill_pixmap_opaque(&mut self.surface.pixmap, widgets::color_bg());
-        let grid = self
-            .params
-            .grid
-            .lock()
-            .map(|g| *g)
-            .unwrap_or_default();
+        let grid = self.params.grid.lock().map(|g| *g).unwrap_or_default();
         grid_view::draw_grid(&mut self.surface.pixmap, &grid, self.scale_factor);
         grid_view::draw_wavefront(
             &mut self.surface.pixmap,
@@ -112,8 +106,7 @@ impl baseview::WindowHandler for MultosisWindow {
         if let baseview::Event::Window(baseview::WindowEvent::Resized(info)) = &event {
             self.physical_width = info.physical_size().width;
             self.physical_height = info.physical_size().height;
-            self.scale_factor =
-                (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+            self.scale_factor = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
             self.resize_buffers();
         }
         baseview::EventStatus::Captured

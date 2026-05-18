@@ -197,7 +197,15 @@ mod tests {
     #[test]
     fn cell_rect_scales() {
         let (x, y, w, h) = cell_rect(1, 2, 2.0);
-        assert_eq!((x, y, w, h), (2.0 * CELL * 2.0, (STATUS_H + CELL) * 2.0, CELL * 2.0, CELL * 2.0));
+        assert_eq!(
+            (x, y, w, h),
+            (
+                2.0 * CELL * 2.0,
+                (STATUS_H + CELL) * 2.0,
+                CELL * 2.0,
+                CELL * 2.0
+            )
+        );
     }
 
     #[test]
