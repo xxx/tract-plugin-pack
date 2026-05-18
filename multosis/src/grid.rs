@@ -170,6 +170,59 @@ impl Default for LoopRegion {
     }
 }
 
+/// The full 16×32 routing grid plus its loop region. `Copy` (~1.5 KB) so it
+/// crosses the GUI/audio boundary cheaply — the same fixed-capacity approach
+/// as the MSEG widget's `MsegData`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Grid {
+    /// Row-major cells, indexed `row * COLS + col`.
+    pub cells: [Cell; CELL_COUNT],
+    pub loop_region: LoopRegion,
+}
+
+impl Grid {
+    /// The flat index of `(row, col)`.
+    #[inline]
+    pub fn index(row: usize, col: usize) -> usize {
+        row * COLS + col
+    }
+
+    /// Shared access to the cell at `(row, col)`.
+    pub fn cell(&self, row: usize, col: usize) -> &Cell {
+        &self.cells[Self::index(row, col)]
+    }
+
+    /// Mutable access to the cell at `(row, col)`.
+    pub fn cell_mut(&mut self, row: usize, col: usize) -> &mut Cell {
+        &mut self.cells[Self::index(row, col)]
+    }
+
+    /// The default grid: every cell enabled and sending only East; the left
+    /// column (`col == 0`) all start cells; loop region the full grid.
+    pub fn default_routing() -> Self {
+        let mut g = Grid {
+            cells: [Cell::default(); CELL_COUNT],
+            loop_region: LoopRegion::full(),
+        };
+        for r in 0..ROWS {
+            for c in 0..COLS {
+                let cell = g.cell_mut(r, c);
+                cell.enabled = true;
+                cell.is_start = c == 0;
+                cell.sends = 0;
+                cell.set_send(Direction::E, true);
+            }
+        }
+        g
+    }
+}
+
+impl Default for Grid {
+    fn default() -> Self {
+        Self::default_routing()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +326,52 @@ mod tests {
         assert!(n.col0 <= n.col1);
         assert!(n.row1 < ROWS);
         assert!(n.col1 < COLS);
+    }
+
+    #[test]
+    fn grid_index_is_row_major() {
+        assert_eq!(Grid::index(0, 0), 0);
+        assert_eq!(Grid::index(0, 31), 31);
+        assert_eq!(Grid::index(1, 0), 32);
+        assert_eq!(Grid::index(15, 31), 511);
+    }
+
+    #[test]
+    fn default_routing_sends_east_everywhere() {
+        let g = Grid::default_routing();
+        for r in 0..ROWS {
+            for c in 0..COLS {
+                let cell = g.cell(r, c);
+                assert!(cell.enabled, "cell ({r},{c}) should be enabled");
+                assert!(cell.sends_to(Direction::E), "cell ({r},{c}) should send E");
+                // East is the only send.
+                assert_eq!(cell.sends, 1u8 << Direction::E.bit());
+            }
+        }
+    }
+
+    #[test]
+    fn default_routing_starts_the_left_column() {
+        let g = Grid::default_routing();
+        for r in 0..ROWS {
+            assert!(g.cell(r, 0).is_start, "left-column cell ({r},0) is a start");
+            for c in 1..COLS {
+                assert!(!g.cell(r, c).is_start, "cell ({r},{c}) is not a start");
+            }
+        }
+    }
+
+    #[test]
+    fn default_routing_loop_region_is_full() {
+        assert_eq!(Grid::default_routing().loop_region, LoopRegion::full());
+        assert_eq!(Grid::default(), Grid::default_routing());
+    }
+
+    #[test]
+    fn cell_mut_writes_through() {
+        let mut g = Grid::default_routing();
+        g.cell_mut(3, 7).enabled = false;
+        assert!(!g.cell(3, 7).enabled);
+        assert!(g.cell(3, 8).enabled);
     }
 }
