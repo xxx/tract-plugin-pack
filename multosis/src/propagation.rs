@@ -3,7 +3,7 @@
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §5.
 
-use crate::grid::{Grid, CELL_COUNT};
+use crate::grid::{Direction, Grid, CELL_COUNT, COLS, ROWS};
 
 /// The set of currently-lit cells. `Copy` so it crosses the GUI/audio
 /// boundary cheaply.
@@ -47,6 +47,28 @@ impl Default for Wavefront {
     }
 }
 
+/// Compute the next wavefront from `current` by following every lit cell's
+/// send directions through `grid.next_cell`. Pure — this is the seam a future
+/// Game-of-Life routing mode plugs into (see the design doc §1.3).
+pub fn step_manual(grid: &Grid, current: &Wavefront) -> Wavefront {
+    let mut next = Wavefront::empty();
+    for r in 0..ROWS {
+        for c in 0..COLS {
+            if !current.is_lit(r, c) {
+                continue;
+            }
+            let cell = *grid.cell(r, c);
+            for dir in Direction::ALL {
+                if cell.sends_to(dir) {
+                    let (nr, nc) = grid.next_cell(r, c, dir);
+                    next.set(nr, nc, true);
+                }
+            }
+        }
+    }
+    next
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,5 +95,108 @@ mod tests {
         wf.set(3, 7, false);
         assert!(!wf.is_lit(3, 7));
         assert_eq!(wf.count(), 1);
+    }
+
+    use crate::grid::{Cell, LoopRegion};
+
+    /// A grid where every cell sends nowhere — a blank slate for tests.
+    fn blank_grid() -> Grid {
+        let mut g = Grid::default_routing();
+        for cell in g.cells.iter_mut() {
+            *cell = Cell::default(); // enabled, not start, no sends
+        }
+        g.loop_region = LoopRegion::full();
+        g
+    }
+
+    #[test]
+    fn step_manual_follows_a_single_send() {
+        let mut g = blank_grid();
+        g.cell_mut(5, 5).set_send(Direction::E, true);
+        let mut wf = Wavefront::empty();
+        wf.set(5, 5, true);
+        let next = step_manual(&g, &wf);
+        assert_eq!(next.count(), 1);
+        assert!(next.is_lit(5, 6));
+    }
+
+    #[test]
+    fn step_manual_splits_the_wavefront() {
+        let mut g = blank_grid();
+        g.cell_mut(5, 5).set_send(Direction::E, true);
+        g.cell_mut(5, 5).set_send(Direction::S, true);
+        let mut wf = Wavefront::empty();
+        wf.set(5, 5, true);
+        let next = step_manual(&g, &wf);
+        assert_eq!(next.count(), 2);
+        assert!(next.is_lit(5, 6));
+        assert!(next.is_lit(6, 5));
+    }
+
+    #[test]
+    fn step_manual_merges_two_cells_onto_one() {
+        let mut g = blank_grid();
+        // (5,5) sends E and (5,7) sends W — both land on (5,6).
+        g.cell_mut(5, 5).set_send(Direction::E, true);
+        g.cell_mut(5, 7).set_send(Direction::W, true);
+        let mut wf = Wavefront::empty();
+        wf.set(5, 5, true);
+        wf.set(5, 7, true);
+        let next = step_manual(&g, &wf);
+        assert_eq!(next.count(), 1, "merge collapses onto one cell");
+        assert!(next.is_lit(5, 6));
+    }
+
+    #[test]
+    fn step_manual_with_no_sends_yields_empty() {
+        let g = blank_grid(); // no cell sends anywhere
+        let mut wf = Wavefront::empty();
+        wf.set(5, 5, true);
+        assert!(step_manual(&g, &wf).is_empty());
+    }
+
+    #[test]
+    fn step_manual_on_empty_input_is_empty() {
+        let g = Grid::default_routing();
+        assert!(step_manual(&g, &Wavefront::empty()).is_empty());
+    }
+
+    #[test]
+    fn step_manual_loops_within_a_one_cell_region() {
+        // A 1×1 loop region: a cell sending E wraps onto itself.
+        let mut g = blank_grid();
+        g.loop_region = LoopRegion {
+            row0: 4,
+            row1: 4,
+            col0: 9,
+            col1: 9,
+        };
+        g.cell_mut(4, 9).set_send(Direction::E, true);
+        let mut wf = Wavefront::empty();
+        wf.set(4, 9, true);
+        let next = step_manual(&g, &wf);
+        assert!(next.is_lit(4, 9), "1×1 region send loops back onto itself");
+        assert_eq!(next.count(), 1);
+    }
+
+    #[test]
+    fn step_manual_1x1_region_collapses_every_send_onto_self() {
+        // In a 1×1 region a cell sending in all 8 directions still lights only
+        // itself — every send wraps back onto the one cell.
+        let mut g = blank_grid();
+        g.loop_region = LoopRegion {
+            row0: 8,
+            row1: 8,
+            col0: 2,
+            col1: 2,
+        };
+        for dir in Direction::ALL {
+            g.cell_mut(8, 2).set_send(dir, true);
+        }
+        let mut wf = Wavefront::empty();
+        wf.set(8, 2, true);
+        let next = step_manual(&g, &wf);
+        assert_eq!(next.count(), 1);
+        assert!(next.is_lit(8, 2));
     }
 }
