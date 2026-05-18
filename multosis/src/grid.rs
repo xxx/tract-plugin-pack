@@ -4,6 +4,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Number of tracks (rows) in the grid.
+pub const ROWS: usize = 16;
+/// Number of steps (columns) in the grid.
+pub const COLS: usize = 32;
+/// Total cell count, `ROWS * COLS`.
+pub const CELL_COUNT: usize = ROWS * COLS;
+
 /// One of the 8 directions a cell can send a trigger.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, Serialize, Deserialize)]
 pub enum Direction {
@@ -109,6 +116,60 @@ impl Cell {
     }
 }
 
+/// A rectangular sub-region of the grid, inclusive on all four bounds.
+/// Invariant: `row0 <= row1 < ROWS` and `col0 <= col1 < COLS`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct LoopRegion {
+    pub row0: usize,
+    pub row1: usize,
+    pub col0: usize,
+    pub col1: usize,
+}
+
+impl LoopRegion {
+    /// The region covering the entire grid.
+    pub fn full() -> Self {
+        Self {
+            row0: 0,
+            row1: ROWS - 1,
+            col0: 0,
+            col1: COLS - 1,
+        }
+    }
+
+    /// Is `(row, col)` inside the region?
+    pub fn contains(self, row: usize, col: usize) -> bool {
+        row >= self.row0 && row <= self.row1 && col >= self.col0 && col <= self.col1
+    }
+
+    /// A copy with bounds clamped into the grid and ordered (`row0 <= row1`,
+    /// `col0 <= col1`). Repairs a hand-edited or corrupt deserialized region.
+    pub fn normalized(self) -> Self {
+        let mut r0 = self.row0.min(ROWS - 1);
+        let mut r1 = self.row1.min(ROWS - 1);
+        let mut c0 = self.col0.min(COLS - 1);
+        let mut c1 = self.col1.min(COLS - 1);
+        if r0 > r1 {
+            std::mem::swap(&mut r0, &mut r1);
+        }
+        if c0 > c1 {
+            std::mem::swap(&mut c0, &mut c1);
+        }
+        Self {
+            row0: r0,
+            row1: r1,
+            col0: c0,
+            col1: c1,
+        }
+    }
+}
+
+impl Default for LoopRegion {
+    fn default() -> Self {
+        Self::full()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +221,57 @@ mod tests {
         c.toggle_send(Direction::S);
         assert!(!c.sends_to(Direction::S));
         assert!(!c.has_send());
+    }
+
+    #[test]
+    fn grid_dimensions_are_16_by_32() {
+        assert_eq!(ROWS, 16);
+        assert_eq!(COLS, 32);
+        assert_eq!(CELL_COUNT, 512);
+    }
+
+    #[test]
+    fn loop_region_full_covers_the_whole_grid() {
+        let r = LoopRegion::full();
+        assert_eq!(r.row0, 0);
+        assert_eq!(r.row1, ROWS - 1);
+        assert_eq!(r.col0, 0);
+        assert_eq!(r.col1, COLS - 1);
+        assert!(r.contains(0, 0));
+        assert!(r.contains(ROWS - 1, COLS - 1));
+        assert_eq!(LoopRegion::default(), LoopRegion::full());
+    }
+
+    #[test]
+    fn loop_region_contains_respects_bounds() {
+        let r = LoopRegion {
+            row0: 2,
+            row1: 5,
+            col0: 8,
+            col1: 12,
+        };
+        assert!(r.contains(2, 8));
+        assert!(r.contains(5, 12));
+        assert!(r.contains(3, 10));
+        assert!(!r.contains(1, 10)); // row above
+        assert!(!r.contains(6, 10)); // row below
+        assert!(!r.contains(3, 7)); // col left
+        assert!(!r.contains(3, 13)); // col right
+    }
+
+    #[test]
+    fn loop_region_normalized_clamps_and_orders() {
+        // Out-of-range and inverted bounds get repaired.
+        let bad = LoopRegion {
+            row0: 9,
+            row1: 4,
+            col0: 99,
+            col1: 1,
+        };
+        let n = bad.normalized();
+        assert!(n.row0 <= n.row1);
+        assert!(n.col0 <= n.col1);
+        assert!(n.row1 < ROWS);
+        assert!(n.col1 < COLS);
     }
 }
