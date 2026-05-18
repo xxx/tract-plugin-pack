@@ -74,6 +74,39 @@ impl Default for LowpassBank {
     }
 }
 
+/// Per-row bit-depth reduction. Throwaway effect: the bit depth is mapped from
+/// the row index — row 0 is heavily crushed (~2 bits), row `ROWS - 1` is
+/// nearly clean (~16 bits). Stateless — bit quantisation has no memory.
+pub struct BitcrushBank {
+    /// Quantisation step per row.
+    step: [f32; ROWS],
+}
+
+impl BitcrushBank {
+    /// A bank with per-row quantisation steps computed.
+    pub fn new() -> Self {
+        let mut step = [0.0; ROWS];
+        for (r, s) in step.iter_mut().enumerate() {
+            let t = r as f32 / (ROWS - 1) as f32;
+            let bits = 2.0 + t * 14.0; // 2..16 bits
+            *s = 2.0_f32.powf(1.0 - bits);
+        }
+        Self { step }
+    }
+
+    /// Process one sample for `row`. Stateless; both channels use this.
+    pub fn process(&self, row: usize, x: f32) -> f32 {
+        let s = self.step[row];
+        (x / s).round() * s
+    }
+}
+
+impl Default for BitcrushBank {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +160,31 @@ mod tests {
         // After reset the first output is just the first filtered step from 0.
         let y = lp.process(0, 0, 1.0);
         assert!(y < 0.5, "state should be cleared, got {y}");
+    }
+
+    #[test]
+    fn bitcrush_dark_row_quantizes_coarsely() {
+        // Row 0 (~2 bits) snaps a small value hard; row ROWS-1 (~16 bits)
+        // barely moves it.
+        let bc = BitcrushBank::new();
+        let x = 0.1_f32;
+        let crushed = bc.process(0, x);
+        let clean = bc.process(crate::grid::ROWS - 1, x);
+        assert!(
+            (crushed - x).abs() > (clean - x).abs(),
+            "dark row should distort more (crushed={crushed}, clean={clean})"
+        );
+    }
+
+    #[test]
+    fn bitcrush_is_bounded() {
+        // Quantisation never blows the signal far past its input range.
+        let bc = BitcrushBank::new();
+        for r in 0..crate::grid::ROWS {
+            for &x in &[-1.0_f32, -0.3, 0.0, 0.42, 1.0] {
+                let y = bc.process(r, x);
+                assert!(y.abs() <= 1.5, "row {r}, x {x} -> {y} out of range");
+            }
+        }
     }
 }
