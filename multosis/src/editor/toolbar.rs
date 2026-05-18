@@ -72,6 +72,78 @@ pub fn toolbar_hit(px: f32, py: f32, scale: f32) -> Option<ToolbarControl> {
     })
 }
 
+/// One grid-operation button in the lower toolbar row.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToolbarOp {
+    /// Restore default East-only routing.
+    ResetRouting,
+    /// Restore default activations (all enabled, left column start).
+    ReinitCells,
+    /// Randomize the enabled flags in the loop region.
+    RandomizeActivations,
+    /// Randomize the routing in the loop region (no dead ends).
+    RandomizeRouting,
+    /// Copy the loop region to the clipboard.
+    Copy,
+    /// Paste the clipboard at the loop region.
+    Paste,
+}
+
+impl ToolbarOp {
+    /// The six operations, left to right.
+    pub const ALL: [ToolbarOp; 6] = [
+        ToolbarOp::ResetRouting,
+        ToolbarOp::ReinitCells,
+        ToolbarOp::RandomizeActivations,
+        ToolbarOp::RandomizeRouting,
+        ToolbarOp::Copy,
+        ToolbarOp::Paste,
+    ];
+
+    /// Logical `(x, width)` of this op button within the 1056-wide row.
+    fn logical_x_w(self) -> (f32, f32) {
+        match self {
+            ToolbarOp::ResetRouting => (6.0, 140.0),
+            ToolbarOp::ReinitCells => (150.0, 140.0),
+            ToolbarOp::RandomizeActivations => (294.0, 140.0),
+            ToolbarOp::RandomizeRouting => (438.0, 140.0),
+            ToolbarOp::Copy => (582.0, 140.0),
+            ToolbarOp::Paste => (726.0, 140.0),
+        }
+    }
+
+    /// The button's centred label.
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolbarOp::ResetRouting => "Reset Route",
+            ToolbarOp::ReinitCells => "Reinit Cells",
+            ToolbarOp::RandomizeActivations => "Rnd Cells",
+            ToolbarOp::RandomizeRouting => "Rnd Route",
+            ToolbarOp::Copy => "Copy",
+            ToolbarOp::Paste => "Paste",
+        }
+    }
+}
+
+/// The physical-pixel rectangle `(x, y, w, h)` of op button `op` at `scale`.
+/// The op buttons live in the toolbar's lower row.
+pub fn op_rect(op: ToolbarOp, scale: f32) -> (f32, f32, f32, f32) {
+    let (lx, lw) = op.logical_x_w();
+    let x = lx * scale;
+    let y = (TOOLBAR_ROW_H + CTRL_INSET) * scale;
+    let w = lw * scale;
+    let h = (TOOLBAR_ROW_H - 2.0 * CTRL_INSET) * scale;
+    (x, y, w, h)
+}
+
+/// The op button under physical-pixel point `(px, py)` at `scale`, or `None`.
+pub fn op_hit(px: f32, py: f32, scale: f32) -> Option<ToolbarOp> {
+    ToolbarOp::ALL.into_iter().find(|&op| {
+        let (x, y, w, h) = op_rect(op, scale);
+        px >= x && px < x + w && py >= y && py < y + h
+    })
+}
+
 /// Draw the toolbar strip and its six upper-row controls.
 pub fn draw_toolbar(
     pixmap: &mut Pixmap,
@@ -204,5 +276,43 @@ mod tests {
             Some(ToolbarControl::Mix)
         );
         assert_eq!(toolbar_hit(500.0, 400.0, 1.0), None);
+    }
+
+    #[test]
+    fn op_rects_sit_in_the_lower_toolbar_row() {
+        for op in ToolbarOp::ALL {
+            let (x, y, w, h) = op_rect(op, 1.0);
+            assert!(x >= 0.0 && x + w <= 1056.0, "{op:?} out of width");
+            // Entirely within the lower row [TOOLBAR_ROW_H, 2*TOOLBAR_ROW_H].
+            assert!(
+                y >= TOOLBAR_ROW_H && y + h <= 2.0 * TOOLBAR_ROW_H,
+                "{op:?} out of the lower row"
+            );
+        }
+    }
+
+    #[test]
+    fn op_rects_do_not_overlap() {
+        let mut rects: Vec<(f32, f32)> = ToolbarOp::ALL
+            .iter()
+            .map(|o| {
+                let (x, _, w, _) = op_rect(*o, 1.0);
+                (x, x + w)
+            })
+            .collect();
+        rects.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        for pair in rects.windows(2) {
+            assert!(pair[0].1 <= pair[1].0, "ops overlap: {pair:?}");
+        }
+    }
+
+    #[test]
+    fn op_hit_finds_an_op_and_misses_elsewhere() {
+        let (x, y, w, h) = op_rect(ToolbarOp::Copy, 1.5);
+        assert_eq!(op_hit(x + w / 2.0, y + h / 2.0, 1.5), Some(ToolbarOp::Copy));
+        // A point in the upper toolbar row is not an op hit.
+        assert_eq!(op_hit(20.0, 10.0, 1.0), None);
+        // A point in the grid (below the strip) is not an op hit.
+        assert_eq!(op_hit(500.0, 400.0, 1.0), None);
     }
 }
