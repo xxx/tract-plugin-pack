@@ -3,7 +3,7 @@
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §7.
 
-use crate::grid::{Direction, Grid, COLS, ROWS};
+use crate::grid::{Direction, Grid, LoopRegion, COLS, ROWS};
 use crate::wavefront_display::WavefrontDisplay;
 use tiny_skia::Pixmap;
 use tiny_skia_widgets as widgets;
@@ -64,6 +64,73 @@ pub fn cell_zone(px: f32, py: f32, scale: f32) -> Option<(usize, usize, CellZone
     // A non-centre third maps to a unit (drow, dcol) step.
     let dir = Direction::from_delta(trow - 1, tcol - 1)?;
     Some((row, col, CellZone::Send(dir)))
+}
+
+/// One draggable edge of the loop-region rectangle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RegionEdge {
+    /// Left edge — drags `col0`.
+    Left,
+    /// Right edge — drags `col1`.
+    Right,
+    /// Top edge — drags `row0`.
+    Top,
+    /// Bottom edge — drags `row1`.
+    Bottom,
+}
+
+/// Half-width of the grab band straddling a region edge, in logical pixels.
+const EDGE_BAND: f32 = 6.0;
+
+/// The loop-region edge under physical-pixel point `(px, py)` at `scale`, or
+/// `None`. The cursor must be within the grid drawing area — points in the
+/// toolbar strip never hit an edge.
+pub fn region_edge_hit(
+    px: f32,
+    py: f32,
+    region: LoopRegion,
+    scale: f32,
+) -> Option<RegionEdge> {
+    // Reject the toolbar strip and anything outside the grid.
+    let grid_top = STATUS_H * scale;
+    let grid_bottom = (STATUS_H + ROWS as f32 * CELL) * scale;
+    let grid_right = COLS as f32 * CELL * scale;
+    if py < grid_top || py > grid_bottom || px < 0.0 || px > grid_right {
+        return None;
+    }
+    let (x0, y0, _, _) = cell_rect(region.row0, region.col0, scale);
+    let (x1, y1, w1, h1) = cell_rect(region.row1, region.col1, scale);
+    let right = x1 + w1;
+    let bottom = y1 + h1;
+    let band = EDGE_BAND * scale;
+    let in_rows = py >= y0 && py <= bottom;
+    let in_cols = px >= x0 && px <= right;
+    if in_rows && (px - x0).abs() <= band {
+        Some(RegionEdge::Left)
+    } else if in_rows && (px - right).abs() <= band {
+        Some(RegionEdge::Right)
+    } else if in_cols && (py - y0).abs() <= band {
+        Some(RegionEdge::Top)
+    } else if in_cols && (py - bottom).abs() <= band {
+        Some(RegionEdge::Bottom)
+    } else {
+        None
+    }
+}
+
+/// The grid column under physical-pixel x `px` at `scale`, clamped to
+/// `0..=COLS-1`. Used while dragging a region edge, where the cursor may
+/// stray off the grid.
+pub fn column_at(px: f32, scale: f32) -> usize {
+    let col = (px / scale / CELL).floor();
+    col.clamp(0.0, (COLS - 1) as f32) as usize
+}
+
+/// The grid row under physical-pixel y `py` at `scale`, clamped to
+/// `0..=ROWS-1`. Used while dragging a region edge.
+pub fn row_at(py: f32, scale: f32) -> usize {
+    let row = ((py / scale - STATUS_H) / CELL).floor();
+    row.clamp(0.0, (ROWS - 1) as f32) as usize
 }
 
 /// Apply a click on cell `(row, col)`'s `zone` to the grid. A left click
@@ -330,5 +397,65 @@ mod tests {
             before,
             "right-click on an octant does nothing"
         );
+    }
+
+    #[test]
+    fn region_edge_hit_finds_each_edge() {
+        let region = LoopRegion {
+            row0: 2,
+            row1: 8,
+            col0: 4,
+            col1: 20,
+        };
+        let (x0, y0, _, _) = cell_rect(2, 4, 1.0);
+        let (x1, y1, w, h) = cell_rect(8, 20, 1.0);
+        let mid_x = (x0 + x1 + w) / 2.0;
+        let mid_y = (y0 + y1 + h) / 2.0;
+        assert_eq!(
+            region_edge_hit(x0, mid_y, region, 1.0),
+            Some(RegionEdge::Left)
+        );
+        assert_eq!(
+            region_edge_hit(x1 + w, mid_y, region, 1.0),
+            Some(RegionEdge::Right)
+        );
+        assert_eq!(
+            region_edge_hit(mid_x, y0, region, 1.0),
+            Some(RegionEdge::Top)
+        );
+        assert_eq!(
+            region_edge_hit(mid_x, y1 + h, region, 1.0),
+            Some(RegionEdge::Bottom)
+        );
+    }
+
+    #[test]
+    fn region_edge_hit_misses_interior_and_toolbar() {
+        let region = LoopRegion {
+            row0: 2,
+            row1: 8,
+            col0: 4,
+            col1: 20,
+        };
+        // Centre of an interior cell — far from every edge.
+        let (xc, yc, wc, hc) = cell_rect(5, 12, 1.0);
+        assert_eq!(
+            region_edge_hit(xc + wc / 2.0, yc + hc / 2.0, region, 1.0),
+            None
+        );
+        // A point up in the toolbar strip (y < STATUS_H).
+        let (x0, _, _, _) = cell_rect(2, 4, 1.0);
+        assert_eq!(region_edge_hit(x0, 10.0, region, 1.0), None);
+    }
+
+    #[test]
+    fn column_at_and_row_at_clamp_to_grid_bounds() {
+        assert_eq!(column_at(0.0, 1.0), 0);
+        assert_eq!(column_at(CELL * 5.5, 1.0), 5);
+        assert_eq!(column_at(CELL * 10_000.0, 1.0), COLS - 1);
+        assert_eq!(row_at(0.0, 1.0), 0); // above the grid -> clamp to 0
+        assert_eq!(row_at(STATUS_H, 1.0), 0); // exactly at the grid's top
+        assert_eq!(row_at(STATUS_H + CELL * 3.5, 1.0), 3);
+        assert_eq!(row_at(STATUS_H + CELL * 10_000.0, 1.0), ROWS - 1);
     }
 }
