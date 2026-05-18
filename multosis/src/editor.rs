@@ -14,6 +14,7 @@ use crate::MultosisParams;
 use tiny_skia_widgets as widgets;
 
 pub mod grid_view;
+pub mod toolbar;
 
 /// Logical editor size; physical size = logical × scale.
 pub const WINDOW_WIDTH: u32 = 1056;
