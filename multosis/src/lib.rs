@@ -12,6 +12,7 @@ pub mod handoff;
 pub mod propagation;
 pub mod randomize;
 pub mod region;
+pub mod wavefront_display;
 
 use crate::clock::Speed;
 use crate::effects::EffectBank;
