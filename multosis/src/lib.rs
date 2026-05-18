@@ -5,6 +5,7 @@
 //! propagation engine, and the step clock. No GUI, no audio, no nih-plug.
 
 pub mod clock;
+pub mod editor;
 pub mod effects;
 pub mod engine;
 pub mod grid;
@@ -133,6 +134,10 @@ impl Plugin for Multosis {
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor::create(self.params.clone(), self.wavefront_display.clone())
     }
 
     fn initialize(
