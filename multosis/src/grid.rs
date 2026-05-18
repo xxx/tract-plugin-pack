@@ -223,6 +223,31 @@ impl Default for Grid {
     }
 }
 
+/// Wrap `v` into the inclusive range `[lo, hi]`.
+fn wrap(v: i32, lo: usize, hi: usize) -> usize {
+    let lo = lo as i32;
+    let span = hi as i32 - lo + 1;
+    (lo + (v - lo).rem_euclid(span)) as usize
+}
+
+impl Grid {
+    /// Where a send in `dir` from `(row, col)` lands. If `(row, col)` is inside
+    /// the loop region the result wraps within the region; otherwise it wraps
+    /// within the full grid. This is the only place loop-region containment is
+    /// enforced.
+    pub fn next_cell(&self, row: usize, col: usize, dir: Direction) -> (usize, usize) {
+        let (dr, dc) = dir.delta();
+        let nr = row as i32 + dr;
+        let nc = col as i32 + dc;
+        if self.loop_region.contains(row, col) {
+            let lr = self.loop_region;
+            (wrap(nr, lr.row0, lr.row1), wrap(nc, lr.col0, lr.col1))
+        } else {
+            (wrap(nr, 0, ROWS - 1), wrap(nc, 0, COLS - 1))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,5 +398,106 @@ mod tests {
         g.cell_mut(3, 7).enabled = false;
         assert!(!g.cell(3, 7).enabled);
         assert!(g.cell(3, 8).enabled);
+    }
+
+    #[test]
+    fn next_cell_moves_inside_the_grid() {
+        let g = Grid::default_routing(); // loop region is full
+        assert_eq!(g.next_cell(5, 5, Direction::E), (5, 6));
+        assert_eq!(g.next_cell(5, 5, Direction::W), (5, 4));
+        assert_eq!(g.next_cell(5, 5, Direction::N), (4, 5));
+        assert_eq!(g.next_cell(5, 5, Direction::S), (6, 5));
+        assert_eq!(g.next_cell(5, 5, Direction::SE), (6, 6));
+    }
+
+    #[test]
+    fn next_cell_wraps_every_grid_edge() {
+        let g = Grid::default_routing();
+        assert_eq!(g.next_cell(5, COLS - 1, Direction::E), (5, 0));
+        assert_eq!(g.next_cell(5, 0, Direction::W), (5, COLS - 1));
+        assert_eq!(g.next_cell(0, 5, Direction::N), (ROWS - 1, 5));
+        assert_eq!(g.next_cell(ROWS - 1, 5, Direction::S), (0, 5));
+        // Corner diagonal wraps both axes at once.
+        assert_eq!(g.next_cell(0, 0, Direction::NW), (ROWS - 1, COLS - 1));
+        assert_eq!(
+            g.next_cell(ROWS - 1, COLS - 1, Direction::SE),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn next_cell_wraps_within_the_loop_region() {
+        let mut g = Grid::default_routing();
+        g.loop_region = LoopRegion {
+            row0: 4,
+            row1: 11,
+            col0: 8,
+            col1: 23,
+        };
+        // A cell on the region's right edge sending E wraps to the region's
+        // left edge — NOT to the grid edge.
+        assert_eq!(g.next_cell(6, 23, Direction::E), (6, 8));
+        // Region's bottom edge sending S wraps to the region's top edge.
+        assert_eq!(g.next_cell(11, 15, Direction::S), (4, 15));
+        // Region's top-left corner sending NW wraps to its bottom-right corner.
+        assert_eq!(g.next_cell(4, 8, Direction::NW), (11, 23));
+        // Interior of the region moves normally.
+        assert_eq!(g.next_cell(6, 15, Direction::E), (6, 16));
+    }
+
+    #[test]
+    fn next_cell_outside_the_region_wraps_the_full_grid() {
+        let mut g = Grid::default_routing();
+        g.loop_region = LoopRegion {
+            row0: 4,
+            row1: 11,
+            col0: 8,
+            col1: 23,
+        };
+        // (2, 31) is outside the region: E wraps to the grid's left edge.
+        assert_eq!(g.next_cell(2, COLS - 1, Direction::E), (2, 0));
+    }
+
+    #[test]
+    fn no_send_from_a_region_cell_ever_escapes_the_region() {
+        let mut g = Grid::default_routing();
+        let lr = LoopRegion {
+            row0: 3,
+            row1: 9,
+            col0: 5,
+            col1: 20,
+        };
+        g.loop_region = lr;
+        for r in lr.row0..=lr.row1 {
+            for c in lr.col0..=lr.col1 {
+                for dir in Direction::ALL {
+                    let (nr, nc) = g.next_cell(r, c, dir);
+                    assert!(
+                        lr.contains(nr, nc),
+                        "send {dir:?} from ({r},{c}) escaped to ({nr},{nc})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn next_cell_in_a_1x1_region_loops_every_direction_onto_itself() {
+        // A 1×1 loop region: the single cell has nowhere to wrap to, so every
+        // one of the 8 directions must resolve back onto the cell itself.
+        let mut g = Grid::default_routing();
+        g.loop_region = LoopRegion {
+            row0: 7,
+            row1: 7,
+            col0: 13,
+            col1: 13,
+        };
+        for dir in Direction::ALL {
+            assert_eq!(
+                g.next_cell(7, 13, dir),
+                (7, 13),
+                "direction {dir:?} did not loop onto itself"
+            );
+        }
     }
 }
