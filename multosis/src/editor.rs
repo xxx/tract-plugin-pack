@@ -5,7 +5,7 @@
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::editor::toolbar::ToolbarControl;
@@ -43,6 +43,7 @@ struct MultosisWindow {
 }
 
 impl MultosisWindow {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         window: &mut baseview::Window<'_>,
         params: Arc<MultosisParams>,
@@ -134,6 +135,33 @@ impl MultosisWindow {
         }
     }
 
+    /// The current normalized value of a slider control.
+    fn slider_normalized(&self, ctrl: ToolbarControl) -> f32 {
+        match ctrl {
+            ToolbarControl::Mix => self.params.mix.unmodulated_normalized_value(),
+            ToolbarControl::Output => self.params.output_gain.unmodulated_normalized_value(),
+            _ => 0.0,
+        }
+    }
+
+    /// Set a slider control to a normalized value via the host.
+    fn set_slider(&self, ctrl: ToolbarControl, norm: f32) {
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        match ctrl {
+            ToolbarControl::Mix => {
+                setter.begin_set_parameter(&self.params.mix);
+                setter.set_parameter_normalized(&self.params.mix, norm);
+                setter.end_set_parameter(&self.params.mix);
+            }
+            ToolbarControl::Output => {
+                setter.begin_set_parameter(&self.params.output_gain);
+                setter.set_parameter_normalized(&self.params.output_gain, norm);
+                setter.end_set_parameter(&self.params.output_gain);
+            }
+            _ => {}
+        }
+    }
+
     fn draw(&mut self) {
         widgets::fill_pixmap_opaque(&mut self.surface.pixmap, widgets::color_bg());
         let grid = self.params.grid.lock().map(|g| *g).unwrap_or_default();
@@ -183,17 +211,28 @@ impl baseview::WindowHandler for MultosisWindow {
                 self.resize_buffers();
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorMoved { position, .. }) => {
-                self.mouse_pos = (position.x as f32, position.y as f32);
+                let (px, py) = (position.x as f32, position.y as f32);
+                self.mouse_pos = (px, py);
+                self.toolbar_drag.set_mouse(px, py);
+                if let Some(&ctrl) = self.toolbar_drag.active_action() {
+                    let current = self.slider_normalized(ctrl);
+                    if let Some(norm) = self.toolbar_drag.update_drag(false, current) {
+                        self.set_slider(ctrl, norm);
+                    }
+                }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
                 button: baseview::MouseButton::Left,
                 ..
             }) => {
                 let (px, py) = self.mouse_pos;
-                if let Some(ctrl) = toolbar::toolbar_hit(px, py, self.scale_factor) {
-                    self.handle_toolbar_button(ctrl);
-                } else {
-                    self.handle_grid_click(false);
+                match toolbar::toolbar_hit(px, py, self.scale_factor) {
+                    Some(ctrl @ (ToolbarControl::Mix | ToolbarControl::Output)) => {
+                        let current = self.slider_normalized(ctrl);
+                        self.toolbar_drag.begin_drag(ctrl, current, false);
+                    }
+                    Some(ctrl) => self.handle_toolbar_button(ctrl),
+                    None => self.handle_grid_click(false),
                 }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
@@ -201,6 +240,12 @@ impl baseview::WindowHandler for MultosisWindow {
                 ..
             }) => {
                 self.handle_grid_click(true);
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                ..
+            }) => {
+                self.toolbar_drag.end_drag();
             }
             _ => {}
         }
