@@ -184,6 +184,36 @@ pub fn region_grip_hit(px: f32, py: f32, region: LoopRegion, scale: f32) -> bool
     px >= gx && px < gx + gw && py >= gy && py < gy + gh
 }
 
+/// Every grid cell on the straight line from cell `a` to cell `b`, inclusive
+/// of both endpoints (Bresenham's line) — so a fast paint drag, whose
+/// `CursorMoved` events can jump several cells, skips no cell in the stroke.
+pub fn cells_between(a: (usize, usize), b: (usize, usize)) -> Vec<(usize, usize)> {
+    let (mut r, mut c) = (a.0 as i32, a.1 as i32);
+    let (r1, c1) = (b.0 as i32, b.1 as i32);
+    let dr = (r1 - r).abs();
+    let dc = (c1 - c).abs();
+    let sr = if r < r1 { 1 } else { -1 };
+    let sc = if c < c1 { 1 } else { -1 };
+    let mut err = dc - dr;
+    let mut out = Vec::new();
+    loop {
+        out.push((r as usize, c as usize));
+        if r == r1 && c == c1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 > -dr {
+            err -= dr;
+            c += sc;
+        }
+        if e2 < dc {
+            err += dc;
+            r += sr;
+        }
+    }
+    out
+}
+
 /// Apply a click on cell `(row, col)`'s `zone` to the grid. A left click
 /// (`right == false`) toggles a send direction (octant) or the `enabled`
 /// flag (centre); a right click toggles the `is_start` flag (centre only)
@@ -735,5 +765,46 @@ mod tests {
         assert!(gx >= cx && gx + gw <= cx + cw);
         assert!(gy >= cy && gy + gh <= cy + ch);
         assert!(gw > 0.0 && gh > 0.0);
+    }
+
+    #[test]
+    fn cells_between_single_cell() {
+        assert_eq!(cells_between((5, 7), (5, 7)), vec![(5, 7)]);
+    }
+
+    #[test]
+    fn cells_between_includes_both_endpoints() {
+        let line = cells_between((2, 3), (2, 6));
+        assert_eq!(line.first(), Some(&(2, 3)));
+        assert_eq!(line.last(), Some(&(2, 6)));
+    }
+
+    #[test]
+    fn cells_between_horizontal_has_no_gap() {
+        assert_eq!(cells_between((4, 1), (4, 4)), vec![(4, 1), (4, 2), (4, 3), (4, 4)]);
+    }
+
+    #[test]
+    fn cells_between_vertical_has_no_gap() {
+        assert_eq!(cells_between((1, 8), (4, 8)), vec![(1, 8), (2, 8), (3, 8), (4, 8)]);
+    }
+
+    #[test]
+    fn cells_between_diagonal_steps_both_axes() {
+        assert_eq!(cells_between((0, 0), (3, 3)), vec![(0, 0), (1, 1), (2, 2), (3, 3)]);
+    }
+
+    #[test]
+    fn cells_between_long_jump_is_contiguous() {
+        // A fast drag from one corner of the grid to the other.
+        let line = cells_between((0, 0), (15, 31));
+        assert_eq!(line.first(), Some(&(0, 0)));
+        assert_eq!(line.last(), Some(&(15, 31)));
+        // Every consecutive pair is a king-move step (adjacent incl. diagonal).
+        for pair in line.windows(2) {
+            let dr = (pair[0].0 as i32 - pair[1].0 as i32).abs();
+            let dc = (pair[0].1 as i32 - pair[1].1 as i32).abs();
+            assert!(dr <= 1 && dc <= 1 && (dr + dc) > 0, "gap between {pair:?}");
+        }
     }
 }
