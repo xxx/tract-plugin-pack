@@ -6,6 +6,7 @@
 
 pub mod clock;
 pub mod grid;
+pub mod handoff;
 pub mod propagation;
 pub mod randomize;
 pub mod region;
