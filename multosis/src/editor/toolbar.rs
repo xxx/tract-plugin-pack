@@ -165,6 +165,7 @@ pub fn draw_toolbar(
     pixmap: &mut Pixmap,
     tr: &mut widgets::TextRenderer,
     params: &MultosisParams,
+    seq_status: &crate::seq_status::SeqStatusDisplay,
     scale: f32,
 ) {
     // The whole two-row strip background.
@@ -232,6 +233,24 @@ pub fn draw_toolbar(
             }
         }
     }
+
+    // Lower row: the six grid-operation buttons.
+    for op in ToolbarOp::ALL {
+        let (x, y, w, h) = op_rect(op, scale);
+        widgets::draw_button(pixmap, tr, x, y, w, h, op.label(), false, false);
+    }
+
+    // Sequence-status readout, at the right end of the lower row.
+    let (state, step) = seq_status.read();
+    let status = match state {
+        crate::propagation::SequenceState::Initial => "Initial".to_string(),
+        crate::propagation::SequenceState::Running => format!("Running · {step}"),
+        crate::propagation::SequenceState::Stopped => "Stopped".to_string(),
+    };
+    let size = 16.0 * scale;
+    let sx = 878.0 * scale;
+    let sy = (TOOLBAR_ROW_H + TOOLBAR_ROW_H / 2.0) * scale + size * 0.36;
+    tr.draw_text(pixmap, sx, sy, &status, size, widgets::color_text());
 }
 
 /// Short label for a `Speed`.

@@ -194,6 +194,7 @@ impl MultosisWindow {
             &mut self.surface.pixmap,
             &mut self.text_renderer,
             &self.params,
+            &self.seq_status,
             self.scale_factor,
         );
     }
