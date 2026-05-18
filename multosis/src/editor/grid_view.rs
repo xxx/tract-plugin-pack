@@ -40,6 +40,30 @@ pub fn cell_at(px: f32, py: f32, scale: f32) -> Option<(usize, usize)> {
     }
 }
 
+/// A clickable zone within a cell: the centre, or one of the 8 send
+/// directions (the cell is split into a 3×3 — centre third + 8 surrounders).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CellZone {
+    Center,
+    Send(Direction),
+}
+
+/// The cell and zone under physical-pixel point `(px, py)` at `scale`, or
+/// `None` if the point is outside the grid.
+pub fn cell_zone(px: f32, py: f32, scale: f32) -> Option<(usize, usize, CellZone)> {
+    let (row, col) = cell_at(px, py, scale)?;
+    let (cx, cy, w, h) = cell_rect(row, col, scale);
+    // Third index 0..3 within the cell, on each axis.
+    let tcol = (((px - cx) / w) * 3.0).floor().clamp(0.0, 2.0) as i32;
+    let trow = (((py - cy) / h) * 3.0).floor().clamp(0.0, 2.0) as i32;
+    if trow == 1 && tcol == 1 {
+        return Some((row, col, CellZone::Center));
+    }
+    // A non-centre third maps to a unit (drow, dcol) step.
+    let dir = Direction::from_delta(trow - 1, tcol - 1)?;
+    Some((row, col, CellZone::Send(dir)))
+}
+
 /// Cell background when the cell is enabled.
 fn color_cell_enabled() -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(0x33, 0x37, 0x42, 0xFF)
@@ -218,5 +242,33 @@ mod tests {
         assert_eq!(cell_at(10.0, 5.0, 1.0), None);
         // A point past the grid is not a cell.
         assert_eq!(cell_at(100_000.0, 100_000.0, 1.0), None);
+    }
+
+    #[test]
+    fn cell_zone_centre_third_is_center() {
+        // The middle of cell (4, 6) resolves to that cell's Center zone.
+        let (x, y, w, h) = cell_rect(4, 6, 1.0);
+        let z = cell_zone(x + w / 2.0, y + h / 2.0, 1.0);
+        assert_eq!(z, Some((4, 6, CellZone::Center)));
+    }
+
+    #[test]
+    fn cell_zone_edges_map_to_directions() {
+        let (x, y, w, h) = cell_rect(4, 6, 1.0);
+        // Top-centre third -> North.
+        let top = cell_zone(x + w / 2.0, y + h / 6.0, 1.0);
+        assert_eq!(top, Some((4, 6, CellZone::Send(Direction::N))));
+        // Right-centre third -> East.
+        let right = cell_zone(x + w * 5.0 / 6.0, y + h / 2.0, 1.0);
+        assert_eq!(right, Some((4, 6, CellZone::Send(Direction::E))));
+        // Bottom-right third -> South-East.
+        let se = cell_zone(x + w * 5.0 / 6.0, y + h * 5.0 / 6.0, 1.0);
+        assert_eq!(se, Some((4, 6, CellZone::Send(Direction::SE))));
+    }
+
+    #[test]
+    fn cell_zone_outside_the_grid_is_none() {
+        assert_eq!(cell_zone(10.0, 5.0, 1.0), None); // status strip
+        assert_eq!(cell_zone(-5.0, 200.0, 1.0), None); // left of grid
     }
 }
