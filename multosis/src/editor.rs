@@ -356,8 +356,7 @@ impl baseview::WindowHandler for MultosisWindow {
                             let value = !shift;
                             let cells = grid_view::cells_between((row, col), cur);
                             self.paint_cells(value, &cells);
-                            self.left_gesture =
-                                Some(LeftGesture::GridPaint { value, last: cur });
+                            self.left_gesture = Some(LeftGesture::GridPaint { value, last: cur });
                         }
                     }
                     Some(LeftGesture::GridPaint { value, last }) => {
@@ -368,8 +367,7 @@ impl baseview::WindowHandler for MultosisWindow {
                         if cur != last {
                             let cells = grid_view::cells_between(last, cur);
                             self.paint_cells(value, &cells);
-                            self.left_gesture =
-                                Some(LeftGesture::GridPaint { value, last: cur });
+                            self.left_gesture = Some(LeftGesture::GridPaint { value, last: cur });
                         }
                     }
                     None => {}

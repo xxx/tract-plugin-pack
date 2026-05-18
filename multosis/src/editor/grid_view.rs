@@ -726,7 +726,10 @@ mod tests {
             col1: 0,
         };
         let moved = apply_region_move(r, 9, 20);
-        assert_eq!((moved.row0, moved.row1, moved.col0, moved.col1), (9, 9, 20, 20));
+        assert_eq!(
+            (moved.row0, moved.row1, moved.col0, moved.col1),
+            (9, 9, 20, 20)
+        );
     }
 
     #[test]
@@ -789,17 +792,26 @@ mod tests {
 
     #[test]
     fn cells_between_horizontal_has_no_gap() {
-        assert_eq!(cells_between((4, 1), (4, 4)), vec![(4, 1), (4, 2), (4, 3), (4, 4)]);
+        assert_eq!(
+            cells_between((4, 1), (4, 4)),
+            vec![(4, 1), (4, 2), (4, 3), (4, 4)]
+        );
     }
 
     #[test]
     fn cells_between_vertical_has_no_gap() {
-        assert_eq!(cells_between((1, 8), (4, 8)), vec![(1, 8), (2, 8), (3, 8), (4, 8)]);
+        assert_eq!(
+            cells_between((1, 8), (4, 8)),
+            vec![(1, 8), (2, 8), (3, 8), (4, 8)]
+        );
     }
 
     #[test]
     fn cells_between_diagonal_steps_both_axes() {
-        assert_eq!(cells_between((0, 0), (3, 3)), vec![(0, 0), (1, 1), (2, 2), (3, 3)]);
+        assert_eq!(
+            cells_between((0, 0), (3, 3)),
+            vec![(0, 0), (1, 1), (2, 2), (3, 3)]
+        );
     }
 
     #[test]
