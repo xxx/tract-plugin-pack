@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::editor::toolbar::ToolbarControl;
 use crate::handoff::GridHandoff;
+use crate::seq_status::SeqStatusDisplay;
 use crate::wavefront_display::WavefrontDisplay;
 use crate::MultosisParams;
 use tiny_skia_widgets as widgets;
@@ -33,6 +34,7 @@ struct MultosisWindow {
     pending_resize: Arc<AtomicU64>,
     params: Arc<MultosisParams>,
     wavefront_display: Arc<WavefrontDisplay>,
+    seq_status: Arc<SeqStatusDisplay>,
     grid_handoff: Arc<GridHandoff>,
     /// Latest cursor position in physical pixels, updated on CursorMoved.
     mouse_pos: (f32, f32),
@@ -48,6 +50,7 @@ impl MultosisWindow {
         window: &mut baseview::Window<'_>,
         params: Arc<MultosisParams>,
         wavefront_display: Arc<WavefrontDisplay>,
+        seq_status: Arc<SeqStatusDisplay>,
         grid_handoff: Arc<GridHandoff>,
         pending_resize: Arc<AtomicU64>,
         gui_context: Arc<dyn GuiContext>,
@@ -66,6 +69,7 @@ impl MultosisWindow {
             pending_resize,
             params,
             wavefront_display,
+            seq_status,
             grid_handoff,
             mouse_pos: (0.0, 0.0),
             text_renderer,
@@ -275,6 +279,7 @@ impl baseview::WindowHandler for MultosisWindow {
 struct MultosisEditor {
     params: Arc<MultosisParams>,
     wavefront_display: Arc<WavefrontDisplay>,
+    seq_status: Arc<SeqStatusDisplay>,
     grid_handoff: Arc<GridHandoff>,
     reset_request: Arc<AtomicBool>,
     pending_resize: Arc<AtomicU64>,
@@ -284,12 +289,14 @@ struct MultosisEditor {
 pub fn create(
     params: Arc<MultosisParams>,
     wavefront_display: Arc<WavefrontDisplay>,
+    seq_status: Arc<SeqStatusDisplay>,
     grid_handoff: Arc<GridHandoff>,
     reset_request: Arc<AtomicBool>,
 ) -> Option<Box<dyn Editor>> {
     Some(Box::new(MultosisEditor {
         params,
         wavefront_display,
+        seq_status,
         grid_handoff,
         reset_request,
         pending_resize: Arc::new(AtomicU64::new(0)),
@@ -307,6 +314,7 @@ impl Editor for MultosisEditor {
 
         let params = Arc::clone(&self.params);
         let wavefront_display = Arc::clone(&self.wavefront_display);
+        let seq_status = Arc::clone(&self.seq_status);
         let grid_handoff = Arc::clone(&self.grid_handoff);
         let pending_resize = Arc::clone(&self.pending_resize);
         let gui_context = Arc::clone(&context);
@@ -325,6 +333,7 @@ impl Editor for MultosisEditor {
                     window,
                     params,
                     wavefront_display,
+                    seq_status,
                     grid_handoff,
                     pending_resize,
                     gui_context,

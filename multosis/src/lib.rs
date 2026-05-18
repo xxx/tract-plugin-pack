@@ -99,6 +99,8 @@ pub struct Multosis {
     was_playing: bool,
     /// Audio→GUI wavefront mirror, shared with the editor.
     wavefront_display: Arc<crate::wavefront_display::WavefrontDisplay>,
+    /// Audio→GUI sequence-status mirror, shared with the editor.
+    seq_status: Arc<crate::seq_status::SeqStatusDisplay>,
     /// Set by the editor's Reset button; consumed once per process block.
     reset_request: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -113,6 +115,7 @@ impl Default for Multosis {
             sample_rate: 44_100.0,
             was_playing: false,
             wavefront_display: Arc::new(crate::wavefront_display::WavefrontDisplay::new()),
+            seq_status: Arc::new(crate::seq_status::SeqStatusDisplay::new()),
             reset_request: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -144,6 +147,7 @@ impl Plugin for Multosis {
         editor::create(
             self.params.clone(),
             self.wavefront_display.clone(),
+            self.seq_status.clone(),
             self.grid_handoff.clone(),
             self.reset_request.clone(),
         )
@@ -226,6 +230,8 @@ impl Plugin for Multosis {
 
         // Publish the wavefront for the editor to draw.
         self.wavefront_display.publish(self.engine.wavefront());
+        self.seq_status
+            .publish(self.engine.sequence_state(), self.engine.step());
 
         // Post-mix output gain (smoothed per sample).
         for i in 0..n {
