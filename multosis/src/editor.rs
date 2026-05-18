@@ -8,8 +8,9 @@ use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::editor::toolbar::ToolbarControl;
+use crate::editor::toolbar::{ToolbarControl, ToolbarOp};
 use crate::handoff::GridHandoff;
+use crate::region::RegionSnapshot;
 use crate::seq_status::SeqStatusDisplay;
 use crate::wavefront_display::WavefrontDisplay;
 use crate::MultosisParams;
@@ -42,6 +43,10 @@ struct MultosisWindow {
     gui_context: Arc<dyn GuiContext>,
     reset_request: Arc<AtomicBool>,
     toolbar_drag: widgets::DragState<ToolbarControl>,
+    /// The loop-region clipboard for Copy/Paste.
+    clipboard: Option<RegionSnapshot>,
+    /// Seed advanced on each randomize op so successive clicks differ.
+    rng_seed: u32,
 }
 
 impl MultosisWindow {
@@ -76,6 +81,8 @@ impl MultosisWindow {
             gui_context,
             reset_request,
             toolbar_drag: widgets::DragState::new(),
+            clipboard: None,
+            rng_seed: 1,
         }
     }
 
@@ -137,6 +144,31 @@ impl MultosisWindow {
             // Mix/Output drags are begun in on_event's ButtonPressed arm.
             ToolbarControl::Mix | ToolbarControl::Output => {}
         }
+    }
+
+    /// Handle a left click on a lower-row operation button.
+    fn handle_toolbar_op(&mut self, op: ToolbarOp) {
+        let Ok(mut grid) = self.params.grid.lock() else {
+            return;
+        };
+        match op {
+            ToolbarOp::Copy => {
+                // Copy snapshots the loop region; it does not change the grid.
+                self.clipboard = Some(grid.copy_region());
+                return;
+            }
+            ToolbarOp::Paste => {
+                if let Some(snap) = &self.clipboard {
+                    grid.paste_region(snap);
+                }
+            }
+            other => {
+                toolbar::apply_grid_op(&mut grid, other, self.rng_seed);
+                self.rng_seed = self.rng_seed.wrapping_add(1);
+            }
+        }
+        // Paste / Reset / Reinit / Randomize all changed the grid — republish.
+        self.grid_handoff.publish(*grid);
     }
 
     /// The current normalized value of a slider control.
@@ -253,7 +285,10 @@ impl baseview::WindowHandler for MultosisWindow {
                         self.begin_slider(ctrl);
                     }
                     Some(ctrl) => self.handle_toolbar_button(ctrl),
-                    None => self.handle_grid_click(false),
+                    None => match toolbar::op_hit(px, py, self.scale_factor) {
+                        Some(op) => self.handle_toolbar_op(op),
+                        None => self.handle_grid_click(false),
+                    },
                 }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
