@@ -123,6 +123,54 @@ pub fn draw_grid(pixmap: &mut Pixmap, grid: &Grid, scale: f32) {
     );
 }
 
+/// A lit wavefront cell.
+fn color_wavefront() -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(0xd8, 0x89, 0x3a, 0xFF)
+}
+
+/// Overlay the live wavefront — every lit cell gets an orange core square.
+pub fn draw_wavefront(pixmap: &mut Pixmap, wf: &WavefrontDisplay, scale: f32) {
+    for r in 0..ROWS {
+        for c in 0..COLS {
+            if !wf.is_lit(r, c) {
+                continue;
+            }
+            let (x, y, w, h) = cell_rect(r, c, scale);
+            let inset = w * 0.22;
+            widgets::draw_rect(
+                pixmap,
+                x + inset,
+                y + inset,
+                w - 2.0 * inset,
+                h - 2.0 * inset,
+                color_wavefront(),
+            );
+        }
+    }
+}
+
+/// Draw the top status strip — the plugin title.
+pub fn draw_status(pixmap: &mut Pixmap, tr: &mut widgets::TextRenderer, scale: f32) {
+    let strip_h = STATUS_H * scale;
+    widgets::draw_rect(
+        pixmap,
+        0.0,
+        0.0,
+        pixmap.width() as f32,
+        strip_h,
+        widgets::color_control_bg(),
+    );
+    let size = 20.0 * scale;
+    tr.draw_text(
+        pixmap,
+        12.0 * scale,
+        strip_h / 2.0 + size * 0.36,
+        "MULTOSIS",
+        size,
+        widgets::color_text(),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

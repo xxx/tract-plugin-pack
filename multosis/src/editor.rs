@@ -74,7 +74,16 @@ impl MultosisWindow {
             .map(|g| *g)
             .unwrap_or_default();
         grid_view::draw_grid(&mut self.surface.pixmap, &grid, self.scale_factor);
-        // The wavefront overlay and status strip are added in Task 7.
+        grid_view::draw_wavefront(
+            &mut self.surface.pixmap,
+            &self.wavefront_display,
+            self.scale_factor,
+        );
+        grid_view::draw_status(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            self.scale_factor,
+        );
     }
 }
 
