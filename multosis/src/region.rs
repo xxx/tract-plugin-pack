@@ -114,6 +114,7 @@ mod tests {
             col1: COLS - 1,
         };
         g.paste_region(&snap); // must not panic
+
         // The one in-bounds cell received the snapshot's top-left.
         assert!(!g.cell(ROWS - 1, COLS - 1).enabled);
     }

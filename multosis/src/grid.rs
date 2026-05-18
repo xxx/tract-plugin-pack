@@ -487,10 +487,7 @@ mod tests {
         assert_eq!(g.next_cell(ROWS - 1, 5, Direction::S), (0, 5));
         // Corner diagonal wraps both axes at once.
         assert_eq!(g.next_cell(0, 0, Direction::NW), (ROWS - 1, COLS - 1));
-        assert_eq!(
-            g.next_cell(ROWS - 1, COLS - 1, Direction::SE),
-            (0, 0)
-        );
+        assert_eq!(g.next_cell(ROWS - 1, COLS - 1, Direction::SE), (0, 0));
     }
 
     #[test]
