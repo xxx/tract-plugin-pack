@@ -8,6 +8,7 @@ use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::handoff::GridHandoff;
 use crate::wavefront_display::WavefrontDisplay;
 use crate::MultosisParams;
 use tiny_skia_widgets as widgets;
@@ -30,6 +31,7 @@ struct MultosisWindow {
     pending_resize: Arc<AtomicU64>,
     params: Arc<MultosisParams>,
     wavefront_display: Arc<WavefrontDisplay>,
+    grid_handoff: Arc<GridHandoff>,
     text_renderer: widgets::TextRenderer,
 }
 
@@ -38,6 +40,7 @@ impl MultosisWindow {
         window: &mut baseview::Window<'_>,
         params: Arc<MultosisParams>,
         wavefront_display: Arc<WavefrontDisplay>,
+        grid_handoff: Arc<GridHandoff>,
         pending_resize: Arc<AtomicU64>,
         scale_factor: f32,
     ) -> Self {
@@ -53,6 +56,7 @@ impl MultosisWindow {
             pending_resize,
             params,
             wavefront_display,
+            grid_handoff,
             text_renderer,
         }
     }
@@ -117,6 +121,7 @@ impl baseview::WindowHandler for MultosisWindow {
 struct MultosisEditor {
     params: Arc<MultosisParams>,
     wavefront_display: Arc<WavefrontDisplay>,
+    grid_handoff: Arc<GridHandoff>,
     pending_resize: Arc<AtomicU64>,
 }
 
@@ -124,10 +129,12 @@ struct MultosisEditor {
 pub fn create(
     params: Arc<MultosisParams>,
     wavefront_display: Arc<WavefrontDisplay>,
+    grid_handoff: Arc<GridHandoff>,
 ) -> Option<Box<dyn Editor>> {
     Some(Box::new(MultosisEditor {
         params,
         wavefront_display,
+        grid_handoff,
         pending_resize: Arc::new(AtomicU64::new(0)),
     }))
 }
@@ -143,6 +150,7 @@ impl Editor for MultosisEditor {
 
         let params = Arc::clone(&self.params);
         let wavefront_display = Arc::clone(&self.wavefront_display);
+        let grid_handoff = Arc::clone(&self.grid_handoff);
         let pending_resize = Arc::clone(&self.pending_resize);
 
         let window = baseview::Window::open_parented(
@@ -154,7 +162,7 @@ impl Editor for MultosisEditor {
                 gl_config: None,
             },
             move |window| {
-                MultosisWindow::new(window, params, wavefront_display, pending_resize, sf)
+                MultosisWindow::new(window, params, wavefront_display, grid_handoff, pending_resize, sf)
             },
         );
 

@@ -137,7 +137,11 @@ impl Plugin for Multosis {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        editor::create(self.params.clone(), self.wavefront_display.clone())
+        editor::create(
+            self.params.clone(),
+            self.wavefront_display.clone(),
+            self.grid_handoff.clone(),
+        )
     }
 
     fn initialize(
