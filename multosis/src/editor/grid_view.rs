@@ -8,8 +8,10 @@ use crate::wavefront_display::WavefrontDisplay;
 use tiny_skia::Pixmap;
 use tiny_skia_widgets as widgets;
 
-/// Logical height of the top status strip.
-pub const STATUS_H: f32 = 48.0;
+/// Logical height of the top toolbar strip (two rows of `TOOLBAR_ROW_H`).
+pub const STATUS_H: f32 = 88.0;
+/// Logical height of one toolbar row.
+pub const TOOLBAR_ROW_H: f32 = 44.0;
 /// Logical edge length of one square grid cell.
 pub const CELL: f32 = 33.0;
 

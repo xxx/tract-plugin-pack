@@ -59,7 +59,7 @@ pub struct MultosisParams {
 impl Default for MultosisParams {
     fn default() -> Self {
         Self {
-            editor_state: tiny_skia_widgets::EditorState::from_size(1056, 576),
+            editor_state: tiny_skia_widgets::EditorState::from_size(1056, 616),
             grid: Arc::new(Mutex::new(Grid::default())),
             speed: EnumParam::new("Speed", Speed::Div16),
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })

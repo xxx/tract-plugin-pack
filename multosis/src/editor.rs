@@ -17,7 +17,7 @@ pub mod grid_view;
 
 /// Logical editor size; physical size = logical × scale.
 pub const WINDOW_WIDTH: u32 = 1056;
-pub const WINDOW_HEIGHT: u32 = 576;
+pub const WINDOW_HEIGHT: u32 = 616;
 
 pub use widgets::EditorState;
 
