@@ -1271,6 +1271,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "multosis"
+version = "0.1.0"
+dependencies = [
+ "nih_plug",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ndk"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

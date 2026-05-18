@@ -5,11 +5,23 @@ edition = "2021"
 description = "A multi-FX routing sequencer"
 license = "GPL-3.0-or-later"
 
-# Milestone 1a is library-only: plain rlib, no cdylib/bin, no nih-plug.
-# Milestone 1b adds the [lib] crate-type, the [[bin]], and the plugin deps.
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "multosis"
+path = "src/main.rs"
 
 [dependencies]
+nih_plug = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr", features = ["standalone", "assert_process_allocs"] }
 serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
 serde_json = "1.0"
+
+[package.metadata.bundler]
+name = "Multosis"
+company = "mpd"
+description = "A multi-FX routing sequencer"
+license = "GPL-3.0-or-later"
+version = "0.1.0"
