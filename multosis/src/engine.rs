@@ -325,7 +325,10 @@ mod tests {
     #[test]
     fn new_engine_reports_initial_state_and_zero_step() {
         let engine = AudioEngine::new();
-        assert_eq!(engine.sequence_state(), crate::propagation::SequenceState::Initial);
+        assert_eq!(
+            engine.sequence_state(),
+            crate::propagation::SequenceState::Initial
+        );
         assert_eq!(engine.step(), 0);
     }
 
@@ -338,7 +341,14 @@ mod tests {
         let mut right = [0.0_f32; 64];
         // One short step arms the start cells -> Running.
         engine.process(
-            &mut left, &mut right, true, 10.0, EffectBank::Lowpass, 0.0, true, &grid,
+            &mut left,
+            &mut right,
+            true,
+            10.0,
+            EffectBank::Lowpass,
+            0.0,
+            true,
+            &grid,
         );
         assert_eq!(
             engine.sequence_state(),

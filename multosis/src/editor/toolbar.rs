@@ -152,9 +152,7 @@ pub fn apply_grid_op(grid: &mut crate::grid::Grid, op: ToolbarOp, seed: u32) {
     match op {
         ToolbarOp::ResetRouting => grid.reset_routing(),
         ToolbarOp::ReinitCells => grid.reinit_activations(),
-        ToolbarOp::RandomizeActivations => {
-            crate::randomize::randomize_activations(grid, seed)
-        }
+        ToolbarOp::RandomizeActivations => crate::randomize::randomize_activations(grid, seed),
         ToolbarOp::RandomizeRouting => crate::randomize::randomize_routing(grid, seed),
         ToolbarOp::Copy | ToolbarOp::Paste => {}
     }
@@ -386,6 +384,9 @@ mod tests {
         let before = g;
         apply_grid_op(&mut g, ToolbarOp::Copy, 0);
         apply_grid_op(&mut g, ToolbarOp::Paste, 0);
-        assert_eq!(g, before, "Copy/Paste are handled by the editor, not apply_grid_op");
+        assert_eq!(
+            g, before,
+            "Copy/Paste are handled by the editor, not apply_grid_op"
+        );
     }
 }
