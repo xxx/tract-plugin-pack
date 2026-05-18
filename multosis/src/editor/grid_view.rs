@@ -161,6 +161,29 @@ pub fn apply_region_move(region: LoopRegion, drow: i32, dcol: i32) -> LoopRegion
     }
 }
 
+/// Logical side length of the loop-region move grip.
+const GRIP_SIZE: f32 = 16.0;
+
+/// The physical-pixel rectangle `(x, y, w, h)` of the loop region's move
+/// grip — a fixed-size square centred in the region, shrunk if necessary so
+/// it never exceeds the region's own bounds.
+pub fn region_grip_rect(region: LoopRegion, scale: f32) -> (f32, f32, f32, f32) {
+    let (x0, y0, _, _) = cell_rect(region.row0, region.col0, scale);
+    let (x1, y1, w1, h1) = cell_rect(region.row1, region.col1, scale);
+    let right = x1 + w1;
+    let bottom = y1 + h1;
+    let size = (GRIP_SIZE * scale).min(right - x0).min(bottom - y0);
+    let cx = (x0 + right) / 2.0;
+    let cy = (y0 + bottom) / 2.0;
+    (cx - size / 2.0, cy - size / 2.0, size, size)
+}
+
+/// True when physical-pixel point `(px, py)` is on the loop-region move grip.
+pub fn region_grip_hit(px: f32, py: f32, region: LoopRegion, scale: f32) -> bool {
+    let (gx, gy, gw, gh) = region_grip_rect(region, scale);
+    px >= gx && px < gx + gw && py >= gy && py < gy + gh
+}
+
 /// Apply a click on cell `(row, col)`'s `zone` to the grid. A left click
 /// (`right == false`) toggles a send direction (octant) or the `enabled`
 /// flag (centre); a right click toggles the `is_start` flag (centre only)
@@ -666,5 +689,51 @@ mod tests {
         };
         let moved = apply_region_move(r, 9, 20);
         assert_eq!((moved.row0, moved.row1, moved.col0, moved.col1), (9, 9, 20, 20));
+    }
+
+    #[test]
+    fn region_grip_hit_at_region_centre() {
+        let region = LoopRegion {
+            row0: 2,
+            row1: 10,
+            col0: 4,
+            col1: 24,
+        };
+        let (x0, y0, _, _) = cell_rect(2, 4, 1.0);
+        let (x1, y1, w, h) = cell_rect(10, 24, 1.0);
+        let cx = (x0 + x1 + w) / 2.0;
+        let cy = (y0 + y1 + h) / 2.0;
+        assert!(region_grip_hit(cx, cy, region, 1.0));
+    }
+
+    #[test]
+    fn region_grip_hit_misses_region_corner_and_outside() {
+        let region = LoopRegion {
+            row0: 2,
+            row1: 10,
+            col0: 4,
+            col1: 24,
+        };
+        // Centre of the top-left cell — far from the centre grip.
+        let (xc, yc, wc, hc) = cell_rect(2, 4, 1.0);
+        assert!(!region_grip_hit(xc + wc / 2.0, yc + hc / 2.0, region, 1.0));
+        // A point well outside the region.
+        assert!(!region_grip_hit(5.0, 5.0, region, 1.0));
+    }
+
+    #[test]
+    fn region_grip_rect_fits_inside_a_1x1_region() {
+        let region = LoopRegion {
+            row0: 6,
+            row1: 6,
+            col0: 6,
+            col1: 6,
+        };
+        let (gx, gy, gw, gh) = region_grip_rect(region, 1.0);
+        let (cx, cy, cw, ch) = cell_rect(6, 6, 1.0);
+        // The grip is fully within the single cell.
+        assert!(gx >= cx && gx + gw <= cx + cw);
+        assert!(gy >= cy && gy + gh <= cy + ch);
+        assert!(gw > 0.0 && gh > 0.0);
     }
 }
