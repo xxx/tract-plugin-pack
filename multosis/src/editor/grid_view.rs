@@ -228,6 +228,52 @@ pub fn apply_grid_click(grid: &mut Grid, row: usize, col: usize, zone: CellZone,
     }
 }
 
+/// Logical pixels the arrowhead tip is held in from the cell edge / corner.
+const ARROW_INSET: f32 = 1.5;
+/// Arrowhead length along the send direction, as a fraction of the cell side.
+const ARROW_LEN_FRAC: f32 = 0.22;
+/// Arrowhead half-width perpendicular to the direction, fraction of the side.
+const ARROW_HALFWIDTH_FRAC: f32 = 0.13;
+
+/// The three triangle vertices of the send-direction arrowhead for a cell
+/// centred at `(cx, cy)` with side `w`. Vertex 0 is the outward-pointing tip:
+/// at the edge midpoint for a cardinal direction, at the cell corner for a
+/// diagonal — held `ARROW_INSET` logical px inside the cell so nothing
+/// overhangs into the inter-cell gap.
+pub fn arrowhead_vertices(
+    cx: f32,
+    cy: f32,
+    w: f32,
+    dir: Direction,
+    scale: f32,
+) -> [(f32, f32); 3] {
+    let (dr, dc) = dir.delta();
+    // Unit vector along the send direction (x = dc, y = dr).
+    let (fx, fy) = (dc as f32, dr as f32);
+    let len = (fx * fx + fy * fy).sqrt();
+    let (ux, uy) = (fx / len, fy / len);
+    // Unit perpendicular.
+    let (perp_x, perp_y) = (-uy, ux);
+    // Distance from the centre to the boundary along `dir`: half a side for a
+    // cardinal, half the diagonal for a diagonal.
+    let diagonal = dr != 0 && dc != 0;
+    let boundary = if diagonal {
+        0.5 * w * std::f32::consts::SQRT_2
+    } else {
+        0.5 * w
+    };
+    let tip_dist = boundary - ARROW_INSET * scale;
+    let tip = (cx + ux * tip_dist, cy + uy * tip_dist);
+    let head_len = ARROW_LEN_FRAC * w;
+    let half_w = ARROW_HALFWIDTH_FRAC * w;
+    let base = (tip.0 - ux * head_len, tip.1 - uy * head_len);
+    [
+        tip,
+        (base.0 + perp_x * half_w, base.1 + perp_y * half_w),
+        (base.0 - perp_x * half_w, base.1 - perp_y * half_w),
+    ]
+}
+
 /// Cell background when the cell is enabled.
 fn color_cell_enabled() -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(0x33, 0x37, 0x42, 0xFF)
@@ -826,5 +872,60 @@ mod tests {
             let dc = (pair[0].1 as i32 - pair[1].1 as i32).abs();
             assert!(dr <= 1 && dc <= 1 && (dr + dc) > 0, "gap between {pair:?}");
         }
+    }
+
+    #[test]
+    fn arrowhead_vertices_stay_within_the_cell() {
+        let (cx, cy, w) = (100.0_f32, 100.0_f32, 33.0_f32);
+        let (left, right) = (cx - w / 2.0, cx + w / 2.0);
+        let (top, bottom) = (cy - w / 2.0, cy + w / 2.0);
+        for dir in Direction::ALL {
+            for (vx, vy) in arrowhead_vertices(cx, cy, w, dir, 1.0) {
+                assert!(
+                    vx >= left && vx <= right && vy >= top && vy <= bottom,
+                    "{dir:?} vertex ({vx}, {vy}) outside cell [{left}..{right}, {top}..{bottom}]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn arrowhead_tip_points_outward() {
+        let (cx, cy, w) = (100.0_f32, 100.0_f32, 33.0_f32);
+        for dir in Direction::ALL {
+            let verts = arrowhead_vertices(cx, cy, w, dir, 1.0);
+            let (dr, dc) = dir.delta();
+            let (fx, fy) = (dc as f32, dr as f32);
+            let len = (fx * fx + fy * fy).sqrt();
+            let (ux, uy) = (fx / len, fy / len);
+            // Project each vertex onto the send direction; vertex 0 (the tip)
+            // must be the furthest out.
+            let proj = |(vx, vy): (f32, f32)| (vx - cx) * ux + (vy - cy) * uy;
+            let tip = proj(verts[0]);
+            assert!(tip > proj(verts[1]), "{dir:?}: tip not outermost vs v1");
+            assert!(tip > proj(verts[2]), "{dir:?}: tip not outermost vs v2");
+        }
+    }
+
+    #[test]
+    fn arrowhead_cardinal_tip_on_edge_midline() {
+        let (cx, cy, w) = (100.0_f32, 100.0_f32, 33.0_f32);
+        // East tip: on the horizontal centreline, to the right of centre.
+        let e = arrowhead_vertices(cx, cy, w, Direction::E, 1.0)[0];
+        assert!((e.1 - cy).abs() < 0.01, "E tip off the midline: {e:?}");
+        assert!(e.0 > cx, "E tip not to the right: {e:?}");
+        // North tip: on the vertical centreline, above centre.
+        let n = arrowhead_vertices(cx, cy, w, Direction::N, 1.0)[0];
+        assert!((n.0 - cx).abs() < 0.01, "N tip off the midline: {n:?}");
+        assert!(n.1 < cy, "N tip not above centre: {n:?}");
+    }
+
+    #[test]
+    fn arrowhead_diagonal_tip_near_corner() {
+        let (cx, cy, w) = (100.0_f32, 100.0_f32, 33.0_f32);
+        let ne = arrowhead_vertices(cx, cy, w, Direction::NE, 1.0)[0];
+        let corner = (cx + w / 2.0, cy - w / 2.0);
+        let dist = ((ne.0 - corner.0).powi(2) + (ne.1 - corner.1).powi(2)).sqrt();
+        assert!(dist < 3.0, "NE tip {ne:?} not near corner {corner:?} (dist {dist})");
     }
 }
