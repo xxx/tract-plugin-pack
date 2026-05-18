@@ -240,13 +240,7 @@ const ARROW_HALFWIDTH_FRAC: f32 = 0.13;
 /// at the edge midpoint for a cardinal direction, at the cell corner for a
 /// diagonal — held `ARROW_INSET` logical px inside the cell so nothing
 /// overhangs into the inter-cell gap.
-pub fn arrowhead_vertices(
-    cx: f32,
-    cy: f32,
-    w: f32,
-    dir: Direction,
-    scale: f32,
-) -> [(f32, f32); 3] {
+pub fn arrowhead_vertices(cx: f32, cy: f32, w: f32, dir: Direction, scale: f32) -> [(f32, f32); 3] {
     let (dr, dc) = dir.delta();
     // Unit vector along the send direction (x = dc, y = dr).
     let (fx, fy) = (dc as f32, dr as f32);
@@ -945,6 +939,9 @@ mod tests {
         let ne = arrowhead_vertices(cx, cy, w, Direction::NE, 1.0)[0];
         let corner = (cx + w / 2.0, cy - w / 2.0);
         let dist = ((ne.0 - corner.0).powi(2) + (ne.1 - corner.1).powi(2)).sqrt();
-        assert!(dist < 3.0, "NE tip {ne:?} not near corner {corner:?} (dist {dist})");
+        assert!(
+            dist < 3.0,
+            "NE tip {ne:?} not near corner {corner:?} (dist {dist})"
+        );
     }
 }
