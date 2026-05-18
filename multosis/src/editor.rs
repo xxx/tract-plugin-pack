@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::editor::toolbar::{ToolbarControl, ToolbarOp};
+use crate::grid::LoopRegion;
 use crate::handoff::GridHandoff;
 use crate::region::RegionSnapshot;
 use crate::seq_status::SeqStatusDisplay;
@@ -42,6 +43,12 @@ enum LeftGesture {
     /// An active paint drag — `value` is the `enabled` state being painted
     /// across the stroke, `last` is the most recently painted cell.
     GridPaint { value: bool, last: (usize, usize) },
+    /// An active loop-region move — `press` is the cursor position when the
+    /// grip was grabbed, `region_at_press` is the region geometry then.
+    MoveRegion {
+        press: (f32, f32),
+        region_at_press: LoopRegion,
+    },
 }
 
 /// The baseview window handler — owns the surface and draws each frame.
@@ -150,6 +157,38 @@ impl MultosisWindow {
         let (px, py) = self.mouse_pos;
         let region = self.params.grid.lock().ok()?.loop_region;
         grid_view::region_edge_hit(px, py, region, self.scale_factor)
+    }
+
+    /// If the cursor is over the loop region's move grip, begin a move
+    /// gesture and return `true`.
+    fn try_begin_region_move(&mut self) -> bool {
+        let region = match self.params.grid.lock() {
+            Ok(grid) => grid.loop_region,
+            Err(_) => return false,
+        };
+        let (px, py) = self.mouse_pos;
+        if grid_view::region_grip_hit(px, py, region, self.scale_factor) {
+            self.left_gesture = Some(LeftGesture::MoveRegion {
+                press: self.mouse_pos,
+                region_at_press: region,
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Translate the loop region for the in-progress move and republish.
+    fn update_region_move(&mut self, press: (f32, f32), region_at_press: LoopRegion) {
+        let scale = self.scale_factor;
+        let (px, py) = self.mouse_pos;
+        let drow = grid_view::row_at(py, scale) as i32 - grid_view::row_at(press.1, scale) as i32;
+        let dcol =
+            grid_view::column_at(px, scale) as i32 - grid_view::column_at(press.0, scale) as i32;
+        if let Ok(mut grid) = self.params.grid.lock() {
+            grid.loop_region = grid_view::apply_region_move(region_at_press, drow, dcol);
+            self.grid_handoff.publish(*grid);
+        }
     }
 
     /// Resize the loop region for the in-progress drag of `edge`, then
@@ -346,6 +385,10 @@ impl baseview::WindowHandler for MultosisWindow {
                 let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
                 match self.left_gesture {
                     Some(LeftGesture::ResizeRegion(edge)) => self.update_region_drag(edge),
+                    Some(LeftGesture::MoveRegion {
+                        press,
+                        region_at_press,
+                    }) => self.update_region_move(press, region_at_press),
                     Some(LeftGesture::GridPending { row, col, zone: _ }) => {
                         let cur = (
                             grid_view::row_at(py, self.scale_factor),
@@ -390,6 +433,8 @@ impl baseview::WindowHandler for MultosisWindow {
                         None => {
                             if let Some(edge) = self.region_edge_under_cursor() {
                                 self.left_gesture = Some(LeftGesture::ResizeRegion(edge));
+                            } else if self.try_begin_region_move() {
+                                // left_gesture set inside try_begin_region_move
                             } else if let Some((row, col, zone)) =
                                 grid_view::cell_zone(px, py, self.scale_factor)
                             {
