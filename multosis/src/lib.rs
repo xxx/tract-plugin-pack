@@ -103,3 +103,99 @@ impl Default for Multosis {
         }
     }
 }
+
+impl Plugin for Multosis {
+    const NAME: &'static str = "Multosis";
+    const VENDOR: &'static str = "mpd";
+    const URL: &'static str = "";
+    const EMAIL: &'static str = "";
+    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
+        main_input_channels: std::num::NonZeroU32::new(2),
+        main_output_channels: std::num::NonZeroU32::new(2),
+        ..AudioIOLayout::const_default()
+    }];
+
+    const SAMPLE_ACCURATE_AUTOMATION: bool = true;
+
+    type SysExMessage = ();
+    type BackgroundTask = ();
+
+    fn params(&self) -> Arc<dyn Params> {
+        self.params.clone()
+    }
+
+    fn initialize(
+        &mut self,
+        _audio_io_layout: &AudioIOLayout,
+        buffer_config: &BufferConfig,
+        _context: &mut impl InitContext<Self>,
+    ) -> bool {
+        self.sample_rate = buffer_config.sample_rate;
+        self.engine.set_sample_rate(self.sample_rate);
+        // Bridge the persisted grid (possibly just restored from project
+        // state) into the audio thread's working copy and the handoff.
+        if let Ok(grid) = self.params.grid.lock() {
+            self.grid = *grid;
+            self.grid_handoff.publish(*grid);
+        }
+        self.was_playing = false;
+        true
+    }
+
+    fn reset(&mut self) {
+        self.engine.reset();
+        self.was_playing = false;
+    }
+
+    fn process(
+        &mut self,
+        buffer: &mut Buffer,
+        _aux: &mut AuxiliaryBuffers,
+        context: &mut impl ProcessContext<Self>,
+    ) -> ProcessStatus {
+        let transport = context.transport();
+        let playing = transport.playing;
+        let bpm = transport.tempo.unwrap_or(120.0);
+
+        // Reset the sequence on the transport stopped→playing edge.
+        if playing && !self.was_playing {
+            self.engine.reset();
+        }
+        self.was_playing = playing;
+
+        // Pick up the latest grid (non-blocking; keep the last on a miss).
+        if let Some(grid) = self.grid_handoff.try_read() {
+            self.grid = grid;
+        }
+
+        let sps = crate::clock::samples_per_step(
+            self.params.speed.value(),
+            bpm,
+            self.sample_rate as f64,
+        );
+        let bank = self.params.effect_bank.value();
+        let mix = self.params.mix.value();
+        let auto_restart = self.params.auto_restart.value();
+
+        let n = buffer.samples();
+        let channels = buffer.as_slice();
+        let (first, rest) = channels.split_at_mut(1);
+        let left = &mut first[0][..n];
+        let right = &mut rest[0][..n];
+
+        self.engine.process(
+            &mut *left, &mut *right, playing, sps, bank, mix, auto_restart, &self.grid,
+        );
+
+        // Post-mix output gain (smoothed per sample).
+        for i in 0..n {
+            let gain = self.params.output_gain.smoothed.next();
+            left[i] *= gain;
+            right[i] *= gain;
+        }
+
+        ProcessStatus::Normal
+    }
+}
