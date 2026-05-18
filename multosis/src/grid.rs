@@ -223,6 +223,44 @@ impl Default for Grid {
     }
 }
 
+/// `Vec`-backed serialization mirror of `Grid`. serde implements its array
+/// traits only for `[T; 0..=32]`, so the 512-cell `[Cell; CELL_COUNT]` field
+/// cannot derive serde directly; this mirror crosses that gap — the same
+/// approach the MSEG widget's `MsegData` uses for its 128-node array.
+#[derive(Serialize, Deserialize)]
+struct GridSerde {
+    cells: Vec<Cell>,
+    loop_region: LoopRegion,
+}
+
+impl Serialize for Grid {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        GridSerde {
+            cells: self.cells.to_vec(),
+            loop_region: self.loop_region,
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Grid {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = GridSerde::deserialize(d)?;
+        if raw.cells.len() != CELL_COUNT {
+            return Err(serde::de::Error::custom(format!(
+                "Grid needs {CELL_COUNT} cells, got {}",
+                raw.cells.len()
+            )));
+        }
+        let mut cells = [Cell::default(); CELL_COUNT];
+        cells.copy_from_slice(&raw.cells);
+        Ok(Grid {
+            cells,
+            loop_region: raw.loop_region,
+        })
+    }
+}
+
 /// Wrap `v` into the inclusive range `[lo, hi]`.
 fn wrap(v: i32, lo: usize, hi: usize) -> usize {
     let lo = lo as i32;
@@ -268,6 +306,13 @@ impl Grid {
                 cell.is_start = c == 0;
             }
         }
+    }
+
+    /// Repair structural invariants after loading a possibly hand-edited or
+    /// corrupt grid: clamp and order the loop region. Called by the plugin
+    /// after deserializing persisted state (Milestone 1b).
+    pub fn sanitize(&mut self) {
+        self.loop_region = self.loop_region.normalized();
     }
 }
 
@@ -565,5 +610,47 @@ mod tests {
         }
         // Routing is untouched.
         assert_eq!(g.cell(4, 4).sends, 0b0001_1000);
+    }
+
+    #[test]
+    fn grid_json_round_trips() {
+        let mut g = Grid::default_routing();
+        g.cell_mut(3, 9).sends = 0b1100_0011;
+        g.cell_mut(3, 9).enabled = false;
+        g.cell_mut(10, 0).is_start = false;
+        g.loop_region = LoopRegion {
+            row0: 2,
+            row1: 12,
+            col0: 4,
+            col1: 28,
+        };
+        let json = serde_json::to_string(&g).unwrap();
+        let back: Grid = serde_json::from_str(&json).unwrap();
+        assert_eq!(g, back);
+    }
+
+    #[test]
+    fn grid_json_rejects_wrong_cell_count() {
+        // A blob with the wrong number of cells must be rejected, not
+        // silently accepted with a truncated or padded grid.
+        let json = r#"{"cells":[],"loop_region":{"row0":0,"row1":15,"col0":0,"col1":31}}"#;
+        let result: Result<Grid, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "empty cell list must be rejected");
+    }
+
+    #[test]
+    fn sanitize_repairs_a_bad_loop_region() {
+        let mut g = Grid::default_routing();
+        // Inverted, out-of-range bounds — as a corrupt blob might carry.
+        g.loop_region = LoopRegion {
+            row0: 14,
+            row1: 3,
+            col0: 99,
+            col1: 0,
+        };
+        g.sanitize();
+        let lr = g.loop_region;
+        assert!(lr.row0 <= lr.row1 && lr.row1 < ROWS);
+        assert!(lr.col0 <= lr.col1 && lr.col1 < COLS);
     }
 }
