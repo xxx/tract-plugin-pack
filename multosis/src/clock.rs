@@ -75,25 +75,27 @@ impl StepClock {
     /// Advance the clock across a process block of `block_len` samples at the
     /// given `samples_per_step`. `on_step` is called once per step boundary
     /// that falls within the block, with the sample offset of the boundary
-    /// inside the block. A non-positive `samples_per_step` fires nothing.
+    /// inside the block. A non-positive `samples_per_step` (or an empty block)
+    /// fires nothing.
     pub fn advance(
         &mut self,
         block_len: usize,
         samples_per_step: f64,
         mut on_step: impl FnMut(usize),
     ) {
-        if samples_per_step <= 0.0 {
+        if samples_per_step <= 0.0 || block_len == 0 {
             return;
         }
-        let block = block_len as f64;
-        // The first boundary lands `samples_per_step - accum` samples in.
-        let mut boundary = samples_per_step - self.accum;
-        while boundary < block {
-            let offset = if boundary < 0.0 { 0 } else { boundary as usize };
-            on_step(offset);
-            boundary += samples_per_step;
+        self.accum += block_len as f64;
+        while self.accum >= samples_per_step {
+            self.accum -= samples_per_step;
+            // `accum` is now the samples remaining after the boundary, so the
+            // boundary sits at `block_len - accum` within the block. A boundary
+            // landing exactly on the block end yields `block_len`; clamp it
+            // into the valid `[0, block_len)` offset range.
+            let offset = ((block_len as f64) - self.accum) as usize;
+            on_step(offset.min(block_len - 1));
         }
-        self.accum = (self.accum + block).rem_euclid(samples_per_step);
     }
 }
 
@@ -170,6 +172,18 @@ mod tests {
         let mut count = 0;
         clk.advance(1000, 0.0, |_| count += 1);
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn step_clock_block_equal_to_step_fires_once_per_block() {
+        // Regression: when block_len exactly equals samples_per_step, the clock
+        // must keep firing one boundary per block, never stalling.
+        let mut clk = StepClock::new();
+        let mut count = 0;
+        for _ in 0..10 {
+            clk.advance(100, 100.0, |_| count += 1);
+        }
+        assert_eq!(count, 10);
     }
 
     #[test]
