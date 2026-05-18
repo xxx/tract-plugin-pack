@@ -5,3 +5,4 @@
 //! propagation engine, and the step clock. No GUI, no audio, no nih-plug.
 
 pub mod grid;
+pub mod region;
