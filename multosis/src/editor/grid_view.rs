@@ -13,12 +13,22 @@ pub const STATUS_H: f32 = 88.0;
 /// Logical height of one toolbar row.
 pub const TOOLBAR_ROW_H: f32 = 44.0;
 /// Logical edge length of one square grid cell.
-pub const CELL: f32 = 33.0;
+pub const CELL: f32 = 40.0;
+/// Logical window-background margin framing the grid (left, right, bottom);
+/// also the toolbar controls' side inset.
+pub const MARGIN: f32 = 16.0;
+/// Logical separation between the toolbar strip and the grid.
+pub const GUTTER: f32 = 14.0;
+/// Number of columns per visual group.
+pub const GROUP_SIZE: usize = 8;
+/// Extra logical gap between groups of `GROUP_SIZE` columns.
+pub const GROUP_GAP: f32 = 8.0;
 
 /// The physical-pixel rectangle `(x, y, w, h)` of cell `(row, col)` at `scale`.
 pub fn cell_rect(row: usize, col: usize, scale: f32) -> (f32, f32, f32, f32) {
-    let x = col as f32 * CELL * scale;
-    let y = (STATUS_H + row as f32 * CELL) * scale;
+    let group = (col / GROUP_SIZE) as f32;
+    let x = (MARGIN + col as f32 * CELL + group * GROUP_GAP) * scale;
+    let y = (STATUS_H + GUTTER + row as f32 * CELL) * scale;
     let side = CELL * scale;
     (x, y, side, side)
 }
@@ -26,20 +36,32 @@ pub fn cell_rect(row: usize, col: usize, scale: f32) -> (f32, f32, f32, f32) {
 /// The cell containing physical-pixel point `(px, py)` at `scale`, or `None`
 /// if the point is in the status strip or outside the grid.
 pub fn cell_at(px: f32, py: f32, scale: f32) -> Option<(usize, usize)> {
-    if scale <= 0.0 || px < 0.0 {
+    if scale <= 0.0 {
         return None;
     }
-    let logical_y = py / scale - STATUS_H;
+    let logical_y = py / scale - STATUS_H - GUTTER;
     if logical_y < 0.0 {
         return None;
     }
-    let col = (px / scale / CELL) as usize;
     let row = (logical_y / CELL) as usize;
-    if row < ROWS && col < COLS {
-        Some((row, col))
-    } else {
-        None
+    if row >= ROWS {
+        return None;
     }
+    let lx = px / scale - MARGIN;
+    if lx < 0.0 {
+        return None;
+    }
+    let period = GROUP_SIZE as f32 * CELL + GROUP_GAP;
+    let group = (lx / period) as usize;
+    let within = lx - group as f32 * period;
+    if within >= GROUP_SIZE as f32 * CELL {
+        return None; // between-group gap — over no cell
+    }
+    let col = group * GROUP_SIZE + (within / CELL) as usize;
+    if col >= COLS {
+        return None;
+    }
+    Some((row, col))
 }
 
 /// A clickable zone within a cell: the centre, or one of the 8 send
@@ -86,11 +108,15 @@ const EDGE_BAND: f32 = 6.0;
 /// `None`. The cursor must be within the grid drawing area — points in the
 /// toolbar strip never hit an edge.
 pub fn region_edge_hit(px: f32, py: f32, region: LoopRegion, scale: f32) -> Option<RegionEdge> {
-    // Reject the toolbar strip and anything outside the grid.
-    let grid_top = STATUS_H * scale;
-    let grid_bottom = (STATUS_H + ROWS as f32 * CELL) * scale;
-    let grid_right = COLS as f32 * CELL * scale;
-    if py < grid_top || py > grid_bottom || px < 0.0 || px > grid_right {
+    // Reject the toolbar strip, the gutter, the margins — anything off-grid.
+    let grid_top = (STATUS_H + GUTTER) * scale;
+    let grid_bottom = (STATUS_H + GUTTER + ROWS as f32 * CELL) * scale;
+    let grid_left = MARGIN * scale;
+    let grid_right = (MARGIN
+        + COLS as f32 * CELL
+        + (COLS / GROUP_SIZE - 1) as f32 * GROUP_GAP)
+        * scale;
+    if py < grid_top || py > grid_bottom || px < grid_left || px > grid_right {
         return None;
     }
     let (x0, y0, _, _) = cell_rect(region.row0, region.col0, scale);
@@ -117,14 +143,33 @@ pub fn region_edge_hit(px: f32, py: f32, region: LoopRegion, scale: f32) -> Opti
 /// `0..=COLS-1`. Used while dragging a region edge, where the cursor may
 /// stray off the grid.
 pub fn column_at(px: f32, scale: f32) -> usize {
-    let col = (px / scale / CELL).floor();
-    col.clamp(0.0, (COLS - 1) as f32) as usize
+    let lx = px / scale - MARGIN;
+    if lx <= 0.0 {
+        return 0;
+    }
+    let period = GROUP_SIZE as f32 * CELL + GROUP_GAP;
+    let group = (lx / period) as usize;
+    if group >= COLS / GROUP_SIZE {
+        return COLS - 1;
+    }
+    let within = lx - group as f32 * period;
+    let cells = GROUP_SIZE as f32 * CELL;
+    let in_group = if within >= cells {
+        if within - cells < GROUP_GAP / 2.0 {
+            GROUP_SIZE - 1
+        } else {
+            GROUP_SIZE
+        }
+    } else {
+        (within / CELL) as usize
+    };
+    (group * GROUP_SIZE + in_group).min(COLS - 1)
 }
 
 /// The grid row under physical-pixel y `py` at `scale`, clamped to
 /// `0..=ROWS-1`. Used while dragging a region edge.
 pub fn row_at(py: f32, scale: f32) -> usize {
-    let row = ((py / scale - STATUS_H) / CELL).floor();
+    let row = ((py / scale - STATUS_H - GUTTER) / CELL).floor();
     row.clamp(0.0, (ROWS - 1) as f32) as usize
 }
 
@@ -473,35 +518,86 @@ mod tests {
 
     #[test]
     fn window_size_matches_the_grid() {
-        // The editor window in editor.rs must exactly fit the grid.
-        assert_eq!(crate::editor::WINDOW_WIDTH, (COLS as f32 * CELL) as u32);
-        assert_eq!(
-            crate::editor::WINDOW_HEIGHT,
-            (STATUS_H + ROWS as f32 * CELL) as u32
-        );
+        let expect_w = 2.0 * MARGIN
+            + COLS as f32 * CELL
+            + (COLS / GROUP_SIZE - 1) as f32 * GROUP_GAP;
+        let expect_h = STATUS_H + GUTTER + ROWS as f32 * CELL + MARGIN;
+        assert_eq!(crate::editor::WINDOW_WIDTH, expect_w as u32);
+        assert_eq!(crate::editor::WINDOW_HEIGHT, expect_h as u32);
     }
 
     #[test]
     fn cell_rect_top_left_and_bottom_right() {
         let (x, y, w, h) = cell_rect(0, 0, 1.0);
-        assert_eq!((x, y, w, h), (0.0, STATUS_H, CELL, CELL));
+        assert_eq!((x, y, w, h), (MARGIN, STATUS_H + GUTTER, CELL, CELL));
         let (x, y, _, _) = cell_rect(ROWS - 1, COLS - 1, 1.0);
-        assert_eq!(x, (COLS - 1) as f32 * CELL);
-        assert_eq!(y, STATUS_H + (ROWS - 1) as f32 * CELL);
+        assert_eq!(
+            x,
+            MARGIN + (COLS - 1) as f32 * CELL + (COLS / GROUP_SIZE - 1) as f32 * GROUP_GAP
+        );
+        assert_eq!(y, STATUS_H + GUTTER + (ROWS - 1) as f32 * CELL);
     }
 
     #[test]
     fn cell_rect_scales() {
+        // Cell (1, 2): column 2 is in the first group — no group gap.
         let (x, y, w, h) = cell_rect(1, 2, 2.0);
         assert_eq!(
             (x, y, w, h),
             (
-                2.0 * CELL * 2.0,
-                (STATUS_H + CELL) * 2.0,
+                (MARGIN + 2.0 * CELL) * 2.0,
+                (STATUS_H + GUTTER + CELL) * 2.0,
                 CELL * 2.0,
-                CELL * 2.0
+                CELL * 2.0,
             )
         );
+    }
+
+    #[test]
+    fn cell_rect_group_gap_offsets_later_groups() {
+        let (x8, _, _, _) = cell_rect(0, 8, 1.0);
+        assert_eq!(x8, MARGIN + 8.0 * CELL + GROUP_GAP);
+        let (x4, _, _, _) = cell_rect(0, 4, 1.0);
+        let (x5, _, _, _) = cell_rect(0, 5, 1.0);
+        assert_eq!(x5 - x4, CELL);
+        let (x16, _, _, _) = cell_rect(0, 16, 1.0);
+        assert_eq!(x16, MARGIN + 16.0 * CELL + 2.0 * GROUP_GAP);
+    }
+
+    #[test]
+    fn cell_at_round_trips_every_cell() {
+        for row in 0..ROWS {
+            for col in 0..COLS {
+                let (x, y, w, h) = cell_rect(row, col, 1.3);
+                let mid = (x + w / 2.0, y + h / 2.0);
+                assert_eq!(
+                    cell_at(mid.0, mid.1, 1.3),
+                    Some((row, col)),
+                    "cell ({row}, {col}) did not round-trip"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cell_at_none_off_the_cells() {
+        assert_eq!(cell_at(MARGIN / 2.0, STATUS_H + GUTTER + 10.0, 1.0), None);
+        assert_eq!(cell_at(MARGIN + 10.0, STATUS_H + GUTTER / 2.0, 1.0), None);
+        let (x7, y7, w7, _) = cell_rect(0, 7, 1.0);
+        assert_eq!(cell_at(x7 + w7 + GROUP_GAP / 2.0, y7 + 5.0, 1.0), None);
+        assert_eq!(cell_at(100_000.0, 100_000.0, 1.0), None);
+    }
+
+    #[test]
+    fn column_at_and_row_at_clamp_with_the_new_layout() {
+        assert_eq!(column_at(0.0, 1.0), 0);
+        assert_eq!(column_at(1_000_000.0, 1.0), COLS - 1);
+        let (x, _, w, _) = cell_rect(0, 20, 1.0);
+        assert_eq!(column_at(x + w / 2.0, 1.0), 20);
+        assert_eq!(row_at(0.0, 1.0), 0);
+        assert_eq!(row_at(1_000_000.0, 1.0), ROWS - 1);
+        let (_, y, _, h) = cell_rect(9, 0, 1.0);
+        assert_eq!(row_at(y + h / 2.0, 1.0), 9);
     }
 
     #[test]
