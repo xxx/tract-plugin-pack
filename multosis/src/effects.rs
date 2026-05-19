@@ -327,7 +327,7 @@ impl TrackEffect {
     /// audible per-track variety before the 2c assignment UI exists.
     pub fn default_for_row(row: usize) -> Self {
         let t = row as f32 / 15.0;
-        if row % 2 == 0 {
+        if row.is_multiple_of(2) {
             let cutoff = 300.0 * (12_000.0_f32 / 300.0).powf(t);
             TrackEffect {
                 kind: EffectKind::Lowpass,
@@ -554,7 +554,10 @@ mod tests {
                 peak = peak.max(l.abs());
             }
         }
-        assert!(peak < 0.5, "a 200 Hz lowpass should kill a fast alternation, got {peak}");
+        assert!(
+            peak < 0.5,
+            "a 200 Hz lowpass should kill a fast alternation, got {peak}"
+        );
     }
 
     #[test]
@@ -624,7 +627,10 @@ mod tests {
         bc.set_param(1, 4.0);
         let first = bc.process_sample(1.0, 1.0).0;
         let held = bc.process_sample(-1.0, -1.0).0;
-        assert!((first - held).abs() < 1e-6, "rate reduction should hold the sample");
+        assert!(
+            (first - held).abs() < 1e-6,
+            "rate reduction should hold the sample"
+        );
     }
 
     #[test]
@@ -634,7 +640,10 @@ mod tests {
         bc.set_param(0, 3.0);
         for &x in &[-1.0_f32, -0.3, 0.0, 0.42, 1.0] {
             let (l, r) = bc.process_sample(x, x);
-            assert!(l.abs() <= 1.5 && r.abs() <= 1.5, "x {x} -> ({l},{r}) out of range");
+            assert!(
+                l.abs() <= 1.5 && r.abs() <= 1.5,
+                "x {x} -> ({l},{r}) out of range"
+            );
         }
     }
 
@@ -685,7 +694,10 @@ mod tests {
                 peak = peak.max(l.abs());
             }
         }
-        assert!(peak < 0.5, "the dispatched lowpass should attenuate, got {peak}");
+        assert!(
+            peak < 0.5,
+            "the dispatched lowpass should attenuate, got {peak}"
+        );
     }
 
     #[test]
