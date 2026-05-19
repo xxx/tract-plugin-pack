@@ -581,6 +581,100 @@ pub fn draw_status(pixmap: &mut Pixmap, tr: &mut widgets::TextRenderer, scale: f
 mod tests {
     use super::*;
 
+    fn bench_stats(label: &str, times_us: &[f64]) {
+        let n = times_us.len() as f64;
+        let min = times_us.iter().cloned().fold(f64::INFINITY, f64::min);
+        let avg = times_us.iter().sum::<f64>() / n;
+        let mut sorted = times_us.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p95 = sorted[((n * 0.95) as usize).min(sorted.len() - 1)];
+        eprintln!("  {label}: min={min:.1} us  avg={avg:.1} us  p95={p95:.1} us");
+    }
+
+    /// Benchmark the full editor render pipeline on a dense worst-case grid.
+    ///
+    /// Run with:
+    ///   cargo nextest run -p multosis --release bench_editor_draw --no-capture
+    #[test]
+    fn bench_editor_draw() {
+        // Dense worst-case grid: every cell enabled, all 8 sends lit.
+        let mut grid = crate::grid::Grid::default_routing();
+        for r in 0..ROWS {
+            for c in 0..COLS {
+                grid.cell_mut(r, c).enabled = true;
+                grid.cell_mut(r, c).sends = 0xFF;
+            }
+        }
+
+        let mut pixmap =
+            tiny_skia::Pixmap::new(crate::editor::WINDOW_WIDTH, crate::editor::WINDOW_HEIGHT)
+                .unwrap();
+
+        let wf = crate::wavefront_display::WavefrontDisplay::new();
+        let params = crate::MultosisParams::default();
+        let mut tr =
+            widgets::TextRenderer::new(include_bytes!("../fonts/DejaVuSans.ttf"));
+        let seq = crate::seq_status::SeqStatusDisplay::new();
+        let scale = 1.0_f32;
+
+        const WARMUP: usize = 10;
+        const ITERS: usize = 200;
+
+        // Warm-up: fill + draw without timing.
+        for _ in 0..WARMUP {
+            widgets::fill_pixmap_opaque(&mut pixmap, widgets::color_bg());
+            draw_grid(&mut pixmap, &grid, scale, None);
+            draw_wavefront(&mut pixmap, &wf, scale);
+            crate::editor::toolbar::draw_toolbar(
+                &mut pixmap,
+                &mut tr,
+                &params,
+                &seq,
+                scale,
+            );
+        }
+
+        let mut grid_samples: Vec<f64> = Vec::with_capacity(ITERS);
+        let mut wf_samples: Vec<f64> = Vec::with_capacity(ITERS);
+        let mut toolbar_samples: Vec<f64> = Vec::with_capacity(ITERS);
+        let mut total_samples: Vec<f64> = Vec::with_capacity(ITERS);
+
+        for _ in 0..ITERS {
+            widgets::fill_pixmap_opaque(&mut pixmap, widgets::color_bg());
+
+            let t_frame = std::time::Instant::now();
+
+            let t0 = std::time::Instant::now();
+            draw_grid(&mut pixmap, &grid, scale, None);
+            grid_samples.push(t0.elapsed().as_nanos() as f64 / 1_000.0);
+
+            let t1 = std::time::Instant::now();
+            draw_wavefront(&mut pixmap, &wf, scale);
+            wf_samples.push(t1.elapsed().as_nanos() as f64 / 1_000.0);
+
+            let t2 = std::time::Instant::now();
+            crate::editor::toolbar::draw_toolbar(
+                &mut pixmap,
+                &mut tr,
+                &params,
+                &seq,
+                scale,
+            );
+            toolbar_samples.push(t2.elapsed().as_nanos() as f64 / 1_000.0);
+
+            total_samples.push(t_frame.elapsed().as_nanos() as f64 / 1_000.0);
+        }
+
+        eprintln!("\n=== bench_editor_draw ({ITERS} iterations, scale={scale}) ===");
+        bench_stats("draw_grid   ", &grid_samples);
+        bench_stats("draw_wavefront", &wf_samples);
+        bench_stats("draw_toolbar", &toolbar_samples);
+        bench_stats("frame total ", &total_samples);
+        eprintln!("=== END bench_editor_draw ===\n");
+
+        assert!(!grid_samples.is_empty());
+    }
+
     #[test]
     fn window_size_matches_the_grid() {
         let expect_w =
