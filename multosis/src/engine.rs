@@ -6,6 +6,7 @@
 use crate::clock::StepClock;
 use crate::effects::{Effect, EffectInstance, TrackEffect};
 use crate::grid::{Grid, COLS, ROWS};
+use crate::modulation::{Modulation, TrackModulation};
 use crate::propagation::{Propagator, Wavefront};
 
 /// Upper bound on step boundaries handled within one process block. At any
@@ -21,6 +22,11 @@ pub struct AudioEngine {
     propagator: Propagator,
     clock: StepClock,
     effects: [EffectInstance; ROWS],
+    /// Per-track effect configuration — kept so the modulation engine can read
+    /// each effect's base parameter values when computing assignable targets.
+    track_effects: [TrackEffect; ROWS],
+    /// The 3-MSEG-per-track modulation engine driving the effects.
+    modulation: Modulation,
     sample_rate: f32,
 }
 
@@ -38,6 +44,8 @@ impl AudioEngine {
                 }
                 e
             }),
+            track_effects: std::array::from_fn(TrackEffect::default_for_row),
+            modulation: Modulation::new(),
             sample_rate: 48_000.0,
         }
     }
@@ -53,6 +61,13 @@ impl AudioEngine {
             e.set_sample_rate(self.sample_rate);
             self.effects[r] = e;
         }
+        self.track_effects = *config;
+    }
+
+    /// Install the per-track modulation configuration into the modulation
+    /// engine.
+    pub fn set_modulation(&mut self, config: &[TrackModulation; ROWS]) {
+        self.modulation.set_config(config);
     }
 
     /// Recompute sample-rate-dependent effect coefficients.
@@ -71,6 +86,7 @@ impl AudioEngine {
         for e in &mut self.effects {
             e.reset();
         }
+        self.modulation.reset();
     }
 
     /// The current wavefront — exposed so the Milestone 1b-ii editor can draw
@@ -111,8 +127,8 @@ impl AudioEngine {
     /// The sum is deliberately un-normalised — with many rows active the wet
     /// signal can exceed the dry level; the `mix` and output-gain controls
     /// manage that (design doc §6).
-    /// Per-row amplitude gain is a literal 1.0 (Phase 2b seam: the modulation
-    /// engine will scale each row's contribution).
+    /// Each active row's wet contribution is scaled by that row's amplitude as
+    /// reported by the modulation engine's amplitude MSEG.
     fn process_sample(&mut self, dry_l: f32, dry_r: f32, active: u16) -> (f32, f32) {
         let mut wet_l = 0.0;
         let mut wet_r = 0.0;
@@ -121,8 +137,9 @@ impl AudioEngine {
                 continue;
             }
             let (l, r_out) = self.effects[r].process_sample(dry_l, dry_r);
-            wet_l += l;
-            wet_r += r_out;
+            let amp = self.modulation.amplitude(r);
+            wet_l += amp * l;
+            wet_r += amp * r_out;
         }
         (wet_l, wet_r)
     }
@@ -141,11 +158,20 @@ impl AudioEngine {
         right: &mut [f32],
         playing: bool,
         samples_per_step: f64,
+        bpm: f64,
         mix: f32,
         auto_restart: bool,
         grid: &Grid,
     ) {
         let n = left.len().min(right.len());
+
+        self.modulation.update_block(
+            n,
+            bpm,
+            self.sample_rate as f64,
+            &mut self.effects,
+            &self.track_effects,
+        );
 
         // Gather this block's step-boundary offsets (only while playing).
         let mut boundaries = [0usize; MAX_BOUNDARIES];
@@ -237,7 +263,7 @@ mod tests {
         let grid = Grid::default_routing();
         let mut left = [0.1_f32; 64];
         let mut right = [-0.2_f32; 64];
-        engine.process(&mut left, &mut right, true, 10.0, 0.0, true, &grid);
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 0.0, true, &grid);
         assert!(left.iter().all(|&s| (s - 0.1).abs() < 1e-6));
         assert!(right.iter().all(|&s| (s + 0.2).abs() < 1e-6));
     }
@@ -251,7 +277,7 @@ mod tests {
         let grid = Grid::default_routing();
         let mut left = [0.5_f32; 64];
         let mut right = [0.5_f32; 64];
-        engine.process(&mut left, &mut right, false, 10.0, 1.0, true, &grid);
+        engine.process(&mut left, &mut right, false, 10.0, 120.0, 1.0, true, &grid);
         assert!(left.iter().all(|&s| s == 0.0));
         assert!(right.iter().all(|&s| s == 0.0));
     }
@@ -266,7 +292,7 @@ mod tests {
         let grid = Grid::default_routing();
         let mut left = [0.3_f32; 128];
         let mut right = [0.3_f32; 128];
-        engine.process(&mut left, &mut right, true, 10.0, 1.0, true, &grid);
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, true, &grid);
         assert!(
             left[127] != 0.0,
             "after arming, a fully-wet block should not be silent"
@@ -280,12 +306,12 @@ mod tests {
         let grid = Grid::default_routing();
         let mut buf = [0.3_f32; 128];
         let mut buf2 = [0.3_f32; 128];
-        engine.process(&mut buf, &mut buf2, true, 10.0, 1.0, true, &grid);
+        engine.process(&mut buf, &mut buf2, true, 10.0, 120.0, 1.0, true, &grid);
         engine.reset();
         // After reset, not playing: empty wavefront -> silent at full wet.
         let mut left = [0.4_f32; 64];
         let mut right = [0.4_f32; 64];
-        engine.process(&mut left, &mut right, false, 10.0, 1.0, true, &grid);
+        engine.process(&mut left, &mut right, false, 10.0, 120.0, 1.0, true, &grid);
         assert!(left.iter().all(|&s| s == 0.0));
         assert!(right.iter().all(|&s| s == 0.0));
     }
@@ -308,7 +334,7 @@ mod tests {
         let mut left = [0.0_f32; 64];
         let mut right = [0.0_f32; 64];
         // One short step arms the start cells -> Running.
-        engine.process(&mut left, &mut right, true, 10.0, 0.0, true, &grid);
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 0.0, true, &grid);
         assert_eq!(
             engine.sequence_state(),
             crate::propagation::SequenceState::Running
@@ -325,11 +351,39 @@ mod tests {
         let grid = Grid::default_routing();
         let mut left = [0.3_f32; 64];
         let mut right = [0.3_f32; 64];
-        engine.process(&mut left, &mut right, true, 10.0, 1.0, true, &grid);
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, true, &grid);
         assert!(left.iter().all(|s| s.is_finite()));
         assert!(
             left.iter().any(|&s| (s - 0.3).abs() > 1e-6),
             "per-track effects should change the signal"
         );
+    }
+
+    #[test]
+    fn engine_applies_modulation() {
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let effect_cfg: [crate::effects::TrackEffect; ROWS] =
+            std::array::from_fn(crate::effects::TrackEffect::default_for_row);
+        engine.set_effects(&effect_cfg);
+        let mod_cfg: [crate::modulation::TrackModulation; ROWS] =
+            std::array::from_fn(crate::modulation::TrackModulation::default_for_row);
+        engine.set_modulation(&mod_cfg);
+        let grid = Grid::default_routing();
+        // Run two well-separated stretches of audio; the default per-track
+        // assignable MSEG should make the wet output drift over time.
+        let mut a = [0.4_f32; 64];
+        let mut b = [0.4_f32; 64];
+        let mut a_r = a;
+        engine.process(&mut a, &mut a_r, true, 10.0, 120.0, 1.0, true, &grid);
+        for _ in 0..300 {
+            let mut l = [0.4_f32; 64];
+            let mut r = [0.4_f32; 64];
+            engine.process(&mut l, &mut r, true, 10.0, 120.0, 1.0, true, &grid);
+        }
+        let mut b_r = b;
+        engine.process(&mut b, &mut b_r, true, 10.0, 120.0, 1.0, true, &grid);
+        assert!(a.iter().all(|s| s.is_finite()) && b.iter().all(|s| s.is_finite()));
+        assert!(a != b, "modulation should make the output drift over time");
     }
 }

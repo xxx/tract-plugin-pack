@@ -40,6 +40,10 @@ pub struct MultosisParams {
     #[persist = "track-effects"]
     pub track_effects: Arc<Mutex<[crate::effects::TrackEffect; 16]>>,
 
+    /// Per-track modulation configuration — persisted plugin state.
+    #[persist = "track-modulation"]
+    pub track_modulation: Arc<Mutex<[crate::modulation::TrackModulation; 16]>>,
+
     /// Tempo-synced wavefront advance rate.
     #[id = "speed"]
     pub speed: EnumParam<Speed>,
@@ -64,6 +68,9 @@ impl Default for MultosisParams {
             grid: Arc::new(Mutex::new(Grid::default())),
             track_effects: Arc::new(Mutex::new(std::array::from_fn(
                 crate::effects::TrackEffect::default_for_row,
+            ))),
+            track_modulation: Arc::new(Mutex::new(std::array::from_fn(
+                crate::modulation::TrackModulation::default_for_row,
             ))),
             speed: EnumParam::new("Speed", Speed::Div16),
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
@@ -173,6 +180,9 @@ impl Plugin for Multosis {
         if let Ok(cfg) = self.params.track_effects.lock() {
             self.engine.set_effects(&cfg);
         }
+        if let Ok(m) = self.params.track_modulation.lock() {
+            self.engine.set_modulation(&m);
+        }
         self.was_playing = false;
         true
     }
@@ -227,6 +237,7 @@ impl Plugin for Multosis {
             &mut *right,
             playing,
             sps,
+            bpm,
             mix,
             auto_restart,
             &self.grid,
