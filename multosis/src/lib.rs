@@ -115,6 +115,9 @@ pub struct Multosis {
     reset_request: Arc<std::sync::atomic::AtomicBool>,
     /// Audio→GUI mirror of the engine's active-row mask, shared with the editor.
     active_rows: Arc<AtomicU16>,
+    /// Set by the editor on any effect/modulation edit; consumed by `process`
+    /// to re-bridge the persisted config into the engine.
+    config_dirty: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for Multosis {
@@ -130,6 +133,7 @@ impl Default for Multosis {
             seq_status: Arc::new(crate::seq_status::SeqStatusDisplay::new()),
             reset_request: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             active_rows: Arc::new(AtomicU16::new(0)),
+            config_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -224,6 +228,20 @@ impl Plugin for Multosis {
         // Pick up the latest grid (non-blocking; keep the last on a miss).
         if let Some(grid) = self.grid_handoff.try_read() {
             self.grid = grid;
+        }
+
+        // Re-bridge edited config into the engine. Clear the dirty flag only
+        // after a successful re-bridge so no edit is lost on lock contention.
+        if self.config_dirty.load(std::sync::atomic::Ordering::Relaxed) {
+            if let (Ok(eff), Ok(modu)) = (
+                self.params.track_effects.try_lock(),
+                self.params.track_modulation.try_lock(),
+            ) {
+                self.engine.set_effects(&eff);
+                self.engine.set_modulation(&modu);
+                self.config_dirty
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
         }
 
         let sps =

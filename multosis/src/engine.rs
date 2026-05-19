@@ -54,16 +54,26 @@ impl AudioEngine {
         }
     }
 
-    /// Rebuild the per-track effect instances from `config` and apply the
-    /// stored sample rate.
+    /// Test-only: mutable access to a row's live effect instance.
+    #[cfg(test)]
+    pub fn effects_mut_for_test(&mut self, row: usize) -> &mut EffectInstance {
+        &mut self.effects[row]
+    }
+
+    /// Bridge `config` into the engine. For each row: if the effect kind is
+    /// unchanged, the live instance is kept and only its parameters are
+    /// re-applied (DSP state survives — a parameter edit does not click); a
+    /// kind change rebuilds that row's instance. `track_effects` is stored
+    /// unconditionally so the modulation engine reads fresh base values.
     pub fn set_effects(&mut self, config: &[TrackEffect; ROWS]) {
         for (r, cfg) in config.iter().enumerate() {
-            let mut e = EffectInstance::new(cfg.kind);
-            for i in 0..e.parameters().len() {
-                e.set_param(i, cfg.params[i]);
+            if self.effects[r].kind() != cfg.kind {
+                self.effects[r] = EffectInstance::new(cfg.kind);
+                self.effects[r].set_sample_rate(self.sample_rate);
             }
-            e.set_sample_rate(self.sample_rate);
-            self.effects[r] = e;
+            for i in 0..self.effects[r].parameters().len() {
+                self.effects[r].set_param(i, cfg.params[i]);
+            }
         }
         self.track_effects = *config;
     }
@@ -385,6 +395,58 @@ mod tests {
         assert!(
             left.iter().any(|&s| (s - 0.3).abs() > 1e-6),
             "per-track effects should change the signal"
+        );
+    }
+
+    #[test]
+    fn set_effects_preserves_dsp_state_when_kind_is_unchanged() {
+        // A lowpass with running state; re-applying the same kind with a new
+        // cutoff must not reset the filter (no zeroed history => no transient).
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let mut cfg: [crate::effects::TrackEffect; ROWS] =
+            std::array::from_fn(|_| crate::effects::TrackEffect {
+                kind: crate::effects::EffectKind::Lowpass,
+                params: [800.0, 0.2, 0.0, 0.0],
+            });
+        engine.set_effects(&cfg);
+        // Drive row 0's effect so it has non-zero internal state.
+        for _ in 0..256 {
+            engine.effects_mut_for_test(0).process_sample(1.0, 1.0);
+        }
+        let before = engine.effects_mut_for_test(0).process_sample(1.0, 1.0).0;
+        // Re-apply with only a parameter change, same kind.
+        cfg[0].params[0] = 900.0;
+        engine.set_effects(&cfg);
+        let after = engine.effects_mut_for_test(0).process_sample(1.0, 1.0).0;
+        // Continuity: state was preserved, so the two consecutive samples are
+        // close — a full rebuild would have snapped `after` toward 0.
+        assert!(
+            (after - before).abs() < 0.2,
+            "kind-unchanged set_effects must keep DSP state: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn set_effects_rebuilds_on_a_kind_change() {
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let mut cfg: [crate::effects::TrackEffect; ROWS] =
+            std::array::from_fn(crate::effects::TrackEffect::default_for_row);
+        cfg[0] = crate::effects::TrackEffect {
+            kind: crate::effects::EffectKind::Lowpass,
+            params: [2000.0, 0.1, 0.0, 0.0],
+        };
+        engine.set_effects(&cfg);
+        assert_eq!(
+            engine.effects_mut_for_test(0).kind(),
+            crate::effects::EffectKind::Lowpass
+        );
+        cfg[0].kind = crate::effects::EffectKind::Bitcrush;
+        engine.set_effects(&cfg);
+        assert_eq!(
+            engine.effects_mut_for_test(0).kind(),
+            crate::effects::EffectKind::Bitcrush
         );
     }
 
