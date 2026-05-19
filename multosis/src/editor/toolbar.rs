@@ -3,7 +3,8 @@
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §7.
 
-use crate::editor::grid_view::TOOLBAR_ROW_H;
+use crate::editor::grid_view::{MARGIN, TOOLBAR_ROW_H};
+use crate::editor::WINDOW_WIDTH;
 use crate::MultosisParams;
 use nih_plug::prelude::Param;
 use tiny_skia::Pixmap;
@@ -53,12 +54,23 @@ impl ToolbarControl {
 /// Vertical inset of a control within its toolbar row, logical px.
 const CTRL_INSET: f32 = 4.0;
 
+/// The toolbar layout was authored for a 1056-wide window inset 6 px each
+/// side (content span 1044 px). `remap` affinely maps an old logical
+/// `(x, width)` onto the current window's content span
+/// `[MARGIN, WINDOW_WIDTH - MARGIN]`, preserving every item's relative
+/// position and width — so a future window-width change re-fits the toolbar.
+fn remap(lx: f32, lw: f32) -> (f32, f32) {
+    let span = (WINDOW_WIDTH as f32 - 2.0 * MARGIN) / 1044.0;
+    (MARGIN + (lx - 6.0) * span, lw * span)
+}
+
 /// The physical-pixel rectangle `(x, y, w, h)` of `ctrl` at `scale`.
 pub fn control_rect(ctrl: ToolbarControl, scale: f32) -> (f32, f32, f32, f32) {
     let (lx, lw) = ctrl.logical_x_w();
-    let x = lx * scale;
+    let (rx, rw) = remap(lx, lw);
+    let x = rx * scale;
     let y = CTRL_INSET * scale;
-    let w = lw * scale;
+    let w = rw * scale;
     let h = (TOOLBAR_ROW_H - 2.0 * CTRL_INSET) * scale;
     (x, y, w, h)
 }
@@ -129,9 +141,10 @@ impl ToolbarOp {
 /// The op buttons live in the toolbar's lower row.
 pub fn op_rect(op: ToolbarOp, scale: f32) -> (f32, f32, f32, f32) {
     let (lx, lw) = op.logical_x_w();
-    let x = lx * scale;
+    let (rx, rw) = remap(lx, lw);
+    let x = rx * scale;
     let y = (TOOLBAR_ROW_H + CTRL_INSET) * scale;
-    let w = lw * scale;
+    let w = rw * scale;
     let h = (TOOLBAR_ROW_H - 2.0 * CTRL_INSET) * scale;
     (x, y, w, h)
 }
@@ -246,7 +259,7 @@ pub fn draw_toolbar(
         crate::propagation::SequenceState::Stopped => "Stopped".to_string(),
     };
     let size = 16.0 * scale;
-    let sx = 878.0 * scale;
+    let sx = remap(878.0, 0.0).0 * scale;
     let sy = (TOOLBAR_ROW_H + TOOLBAR_ROW_H / 2.0) * scale + size * 0.36;
     tr.draw_text(pixmap, sx, sy, &status, size, widgets::color_text());
 }
@@ -281,7 +294,10 @@ mod tests {
     fn control_rects_sit_in_the_upper_toolbar_row() {
         for ctrl in ToolbarControl::ALL {
             let (x, y, w, h) = control_rect(ctrl, 1.0);
-            assert!(x >= 0.0 && x + w <= 1056.0, "{ctrl:?} out of width");
+            assert!(
+                x >= 0.0 && x + w <= crate::editor::WINDOW_WIDTH as f32,
+                "{ctrl:?} out of width"
+            );
             assert!(y >= 0.0 && y + h <= TOOLBAR_ROW_H, "{ctrl:?} out of row");
         }
     }
@@ -315,7 +331,10 @@ mod tests {
     fn op_rects_sit_in_the_lower_toolbar_row() {
         for op in ToolbarOp::ALL {
             let (x, y, w, h) = op_rect(op, 1.0);
-            assert!(x >= 0.0 && x + w <= 1056.0, "{op:?} out of width");
+            assert!(
+                x >= 0.0 && x + w <= crate::editor::WINDOW_WIDTH as f32,
+                "{op:?} out of width"
+            );
             // Entirely within the lower row [TOOLBAR_ROW_H, 2*TOOLBAR_ROW_H].
             assert!(
                 y >= TOOLBAR_ROW_H && y + h <= 2.0 * TOOLBAR_ROW_H,
@@ -388,5 +407,57 @@ mod tests {
             g, before,
             "Copy/Paste are handled by the editor, not apply_grid_op"
         );
+    }
+
+    #[test]
+    fn toolbar_rows_lie_within_the_window_margins() {
+        let left = crate::editor::grid_view::MARGIN;
+        let right = crate::editor::WINDOW_WIDTH as f32 - crate::editor::grid_view::MARGIN;
+        for ctrl in ToolbarControl::ALL {
+            let (x, _, w, _) = control_rect(ctrl, 1.0);
+            assert!(x >= left - 0.5 && x + w <= right + 0.5, "{ctrl:?} outside margins");
+        }
+        for op in ToolbarOp::ALL {
+            let (x, _, w, _) = op_rect(op, 1.0);
+            assert!(x >= left - 0.5 && x + w <= right + 0.5, "{op:?} outside margins");
+        }
+    }
+
+    #[test]
+    fn toolbar_controls_do_not_overlap() {
+        for row in [
+            ToolbarControl::ALL
+                .iter()
+                .map(|&c| {
+                    let (x, _, w, _) = control_rect(c, 1.0);
+                    (x, x + w)
+                })
+                .collect::<Vec<_>>(),
+            ToolbarOp::ALL
+                .iter()
+                .map(|&o| {
+                    let (x, _, w, _) = op_rect(o, 1.0);
+                    (x, x + w)
+                })
+                .collect::<Vec<_>>(),
+        ] {
+            let mut spans = row;
+            spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            for pair in spans.windows(2) {
+                assert!(pair[0].1 <= pair[1].0 + 0.5, "toolbar items overlap: {pair:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn toolbar_hit_round_trips_each_item() {
+        for ctrl in ToolbarControl::ALL {
+            let (x, y, w, h) = control_rect(ctrl, 1.4);
+            assert_eq!(toolbar_hit(x + w / 2.0, y + h / 2.0, 1.4), Some(ctrl));
+        }
+        for op in ToolbarOp::ALL {
+            let (x, y, w, h) = op_rect(op, 1.4);
+            assert_eq!(op_hit(x + w / 2.0, y + h / 2.0, 1.4), Some(op));
+        }
     }
 }
