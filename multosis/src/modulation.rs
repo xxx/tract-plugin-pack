@@ -4,8 +4,8 @@
 //!
 //! See `docs/superpowers/specs/2026-05-19-multosis-phase-2b-design.md`.
 
-use tiny_skia_widgets::{MsegData, PlayMode, SyncMode};
 use crate::effects::ParamSpec;
+use tiny_skia_widgets::{MsegData, PlayMode, SyncMode};
 
 /// The number of track rows. Matches `crate::grid::ROWS`.
 #[allow(dead_code)]
@@ -145,13 +145,23 @@ mod tests {
 
     #[test]
     fn assignable_value_midline_is_the_base() {
-        let spec = ParamSpec { name: "p", min: 0.0, max: 100.0, default: 50.0 };
+        let spec = ParamSpec {
+            name: "p",
+            min: 0.0,
+            max: 100.0,
+            default: 50.0,
+        };
         assert!((assignable_value(0.5, 40.0, 1.0, spec) - 40.0).abs() < 1e-6);
     }
 
     #[test]
     fn assignable_value_depth_and_sign() {
-        let spec = ParamSpec { name: "p", min: 0.0, max: 100.0, default: 50.0 };
+        let spec = ParamSpec {
+            name: "p",
+            min: 0.0,
+            max: 100.0,
+            default: 50.0,
+        };
         assert_eq!(assignable_value(1.0, 40.0, 1.0, spec), 100.0);
         assert_eq!(assignable_value(1.0, 40.0, -1.0, spec), 0.0);
         assert!((assignable_value(1.0, 20.0, 0.5, spec) - 70.0).abs() < 1e-4);
@@ -159,7 +169,12 @@ mod tests {
 
     #[test]
     fn assignable_value_always_within_range() {
-        let spec = ParamSpec { name: "p", min: 5.0, max: 9.0, default: 7.0 };
+        let spec = ParamSpec {
+            name: "p",
+            min: 5.0,
+            max: 9.0,
+            default: 7.0,
+        };
         for &v in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
             for &d in &[-1.0_f32, -0.3, 0.0, 0.6, 1.0] {
                 let out = assignable_value(v, 8.0, d, spec);
