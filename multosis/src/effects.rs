@@ -7,6 +7,141 @@
 
 use nih_plug::prelude::Enum;
 
+/// A modulatable parameter of an effect: its name and value range. Static per
+/// effect kind; used by the 2b modulation engine and the 2c effect editor.
+#[derive(Clone, Copy, Debug)]
+pub struct ParamSpec {
+    pub name: &'static str,
+    pub min: f32,
+    pub max: f32,
+    pub default: f32,
+}
+
+/// The standardized audio-effect contract. Implemented by each effect struct;
+/// dispatched allocation-free through `EffectInstance` (no `dyn`). Audio-thread
+/// methods (`process_sample`, `set_param`, `reset`) must not allocate.
+pub trait Effect {
+    /// Process one stereo sample, returning the wet `(left, right)`. DSP state
+    /// persists across calls so the effect does not click on reactivation.
+    fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32);
+
+    /// Recompute sample-rate-dependent coefficients.
+    fn set_sample_rate(&mut self, sample_rate: f32);
+
+    /// Clear all DSP state.
+    fn reset(&mut self);
+
+    /// The effect's modulatable parameters, in `set_param` index order.
+    fn parameters(&self) -> &'static [ParamSpec];
+
+    /// Set parameter `index` to `value` (clamped to the spec's range). An
+    /// out-of-range `index` is ignored.
+    fn set_param(&mut self, index: usize, value: f32);
+}
+
+/// A resonant lowpass — a TPT state-variable filter, lowpass output.
+pub struct LowpassEffect {
+    cutoff: f32,
+    resonance: f32,
+    sample_rate: f32,
+    a1: f32,
+    a2: f32,
+    a3: f32,
+    ic1: [f32; 2],
+    ic2: [f32; 2],
+}
+
+impl LowpassEffect {
+    const PARAMS: [ParamSpec; 2] = [
+        ParamSpec {
+            name: "Cutoff",
+            min: 20.0,
+            max: 20_000.0,
+            default: 2_000.0,
+        },
+        ParamSpec {
+            name: "Resonance",
+            min: 0.0,
+            max: 1.0,
+            default: 0.1,
+        },
+    ];
+
+    /// A `LowpassEffect` at its default parameters; call `set_sample_rate`
+    /// before processing.
+    pub fn new() -> Self {
+        let mut lp = Self {
+            cutoff: Self::PARAMS[0].default,
+            resonance: Self::PARAMS[1].default,
+            sample_rate: 48_000.0,
+            a1: 0.0,
+            a2: 0.0,
+            a3: 0.0,
+            ic1: [0.0; 2],
+            ic2: [0.0; 2],
+        };
+        lp.recompute();
+        lp
+    }
+
+    /// Recompute the TPT-SVF coefficients from cutoff / resonance / SR.
+    fn recompute(&mut self) {
+        let sr = self.sample_rate.max(1.0);
+        let fc = self.cutoff.clamp(20.0, sr * 0.49);
+        let g = (std::f32::consts::PI * fc / sr).tan();
+        let q = 0.5 + self.resonance.clamp(0.0, 1.0) * 9.5;
+        let k = 1.0 / q;
+        self.a1 = 1.0 / (1.0 + g * (g + k));
+        self.a2 = g * self.a1;
+        self.a3 = g * self.a2;
+    }
+
+    /// Process one sample for a single channel using the TPT-SVF integrator form.
+    fn svf_step(&mut self, x: f32, ch: usize) -> f32 {
+        let v3 = x - self.ic2[ch];
+        let v1 = self.a1 * self.ic1[ch] + self.a2 * v3;
+        let v2 = self.ic2[ch] + self.a2 * self.ic1[ch] + self.a3 * v3;
+        self.ic1[ch] = 2.0 * v1 - self.ic1[ch];
+        self.ic2[ch] = 2.0 * v2 - self.ic2[ch];
+        v2
+    }
+}
+
+impl Default for LowpassEffect {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Effect for LowpassEffect {
+    fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
+        (self.svf_step(left, 0), self.svf_step(right, 1))
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate;
+        self.recompute();
+    }
+
+    fn reset(&mut self) {
+        self.ic1 = [0.0; 2];
+        self.ic2 = [0.0; 2];
+    }
+
+    fn parameters(&self) -> &'static [ParamSpec] {
+        &Self::PARAMS
+    }
+
+    fn set_param(&mut self, index: usize, value: f32) {
+        match index {
+            0 => self.cutoff = value.clamp(Self::PARAMS[0].min, Self::PARAMS[0].max),
+            1 => self.resonance = value.clamp(Self::PARAMS[1].min, Self::PARAMS[1].max),
+            _ => return,
+        }
+        self.recompute();
+    }
+}
+
 /// Which throwaway effect every row uses. A host parameter.
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum EffectBank {
@@ -186,5 +321,67 @@ mod tests {
                 assert!(y.abs() <= 1.5, "row {r}, x {x} -> {y} out of range");
             }
         }
+    }
+
+    #[test]
+    fn lowpass_effect_parameters_are_declared() {
+        let lp = LowpassEffect::new();
+        let specs = lp.parameters();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].name, "Cutoff");
+        assert_eq!(specs[1].name, "Resonance");
+        assert!(specs[0].min < specs[0].max);
+    }
+
+    #[test]
+    fn lowpass_effect_dark_cutoff_attenuates_highs() {
+        let mut lp = LowpassEffect::new();
+        lp.set_sample_rate(48_000.0);
+        lp.set_param(0, 200.0);
+        lp.set_param(1, 0.0);
+        let mut peak = 0.0_f32;
+        for i in 0..2048 {
+            let x = if i % 2 == 0 { 1.0 } else { -1.0 };
+            let (l, _) = lp.process_sample(x, x);
+            if i > 256 {
+                peak = peak.max(l.abs());
+            }
+        }
+        assert!(peak < 0.5, "a 200 Hz lowpass should kill a fast alternation, got {peak}");
+    }
+
+    #[test]
+    fn lowpass_effect_open_cutoff_passes_a_constant() {
+        let mut lp = LowpassEffect::new();
+        lp.set_sample_rate(48_000.0);
+        lp.set_param(0, 18_000.0);
+        lp.set_param(1, 0.0);
+        let mut y = 0.0;
+        for _ in 0..2048 {
+            y = lp.process_sample(1.0, 1.0).0;
+        }
+        assert!(y > 0.9, "an open lowpass should pass a constant, got {y}");
+    }
+
+    #[test]
+    fn lowpass_effect_reset_clears_state() {
+        let mut lp = LowpassEffect::new();
+        lp.set_sample_rate(48_000.0);
+        lp.set_param(0, 300.0);
+        for _ in 0..512 {
+            lp.process_sample(1.0, 1.0);
+        }
+        lp.reset();
+        let y = lp.process_sample(1.0, 1.0).0;
+        assert!(y.abs() < 0.5, "reset should clear filter state, got {y}");
+    }
+
+    #[test]
+    fn lowpass_effect_set_param_out_of_range_is_ignored() {
+        let mut lp = LowpassEffect::new();
+        lp.set_sample_rate(48_000.0);
+        lp.set_param(99, 1.0);
+        let y = lp.process_sample(0.25, 0.25);
+        assert!(y.0.is_finite());
     }
 }
