@@ -55,6 +55,19 @@ impl TrackModulation {
             depths: [0.4, 0.0],
         }
     }
+
+    /// Clear any assignable-MSEG target that points past `param_count`
+    /// parameters. Called after a track's effect kind changes so a target can
+    /// never reference a parameter the new effect does not have.
+    pub fn clamp_targets(&mut self, param_count: usize) {
+        for target in &mut self.targets {
+            if let Some(i) = *target {
+                if i >= param_count {
+                    *target = None;
+                }
+            }
+        }
+    }
 }
 
 impl Default for TrackModulation {
@@ -359,5 +372,18 @@ mod tests {
         m.reset();
         // After reset, every phase is back at 0.
         assert!(m.phases_all_zero());
+    }
+
+    #[test]
+    fn clamp_targets_clears_out_of_range_targets() {
+        let mut tm = TrackModulation::default_for_row(0);
+        tm.targets = [Some(0), Some(5)];
+        // An effect with 2 parameters: target 0 survives, target 5 is cleared.
+        tm.clamp_targets(2);
+        assert_eq!(tm.targets, [Some(0), None]);
+        // A target exactly at the count is out of range.
+        tm.targets = [Some(2), None];
+        tm.clamp_targets(2);
+        assert_eq!(tm.targets, [None, None]);
     }
 }

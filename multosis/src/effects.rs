@@ -243,6 +243,24 @@ impl EffectKind {
     }
 }
 
+/// The number of modulatable parameters effect `kind` declares.
+pub fn param_count(kind: EffectKind) -> usize {
+    EffectInstance::new(kind).parameters().len()
+}
+
+/// The default parameter values for effect `kind`, laid out in the
+/// `TrackEffect::params` slot order (slots past the kind's parameter count are
+/// zero). Used when a track switches effect kind.
+pub fn default_params_for_kind(kind: EffectKind) -> [f32; MAX_EFFECT_PARAMS] {
+    let instance = EffectInstance::new(kind);
+    let specs = instance.parameters();
+    let mut params = [0.0; MAX_EFFECT_PARAMS];
+    for (i, spec) in specs.iter().enumerate() {
+        params[i] = spec.default;
+    }
+    params
+}
+
 /// A live effect instance — enum dispatch over the effect structs, so the
 /// audio engine holds `[EffectInstance; 16]` with no heap and no `dyn`.
 pub enum EffectInstance {
@@ -547,5 +565,23 @@ mod tests {
         assert!(config.iter().any(|t| t.kind == EffectKind::Lowpass));
         assert!(config.iter().any(|t| t.kind == EffectKind::Bitcrush));
         assert!(config.iter().any(|t| *t != config[0]));
+    }
+
+    #[test]
+    fn default_params_for_kind_matches_the_kinds_specs() {
+        let lp = default_params_for_kind(EffectKind::Lowpass);
+        assert_eq!(lp[0], LowpassEffect::new().parameters()[0].default);
+        assert_eq!(lp[1], LowpassEffect::new().parameters()[1].default);
+        // Slots past the kind's parameter count are zero.
+        assert_eq!(lp[2], 0.0);
+        assert_eq!(lp[3], 0.0);
+        let bc = default_params_for_kind(EffectKind::Bitcrush);
+        assert_eq!(bc[0], BitcrushEffect::new().parameters()[0].default);
+    }
+
+    #[test]
+    fn param_count_reports_each_kinds_arity() {
+        assert_eq!(param_count(EffectKind::Lowpass), 2);
+        assert_eq!(param_count(EffectKind::Bitcrush), 2);
     }
 }
