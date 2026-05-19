@@ -5,6 +5,7 @@
 //! See `docs/superpowers/specs/2026-05-19-multosis-phase-2b-design.md`.
 
 use tiny_skia_widgets::{MsegData, PlayMode, SyncMode};
+use crate::effects::ParamSpec;
 
 /// The number of track rows. Matches `crate::grid::ROWS`.
 #[allow(dead_code)]
@@ -63,6 +64,33 @@ impl Default for TrackModulation {
     }
 }
 
+/// The phase delta (0..1 space) one `block_len`-sample process block advances
+/// `mseg`, given the host `bpm` and `sample_rate`. Honours the MSEG's
+/// `sync_mode`: `Time` uses `time_seconds`, `Beat` converts `beats` via the
+/// tempo. Returns 0.0 for a degenerate (zero/negative) length.
+pub fn mseg_phase_delta(mseg: &MsegData, block_len: usize, bpm: f64, sample_rate: f64) -> f32 {
+    let length_samples = match mseg.sync_mode {
+        SyncMode::Time => mseg.time_seconds as f64 * sample_rate,
+        SyncMode::Beat => mseg.beats as f64 * (60.0 / bpm) * sample_rate,
+    };
+    if length_samples > 0.0 {
+        (block_len as f64 / length_samples) as f32
+    } else {
+        0.0
+    }
+}
+
+/// The effective effect-parameter value for an assignable MSEG modulating
+/// parameter `spec` around `base`. `mseg_value` is the MSEG's 0..1 output;
+/// `depth` is the bipolar (−1..1) modulation depth. The MSEG midline (0.5)
+/// leaves the parameter at `base`; the result is clamped to the parameter's
+/// range.
+pub fn assignable_value(mseg_value: f32, base: f32, depth: f32, spec: ParamSpec) -> f32 {
+    let bipolar = mseg_value * 2.0 - 1.0;
+    let deviation = bipolar * depth * (spec.max - spec.min);
+    (base + deviation).clamp(spec.min, spec.max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +123,48 @@ mod tests {
         assert!(a.msegs[0].nodes[..a.msegs[0].node_count]
             .iter()
             .all(|n| (n.value - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn mseg_phase_delta_time_sync() {
+        let mut m = MsegData::default();
+        m.sync_mode = SyncMode::Time;
+        m.time_seconds = 2.0;
+        let dt = mseg_phase_delta(&m, 48, 120.0, 48_000.0);
+        assert!((dt - 48.0 / 96_000.0).abs() < 1e-9, "got {dt}");
+    }
+
+    #[test]
+    fn mseg_phase_delta_beat_sync() {
+        let mut m = MsegData::default();
+        m.sync_mode = SyncMode::Beat;
+        m.beats = 4.0;
+        let dt = mseg_phase_delta(&m, 48, 120.0, 48_000.0);
+        assert!((dt - 48.0 / 96_000.0).abs() < 1e-9, "got {dt}");
+    }
+
+    #[test]
+    fn assignable_value_midline_is_the_base() {
+        let spec = ParamSpec { name: "p", min: 0.0, max: 100.0, default: 50.0 };
+        assert!((assignable_value(0.5, 40.0, 1.0, spec) - 40.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn assignable_value_depth_and_sign() {
+        let spec = ParamSpec { name: "p", min: 0.0, max: 100.0, default: 50.0 };
+        assert_eq!(assignable_value(1.0, 40.0, 1.0, spec), 100.0);
+        assert_eq!(assignable_value(1.0, 40.0, -1.0, spec), 0.0);
+        assert!((assignable_value(1.0, 20.0, 0.5, spec) - 70.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn assignable_value_always_within_range() {
+        let spec = ParamSpec { name: "p", min: 5.0, max: 9.0, default: 7.0 };
+        for &v in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            for &d in &[-1.0_f32, -0.3, 0.0, 0.6, 1.0] {
+                let out = assignable_value(v, 8.0, d, spec);
+                assert!((5.0..=9.0).contains(&out), "v {v} d {d} -> {out}");
+            }
+        }
     }
 }
