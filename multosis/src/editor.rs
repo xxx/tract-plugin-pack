@@ -33,8 +33,8 @@ pub use widgets::EditorState;
 /// dispatch in `on_event` selects exactly one; `None` means no left drag.
 #[derive(Clone, Copy, Debug)]
 enum LeftGesture {
-    /// Dragging a loop-region edge to resize it.
-    ResizeRegion(grid_view::RegionEdge),
+    /// Dragging a loop-region edge or corner to resize it.
+    ResizeRegion(grid_view::RegionHandle),
     /// A left press on a grid cell that has not moved yet — a click in
     /// waiting. Becomes a click on release, or a paint drag if the cursor
     /// leaves the cell (later task).
@@ -155,11 +155,12 @@ impl MultosisWindow {
         }
     }
 
-    /// The loop-region edge under the cursor, if the cursor is over one.
-    fn region_edge_under_cursor(&self) -> Option<grid_view::RegionEdge> {
+    /// The loop-region resize handle under the cursor, if the cursor is over
+    /// one.
+    fn region_handle_under_cursor(&self) -> Option<grid_view::RegionHandle> {
         let (px, py) = self.mouse_pos;
         let region = self.params.grid.lock().ok()?.loop_region;
-        grid_view::region_edge_hit(px, py, region, self.scale_factor)
+        grid_view::region_handle_hit(px, py, region, self.scale_factor)
     }
 
     /// If the cursor is over the loop region's move grip, begin a move
@@ -194,20 +195,31 @@ impl MultosisWindow {
         }
     }
 
-    /// Resize the loop region for the in-progress drag of `edge`, then
-    /// republish the grid so the audio thread picks up the new region.
-    fn update_region_drag(&mut self, edge: grid_view::RegionEdge) {
+    /// Resize the loop region for the in-progress drag of `handle`, then
+    /// republish the grid.
+    fn update_region_drag(&mut self, handle: grid_view::RegionHandle) {
         let (px, py) = self.mouse_pos;
-        let index = match edge {
-            grid_view::RegionEdge::Left | grid_view::RegionEdge::Right => {
-                grid_view::column_at(px, self.scale_factor)
-            }
-            grid_view::RegionEdge::Top | grid_view::RegionEdge::Bottom => {
-                grid_view::row_at(py, self.scale_factor)
-            }
-        };
+        let scale = self.scale_factor;
         if let Ok(mut grid) = self.params.grid.lock() {
-            grid.loop_region = grid_view::apply_region_drag(grid.loop_region, edge, index);
+            grid.loop_region = match handle {
+                grid_view::RegionHandle::Edge(edge) => {
+                    let index = match edge {
+                        grid_view::RegionEdge::Left | grid_view::RegionEdge::Right => {
+                            grid_view::column_at(px, scale)
+                        }
+                        grid_view::RegionEdge::Top | grid_view::RegionEdge::Bottom => {
+                            grid_view::row_at(py, scale)
+                        }
+                    };
+                    grid_view::apply_region_drag(grid.loop_region, edge, index)
+                }
+                grid_view::RegionHandle::Corner(corner) => grid_view::apply_region_corner_drag(
+                    grid.loop_region,
+                    corner,
+                    grid_view::row_at(py, scale),
+                    grid_view::column_at(px, scale),
+                ),
+            };
             self.grid_handoff.publish(*grid);
         }
     }
@@ -387,7 +399,7 @@ impl baseview::WindowHandler for MultosisWindow {
                 }
                 let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
                 match self.left_gesture {
-                    Some(LeftGesture::ResizeRegion(edge)) => self.update_region_drag(edge),
+                    Some(LeftGesture::ResizeRegion(handle)) => self.update_region_drag(handle),
                     Some(LeftGesture::MoveRegion {
                         press,
                         region_at_press,
@@ -434,8 +446,8 @@ impl baseview::WindowHandler for MultosisWindow {
                     None => match toolbar::op_hit(px, py, self.scale_factor) {
                         Some(op) => self.handle_toolbar_op(op),
                         None => {
-                            if let Some(edge) = self.region_edge_under_cursor() {
-                                self.left_gesture = Some(LeftGesture::ResizeRegion(edge));
+                            if let Some(handle) = self.region_handle_under_cursor() {
+                                self.left_gesture = Some(LeftGesture::ResizeRegion(handle));
                             } else if self.try_begin_region_move() {
                                 // left_gesture set inside try_begin_region_move
                             } else if let Some((row, col, zone)) =

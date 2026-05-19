@@ -101,13 +101,54 @@ pub enum RegionEdge {
     Bottom,
 }
 
+/// One corner of the loop-region rectangle — the meeting of a vertical edge
+/// and a horizontal edge.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RegionCorner {
+    /// North-west — Left + Top.
+    NW,
+    /// North-east — Right + Top.
+    NE,
+    /// South-west — Left + Bottom.
+    SW,
+    /// South-east — Right + Bottom.
+    SE,
+}
+
+impl RegionCorner {
+    /// The `(vertical, horizontal)` edges this corner is made of.
+    pub fn edges(self) -> (RegionEdge, RegionEdge) {
+        match self {
+            RegionCorner::NW => (RegionEdge::Left, RegionEdge::Top),
+            RegionCorner::NE => (RegionEdge::Right, RegionEdge::Top),
+            RegionCorner::SW => (RegionEdge::Left, RegionEdge::Bottom),
+            RegionCorner::SE => (RegionEdge::Right, RegionEdge::Bottom),
+        }
+    }
+}
+
+/// A draggable loop-region resize handle — an edge (one axis) or a corner
+/// (both axes).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RegionHandle {
+    Edge(RegionEdge),
+    Corner(RegionCorner),
+}
+
 /// Half-width of the grab band straddling a region edge, in logical pixels.
 const EDGE_BAND: f32 = 6.0;
 
-/// The loop-region edge under physical-pixel point `(px, py)` at `scale`, or
-/// `None`. The cursor must be within the grid drawing area — points in the
-/// toolbar strip never hit an edge.
-pub fn region_edge_hit(px: f32, py: f32, region: LoopRegion, scale: f32) -> Option<RegionEdge> {
+/// The loop-region resize handle under physical-pixel point `(px, py)` at
+/// `scale`, or `None`. A point within `EDGE_BAND` of a corner in *both* axes
+/// is a `Corner`; within `EDGE_BAND` of one edge line (along the region's
+/// span) is an `Edge`. Points in the toolbar strip / gutter / margins never
+/// hit a handle.
+pub fn region_handle_hit(
+    px: f32,
+    py: f32,
+    region: LoopRegion,
+    scale: f32,
+) -> Option<RegionHandle> {
     // Reject the toolbar strip, the gutter, the margins — anything off-grid.
     let grid_top = (STATUS_H + GUTTER) * scale;
     let grid_bottom = (STATUS_H + GUTTER + ROWS as f32 * CELL) * scale;
@@ -122,16 +163,32 @@ pub fn region_edge_hit(px: f32, py: f32, region: LoopRegion, scale: f32) -> Opti
     let right = x1 + w1;
     let bottom = y1 + h1;
     let band = EDGE_BAND * scale;
+    let near_left = (px - x0).abs() <= band;
+    let near_right = (px - right).abs() <= band;
+    let near_top = (py - y0).abs() <= band;
+    let near_bottom = (py - bottom).abs() <= band;
+    // Corners first — within `band` of a corner point in both axes.
+    let corner = match (near_left, near_right, near_top, near_bottom) {
+        (true, _, true, _) => Some(RegionCorner::NW),
+        (_, true, true, _) => Some(RegionCorner::NE),
+        (true, _, _, true) => Some(RegionCorner::SW),
+        (_, true, _, true) => Some(RegionCorner::SE),
+        _ => None,
+    };
+    if let Some(c) = corner {
+        return Some(RegionHandle::Corner(c));
+    }
+    // Then edges — within `band` of an edge line, along the region's span.
     let in_rows = py >= y0 && py <= bottom;
     let in_cols = px >= x0 && px <= right;
-    if in_rows && (px - x0).abs() <= band {
-        Some(RegionEdge::Left)
-    } else if in_rows && (px - right).abs() <= band {
-        Some(RegionEdge::Right)
-    } else if in_cols && (py - y0).abs() <= band {
-        Some(RegionEdge::Top)
-    } else if in_cols && (py - bottom).abs() <= band {
-        Some(RegionEdge::Bottom)
+    if in_rows && near_left {
+        Some(RegionHandle::Edge(RegionEdge::Left))
+    } else if in_rows && near_right {
+        Some(RegionHandle::Edge(RegionEdge::Right))
+    } else if in_cols && near_top {
+        Some(RegionHandle::Edge(RegionEdge::Top))
+    } else if in_cols && near_bottom {
+        Some(RegionHandle::Edge(RegionEdge::Bottom))
     } else {
         None
     }
@@ -184,6 +241,21 @@ pub fn apply_region_drag(region: LoopRegion, edge: RegionEdge, index: usize) -> 
         RegionEdge::Bottom => r.row1 = index.max(r.row0).min(ROWS - 1),
     }
     r
+}
+
+/// Resize the loop region by dragging `corner` to grid cell `(row, col)`,
+/// moving both bounds the corner is made of. Composes `apply_region_drag`
+/// once per edge, so the corner drag inherits its clamping — it never
+/// inverts the region and can collapse it toward 1×1.
+pub fn apply_region_corner_drag(
+    region: LoopRegion,
+    corner: RegionCorner,
+    row: usize,
+    col: usize,
+) -> LoopRegion {
+    let (vertical, horizontal) = corner.edges();
+    let r = apply_region_drag(region, vertical, col);
+    apply_region_drag(r, horizontal, row)
 }
 
 /// Translate the loop region by `(drow, dcol)` grid cells, preserving its
@@ -682,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn region_edge_hit_finds_each_edge() {
+    fn region_handle_hit_finds_each_edge() {
         let region = LoopRegion {
             row0: 2,
             row1: 8,
@@ -694,25 +766,25 @@ mod tests {
         let mid_x = (x0 + x1 + w) / 2.0;
         let mid_y = (y0 + y1 + h) / 2.0;
         assert_eq!(
-            region_edge_hit(x0, mid_y, region, 1.0),
-            Some(RegionEdge::Left)
+            region_handle_hit(x0, mid_y, region, 1.0),
+            Some(RegionHandle::Edge(RegionEdge::Left))
         );
         assert_eq!(
-            region_edge_hit(x1 + w, mid_y, region, 1.0),
-            Some(RegionEdge::Right)
+            region_handle_hit(x1 + w, mid_y, region, 1.0),
+            Some(RegionHandle::Edge(RegionEdge::Right))
         );
         assert_eq!(
-            region_edge_hit(mid_x, y0, region, 1.0),
-            Some(RegionEdge::Top)
+            region_handle_hit(mid_x, y0, region, 1.0),
+            Some(RegionHandle::Edge(RegionEdge::Top))
         );
         assert_eq!(
-            region_edge_hit(mid_x, y1 + h, region, 1.0),
-            Some(RegionEdge::Bottom)
+            region_handle_hit(mid_x, y1 + h, region, 1.0),
+            Some(RegionHandle::Edge(RegionEdge::Bottom))
         );
     }
 
     #[test]
-    fn region_edge_hit_misses_interior_and_toolbar() {
+    fn region_handle_hit_misses_interior_and_toolbar() {
         let region = LoopRegion {
             row0: 2,
             row1: 8,
@@ -722,12 +794,83 @@ mod tests {
         // Centre of an interior cell — far from every edge.
         let (xc, yc, wc, hc) = cell_rect(5, 12, 1.0);
         assert_eq!(
-            region_edge_hit(xc + wc / 2.0, yc + hc / 2.0, region, 1.0),
+            region_handle_hit(xc + wc / 2.0, yc + hc / 2.0, region, 1.0),
             None
         );
         // A point up in the toolbar strip (y < STATUS_H).
         let (x0, _, _, _) = cell_rect(2, 4, 1.0);
-        assert_eq!(region_edge_hit(x0, 10.0, region, 1.0), None);
+        assert_eq!(region_handle_hit(x0, 10.0, region, 1.0), None);
+    }
+
+    #[test]
+    fn region_handle_hit_finds_each_corner() {
+        let region = LoopRegion {
+            row0: 2,
+            row1: 9,
+            col0: 5,
+            col1: 22,
+        };
+        let (x0, y0, _, _) = cell_rect(2, 5, 1.0);
+        let (x1, y1, w, h) = cell_rect(9, 22, 1.0);
+        let right = x1 + w;
+        let bottom = y1 + h;
+        assert_eq!(
+            region_handle_hit(x0, y0, region, 1.0),
+            Some(RegionHandle::Corner(RegionCorner::NW))
+        );
+        assert_eq!(
+            region_handle_hit(right, y0, region, 1.0),
+            Some(RegionHandle::Corner(RegionCorner::NE))
+        );
+        assert_eq!(
+            region_handle_hit(x0, bottom, region, 1.0),
+            Some(RegionHandle::Corner(RegionCorner::SW))
+        );
+        assert_eq!(
+            region_handle_hit(right, bottom, region, 1.0),
+            Some(RegionHandle::Corner(RegionCorner::SE))
+        );
+    }
+
+    #[test]
+    fn apply_region_corner_drag_moves_both_bounds() {
+        let r = LoopRegion {
+            row0: 4,
+            row1: 12,
+            col0: 6,
+            col1: 20,
+        };
+        let nw = apply_region_corner_drag(r, RegionCorner::NW, 7, 9);
+        assert_eq!((nw.row0, nw.col0), (7, 9));
+        assert_eq!((nw.row1, nw.col1), (12, 20));
+        let se = apply_region_corner_drag(r, RegionCorner::SE, 15, 28);
+        assert_eq!((se.row1, se.col1), (15, 28));
+        assert_eq!((se.row0, se.col0), (4, 6));
+    }
+
+    #[test]
+    fn apply_region_corner_drag_cannot_invert() {
+        let r = LoopRegion {
+            row0: 4,
+            row1: 12,
+            col0: 6,
+            col1: 20,
+        };
+        let out = apply_region_corner_drag(r, RegionCorner::NW, 99, 99);
+        assert_eq!((out.row0, out.col0), (12, 20));
+        assert!(out.row0 <= out.row1 && out.col0 <= out.col1);
+    }
+
+    #[test]
+    fn apply_region_corner_drag_can_collapse_to_1x1() {
+        let r = LoopRegion {
+            row0: 4,
+            row1: 12,
+            col0: 6,
+            col1: 20,
+        };
+        let out = apply_region_corner_drag(r, RegionCorner::NW, 12, 20);
+        assert_eq!((out.row0, out.row1, out.col0, out.col1), (12, 12, 20, 20));
     }
 
     // `column_at`/`row_at` clamping is covered by
