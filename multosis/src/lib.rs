@@ -10,6 +10,7 @@ pub mod effects;
 pub mod engine;
 pub mod grid;
 pub mod handoff;
+pub mod modulation;
 pub mod propagation;
 pub mod randomize;
 pub mod region;
