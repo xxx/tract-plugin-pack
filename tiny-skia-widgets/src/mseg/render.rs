@@ -223,6 +223,48 @@ fn draw_canvas(
     draw_rect_outline(pixmap, cx, cy, cw, ch, color_border(), 1.0);
 }
 
+/// Draw only `data`'s curve polyline — faint, no nodes/markers/strip — inside
+/// the MSEG editor plot rect `rect`. For rendering inactive MSEGs as ghost
+/// context behind an active `draw_mseg`. `color` is packed `0xRRGGBBAA`.
+///
+/// Samples the curve per pixel column exactly like `draw_canvas` so the ghost
+/// aligns with the active overlay; uses the same `draw_line` stroking routine
+/// as the active curve, just in the supplied faint colour.
+pub fn draw_mseg_ghost(
+    pixmap: &mut Pixmap,
+    rect: (f32, f32, f32, f32),
+    data: &MsegData,
+    state: &MsegEditState,
+    scale: f32,
+    color: u32,
+) {
+    let layout = mseg_layout(rect, state.is_curve_only(), scale);
+    let (_px0, _py0, pw, ph) = layout.plot;
+    if pw <= 0.0 || ph <= 0.0 {
+        return;
+    }
+    // Unpack 0xRRGGBBAA into a tiny_skia::Color, matching the convention used
+    // by the rest of the widget crate (`Color::from_rgba8`).
+    let r = ((color >> 24) & 0xFF) as u8;
+    let g = ((color >> 16) & 0xFF) as u8;
+    let b = ((color >> 8) & 0xFF) as u8;
+    let a = (color & 0xFF) as u8;
+    let stroke = tiny_skia::Color::from_rgba8(r, g, b, a);
+    // Sample `value_at_phase` per pixel column of the plot and stroke a
+    // polyline between consecutive samples — same pattern as `draw_canvas`.
+    let cols = pw.max(1.0) as usize;
+    let mut prev: Option<(f32, f32)> = None;
+    for col in 0..=cols {
+        let phase = col as f32 / cols as f32;
+        let x = phase_to_x(&layout, phase);
+        let y = value_to_y(&layout, value_at_phase(data, phase));
+        if let Some((px, py)) = prev {
+            draw_line(pixmap, px, py, x, y, stroke);
+        }
+        prev = Some((x, y));
+    }
+}
+
 /// Node-dot radius and tension-handle radius, unscaled px.
 const NODE_R: f32 = 4.0;
 const TENSION_R: f32 = 3.0;
@@ -662,5 +704,17 @@ mod tests {
             mseg_hit_test(&l, &data, false, 1.0, -10.0, -10.0),
             MsegHit::None
         );
+    }
+
+    #[test]
+    fn ghost_curve_draws_some_pixels() {
+        let mut pm = Pixmap::new(200, 120).unwrap();
+        let data = MsegData::default(); // a 0->1 ramp
+        let state = MsegEditState::new();
+        let rect = (0.0, 0.0, 200.0, 120.0);
+        draw_mseg_ghost(&mut pm, rect, &data, &state, 1.0, 0x5A5040FF);
+        // The ghost curve strokes a polyline — some pixels are non-transparent.
+        let any_drawn = pm.pixels().iter().any(|p| p.alpha() != 0);
+        assert!(any_drawn, "the ghost curve should draw some pixels");
     }
 }
