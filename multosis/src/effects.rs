@@ -307,6 +307,48 @@ impl Effect for EffectInstance {
     }
 }
 
+/// Maximum modulatable parameters any effect declares — fixes the
+/// `TrackEffect::params` array length so the persisted config is stable as
+/// effects are added (current max is 2; 4 leaves headroom).
+pub const MAX_EFFECT_PARAMS: usize = 4;
+
+/// One track row's persisted effect configuration: which effect, and its
+/// parameter values. `params[i]` is the value for the kind's `parameters()[i]`;
+/// entries past the kind's parameter count are unused.
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TrackEffect {
+    pub kind: EffectKind,
+    pub params: [f32; MAX_EFFECT_PARAMS],
+}
+
+impl TrackEffect {
+    /// The default effect for track row `row` (`0..16`). Alternates the two
+    /// kinds and spreads parameters by row so the sequencer plays with
+    /// audible per-track variety before the 2c assignment UI exists.
+    pub fn default_for_row(row: usize) -> Self {
+        let t = row as f32 / 15.0;
+        if row % 2 == 0 {
+            let cutoff = 300.0 * (12_000.0_f32 / 300.0).powf(t);
+            TrackEffect {
+                kind: EffectKind::Lowpass,
+                params: [cutoff, 0.15, 0.0, 0.0],
+            }
+        } else {
+            let bits = 3.0 + t * 11.0;
+            TrackEffect {
+                kind: EffectKind::Bitcrush,
+                params: [bits, 1.0, 0.0, 0.0],
+            }
+        }
+    }
+}
+
+impl Default for TrackEffect {
+    fn default() -> Self {
+        Self::default_for_row(0)
+    }
+}
+
 /// Which throwaway effect every row uses. A host parameter.
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum EffectBank {
@@ -644,5 +686,33 @@ mod tests {
             }
         }
         assert!(peak < 0.5, "the dispatched lowpass should attenuate, got {peak}");
+    }
+
+    #[test]
+    fn track_effect_serde_round_trips() {
+        let te = TrackEffect {
+            kind: EffectKind::Bitcrush,
+            params: [3.0, 8.0, 0.0, 0.0],
+        };
+        let json = serde_json::to_string(&te).unwrap();
+        let back: TrackEffect = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, EffectKind::Bitcrush);
+        assert_eq!(back.params, [3.0, 8.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn track_effect_array_serde_round_trips() {
+        let config: [TrackEffect; 16] = std::array::from_fn(TrackEffect::default_for_row);
+        let json = serde_json::to_string(&config).unwrap();
+        let back: [TrackEffect; 16] = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+    }
+
+    #[test]
+    fn default_for_row_varies_and_exercises_both_kinds() {
+        let config: [TrackEffect; 16] = std::array::from_fn(TrackEffect::default_for_row);
+        assert!(config.iter().any(|t| t.kind == EffectKind::Lowpass));
+        assert!(config.iter().any(|t| t.kind == EffectKind::Bitcrush));
+        assert!(config.iter().any(|t| *t != config[0]));
     }
 }
