@@ -225,6 +225,88 @@ impl Effect for BitcrushEffect {
     }
 }
 
+/// The effect registry — which effects exist. `Copy`, serde-derivable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum EffectKind {
+    Lowpass,
+    Bitcrush,
+}
+
+impl EffectKind {
+    /// Every effect kind, in display / registry order.
+    pub const ALL: [EffectKind; 2] = [EffectKind::Lowpass, EffectKind::Bitcrush];
+
+    /// The kind's display name.
+    pub fn name(self) -> &'static str {
+        match self {
+            EffectKind::Lowpass => "Lowpass",
+            EffectKind::Bitcrush => "Bitcrush",
+        }
+    }
+}
+
+/// A live effect instance — enum dispatch over the effect structs, so the
+/// audio engine holds `[EffectInstance; 16]` with no heap and no `dyn`.
+pub enum EffectInstance {
+    Lowpass(LowpassEffect),
+    Bitcrush(BitcrushEffect),
+}
+
+impl EffectInstance {
+    /// A fresh instance of `kind` at default parameters.
+    pub fn new(kind: EffectKind) -> Self {
+        match kind {
+            EffectKind::Lowpass => EffectInstance::Lowpass(LowpassEffect::new()),
+            EffectKind::Bitcrush => EffectInstance::Bitcrush(BitcrushEffect::new()),
+        }
+    }
+
+    /// Which kind this instance is.
+    pub fn kind(&self) -> EffectKind {
+        match self {
+            EffectInstance::Lowpass(_) => EffectKind::Lowpass,
+            EffectInstance::Bitcrush(_) => EffectKind::Bitcrush,
+        }
+    }
+}
+
+impl Effect for EffectInstance {
+    fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
+        match self {
+            EffectInstance::Lowpass(e) => e.process_sample(left, right),
+            EffectInstance::Bitcrush(e) => e.process_sample(left, right),
+        }
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        match self {
+            EffectInstance::Lowpass(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Bitcrush(e) => e.set_sample_rate(sample_rate),
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            EffectInstance::Lowpass(e) => e.reset(),
+            EffectInstance::Bitcrush(e) => e.reset(),
+        }
+    }
+
+    fn parameters(&self) -> &'static [ParamSpec] {
+        match self {
+            EffectInstance::Lowpass(e) => e.parameters(),
+            EffectInstance::Bitcrush(e) => e.parameters(),
+        }
+    }
+
+    fn set_param(&mut self, index: usize, value: f32) {
+        match self {
+            EffectInstance::Lowpass(e) => e.set_param(index, value),
+            EffectInstance::Bitcrush(e) => e.set_param(index, value),
+        }
+    }
+}
+
 /// Which throwaway effect every row uses. A host parameter.
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum EffectBank {
@@ -523,5 +605,44 @@ mod tests {
         bc.reset();
         let y = bc.process_sample(0.25, 0.25).0;
         assert!((y - 0.25).abs() < 0.1, "reset should re-sample, got {y}");
+    }
+
+    #[test]
+    fn effect_kind_registry() {
+        assert_eq!(EffectKind::ALL.len(), 2);
+        assert_eq!(EffectKind::Lowpass.name(), "Lowpass");
+        assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
+    }
+
+    #[test]
+    fn effect_instance_dispatches_to_the_right_effect() {
+        let mut lp = EffectInstance::new(EffectKind::Lowpass);
+        assert_eq!(lp.kind(), EffectKind::Lowpass);
+        assert_eq!(lp.parameters().len(), 2);
+        let mut bc = EffectInstance::new(EffectKind::Bitcrush);
+        assert_eq!(bc.kind(), EffectKind::Bitcrush);
+        lp.set_sample_rate(48_000.0);
+        bc.set_sample_rate(48_000.0);
+        let _ = lp.process_sample(0.5, 0.5);
+        let _ = bc.process_sample(0.5, 0.5);
+        lp.reset();
+        bc.reset();
+    }
+
+    #[test]
+    fn effect_instance_set_param_changes_behaviour() {
+        let mut e = EffectInstance::new(EffectKind::Lowpass);
+        e.set_sample_rate(48_000.0);
+        e.set_param(0, 200.0);
+        e.set_param(1, 0.0);
+        let mut peak = 0.0_f32;
+        for i in 0..2048 {
+            let x = if i % 2 == 0 { 1.0 } else { -1.0 };
+            let (l, _) = e.process_sample(x, x);
+            if i > 256 {
+                peak = peak.max(l.abs());
+            }
+        }
+        assert!(peak < 0.5, "the dispatched lowpass should attenuate, got {peak}");
     }
 }
