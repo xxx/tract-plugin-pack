@@ -4,11 +4,10 @@
 //!
 //! See `docs/superpowers/specs/2026-05-19-multosis-phase-2b-design.md`.
 
-use crate::effects::ParamSpec;
-use tiny_skia_widgets::{MsegData, PlayMode, SyncMode};
+use crate::effects::{Effect, EffectInstance, ParamSpec, TrackEffect};
+use tiny_skia_widgets::{advance, value_at_phase, MsegData, PlayMode, SyncMode};
 
 /// The number of track rows. Matches `crate::grid::ROWS`.
-#[allow(dead_code)]
 const ROWS: usize = 16;
 
 /// One track row's modulation: three MSEGs and the two assignable MSEGs'
@@ -89,6 +88,91 @@ pub fn assignable_value(mseg_value: f32, base: f32, depth: f32, spec: ParamSpec)
     let bipolar = mseg_value * 2.0 - 1.0;
     let deviation = bipolar * depth * (spec.max - spec.min);
     (base + deviation).clamp(spec.min, spec.max)
+}
+
+/// The modulation runtime owned by the audio engine — the per-track config,
+/// each MSEG's free-running phase, and the latest per-row amplitude gain.
+pub struct Modulation {
+    config: [TrackModulation; ROWS],
+    /// Free-running phase per `[row][mseg]`.
+    phases: [[f32; 3]; ROWS],
+    /// Latest per-row amplitude gain, set by `update_block`.
+    amplitudes: [f32; ROWS],
+}
+
+impl Modulation {
+    /// A runtime with the default per-row modulation and zeroed phases.
+    pub fn new() -> Self {
+        Self {
+            config: std::array::from_fn(TrackModulation::default_for_row),
+            phases: [[0.0; 3]; ROWS],
+            amplitudes: [1.0; ROWS],
+        }
+    }
+
+    /// Replace the per-track modulation config (bridged from persisted state
+    /// at init — off the audio thread).
+    pub fn set_config(&mut self, config: &[TrackModulation; ROWS]) {
+        self.config = config.clone();
+    }
+
+    /// Reset every MSEG phase to 0.
+    pub fn reset(&mut self) {
+        self.phases = [[0.0; 3]; ROWS];
+    }
+
+    /// The latest amplitude gain for `row` (set by the previous `update_block`).
+    pub fn amplitude(&self, row: usize) -> f32 {
+        self.amplitudes[row]
+    }
+
+    /// Advance every MSEG one process block, evaluate it, and apply: the
+    /// amplitude MSEG sets `amplitudes[row]`; each assigned assignable MSEG
+    /// writes its target effect parameter via `set_param`. Allocation-free.
+    pub fn update_block(
+        &mut self,
+        block_len: usize,
+        bpm: f64,
+        sample_rate: f64,
+        effects: &mut [EffectInstance; ROWS],
+        track_effects: &[TrackEffect; ROWS],
+    ) {
+        for row in 0..ROWS {
+            for k in 0..3 {
+                // `MsegData` is `Copy`; copy the needed config out so the
+                // immutable `self.config` borrow does not span the
+                // `self.phases` / `self.amplitudes` writes below.
+                let mseg = self.config[row].msegs[k];
+                let dt = mseg_phase_delta(&mseg, block_len, bpm, sample_rate);
+                let (next, _finished) = advance(&mseg, self.phases[row][k], dt, false);
+                self.phases[row][k] = next;
+                let value = value_at_phase(&mseg, next);
+                if k == 0 {
+                    // Amplitude MSEG.
+                    self.amplitudes[row] = value;
+                } else if let Some(target) = self.config[row].targets[k - 1] {
+                    // Assignable MSEG -> a target effect parameter.
+                    if let Some(&spec) = effects[row].parameters().get(target) {
+                        let base = track_effects[row].params[target];
+                        let depth = self.config[row].depths[k - 1];
+                        effects[row].set_param(target, assignable_value(value, base, depth, spec));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Test helper: true when every MSEG phase is 0.
+    #[cfg(test)]
+    pub fn phases_all_zero(&self) -> bool {
+        self.phases.iter().flatten().all(|&p| p == 0.0)
+    }
+}
+
+impl Default for Modulation {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -181,5 +265,64 @@ mod tests {
                 assert!((5.0..=9.0).contains(&out), "v {v} d {d} -> {out}");
             }
         }
+    }
+
+    #[test]
+    fn modulation_amplitude_reflects_the_amplitude_mseg() {
+        let mut m = Modulation::new();
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        m.update_block(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        // The default amplitude MSEG is flat at 1.0.
+        for r in 0..ROWS {
+            assert!(
+                (m.amplitude(r) - 1.0).abs() < 1e-6,
+                "row {r}: {}",
+                m.amplitude(r)
+            );
+        }
+    }
+
+    #[test]
+    fn modulation_applies_an_assignable_mseg_to_its_effect() {
+        let mut m = Modulation::new();
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+        for e in &mut effects {
+            e.set_sample_rate(48_000.0);
+        }
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        // Run a block, then drive the effects with a signal and capture output.
+        m.update_block(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        let after_first: Vec<f32> = (0..200)
+            .map(|_| effects[0].process_sample(1.0, -1.0).0)
+            .collect();
+        // Advance many blocks so the cyclic MSEG has moved, re-apply.
+        for _ in 0..400 {
+            m.update_block(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        }
+        let after_later: Vec<f32> = (0..200)
+            .map(|_| effects[0].process_sample(1.0, -1.0).0)
+            .collect();
+        // The modulated cutoff changed -> the filtered output differs.
+        assert!(
+            after_first != after_later,
+            "an assigned MSEG should modulate the effect over time"
+        );
+    }
+
+    #[test]
+    fn modulation_reset_zeroes_phases() {
+        let mut m = Modulation::new();
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        for _ in 0..100 {
+            m.update_block(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        }
+        m.reset();
+        // After reset, every phase is back at 0.
+        assert!(m.phases_all_zero());
     }
 }
