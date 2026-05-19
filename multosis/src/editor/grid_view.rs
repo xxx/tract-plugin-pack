@@ -112,10 +112,8 @@ pub fn region_edge_hit(px: f32, py: f32, region: LoopRegion, scale: f32) -> Opti
     let grid_top = (STATUS_H + GUTTER) * scale;
     let grid_bottom = (STATUS_H + GUTTER + ROWS as f32 * CELL) * scale;
     let grid_left = MARGIN * scale;
-    let grid_right = (MARGIN
-        + COLS as f32 * CELL
-        + (COLS / GROUP_SIZE - 1) as f32 * GROUP_GAP)
-        * scale;
+    let grid_right =
+        (MARGIN + COLS as f32 * CELL + (COLS / GROUP_SIZE - 1) as f32 * GROUP_GAP) * scale;
     if py < grid_top || py > grid_bottom || px < grid_left || px > grid_right {
         return None;
     }
@@ -518,9 +516,8 @@ mod tests {
 
     #[test]
     fn window_size_matches_the_grid() {
-        let expect_w = 2.0 * MARGIN
-            + COLS as f32 * CELL
-            + (COLS / GROUP_SIZE - 1) as f32 * GROUP_GAP;
+        let expect_w =
+            2.0 * MARGIN + COLS as f32 * CELL + (COLS / GROUP_SIZE - 1) as f32 * GROUP_GAP;
         let expect_h = STATUS_H + GUTTER + ROWS as f32 * CELL + MARGIN;
         assert_eq!(crate::editor::WINDOW_WIDTH, expect_w as u32);
         assert_eq!(crate::editor::WINDOW_HEIGHT, expect_h as u32);

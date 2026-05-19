@@ -415,11 +415,17 @@ mod tests {
         let right = crate::editor::WINDOW_WIDTH as f32 - crate::editor::grid_view::MARGIN;
         for ctrl in ToolbarControl::ALL {
             let (x, _, w, _) = control_rect(ctrl, 1.0);
-            assert!(x >= left - 0.5 && x + w <= right + 0.5, "{ctrl:?} outside margins");
+            assert!(
+                x >= left - 0.5 && x + w <= right + 0.5,
+                "{ctrl:?} outside margins"
+            );
         }
         for op in ToolbarOp::ALL {
             let (x, _, w, _) = op_rect(op, 1.0);
-            assert!(x >= left - 0.5 && x + w <= right + 0.5, "{op:?} outside margins");
+            assert!(
+                x >= left - 0.5 && x + w <= right + 0.5,
+                "{op:?} outside margins"
+            );
         }
     }
 
@@ -444,7 +450,10 @@ mod tests {
             let mut spans = row;
             spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
             for pair in spans.windows(2) {
-                assert!(pair[0].1 <= pair[1].0 + 0.5, "toolbar items overlap: {pair:?}");
+                assert!(
+                    pair[0].1 <= pair[1].0 + 0.5,
+                    "toolbar items overlap: {pair:?}"
+                );
             }
         }
     }
