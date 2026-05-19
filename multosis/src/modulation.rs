@@ -44,8 +44,10 @@ impl TrackModulation {
         sweep.beats = 4.0 + row as f32 * 2.0; // 4..34 beats across the rows
 
         // msegs[2] — assignable: unused default.
-        let mut spare = MsegData::default();
-        spare.play_mode = PlayMode::Cyclic;
+        let spare = MsegData {
+            play_mode: PlayMode::Cyclic,
+            ..MsegData::default()
+        };
 
         TrackModulation {
             msegs: [amplitude, sweep, spare],
