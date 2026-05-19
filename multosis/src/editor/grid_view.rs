@@ -23,11 +23,14 @@ pub const GUTTER: f32 = 14.0;
 pub const GROUP_SIZE: usize = 8;
 /// Extra logical gap between groups of `GROUP_SIZE` columns.
 pub const GROUP_GAP: f32 = 8.0;
+/// Logical width of the always-visible left-edge track listing panel
+/// (`editor::track_list`). The grid is drawn to its right.
+pub const TRACK_PANEL_W: f32 = 120.0;
 
 /// The physical-pixel rectangle `(x, y, w, h)` of cell `(row, col)` at `scale`.
 pub fn cell_rect(row: usize, col: usize, scale: f32) -> (f32, f32, f32, f32) {
     let group = (col / GROUP_SIZE) as f32;
-    let x = (MARGIN + col as f32 * CELL + group * GROUP_GAP) * scale;
+    let x = (MARGIN + TRACK_PANEL_W + col as f32 * CELL + group * GROUP_GAP) * scale;
     let y = (STATUS_H + GUTTER + row as f32 * CELL) * scale;
     let side = CELL * scale;
     (x, y, side, side)
@@ -47,7 +50,7 @@ pub fn cell_at(px: f32, py: f32, scale: f32) -> Option<(usize, usize)> {
     if row >= ROWS {
         return None;
     }
-    let lx = px / scale - MARGIN;
+    let lx = px / scale - MARGIN - TRACK_PANEL_W;
     if lx < 0.0 {
         return None;
     }
@@ -147,9 +150,10 @@ pub fn region_handle_hit(px: f32, py: f32, region: LoopRegion, scale: f32) -> Op
     // Reject the toolbar strip, the gutter, the margins — anything off-grid.
     let grid_top = (STATUS_H + GUTTER) * scale;
     let grid_bottom = (STATUS_H + GUTTER + ROWS as f32 * CELL) * scale;
-    let grid_left = MARGIN * scale;
+    let grid_left = (MARGIN + TRACK_PANEL_W) * scale;
     let grid_right =
-        (MARGIN + COLS as f32 * CELL + (COLS / GROUP_SIZE - 1) as f32 * GROUP_GAP) * scale;
+        (MARGIN + TRACK_PANEL_W + COLS as f32 * CELL + (COLS / GROUP_SIZE - 1) as f32 * GROUP_GAP)
+            * scale;
     if py < grid_top || py > grid_bottom || px < grid_left || px > grid_right {
         return None;
     }
@@ -193,7 +197,7 @@ pub fn region_handle_hit(px: f32, py: f32, region: LoopRegion, scale: f32) -> Op
 /// `0..=COLS-1`. Used while dragging a region edge, where the cursor may
 /// stray off the grid.
 pub fn column_at(px: f32, scale: f32) -> usize {
-    let lx = px / scale - MARGIN;
+    let lx = px / scale - MARGIN - TRACK_PANEL_W;
     if lx <= 0.0 {
         return 0;
     }
@@ -823,8 +827,10 @@ mod tests {
 
     #[test]
     fn window_size_matches_the_grid() {
-        let expect_w =
-            2.0 * MARGIN + COLS as f32 * CELL + (COLS / GROUP_SIZE - 1) as f32 * GROUP_GAP;
+        let expect_w = 2.0 * MARGIN
+            + TRACK_PANEL_W
+            + COLS as f32 * CELL
+            + (COLS / GROUP_SIZE - 1) as f32 * GROUP_GAP;
         let expect_h = STATUS_H + GUTTER + ROWS as f32 * CELL + MARGIN;
         assert_eq!(crate::editor::WINDOW_WIDTH, expect_w as u32);
         assert_eq!(crate::editor::WINDOW_HEIGHT, expect_h as u32);
@@ -833,11 +839,17 @@ mod tests {
     #[test]
     fn cell_rect_top_left_and_bottom_right() {
         let (x, y, w, h) = cell_rect(0, 0, 1.0);
-        assert_eq!((x, y, w, h), (MARGIN, STATUS_H + GUTTER, CELL, CELL));
+        assert_eq!(
+            (x, y, w, h),
+            (MARGIN + TRACK_PANEL_W, STATUS_H + GUTTER, CELL, CELL)
+        );
         let (x, y, _, _) = cell_rect(ROWS - 1, COLS - 1, 1.0);
         assert_eq!(
             x,
-            MARGIN + (COLS - 1) as f32 * CELL + (COLS / GROUP_SIZE - 1) as f32 * GROUP_GAP
+            MARGIN
+                + TRACK_PANEL_W
+                + (COLS - 1) as f32 * CELL
+                + (COLS / GROUP_SIZE - 1) as f32 * GROUP_GAP
         );
         assert_eq!(y, STATUS_H + GUTTER + (ROWS - 1) as f32 * CELL);
     }
@@ -849,7 +861,7 @@ mod tests {
         assert_eq!(
             (x, y, w, h),
             (
-                (MARGIN + 2.0 * CELL) * 2.0,
+                (MARGIN + TRACK_PANEL_W + 2.0 * CELL) * 2.0,
                 (STATUS_H + GUTTER + CELL) * 2.0,
                 CELL * 2.0,
                 CELL * 2.0,
@@ -860,12 +872,12 @@ mod tests {
     #[test]
     fn cell_rect_group_gap_offsets_later_groups() {
         let (x8, _, _, _) = cell_rect(0, 8, 1.0);
-        assert_eq!(x8, MARGIN + 8.0 * CELL + GROUP_GAP);
+        assert_eq!(x8, MARGIN + TRACK_PANEL_W + 8.0 * CELL + GROUP_GAP);
         let (x4, _, _, _) = cell_rect(0, 4, 1.0);
         let (x5, _, _, _) = cell_rect(0, 5, 1.0);
         assert_eq!(x5 - x4, CELL);
         let (x16, _, _, _) = cell_rect(0, 16, 1.0);
-        assert_eq!(x16, MARGIN + 16.0 * CELL + 2.0 * GROUP_GAP);
+        assert_eq!(x16, MARGIN + TRACK_PANEL_W + 16.0 * CELL + 2.0 * GROUP_GAP);
     }
 
     #[test]
@@ -1407,5 +1419,27 @@ mod tests {
             dist < 3.0,
             "NE tip {ne:?} not near corner {corner:?} (dist {dist})"
         );
+    }
+
+    #[test]
+    fn cell_rect_is_offset_by_the_track_panel() {
+        // Cell (0,0)'s left edge sits a full panel-width past the margin.
+        let (x, _, _, _) = cell_rect(0, 0, 1.0);
+        assert!((x - (MARGIN + TRACK_PANEL_W)).abs() < 1e-3, "got {x}");
+    }
+
+    #[test]
+    fn cell_at_round_trips_through_the_panel_offset() {
+        // A point in the middle of cell (3, 5) maps back to (3, 5).
+        let (x, y, w, h) = cell_rect(3, 5, 1.0);
+        assert_eq!(cell_at(x + w / 2.0, y + h / 2.0, 1.0), Some((3, 5)));
+        // A point left of the grid (in the panel strip) is off-grid.
+        assert_eq!(cell_at((MARGIN + 1.0) * 1.0, y + h / 2.0, 1.0), None);
+    }
+
+    #[test]
+    fn column_at_accounts_for_the_panel_offset() {
+        let (x, _, w, _) = cell_rect(0, 9, 1.0);
+        assert_eq!(column_at(x + w / 2.0, 1.0), 9);
     }
 }

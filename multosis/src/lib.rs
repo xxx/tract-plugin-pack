@@ -64,7 +64,7 @@ pub struct MultosisParams {
 impl Default for MultosisParams {
     fn default() -> Self {
         Self {
-            editor_state: tiny_skia_widgets::EditorState::from_size(1336, 758),
+            editor_state: tiny_skia_widgets::EditorState::from_size(1456, 758),
             grid: Arc::new(Mutex::new(Grid::default())),
             track_effects: Arc::new(Mutex::new(std::array::from_fn(
                 crate::effects::TrackEffect::default_for_row,

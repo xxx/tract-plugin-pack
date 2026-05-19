@@ -21,10 +21,11 @@ pub mod grid_view;
 pub mod toolbar;
 
 /// Editor window size. Derived from the grid layout in `grid_view`:
-/// width  = 2*MARGIN + COLS*CELL + 3*GROUP_GAP = 16 + 1280 + 24 + 16
-/// height = STATUS_H + GUTTER + ROWS*CELL + MARGIN = 88 + 14 + 640 + 16
+/// width  = 2*MARGIN + TRACK_PANEL_W + COLS*CELL + 3*GROUP_GAP
+///        = 16 + 120 + 1280 + 24 + 16 = 1456
+/// height = STATUS_H + GUTTER + ROWS*CELL + MARGIN = 88 + 14 + 640 + 16 = 758
 /// (kept in sync by the `window_size_matches_the_grid` test).
-pub const WINDOW_WIDTH: u32 = 1336;
+pub const WINDOW_WIDTH: u32 = 1456;
 pub const WINDOW_HEIGHT: u32 = 758;
 
 pub use widgets::EditorState;
