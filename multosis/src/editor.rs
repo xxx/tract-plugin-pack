@@ -56,6 +56,19 @@ enum LeftGesture {
     },
 }
 
+/// Which screen the window's main area shows. The toolbar and track listing
+/// are drawn in both; only the main area to the right of the panel swaps.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum View {
+    Grid,
+    Effect,
+}
+
+/// Clamp a candidate selected-track index into `0..ROWS`.
+fn clamp_track(row: usize) -> usize {
+    row.min(crate::grid::ROWS - 1)
+}
+
 /// The baseview window handler — owns the surface and draws each frame.
 struct MultosisWindow {
     surface: widgets::SoftbufferSurface,
@@ -84,6 +97,10 @@ struct MultosisWindow {
     left_gesture: Option<LeftGesture>,
     /// Cached render of the grid cells — re-renders only changed cells each frame.
     grid_cache: grid_view::GridCache,
+    /// Which screen is showing.
+    view: View,
+    /// The track the Effect view edits (`0..ROWS`).
+    selected_track: usize,
 }
 
 impl MultosisWindow {
@@ -124,6 +141,8 @@ impl MultosisWindow {
             rng_seed: 1,
             left_gesture: None,
             grid_cache: grid_view::GridCache::new(pw, ph),
+            view: View::Grid,
+            selected_track: 0,
         }
     }
 
@@ -330,32 +349,90 @@ impl MultosisWindow {
         }
     }
 
+    /// The track-effect kinds, for the track listing. Reads the persisted
+    /// config; falls back to row defaults on lock contention.
+    fn track_kinds(&self) -> [crate::effects::EffectKind; crate::grid::ROWS] {
+        if let Ok(cfg) = self.params.track_effects.lock() {
+            std::array::from_fn(|r| cfg[r].kind)
+        } else {
+            std::array::from_fn(|r| crate::effects::TrackEffect::default_for_row(r).kind)
+        }
+    }
+
+    /// The temporary "Back to Grid" button rect (physical px), used by both
+    /// the `View::Effect` draw arm and its press hit-test. Replaced by the
+    /// real editor bar in Task 8.
+    fn back_button_rect(&self) -> (f32, f32, f32, f32) {
+        let bx = (grid_view::MARGIN + grid_view::TRACK_PANEL_W) * self.scale_factor;
+        let by = (grid_view::STATUS_H + grid_view::GUTTER) * self.scale_factor;
+        let bw = 90.0 * self.scale_factor;
+        let bh = 26.0 * self.scale_factor;
+        (bx, by, bw, bh)
+    }
+
     fn draw(&mut self) {
-        let grid = self.params.grid.lock().map(|g| *g).unwrap_or_default();
-        // The engine's active-row mask — Task 3 lights each track's "sounding"
-        // dot from this; for now the value is read but not yet drawn.
-        let _active_mask = self.active_rows.load(Ordering::Relaxed);
-        // Update the cache (full rebuild on scale change; otherwise only
-        // re-renders cells that changed).
-        self.grid_cache.update(&grid, self.scale_factor);
-        // Blit the cached cells into the surface — replaces both the old
-        // fill_pixmap_opaque clear and draw_grid_cells.
-        self.surface
-            .pixmap
-            .data_mut()
-            .copy_from_slice(self.grid_cache.pixmap().data());
-        // Cursor-dependent overlay (loop-region outline, nubs, move grip).
-        grid_view::draw_region_overlay(
+        match self.view {
+            View::Grid => {
+                let grid = self.params.grid.lock().map(|g| *g).unwrap_or_default();
+                self.grid_cache.update(&grid, self.scale_factor);
+                self.surface
+                    .pixmap
+                    .data_mut()
+                    .copy_from_slice(self.grid_cache.pixmap().data());
+                grid_view::draw_region_overlay(
+                    &mut self.surface.pixmap,
+                    &grid,
+                    self.scale_factor,
+                    Some(self.mouse_pos),
+                );
+                grid_view::draw_wavefront(
+                    &mut self.surface.pixmap,
+                    &self.wavefront_display,
+                    self.scale_factor,
+                );
+            }
+            View::Effect => {
+                // The grid cache already paints the full window background;
+                // reuse it as the backdrop, then draw the effect editor over
+                // the main area. (Task 8 replaces this with the real editor.)
+                let grid = self.params.grid.lock().map(|g| *g).unwrap_or_default();
+                self.grid_cache.update(&grid, self.scale_factor);
+                self.surface
+                    .pixmap
+                    .data_mut()
+                    .copy_from_slice(self.grid_cache.pixmap().data());
+                // Temporary "Back to Grid" button — replaced by the real
+                // editor bar in Task 8.
+                let (bx, by, bw, bh) = self.back_button_rect();
+                widgets::draw_button(
+                    &mut self.surface.pixmap,
+                    &mut self.text_renderer,
+                    bx,
+                    by,
+                    bw,
+                    bh,
+                    "< Grid",
+                    false,
+                    false,
+                );
+            }
+        }
+        // Track listing — both views.
+        let kinds = self.track_kinds();
+        let active = self.active_rows.load(Ordering::Relaxed);
+        let selected = match self.view {
+            View::Grid => None,
+            View::Effect => Some(self.selected_track),
+        };
+        track_list::draw_track_list(
             &mut self.surface.pixmap,
-            &grid,
-            self.scale_factor,
-            Some(self.mouse_pos),
-        );
-        grid_view::draw_wavefront(
-            &mut self.surface.pixmap,
-            &self.wavefront_display,
+            &mut self.text_renderer,
+            &kinds,
+            active,
+            selected,
             self.scale_factor,
         );
+        // Toolbar — both views.
         toolbar::draw_toolbar(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
@@ -410,37 +487,42 @@ impl baseview::WindowHandler for MultosisWindow {
                     }
                 }
                 let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
-                match self.left_gesture {
-                    Some(LeftGesture::ResizeRegion(handle)) => self.update_region_drag(handle),
-                    Some(LeftGesture::MoveRegion {
-                        press,
-                        region_at_press,
-                    }) => self.update_region_move(press, region_at_press),
-                    Some(LeftGesture::GridPending { row, col, zone: _ }) => {
-                        let cur = (
-                            grid_view::row_at(py, self.scale_factor),
-                            grid_view::column_at(px, self.scale_factor),
-                        );
-                        if cur != (row, col) {
-                            // The press has become a paint drag.
-                            let value = !shift;
-                            let cells = grid_view::cells_between((row, col), cur);
-                            self.paint_cells(value, &cells);
-                            self.left_gesture = Some(LeftGesture::GridPaint { value, last: cur });
+                // Grid/region/paint gestures only apply in the grid view.
+                if self.view == View::Grid {
+                    match self.left_gesture {
+                        Some(LeftGesture::ResizeRegion(handle)) => self.update_region_drag(handle),
+                        Some(LeftGesture::MoveRegion {
+                            press,
+                            region_at_press,
+                        }) => self.update_region_move(press, region_at_press),
+                        Some(LeftGesture::GridPending { row, col, zone: _ }) => {
+                            let cur = (
+                                grid_view::row_at(py, self.scale_factor),
+                                grid_view::column_at(px, self.scale_factor),
+                            );
+                            if cur != (row, col) {
+                                // The press has become a paint drag.
+                                let value = !shift;
+                                let cells = grid_view::cells_between((row, col), cur);
+                                self.paint_cells(value, &cells);
+                                self.left_gesture =
+                                    Some(LeftGesture::GridPaint { value, last: cur });
+                            }
                         }
-                    }
-                    Some(LeftGesture::GridPaint { value, last }) => {
-                        let cur = (
-                            grid_view::row_at(py, self.scale_factor),
-                            grid_view::column_at(px, self.scale_factor),
-                        );
-                        if cur != last {
-                            let cells = grid_view::cells_between(last, cur);
-                            self.paint_cells(value, &cells);
-                            self.left_gesture = Some(LeftGesture::GridPaint { value, last: cur });
+                        Some(LeftGesture::GridPaint { value, last }) => {
+                            let cur = (
+                                grid_view::row_at(py, self.scale_factor),
+                                grid_view::column_at(px, self.scale_factor),
+                            );
+                            if cur != last {
+                                let cells = grid_view::cells_between(last, cur);
+                                self.paint_cells(value, &cells);
+                                self.left_gesture =
+                                    Some(LeftGesture::GridPaint { value, last: cur });
+                            }
                         }
+                        None => {}
                     }
-                    None => {}
                 }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
@@ -458,16 +540,33 @@ impl baseview::WindowHandler for MultosisWindow {
                     None => match toolbar::op_hit(px, py, self.scale_factor) {
                         Some(op) => self.handle_toolbar_op(op),
                         None => {
-                            if let Some(handle) = self.region_handle_under_cursor() {
-                                self.left_gesture = Some(LeftGesture::ResizeRegion(handle));
-                            } else if self.try_begin_region_move() {
-                                // left_gesture set inside try_begin_region_move
-                            } else if let Some((row, col, zone)) =
-                                grid_view::cell_zone(px, py, self.scale_factor)
-                            {
-                                self.left_gesture =
-                                    Some(LeftGesture::GridPending { row, col, zone });
+                            // Returning to the grid takes priority over
+                            // re-selecting a track.
+                            if self.view == View::Effect {
+                                let (bx, by, bw, bh) = self.back_button_rect();
+                                if px >= bx && px < bx + bw && py >= by && py < by + bh {
+                                    self.view = View::Grid;
+                                    return baseview::EventStatus::Captured;
+                                }
                             }
+                            // Track listing — both views.
+                            if let Some(row) = track_list::track_at(px, py, self.scale_factor) {
+                                self.selected_track = clamp_track(row);
+                                self.view = View::Effect;
+                            } else if self.view == View::Grid {
+                                // Grid: region handle / region move / cell pending.
+                                if let Some(handle) = self.region_handle_under_cursor() {
+                                    self.left_gesture = Some(LeftGesture::ResizeRegion(handle));
+                                } else if self.try_begin_region_move() {
+                                    // left_gesture set inside try_begin_region_move
+                                } else if let Some((row, col, zone)) =
+                                    grid_view::cell_zone(px, py, self.scale_factor)
+                                {
+                                    self.left_gesture =
+                                        Some(LeftGesture::GridPending { row, col, zone });
+                                }
+                            }
+                            // View::Effect main-area hits are wired in Task 8.
                         }
                     },
                 }
@@ -475,7 +574,8 @@ impl baseview::WindowHandler for MultosisWindow {
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
                 button: baseview::MouseButton::Right,
                 ..
-            }) => {
+            }) if self.view == View::Grid => {
+                // Right-click cell editing applies only in the grid view.
                 self.handle_grid_click(true);
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
@@ -596,4 +696,16 @@ impl Editor for MultosisEditor {
     fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
     fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
     fn param_values_changed(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_track_keeps_indices_in_range() {
+        assert_eq!(clamp_track(0), 0);
+        assert_eq!(clamp_track(15), 15);
+        assert_eq!(clamp_track(99), 15);
+    }
 }
