@@ -15,8 +15,6 @@ use tiny_skia_widgets as widgets;
 pub enum ToolbarControl {
     /// Cycles the wavefront speed.
     Speed,
-    /// Cycles the throwaway effect bank.
-    Bank,
     /// Toggles auto-restart.
     AutoRestart,
     /// Drag slider — dry/wet mix.
@@ -28,25 +26,23 @@ pub enum ToolbarControl {
 }
 
 impl ToolbarControl {
-    /// The six controls, left to right.
-    pub const ALL: [ToolbarControl; 6] = [
+    /// The five controls, left to right.
+    pub const ALL: [ToolbarControl; 5] = [
         ToolbarControl::Speed,
-        ToolbarControl::Bank,
         ToolbarControl::AutoRestart,
         ToolbarControl::Mix,
         ToolbarControl::Output,
         ToolbarControl::Reset,
     ];
 
-    /// Logical `(x, width)` of this control. The row is 1056 logical wide.
+    /// Logical `(x, width)` of this control. The row is 1050 logical wide.
     fn logical_x_w(self) -> (f32, f32) {
         match self {
-            ToolbarControl::Speed => (6.0, 200.0),
-            ToolbarControl::Bank => (212.0, 160.0),
-            ToolbarControl::AutoRestart => (378.0, 120.0),
-            ToolbarControl::Mix => (504.0, 180.0),
-            ToolbarControl::Output => (690.0, 180.0),
-            ToolbarControl::Reset => (876.0, 174.0),
+            ToolbarControl::Speed => (6.0, 204.0),
+            ToolbarControl::AutoRestart => (216.0, 204.0),
+            ToolbarControl::Mix => (426.0, 204.0),
+            ToolbarControl::Output => (636.0, 204.0),
+            ToolbarControl::Reset => (846.0, 204.0),
         }
     }
 }
@@ -197,10 +193,6 @@ pub fn draw_toolbar(
                 let label = format!("Speed: {}", speed_label(params.speed.value()));
                 widgets::draw_button(pixmap, tr, x, y, w, h, &label, false, false);
             }
-            ToolbarControl::Bank => {
-                let label = format!("Effect: {}", bank_label(params.effect_bank.value()));
-                widgets::draw_button(pixmap, tr, x, y, w, h, &label, false, false);
-            }
             ToolbarControl::AutoRestart => {
                 let on = params.auto_restart.value();
                 widgets::draw_button(pixmap, tr, x, y, w, h, "Auto-Restart", on, false);
@@ -274,15 +266,6 @@ fn speed_label(s: crate::clock::Speed) -> &'static str {
         Speed::Div4 => "1/4",
         Speed::Div2 => "1/2",
         Speed::Div1 => "1/1",
-    }
-}
-
-/// Short label for an `EffectBank`.
-fn bank_label(b: crate::effects::EffectBank) -> &'static str {
-    use crate::effects::EffectBank;
-    match b {
-        EffectBank::Lowpass => "Lowpass",
-        EffectBank::Bitcrush => "Bitcrush",
     }
 }
 

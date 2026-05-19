@@ -242,16 +242,6 @@ impl MultosisWindow {
                 setter.set_parameter(&self.params.speed, next);
                 setter.end_set_parameter(&self.params.speed);
             }
-            ToolbarControl::Bank => {
-                use crate::effects::EffectBank;
-                let next = match self.params.effect_bank.value() {
-                    EffectBank::Lowpass => EffectBank::Bitcrush,
-                    EffectBank::Bitcrush => EffectBank::Lowpass,
-                };
-                setter.begin_set_parameter(&self.params.effect_bank);
-                setter.set_parameter(&self.params.effect_bank, next);
-                setter.end_set_parameter(&self.params.effect_bank);
-            }
             ToolbarControl::AutoRestart => {
                 let next = !self.params.auto_restart.value();
                 setter.begin_set_parameter(&self.params.auto_restart);
