@@ -78,6 +78,8 @@ struct MultosisWindow {
     rng_seed: u32,
     /// The active left-button gesture, if any.
     left_gesture: Option<LeftGesture>,
+    /// Cached render of the grid cells — re-renders only changed cells each frame.
+    grid_cache: grid_view::GridCache,
 }
 
 impl MultosisWindow {
@@ -115,6 +117,7 @@ impl MultosisWindow {
             clipboard: None,
             rng_seed: 1,
             left_gesture: None,
+            grid_cache: grid_view::GridCache::new(WINDOW_WIDTH, WINDOW_HEIGHT),
         }
     }
 
@@ -331,9 +334,18 @@ impl MultosisWindow {
     }
 
     fn draw(&mut self) {
-        widgets::fill_pixmap_opaque(&mut self.surface.pixmap, widgets::color_bg());
         let grid = self.params.grid.lock().map(|g| *g).unwrap_or_default();
-        grid_view::draw_grid(
+        // Update the cache (full rebuild on scale change; otherwise only
+        // re-renders cells that changed).
+        self.grid_cache.update(&grid, self.scale_factor);
+        // Blit the cached cells into the surface — replaces both the old
+        // fill_pixmap_opaque clear and draw_grid_cells.
+        self.surface
+            .pixmap
+            .data_mut()
+            .copy_from_slice(self.grid_cache.pixmap().data());
+        // Cursor-dependent overlay (loop-region outline, nubs, move grip).
+        grid_view::draw_region_overlay(
             &mut self.surface.pixmap,
             &grid,
             self.scale_factor,

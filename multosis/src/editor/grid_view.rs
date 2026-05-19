@@ -458,13 +458,26 @@ fn draw_cell(pixmap: &mut Pixmap, row: usize, col: usize, cell: &crate::grid::Ce
     }
 }
 
-/// Draw the whole grid — every cell, then the loop-region outline.
-pub fn draw_grid(pixmap: &mut Pixmap, grid: &Grid, scale: f32, cursor: Option<(f32, f32)>) {
+/// Draw every grid cell into `pixmap` (the cacheable part of the grid — no
+/// loop-region overlay, no wavefront). `GridCache` and `draw_region_overlay`
+/// together replace the old `draw_grid`.
+pub fn draw_grid_cells(pixmap: &mut Pixmap, grid: &Grid, scale: f32) {
     for r in 0..ROWS {
         for c in 0..COLS {
             draw_cell(pixmap, r, c, grid.cell(r, c), scale);
         }
     }
+}
+
+/// Draw the loop-region outline, edge nubs, and (when the cursor is inside
+/// the region) the move grip — the cursor-dependent overlay on top of the
+/// cached cells.
+pub fn draw_region_overlay(
+    pixmap: &mut Pixmap,
+    grid: &Grid,
+    scale: f32,
+    cursor: Option<(f32, f32)>,
+) {
     // Loop-region outline: a rectangle spanning the region's cells.
     let lr = grid.loop_region;
     let (x0, y0, _, _) = cell_rect(lr.row0, lr.col0, scale);
@@ -529,6 +542,54 @@ pub fn draw_grid(pixmap: &mut Pixmap, grid: &Grid, scale: f32, cursor: Option<(f
     }
 }
 
+/// A cached render of the grid's cells. The editor blits this and re-renders
+/// only the cells that changed since the last frame (all of them on a scale
+/// change) — so an unchanged frame is a memcpy, not a 512-cell repaint.
+pub struct GridCache {
+    pixmap: Pixmap,
+    grid: Grid,
+    scale: f32,
+    built: bool,
+}
+
+impl GridCache {
+    /// A cache sized for a `w`×`h` editor window.
+    pub fn new(w: u32, h: u32) -> Self {
+        Self {
+            pixmap: Pixmap::new(w, h).expect("editor window size is valid"),
+            grid: Grid::default_routing(),
+            scale: 0.0,
+            built: false,
+        }
+    }
+
+    /// Bring the cache up to date for `(grid, scale)`. Full rebuild on the
+    /// first call or a scale change; otherwise re-renders only the cells that
+    /// differ from the cached grid.
+    pub fn update(&mut self, grid: &Grid, scale: f32) {
+        if !self.built || self.scale != scale {
+            widgets::fill_pixmap_opaque(&mut self.pixmap, widgets::color_bg());
+            draw_grid_cells(&mut self.pixmap, grid, scale);
+        } else {
+            for r in 0..ROWS {
+                for c in 0..COLS {
+                    if *grid.cell(r, c) != *self.grid.cell(r, c) {
+                        draw_cell(&mut self.pixmap, r, c, grid.cell(r, c), scale);
+                    }
+                }
+            }
+        }
+        self.grid = *grid;
+        self.scale = scale;
+        self.built = true;
+    }
+
+    /// The cached grid render — blit this into the editor pixmap each frame.
+    pub fn pixmap(&self) -> &Pixmap {
+        &self.pixmap
+    }
+}
+
 /// A lit wavefront cell.
 fn color_wavefront() -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(0xd8, 0x89, 0x3a, 0xFF)
@@ -581,6 +642,49 @@ pub fn draw_status(pixmap: &mut Pixmap, tr: &mut widgets::TextRenderer, scale: f
 mod tests {
     use super::*;
 
+    #[test]
+    fn grid_cache_matches_an_uncached_cell_render() {
+        let mut grid = Grid::default_routing();
+        for r in 0..ROWS {
+            for c in 0..COLS {
+                grid.cell_mut(r, c).enabled = (r + c) % 2 == 0;
+                grid.cell_mut(r, c).sends = ((r * 7 + c) & 0xFF) as u8;
+            }
+        }
+        let w = crate::editor::WINDOW_WIDTH;
+        let h = crate::editor::WINDOW_HEIGHT;
+        let mut reference = Pixmap::new(w, h).unwrap();
+        widgets::fill_pixmap_opaque(&mut reference, widgets::color_bg());
+        draw_grid_cells(&mut reference, &grid, 1.0);
+        let mut cache = GridCache::new(w, h);
+        cache.update(&grid, 1.0);
+        assert_eq!(cache.pixmap().data(), reference.data(), "cold cache differs");
+        grid.cell_mut(3, 5).enabled = !grid.cell(3, 5).enabled;
+        grid.cell_mut(9, 20).sends ^= 0b0101_0101;
+        cache.update(&grid, 1.0);
+        let mut reference2 = Pixmap::new(w, h).unwrap();
+        widgets::fill_pixmap_opaque(&mut reference2, widgets::color_bg());
+        draw_grid_cells(&mut reference2, &grid, 1.0);
+        assert_eq!(
+            cache.pixmap().data(),
+            reference2.data(),
+            "incremental cache differs"
+        );
+    }
+
+    #[test]
+    fn grid_cache_rebuilds_on_scale_change() {
+        let grid = Grid::default_routing();
+        let (w, h) = (crate::editor::WINDOW_WIDTH, crate::editor::WINDOW_HEIGHT);
+        let mut cache = GridCache::new(w, h);
+        cache.update(&grid, 1.0);
+        cache.update(&grid, 1.5);
+        let mut reference = Pixmap::new(w, h).unwrap();
+        widgets::fill_pixmap_opaque(&mut reference, widgets::color_bg());
+        draw_grid_cells(&mut reference, &grid, 1.5);
+        assert_eq!(cache.pixmap().data(), reference.data(), "scale rebuild differs");
+    }
+
     fn bench_stats(label: &str, times_us: &[f64]) {
         let n = times_us.len() as f64;
         let min = times_us.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -597,6 +701,8 @@ mod tests {
     ///   cargo nextest run -p multosis --release bench_editor_draw --no-capture
     #[test]
     fn bench_editor_draw() {
+        let (w, h) = (crate::editor::WINDOW_WIDTH, crate::editor::WINDOW_HEIGHT);
+
         // Dense worst-case grid: every cell enabled, all 8 sends lit.
         let mut grid = crate::grid::Grid::default_routing();
         for r in 0..ROWS {
@@ -606,27 +712,28 @@ mod tests {
             }
         }
 
-        let mut pixmap =
-            tiny_skia::Pixmap::new(crate::editor::WINDOW_WIDTH, crate::editor::WINDOW_HEIGHT)
-                .unwrap();
+        let mut surface_pixmap = tiny_skia::Pixmap::new(w, h).unwrap();
+        let blit_src = tiny_skia::Pixmap::new(w, h).unwrap();
 
         let wf = crate::wavefront_display::WavefrontDisplay::new();
         let params = crate::MultosisParams::default();
-        let mut tr =
-            widgets::TextRenderer::new(include_bytes!("../fonts/DejaVuSans.ttf"));
+        let mut tr = widgets::TextRenderer::new(include_bytes!("../fonts/DejaVuSans.ttf"));
         let seq = crate::seq_status::SeqStatusDisplay::new();
         let scale = 1.0_f32;
 
         const WARMUP: usize = 10;
         const ITERS: usize = 200;
 
-        // Warm-up: fill + draw without timing.
+        let mut cache = GridCache::new(w, h);
+
+        // Warm-up: cache update + full frame without timing.
         for _ in 0..WARMUP {
-            widgets::fill_pixmap_opaque(&mut pixmap, widgets::color_bg());
-            draw_grid(&mut pixmap, &grid, scale, None);
-            draw_wavefront(&mut pixmap, &wf, scale);
+            cache.update(&grid, scale);
+            surface_pixmap.data_mut().copy_from_slice(cache.pixmap().data());
+            draw_region_overlay(&mut surface_pixmap, &grid, scale, None);
+            draw_wavefront(&mut surface_pixmap, &wf, scale);
             crate::editor::toolbar::draw_toolbar(
-                &mut pixmap,
+                &mut surface_pixmap,
                 &mut tr,
                 &params,
                 &seq,
@@ -634,45 +741,74 @@ mod tests {
             );
         }
 
-        let mut grid_samples: Vec<f64> = Vec::with_capacity(ITERS);
+        let mut cache_static_samples: Vec<f64> = Vec::with_capacity(ITERS);
+        let mut cache_2cell_samples: Vec<f64> = Vec::with_capacity(ITERS);
+        let mut blit_samples: Vec<f64> = Vec::with_capacity(ITERS);
+        let mut overlay_samples: Vec<f64> = Vec::with_capacity(ITERS);
         let mut wf_samples: Vec<f64> = Vec::with_capacity(ITERS);
         let mut toolbar_samples: Vec<f64> = Vec::with_capacity(ITERS);
         let mut total_samples: Vec<f64> = Vec::with_capacity(ITERS);
 
-        for _ in 0..ITERS {
-            widgets::fill_pixmap_opaque(&mut pixmap, widgets::color_bg());
+        for i in 0..ITERS {
+            // --- cache-hit case: same grid, no cells changed ---
+            let t0 = std::time::Instant::now();
+            cache.update(&grid, scale);
+            cache_static_samples.push(t0.elapsed().as_nanos() as f64 / 1_000.0);
 
+            // --- drag-paint case: 2 cells mutated each iteration ---
+            let r0 = i % ROWS;
+            let c0 = i % COLS;
+            let r1 = (i + 1) % ROWS;
+            let c1 = (i + 3) % COLS;
+            grid.cell_mut(r0, c0).enabled = !grid.cell(r0, c0).enabled;
+            grid.cell_mut(r1, c1).sends ^= 0b0101_0101;
+            let t1 = std::time::Instant::now();
+            cache.update(&grid, scale);
+            cache_2cell_samples.push(t1.elapsed().as_nanos() as f64 / 1_000.0);
+            // restore for reproducibility
+            grid.cell_mut(r0, c0).enabled = !grid.cell(r0, c0).enabled;
+            grid.cell_mut(r1, c1).sends ^= 0b0101_0101;
+            cache.update(&grid, scale); // rebuild clean cache
+
+            // --- full frame timing ---
             let t_frame = std::time::Instant::now();
 
-            let t0 = std::time::Instant::now();
-            draw_grid(&mut pixmap, &grid, scale, None);
-            grid_samples.push(t0.elapsed().as_nanos() as f64 / 1_000.0);
+            let tb = std::time::Instant::now();
+            surface_pixmap.data_mut().copy_from_slice(blit_src.data());
+            blit_samples.push(tb.elapsed().as_nanos() as f64 / 1_000.0);
 
-            let t1 = std::time::Instant::now();
-            draw_wavefront(&mut pixmap, &wf, scale);
-            wf_samples.push(t1.elapsed().as_nanos() as f64 / 1_000.0);
+            let to = std::time::Instant::now();
+            draw_region_overlay(&mut surface_pixmap, &grid, scale, None);
+            overlay_samples.push(to.elapsed().as_nanos() as f64 / 1_000.0);
 
-            let t2 = std::time::Instant::now();
+            let tw = std::time::Instant::now();
+            draw_wavefront(&mut surface_pixmap, &wf, scale);
+            wf_samples.push(tw.elapsed().as_nanos() as f64 / 1_000.0);
+
+            let tt = std::time::Instant::now();
             crate::editor::toolbar::draw_toolbar(
-                &mut pixmap,
+                &mut surface_pixmap,
                 &mut tr,
                 &params,
                 &seq,
                 scale,
             );
-            toolbar_samples.push(t2.elapsed().as_nanos() as f64 / 1_000.0);
+            toolbar_samples.push(tt.elapsed().as_nanos() as f64 / 1_000.0);
 
             total_samples.push(t_frame.elapsed().as_nanos() as f64 / 1_000.0);
         }
 
         eprintln!("\n=== bench_editor_draw ({ITERS} iterations, scale={scale}) ===");
-        bench_stats("draw_grid   ", &grid_samples);
-        bench_stats("draw_wavefront", &wf_samples);
-        bench_stats("draw_toolbar", &toolbar_samples);
-        bench_stats("frame total ", &total_samples);
+        bench_stats("grid_cache.update (static)", &cache_static_samples);
+        bench_stats("grid_cache.update (2 cells)", &cache_2cell_samples);
+        bench_stats("blit copy_from_slice       ", &blit_samples);
+        bench_stats("draw_region_overlay        ", &overlay_samples);
+        bench_stats("draw_wavefront             ", &wf_samples);
+        bench_stats("draw_toolbar               ", &toolbar_samples);
+        bench_stats("frame total                ", &total_samples);
         eprintln!("=== END bench_editor_draw ===\n");
 
-        assert!(!grid_samples.is_empty());
+        assert!(!cache_static_samples.is_empty());
     }
 
     #[test]
