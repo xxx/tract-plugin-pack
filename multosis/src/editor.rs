@@ -5,7 +5,7 @@
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::editor::toolbar::{ToolbarControl, ToolbarOp};
@@ -67,6 +67,8 @@ struct MultosisWindow {
     wavefront_display: Arc<WavefrontDisplay>,
     seq_status: Arc<SeqStatusDisplay>,
     grid_handoff: Arc<GridHandoff>,
+    /// Audio→GUI mirror of the engine's active-row mask. Task 3 draws with it.
+    active_rows: Arc<AtomicU16>,
     /// Latest cursor position in physical pixels, updated on CursorMoved.
     mouse_pos: (f32, f32),
     text_renderer: widgets::TextRenderer,
@@ -94,6 +96,7 @@ impl MultosisWindow {
         pending_resize: Arc<AtomicU64>,
         gui_context: Arc<dyn GuiContext>,
         reset_request: Arc<AtomicBool>,
+        active_rows: Arc<AtomicU16>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -110,6 +113,7 @@ impl MultosisWindow {
             wavefront_display,
             seq_status,
             grid_handoff,
+            active_rows,
             mouse_pos: (0.0, 0.0),
             text_renderer,
             gui_context,
@@ -327,6 +331,9 @@ impl MultosisWindow {
 
     fn draw(&mut self) {
         let grid = self.params.grid.lock().map(|g| *g).unwrap_or_default();
+        // The engine's active-row mask — Task 3 lights each track's "sounding"
+        // dot from this; for now the value is read but not yet drawn.
+        let _active_mask = self.active_rows.load(Ordering::Relaxed);
         // Update the cache (full rebuild on scale change; otherwise only
         // re-renders cells that changed).
         self.grid_cache.update(&grid, self.scale_factor);
@@ -495,6 +502,7 @@ struct MultosisEditor {
     seq_status: Arc<SeqStatusDisplay>,
     grid_handoff: Arc<GridHandoff>,
     reset_request: Arc<AtomicBool>,
+    active_rows: Arc<AtomicU16>,
     pending_resize: Arc<AtomicU64>,
 }
 
@@ -505,6 +513,7 @@ pub fn create(
     seq_status: Arc<SeqStatusDisplay>,
     grid_handoff: Arc<GridHandoff>,
     reset_request: Arc<AtomicBool>,
+    active_rows: Arc<AtomicU16>,
 ) -> Option<Box<dyn Editor>> {
     Some(Box::new(MultosisEditor {
         params,
@@ -512,6 +521,7 @@ pub fn create(
         seq_status,
         grid_handoff,
         reset_request,
+        active_rows,
         pending_resize: Arc::new(AtomicU64::new(0)),
     }))
 }
@@ -532,6 +542,7 @@ impl Editor for MultosisEditor {
         let pending_resize = Arc::clone(&self.pending_resize);
         let gui_context = Arc::clone(&context);
         let reset_request = Arc::clone(&self.reset_request);
+        let active_rows = Arc::clone(&self.active_rows);
 
         let window = baseview::Window::open_parented(
             &widgets::ParentWindowHandleAdapter(parent),
@@ -551,6 +562,7 @@ impl Editor for MultosisEditor {
                     pending_resize,
                     gui_context,
                     reset_request,
+                    active_rows,
                     sf,
                 )
             },

@@ -22,6 +22,7 @@ use crate::engine::AudioEngine;
 use crate::grid::Grid;
 use crate::handoff::GridHandoff;
 use nih_plug::prelude::*;
+use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex};
 
 /// The Multosis plugin's parameters and persisted state.
@@ -112,6 +113,8 @@ pub struct Multosis {
     seq_status: Arc<crate::seq_status::SeqStatusDisplay>,
     /// Set by the editor's Reset button; consumed once per process block.
     reset_request: Arc<std::sync::atomic::AtomicBool>,
+    /// Audio→GUI mirror of the engine's active-row mask, shared with the editor.
+    active_rows: Arc<AtomicU16>,
 }
 
 impl Default for Multosis {
@@ -126,6 +129,7 @@ impl Default for Multosis {
             wavefront_display: Arc::new(crate::wavefront_display::WavefrontDisplay::new()),
             seq_status: Arc::new(crate::seq_status::SeqStatusDisplay::new()),
             reset_request: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            active_rows: Arc::new(AtomicU16::new(0)),
         }
     }
 }
@@ -159,6 +163,7 @@ impl Plugin for Multosis {
             self.seq_status.clone(),
             self.grid_handoff.clone(),
             self.reset_request.clone(),
+            self.active_rows.clone(),
         )
     }
 
@@ -247,6 +252,10 @@ impl Plugin for Multosis {
         self.wavefront_display.publish(self.engine.wavefront());
         self.seq_status
             .publish(self.engine.sequence_state(), self.engine.step());
+        self.active_rows.store(
+            self.engine.active_mask(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         // Post-mix output gain (smoothed per sample).
         for i in 0..n {

@@ -27,6 +27,9 @@ pub struct AudioEngine {
     track_effects: [TrackEffect; ROWS],
     /// The 3-MSEG-per-track modulation engine driving the effects.
     modulation: Modulation,
+    /// The most recent process block's active-row bitmask (bit `r` = row `r`
+    /// had a lit, enabled cell under the wavefront). Published to the editor.
+    last_active: u16,
     sample_rate: f32,
 }
 
@@ -46,6 +49,7 @@ impl AudioEngine {
             }),
             track_effects: std::array::from_fn(TrackEffect::default_for_row),
             modulation: Modulation::new(),
+            last_active: 0,
             sample_rate: 48_000.0,
         }
     }
@@ -105,6 +109,13 @@ impl AudioEngine {
     /// status readout.
     pub fn step(&self) -> u64 {
         self.propagator.step
+    }
+
+    /// The last process block's active-row bitmask — bit `r` set when row `r`
+    /// had a lit, enabled cell under the wavefront. For the editor's track
+    /// listing "currently sounding" indicator.
+    pub fn active_mask(&self) -> u16 {
+        self.last_active
     }
 
     /// Bitmask (bit `R`) of rows holding at least one cell that is both lit in
@@ -209,6 +220,7 @@ impl AudioEngine {
                 bi += 1;
             }
         }
+        self.last_active = active;
     }
 }
 
@@ -248,6 +260,23 @@ mod tests {
         wf.set(4, 1, true);
         wf.set(4, 30, true); // same row, twice -> one bit
         assert_eq!(AudioEngine::active_rows(&grid, &wf), 1 << 4);
+    }
+
+    #[test]
+    fn active_mask_reports_the_last_blocks_active_rows() {
+        // A fresh engine has processed nothing — mask is empty.
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        assert_eq!(engine.active_mask(), 0);
+        // After a playing block on the default grid, some rows are active.
+        let grid = Grid::default_routing();
+        let mut left = [0.2_f32; 128];
+        let mut right = [0.2_f32; 128];
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, true, &grid);
+        assert!(
+            engine.active_mask() != 0,
+            "after arming, at least one row should be active"
+        );
     }
 
     #[test]
