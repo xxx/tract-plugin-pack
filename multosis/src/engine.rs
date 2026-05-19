@@ -1,5 +1,5 @@
 //! The audio engine: drives the Milestone 1a `Propagator` + `StepClock`,
-//! applies the lit rows' throwaway effects to the dry input, and mixes.
+//! applies each lit row's per-track effect to the dry input, and mixes.
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §6.
 

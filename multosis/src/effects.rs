@@ -1,9 +1,9 @@
-//! The two throwaway effects for Milestone 1b — a per-row lowpass and a
-//! per-row bitcrush. Hardwired, with no shared abstraction; the standardised
-//! effect trait is Phase 2. Each effect's character is mapped from the row
-//! index so the wavefront's vertical motion is immediately audible.
+//! The effect abstraction — Phase 2 Milestone 2a. A standardized `Effect`
+//! trait, the `EffectKind` registry, enum-dispatch `EffectInstance`, two
+//! effects (`LowpassEffect`, `BitcrushEffect`), and the persisted per-track
+//! `TrackEffect` config. Each track row carries its own effect instance.
 //!
-//! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §6.1.
+//! See `docs/superpowers/specs/2026-05-18-multosis-phase-2a-design.md`.
 
 /// A modulatable parameter of an effect: its name and value range. Static per
 /// effect kind; used by the 2b modulation engine and the 2c effect editor.
