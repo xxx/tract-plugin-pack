@@ -730,16 +730,9 @@ mod tests {
         assert_eq!(region_edge_hit(x0, 10.0, region, 1.0), None);
     }
 
-    #[test]
-    fn column_at_and_row_at_clamp_to_grid_bounds() {
-        assert_eq!(column_at(0.0, 1.0), 0);
-        assert_eq!(column_at(CELL * 5.5, 1.0), 5);
-        assert_eq!(column_at(CELL * 10_000.0, 1.0), COLS - 1);
-        assert_eq!(row_at(0.0, 1.0), 0); // above the grid -> clamp to 0
-        assert_eq!(row_at(STATUS_H, 1.0), 0); // exactly at the grid's top
-        assert_eq!(row_at(STATUS_H + CELL * 3.5, 1.0), 3);
-        assert_eq!(row_at(STATUS_H + CELL * 10_000.0, 1.0), ROWS - 1);
-    }
+    // `column_at`/`row_at` clamping is covered by
+    // `column_at_and_row_at_clamp_with_the_new_layout`, which uses
+    // geometry-aware inputs for the margin/gutter/group-gap layout.
 
     #[test]
     fn apply_region_drag_left_edge_moves_col0() {
