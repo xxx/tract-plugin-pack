@@ -658,7 +658,11 @@ mod tests {
         draw_grid_cells(&mut reference, &grid, 1.0);
         let mut cache = GridCache::new(w, h);
         cache.update(&grid, 1.0);
-        assert_eq!(cache.pixmap().data(), reference.data(), "cold cache differs");
+        assert_eq!(
+            cache.pixmap().data(),
+            reference.data(),
+            "cold cache differs"
+        );
         grid.cell_mut(3, 5).enabled = !grid.cell(3, 5).enabled;
         grid.cell_mut(9, 20).sends ^= 0b0101_0101;
         cache.update(&grid, 1.0);
@@ -682,7 +686,11 @@ mod tests {
         let mut reference = Pixmap::new(w, h).unwrap();
         widgets::fill_pixmap_opaque(&mut reference, widgets::color_bg());
         draw_grid_cells(&mut reference, &grid, 1.5);
-        assert_eq!(cache.pixmap().data(), reference.data(), "scale rebuild differs");
+        assert_eq!(
+            cache.pixmap().data(),
+            reference.data(),
+            "scale rebuild differs"
+        );
     }
 
     fn bench_stats(label: &str, times_us: &[f64]) {
@@ -729,7 +737,9 @@ mod tests {
         // Warm-up: cache update + full frame without timing.
         for _ in 0..WARMUP {
             cache.update(&grid, scale);
-            surface_pixmap.data_mut().copy_from_slice(cache.pixmap().data());
+            surface_pixmap
+                .data_mut()
+                .copy_from_slice(cache.pixmap().data());
             draw_region_overlay(&mut surface_pixmap, &grid, scale, None);
             draw_wavefront(&mut surface_pixmap, &wf, scale);
             crate::editor::toolbar::draw_toolbar(

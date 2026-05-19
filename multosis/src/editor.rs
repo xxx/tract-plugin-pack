@@ -117,7 +117,7 @@ impl MultosisWindow {
             clipboard: None,
             rng_seed: 1,
             left_gesture: None,
-            grid_cache: grid_view::GridCache::new(WINDOW_WIDTH, WINDOW_HEIGHT),
+            grid_cache: grid_view::GridCache::new(pw, ph),
         }
     }
 
@@ -125,6 +125,7 @@ impl MultosisWindow {
         let pw = self.physical_width.max(1);
         let ph = self.physical_height.max(1);
         self.surface.resize(pw, ph);
+        self.grid_cache = grid_view::GridCache::new(pw, ph);
         self.params.editor_state.store_size(pw, ph);
     }
 
