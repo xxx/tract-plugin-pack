@@ -19,6 +19,7 @@ use tiny_skia_widgets as widgets;
 
 pub mod grid_view;
 pub mod toolbar;
+pub mod track_list;
 
 /// Editor window size. Derived from the grid layout in `grid_view`:
 /// width  = 2*MARGIN + TRACK_PANEL_W + COLS*CELL + 3*GROUP_GAP
