@@ -143,12 +143,7 @@ const EDGE_BAND: f32 = 6.0;
 /// is a `Corner`; within `EDGE_BAND` of one edge line (along the region's
 /// span) is an `Edge`. Points in the toolbar strip / gutter / margins never
 /// hit a handle.
-pub fn region_handle_hit(
-    px: f32,
-    py: f32,
-    region: LoopRegion,
-    scale: f32,
-) -> Option<RegionHandle> {
+pub fn region_handle_hit(px: f32, py: f32, region: LoopRegion, scale: f32) -> Option<RegionHandle> {
     // Reject the toolbar strip, the gutter, the margins — anything off-grid.
     let grid_top = (STATUS_H + GUTTER) * scale;
     let grid_bottom = (STATUS_H + GUTTER + ROWS as f32 * CELL) * scale;
