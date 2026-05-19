@@ -66,13 +66,16 @@ impl Default for TrackModulation {
 /// The phase delta (0..1 space) one `block_len`-sample process block advances
 /// `mseg`, given the host `bpm` and `sample_rate`. Honours the MSEG's
 /// `sync_mode`: `Time` uses `time_seconds`, `Beat` converts `beats` via the
-/// tempo. Returns 0.0 for a degenerate (zero/negative) length.
+/// tempo. Returns 0.0 for a degenerate (zero/negative) length — a `bpm` of 0
+/// or below is treated as such (the modulation simply freezes).
 pub fn mseg_phase_delta(mseg: &MsegData, block_len: usize, bpm: f64, sample_rate: f64) -> f32 {
     let length_samples = match mseg.sync_mode {
         SyncMode::Time => mseg.time_seconds as f64 * sample_rate,
-        SyncMode::Beat => mseg.beats as f64 * (60.0 / bpm) * sample_rate,
+        // A non-positive `bpm` gives a degenerate length (freezes below).
+        SyncMode::Beat if bpm > 0.0 => mseg.beats as f64 * (60.0 / bpm) * sample_rate,
+        SyncMode::Beat => 0.0,
     };
-    if length_samples > 0.0 {
+    if length_samples.is_finite() && length_samples > 0.0 {
         (block_len as f64 / length_samples) as f32
     } else {
         0.0
@@ -228,6 +231,17 @@ mod tests {
     }
 
     #[test]
+    fn mseg_phase_delta_zero_bpm_freezes() {
+        // A host reporting a 0 BPM must not yield a non-finite delta; the
+        // modulation simply freezes (delta 0).
+        let mut m = MsegData::default();
+        m.sync_mode = SyncMode::Beat;
+        m.beats = 4.0;
+        let dt = mseg_phase_delta(&m, 48, 0.0, 48_000.0);
+        assert_eq!(dt, 0.0);
+    }
+
+    #[test]
     fn assignable_value_midline_is_the_base() {
         let spec = ParamSpec {
             name: "p",
@@ -281,6 +295,27 @@ mod tests {
                 "row {r}: {}",
                 m.amplitude(r)
             );
+        }
+    }
+
+    #[test]
+    fn modulation_amplitude_flat_zero_mseg_silences_the_row() {
+        // An amplitude MSEG flat at 0.0 yields a row gain of 0 (spec §8).
+        let mut config: [TrackModulation; ROWS] =
+            std::array::from_fn(TrackModulation::default_for_row);
+        for tm in &mut config {
+            for node in &mut tm.msegs[0].nodes {
+                node.value = 0.0;
+            }
+        }
+        let mut m = Modulation::new();
+        m.set_config(&config);
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        m.update_block(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        for r in 0..ROWS {
+            assert_eq!(m.amplitude(r), 0.0, "row {r}");
         }
     }
 
