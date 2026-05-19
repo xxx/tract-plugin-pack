@@ -17,7 +17,6 @@ pub mod seq_status;
 pub mod wavefront_display;
 
 use crate::clock::Speed;
-use crate::effects::EffectBank;
 use crate::engine::AudioEngine;
 use crate::grid::Grid;
 use crate::handoff::GridHandoff;
@@ -36,6 +35,10 @@ pub struct MultosisParams {
     #[persist = "grid"]
     pub grid: Arc<Mutex<Grid>>,
 
+    /// Per-track effect configuration — persisted plugin state.
+    #[persist = "track-effects"]
+    pub track_effects: Arc<Mutex<[crate::effects::TrackEffect; 16]>>,
+
     /// Tempo-synced wavefront advance rate.
     #[id = "speed"]
     pub speed: EnumParam<Speed>,
@@ -48,10 +51,6 @@ pub struct MultosisParams {
     #[id = "output_gain"]
     pub output_gain: FloatParam,
 
-    /// Which throwaway effect every row uses.
-    #[id = "effect_bank"]
-    pub effect_bank: EnumParam<EffectBank>,
-
     /// When on, a dead-ended wavefront re-arms the start cells.
     #[id = "auto_restart"]
     pub auto_restart: BoolParam,
@@ -62,6 +61,9 @@ impl Default for MultosisParams {
         Self {
             editor_state: tiny_skia_widgets::EditorState::from_size(1336, 758),
             grid: Arc::new(Mutex::new(Grid::default())),
+            track_effects: Arc::new(Mutex::new(std::array::from_fn(
+                crate::effects::TrackEffect::default_for_row,
+            ))),
             speed: EnumParam::new("Speed", Speed::Div16),
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit("%")
@@ -80,7 +82,6 @@ impl Default for MultosisParams {
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
-            effect_bank: EnumParam::new("Effect", EffectBank::Lowpass),
             auto_restart: BoolParam::new("Auto Restart", true),
         }
     }
@@ -167,6 +168,10 @@ impl Plugin for Multosis {
             self.grid = *grid;
             self.grid_handoff.publish(*grid);
         }
+        // Bridge the persisted per-track effect config into the engine.
+        if let Ok(cfg) = self.params.track_effects.lock() {
+            self.engine.set_effects(&cfg);
+        }
         self.was_playing = false;
         true
     }
@@ -207,7 +212,6 @@ impl Plugin for Multosis {
 
         let sps =
             crate::clock::samples_per_step(self.params.speed.value(), bpm, self.sample_rate as f64);
-        let bank = self.params.effect_bank.value();
         let mix = self.params.mix.value();
         let auto_restart = self.params.auto_restart.value();
 
@@ -222,7 +226,6 @@ impl Plugin for Multosis {
             &mut *right,
             playing,
             sps,
-            bank,
             mix,
             auto_restart,
             &self.grid,
