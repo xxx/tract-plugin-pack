@@ -60,6 +60,15 @@ impl<A: Clone + PartialEq> TextEditState<A> {
         }
     }
 
+    /// The currently-editing action, or `None` when no edit is in progress.
+    /// Use this when the caller needs to inspect or compare the active
+    /// action without knowing it in advance — for example to decide whether
+    /// a press lands on the editing widget itself (cancel + drag) or
+    /// somewhere else (auto-commit).
+    pub fn active_for_any(&self) -> Option<A> {
+        self.active.clone()
+    }
+
     /// Discard the in-flight edit without committing.
     pub fn cancel(&mut self) {
         self.active = None;
@@ -289,6 +298,16 @@ mod tests {
             s.caret_visible(),
             "visible again ~1050ms in (start of next cycle)"
         );
+    }
+
+    #[test]
+    fn active_for_any_reports_action_when_active() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        assert_eq!(s.active_for_any(), None);
+        s.begin(A::Gain, "10");
+        assert_eq!(s.active_for_any(), Some(A::Gain));
+        s.cancel();
+        assert_eq!(s.active_for_any(), None);
     }
 
     #[test]

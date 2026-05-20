@@ -150,13 +150,18 @@ pub fn effect_hit(
 
 /// Draw the editor bar and EFFECT section. The MODULATION section is drawn by
 /// `draw_modulation_section` (Task 9). `track` is the edited track's effect
-/// config; `track_index` is its row (0-based) for the title.
+/// config; `track_index` is its row (0-based) for the title. `editing_dial`
+/// is `Some((i, buffer, caret_on))` when a right-click text edit is active on
+/// dial slot `i`; that dial renders the buffer + caret in place of its
+/// formatted value.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_effect_section(
     pixmap: &mut Pixmap,
     tr: &mut widgets::TextRenderer,
     track: &TrackEffect,
     track_index: usize,
     kind_dropdown_open: bool,
+    editing_dial: Option<(usize, &str, bool)>,
     scale: f32,
 ) {
     let lay = effect_layout(scale);
@@ -188,16 +193,36 @@ pub fn draw_effect_section(
         let (dx, dy, dw, dh) = lay.dials[i];
         let value = track.params[i];
         let norm = crate::effects::value_to_norm(value, spec.min, spec.max, spec.scaling);
-        widgets::param_dial::draw_dial(
-            pixmap,
-            tr,
-            dx + dw / 2.0,
-            dy + dh / 2.0,
-            (dw.min(dh) / 2.0) - 8.0 * scale,
-            spec.name,
-            &crate::effects::format_value(value, spec.format),
-            norm,
-        );
+        let value_text = crate::effects::format_value(value, spec.format);
+        match editing_dial {
+            Some((idx, buf, caret_on)) if idx == i => {
+                widgets::param_dial::draw_dial_ex(
+                    pixmap,
+                    tr,
+                    dx + dw / 2.0,
+                    dy + dh / 2.0,
+                    (dw.min(dh) / 2.0) - 8.0 * scale,
+                    spec.name,
+                    &value_text,
+                    norm,
+                    None,
+                    Some(buf),
+                    caret_on,
+                );
+            }
+            _ => {
+                widgets::param_dial::draw_dial(
+                    pixmap,
+                    tr,
+                    dx + dw / 2.0,
+                    dy + dh / 2.0,
+                    (dw.min(dh) / 2.0) - 8.0 * scale,
+                    spec.name,
+                    &value_text,
+                    norm,
+                );
+            }
+        }
     }
 }
 

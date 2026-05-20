@@ -126,6 +126,10 @@ struct MultosisWindow {
     /// at a time, tagged with the slot index via `EffectHit::Dial(i)` or by
     /// `EffectHit::Depth` for the modulation depth dial.
     effect_dial_drag: widgets::DragState<EffectHit>,
+    /// Right-click text-entry state for the effect-param dials. Only
+    /// `EffectHit::Dial(i)` is ever begun on this; the depth and trigger-rate
+    /// dials stay drag-only.
+    text_edit: widgets::TextEditState<EffectHit>,
     /// MSEG editor state — owns hover/drag/last-node info for the active MSEG.
     /// Full-editor mode: the strip (sync/length/play-mode/randomize/style) is
     /// drawn inside the MSEG pane and routed through the widget's own handlers.
@@ -185,6 +189,7 @@ impl MultosisWindow {
             selected_mseg: 0,
             kind_dropdown: widgets::dropdown::DropdownState::new(),
             effect_dial_drag: widgets::DragState::new(),
+            text_edit: widgets::TextEditState::new(),
             mseg_edit: widgets::mseg::MsegEditState::new(),
             mseg_last_click_time: std::time::Instant::now(),
             mseg_last_click_pos: (-999.0, -999.0),
@@ -452,12 +457,24 @@ impl MultosisWindow {
     fn draw_effect_view(&mut self) {
         let track = self.selected_track_effect();
         let lay = effect_editor::effect_layout(self.scale_factor);
+        // If a dial-text edit is active, hand the buffer + caret state to the
+        // section drawer so it can render in place of the formatted value.
+        let editing_dial: Option<(usize, &str, bool)> = match self.text_edit.active_for_any() {
+            Some(EffectHit::Dial(i)) => {
+                let caret_on = self.text_edit.caret_visible();
+                self.text_edit
+                    .active_for(&EffectHit::Dial(i))
+                    .map(|buf| (i, buf, caret_on))
+            }
+            _ => None,
+        };
         effect_editor::draw_effect_section(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
             &track,
             self.selected_track,
             self.kind_dropdown.is_open_for(EffectAction::Kind),
+            editing_dial,
             self.scale_factor,
         );
         // MODULATION section.
@@ -661,6 +678,53 @@ impl MultosisWindow {
         let kind = self.selected_track_effect().kind;
         let instance = crate::effects::EffectInstance::new(kind);
         instance.parameters().get(i).copied()
+    }
+
+    /// Parse the typed text for dial `i`, clamp to the param's range, write
+    /// to the persisted config, and mark dirty. Parse failure is a silent
+    /// no-op — the dial keeps its previous value.
+    fn commit_dial_text_edit(&mut self, i: usize, text: &str) {
+        let Some(spec) = self.param_spec(i) else {
+            return;
+        };
+        let Some(v) = effects::parse_value(text, spec.format) else {
+            return;
+        };
+        let clamped = v.clamp(spec.min, spec.max);
+        if let Ok(mut cfg) = self.params.track_effects.lock() {
+            cfg[self.selected_track].params[i] = clamped;
+        }
+        self.mark_config_dirty();
+    }
+
+    /// If a dial-text edit is active, decide whether to commit or cancel it
+    /// based on the incoming press location. A press on the active dial
+    /// cancels (the user wants to drag); a press anywhere else commits.
+    fn finalize_dial_edit_for_press(&mut self, px: f32, py: f32) {
+        let Some(active) = self.text_edit.active_for_any() else {
+            return;
+        };
+        // Resolve the press to an effect-editor hit, if any.
+        let trigger = self.selected_track_modulation().trigger;
+        let is_free_hz = matches!(trigger, TriggerSource::FreeHz { .. });
+        let param_count = self.selected_track_param_count();
+        let hit = effect_editor::effect_hit(
+            px,
+            py,
+            self.scale_factor,
+            param_count,
+            self.selected_mseg,
+            is_free_hz,
+        );
+        if hit == Some(active) {
+            // Click on the active dial → cancel; the normal effect-press path
+            // then starts a drag.
+            self.text_edit.cancel();
+        } else if let Some((EffectHit::Dial(i), text)) = self.text_edit.commit() {
+            self.commit_dial_text_edit(i, &text);
+        } else {
+            self.text_edit.cancel();
+        }
     }
 
     /// Apply a dial drag's new normalized value to slot `i` of the currently
@@ -1009,6 +1073,11 @@ impl baseview::WindowHandler for MultosisWindow {
             }) => {
                 let (px, py) = self.mouse_pos;
                 let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                // Auto-commit/cancel any in-flight dial text edit BEFORE any
+                // other press routing. A press on the editing dial cancels (so
+                // the normal effect-press path can begin a drag); a press
+                // anywhere else commits the typed value.
+                self.finalize_dial_edit_for_press(px, py);
                 // An open dropdown owns every click — selecting a row applies
                 // it, clicking outside closes. Route this BEFORE checking any
                 // other control so a click on the popup never hits the
@@ -1087,10 +1156,34 @@ impl baseview::WindowHandler for MultosisWindow {
                 button: baseview::MouseButton::Right,
                 ..
             }) if self.view == View::Effect => {
-                // Right-click on the MSEG pane toggles segment-stepped flag
+                // Right-click on a param dial opens a text-entry edit; on the
+                // MSEG pane it toggles the segment-stepped flag
                 // (see `MsegEditState::on_right_click`). Ignored elsewhere.
                 let (px, py) = self.mouse_pos;
                 if self.effect_dial_drag.active_action().is_some() {
+                    return baseview::EventStatus::Captured;
+                }
+                // First, hit-test for a param dial — only `EffectHit::Dial(i)`
+                // gets text entry. Depth, trigger, and trigger-rate stay
+                // drag-only.
+                let param_count = self.selected_track_param_count();
+                let trigger = self.selected_track_modulation().trigger;
+                let is_free_hz = matches!(trigger, TriggerSource::FreeHz { .. });
+                if let Some(EffectHit::Dial(i)) = effect_editor::effect_hit(
+                    px,
+                    py,
+                    self.scale_factor,
+                    param_count,
+                    self.selected_mseg,
+                    is_free_hz,
+                ) {
+                    if let Some(spec) = self.param_spec(i) {
+                        let value = self.selected_track_effect().params[i];
+                        self.text_edit.begin(
+                            EffectHit::Dial(i),
+                            &effects::format_value(value, spec.format),
+                        );
+                    }
                     return baseview::EventStatus::Captured;
                 }
                 let lay = effect_editor::effect_layout(self.scale_factor);
@@ -1140,6 +1233,29 @@ impl baseview::WindowHandler for MultosisWindow {
                     self.commit_click(row, col, zone, false);
                 }
                 self.left_gesture = None;
+            }
+            baseview::Event::Keyboard(ev) if self.text_edit.is_active() => {
+                // Swallow key-ups while editing so the host DAW doesn't
+                // process Enter/Escape releases as its own shortcuts.
+                if ev.state != keyboard_types::KeyState::Down {
+                    return baseview::EventStatus::Captured;
+                }
+                match &ev.key {
+                    keyboard_types::Key::Character(s) => {
+                        for c in s.chars() {
+                            self.text_edit.insert_char(c);
+                        }
+                    }
+                    keyboard_types::Key::Backspace => self.text_edit.backspace(),
+                    keyboard_types::Key::Escape => self.text_edit.cancel(),
+                    keyboard_types::Key::Enter => {
+                        if let Some((EffectHit::Dial(i), text)) = self.text_edit.commit() {
+                            self.commit_dial_text_edit(i, &text);
+                        }
+                    }
+                    _ => return baseview::EventStatus::Ignored,
+                }
+                return baseview::EventStatus::Captured;
             }
             _ => {}
         }
