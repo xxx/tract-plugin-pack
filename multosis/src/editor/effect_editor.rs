@@ -187,11 +187,7 @@ pub fn draw_effect_section(
     for (i, spec) in specs.iter().enumerate() {
         let (dx, dy, dw, dh) = lay.dials[i];
         let value = track.params[i];
-        let norm = if spec.max > spec.min {
-            ((value - spec.min) / (spec.max - spec.min)).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        let norm = crate::effects::value_to_norm(value, spec.min, spec.max, spec.scaling);
         widgets::param_dial::draw_dial(
             pixmap,
             tr,
@@ -199,7 +195,7 @@ pub fn draw_effect_section(
             dy + dh / 2.0,
             (dw.min(dh) / 2.0) - 8.0 * scale,
             spec.name,
-            &format!("{value:.0}"),
+            &crate::effects::format_value(value, spec.format),
             norm,
         );
     }
@@ -261,23 +257,6 @@ pub fn trigger_to_item(src: TriggerSource) -> usize {
 pub const TRIGGER_RATE_MIN_HZ: f32 = 0.05;
 pub const TRIGGER_RATE_MAX_HZ: f32 = 20.0;
 
-/// Map a 0..1 dial position to a Hz value, log-skewed across the rate range.
-pub fn norm_to_hz(norm: f32) -> f32 {
-    let n = norm.clamp(0.0, 1.0);
-    TRIGGER_RATE_MIN_HZ * (TRIGGER_RATE_MAX_HZ / TRIGGER_RATE_MIN_HZ).powf(n)
-}
-
-/// Map a Hz value to a 0..1 dial position. Clamps to the rate range.
-pub fn hz_to_norm(hz: f32) -> f32 {
-    if hz <= TRIGGER_RATE_MIN_HZ {
-        return 0.0;
-    }
-    if hz >= TRIGGER_RATE_MAX_HZ {
-        return 1.0;
-    }
-    (hz / TRIGGER_RATE_MIN_HZ).log(TRIGGER_RATE_MAX_HZ / TRIGGER_RATE_MIN_HZ)
-}
-
 /// Draw the per-track trigger dropdown trigger and (when the source is
 /// `FreeHz`) the rate dial. Called as part of the MODULATION section draw.
 pub fn draw_trigger_controls(
@@ -303,8 +282,13 @@ pub fn draw_trigger_controls(
             ry + rh / 2.0,
             (rw.min(rh) / 2.0) - 6.0 * scale,
             "Rate",
-            &format!("{hz:.2} Hz"),
-            hz_to_norm(hz),
+            &crate::effects::format_value(hz, crate::effects::ParamFormat::Hertz),
+            crate::effects::value_to_norm(
+                hz,
+                TRIGGER_RATE_MIN_HZ,
+                TRIGGER_RATE_MAX_HZ,
+                crate::effects::ParamScaling::Log,
+            ),
         );
     }
 }
@@ -431,23 +415,6 @@ mod tests {
         assert_eq!(trigger_to_item(TriggerSource::Free), 0);
         assert_eq!(trigger_to_item(TriggerSource::CellLight), 1);
         assert_eq!(trigger_to_item(TriggerSource::FreeHz { hz: 99.0 }), 2);
-    }
-
-    #[test]
-    fn hz_norm_round_trips_within_range() {
-        for &hz in &[0.05_f32, 0.1, 1.0, 5.0, 20.0] {
-            let norm = hz_to_norm(hz);
-            assert!((0.0..=1.0).contains(&norm), "norm for hz {hz}: {norm}");
-            let back = norm_to_hz(norm);
-            // Log mapping: relative error < 1e-4.
-            assert!(
-                ((back - hz) / hz).abs() < 1e-4,
-                "round-trip {hz} -> {norm} -> {back}"
-            );
-        }
-        // hz below range clamps to min; above clamps to max.
-        assert_eq!(hz_to_norm(0.001), 0.0);
-        assert_eq!(hz_to_norm(100.0), 1.0);
     }
 
     #[test]

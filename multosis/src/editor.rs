@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::editor::effect_editor::EffectHit;
 use crate::editor::toolbar::{ToolbarControl, ToolbarOp};
-use crate::effects::{EffectKind, ParamSpec};
+use crate::effects::{self, EffectKind, ParamSpec};
 use crate::grid::LoopRegion;
 use crate::handoff::GridHandoff;
 use crate::modulation::TriggerSource;
@@ -82,16 +82,6 @@ enum EffectAction {
 /// Clamp a candidate selected-track index into `0..ROWS`.
 fn clamp_track(row: usize) -> usize {
     row.min(crate::grid::ROWS - 1)
-}
-
-/// Map a parameter `value` to `[0, 1]` against its spec range. Degenerate
-/// (max <= min) specs map to 0.
-fn normalize_param(value: f32, spec: ParamSpec) -> f32 {
-    if spec.max > spec.min {
-        ((value - spec.min) / (spec.max - spec.min)).clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
 }
 
 /// The baseview window handler — owns the surface and draws each frame.
@@ -560,7 +550,7 @@ impl MultosisWindow {
             EffectHit::Dial(i) => {
                 if let Some(spec) = self.param_spec(i) {
                     let value = self.selected_track_effect().params[i];
-                    let norm = normalize_param(value, spec);
+                    let norm = effects::value_to_norm(value, spec.min, spec.max, spec.scaling);
                     self.effect_dial_drag
                         .begin_drag(EffectHit::Dial(i), norm, false);
                 }
@@ -643,7 +633,12 @@ impl MultosisWindow {
             EffectHit::TriggerRate => {
                 let trigger = self.selected_track_modulation().trigger;
                 if let TriggerSource::FreeHz { hz } = trigger {
-                    let current_norm = effect_editor::hz_to_norm(hz);
+                    let current_norm = effects::value_to_norm(
+                        hz,
+                        effect_editor::TRIGGER_RATE_MIN_HZ,
+                        effect_editor::TRIGGER_RATE_MAX_HZ,
+                        effects::ParamScaling::Log,
+                    );
                     self.effect_dial_drag
                         .begin_drag(EffectHit::TriggerRate, current_norm, false);
                 } else {
@@ -674,7 +669,7 @@ impl MultosisWindow {
         let Some(spec) = self.param_spec(i) else {
             return;
         };
-        let value = spec.min + norm.clamp(0.0, 1.0) * (spec.max - spec.min);
+        let value = effects::norm_to_value(norm, spec.min, spec.max, spec.scaling);
         if let Ok(mut cfg) = self.params.track_effects.lock() {
             cfg[self.selected_track].params[i] = value;
         }
@@ -728,7 +723,12 @@ impl MultosisWindow {
 
     /// Update the trigger rate from the rate-dial drag's normalised value.
     fn apply_trigger_rate_drag(&mut self, norm: f32) {
-        let new_hz = effect_editor::norm_to_hz(norm);
+        let new_hz = effects::norm_to_value(
+            norm,
+            effect_editor::TRIGGER_RATE_MIN_HZ,
+            effect_editor::TRIGGER_RATE_MAX_HZ,
+            effects::ParamScaling::Log,
+        );
         if let Ok(mut cfg) = self.params.track_modulation.lock() {
             if let TriggerSource::FreeHz { hz } = &mut cfg[self.selected_track].trigger {
                 *hz = new_hz;
@@ -892,7 +892,7 @@ impl baseview::WindowHandler for MultosisWindow {
                     Some(EffectHit::Dial(i)) => {
                         let current = if let Some(spec) = self.param_spec(i) {
                             let value = self.selected_track_effect().params[i];
-                            normalize_param(value, spec)
+                            effects::value_to_norm(value, spec.min, spec.max, spec.scaling)
                         } else {
                             0.0
                         };
@@ -912,11 +912,14 @@ impl baseview::WindowHandler for MultosisWindow {
                         }
                     }
                     Some(EffectHit::TriggerRate) => {
-                        let current = effect_editor::hz_to_norm(
+                        let current = effects::value_to_norm(
                             match self.selected_track_modulation().trigger {
                                 TriggerSource::FreeHz { hz } => hz,
                                 _ => 1.0,
                             },
+                            effect_editor::TRIGGER_RATE_MIN_HZ,
+                            effect_editor::TRIGGER_RATE_MAX_HZ,
+                            effects::ParamScaling::Log,
                         );
                         if let Some(norm) = self.effect_dial_drag.update_drag(shift, current) {
                             self.apply_trigger_rate_drag(norm);
