@@ -10,6 +10,20 @@ use tiny_skia_widgets::{advance, value_at_phase, MsegData, PlayMode, SyncMode};
 /// The number of track rows. Matches `crate::grid::ROWS`.
 const ROWS: usize = 16;
 
+/// The event that causes a track's three MSEG phases to reset to 0.
+/// Per Phase 3 design — Free is the Phase 2b free-running default; CellLight
+/// fires on the row's inactive→active edge under the wavefront; FreeHz fires
+/// every `1.0/hz` seconds independently of any sync.
+#[derive(Clone, Copy, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum TriggerSource {
+    #[default]
+    Free,
+    CellLight,
+    FreeHz {
+        hz: f32,
+    },
+}
+
 /// One track row's modulation: three MSEGs and the two assignable MSEGs'
 /// targets and depths. `msegs[0]` is the amplitude MSEG; `msegs[1]` and
 /// `msegs[2]` are the assignable MSEGs — `targets[k]` / `depths[k]` belong to
@@ -21,6 +35,9 @@ pub struct TrackModulation {
     pub targets: [Option<usize>; 2],
     /// Bipolar modulation depth (−1..1) for each assignable MSEG.
     pub depths: [f32; 2],
+    /// The event that resets all three of this row's MSEG phases.
+    #[serde(default)]
+    pub trigger: TriggerSource,
 }
 
 impl TrackModulation {
@@ -53,6 +70,7 @@ impl TrackModulation {
             msegs: [amplitude, sweep, spare],
             targets: [Some(0), None],
             depths: [0.4, 0.0],
+            trigger: TriggerSource::Free,
         }
     }
 
@@ -385,5 +403,53 @@ mod tests {
         tm.targets = [Some(2), None];
         tm.clamp_targets(2);
         assert_eq!(tm.targets, [None, None]);
+    }
+
+    #[test]
+    fn trigger_source_default_is_free() {
+        assert_eq!(TriggerSource::default(), TriggerSource::Free);
+    }
+
+    #[test]
+    fn trigger_source_variants_serde_round_trip() {
+        for src in [
+            TriggerSource::Free,
+            TriggerSource::CellLight,
+            TriggerSource::FreeHz { hz: 2.5 },
+        ] {
+            let json = serde_json::to_string(&src).unwrap();
+            let back: TriggerSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, src);
+        }
+    }
+
+    #[test]
+    fn track_modulation_with_trigger_serde_round_trips() {
+        let mut tm = TrackModulation::default_for_row(0);
+        tm.trigger = TriggerSource::FreeHz { hz: 4.0 };
+        let json = serde_json::to_string(&tm).unwrap();
+        let back: TrackModulation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.trigger, TriggerSource::FreeHz { hz: 4.0 });
+    }
+
+    #[test]
+    fn track_modulation_loads_missing_trigger_as_free() {
+        // A JSON shaped like a pre-Phase-3 TrackModulation (no "trigger" key)
+        // deserialises with trigger = Free, per serde's additive default.
+        let tm = TrackModulation::default_for_row(0);
+        let json = serde_json::to_string(&tm).unwrap();
+        // Strip the trigger field from the JSON to simulate the old shape.
+        let stripped = strip_trigger_field(&json);
+        let back: TrackModulation = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(back.trigger, TriggerSource::Free);
+    }
+
+    fn strip_trigger_field(json: &str) -> String {
+        // Naively remove the `"trigger":<value>,` substring. Works for the
+        // serde_json default representation of small enums.
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let mut obj = v.as_object().unwrap().clone();
+        obj.remove("trigger");
+        serde_json::to_string(&serde_json::Value::Object(obj)).unwrap()
     }
 }
