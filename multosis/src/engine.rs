@@ -190,6 +190,7 @@ impl AudioEngine {
             n,
             bpm,
             self.sample_rate as f64,
+            self.last_active,
             &mut self.effects,
             &self.track_effects,
         );

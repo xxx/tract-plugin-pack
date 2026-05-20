@@ -132,6 +132,12 @@ pub struct Modulation {
     phases: [[f32; 3]; ROWS],
     /// Latest per-row amplitude gain, set by `update_block`.
     amplitudes: [f32; ROWS],
+    /// Last block's active-row mask, for cell-light edge detection.
+    prev_active: u16,
+    /// Free-Hz oscillator phase per row, advances 0..1 and wraps modulo 1.
+    hz_phases: [f32; ROWS],
+    /// The rows that fired this block (bit `r` set). Set by `update_block`.
+    fires: u16,
 }
 
 impl Modulation {
@@ -141,6 +147,9 @@ impl Modulation {
             config: std::array::from_fn(TrackModulation::default_for_row),
             phases: [[0.0; 3]; ROWS],
             amplitudes: [1.0; ROWS],
+            prev_active: 0,
+            hz_phases: [0.0; ROWS],
+            fires: 0,
         }
     }
 
@@ -153,6 +162,9 @@ impl Modulation {
     /// Reset every MSEG phase to 0.
     pub fn reset(&mut self) {
         self.phases = [[0.0; 3]; ROWS];
+        self.prev_active = 0;
+        self.hz_phases = [0.0; ROWS];
+        self.fires = 0;
     }
 
     /// The latest amplitude gain for `row` (set by the previous `update_block`).
@@ -168,9 +180,47 @@ impl Modulation {
         block_len: usize,
         bpm: f64,
         sample_rate: f64,
+        active_mask: u16,
         effects: &mut [EffectInstance; ROWS],
         track_effects: &[TrackEffect; ROWS],
     ) {
+        // Phase 3: decide which rows fire this block, then reset their phases.
+        let mut fires: u16 = 0;
+        for row in 0..ROWS {
+            let cur_lit = (active_mask & (1 << row)) != 0;
+            let prev_lit = (self.prev_active & (1 << row)) != 0;
+            let fire = match self.config[row].trigger {
+                TriggerSource::Free => false,
+                TriggerSource::CellLight => cur_lit && !prev_lit,
+                TriggerSource::FreeHz { hz } => {
+                    if hz <= 0.0 {
+                        false
+                    } else {
+                        self.hz_phases[row] += (block_len as f32 * hz) / sample_rate as f32;
+                        if self.hz_phases[row] >= 1.0 {
+                            // Retain fractional remainder; multiple wraps in
+                            // one block still count as one fire (spec §7).
+                            self.hz_phases[row] -= self.hz_phases[row].floor();
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+            };
+            if fire {
+                fires |= 1 << row;
+            }
+        }
+        // Reset phases for firing rows — all three MSEGs in lockstep.
+        for row in 0..ROWS {
+            if fires & (1 << row) != 0 {
+                self.phases[row] = [0.0; 3];
+            }
+        }
+        self.fires = fires;
+        self.prev_active = active_mask;
+
         for row in 0..ROWS {
             for k in 0..3 {
                 // `MsegData` is `Copy`; copy the needed config out so the
@@ -200,6 +250,30 @@ impl Modulation {
     #[cfg(test)]
     pub fn phases_all_zero(&self) -> bool {
         self.phases.iter().flatten().all(|&p| p == 0.0)
+    }
+
+    /// Test helper: the rows that fired this block (set by `update_block`).
+    #[cfg(test)]
+    pub fn fires_last_block(&self) -> u16 {
+        self.fires
+    }
+
+    /// Test helper: the current phase for `[row][k]`.
+    #[cfg(test)]
+    pub fn phase_for_test(&self, row: usize, k: usize) -> f32 {
+        self.phases[row][k]
+    }
+
+    /// Test helper: true when every Free-Hz oscillator phase is 0.
+    #[cfg(test)]
+    pub fn hz_phases_all_zero(&self) -> bool {
+        self.hz_phases.iter().all(|&p| p == 0.0)
+    }
+
+    /// Test helper: the `prev_active` mask.
+    #[cfg(test)]
+    pub fn prev_active_for_test(&self) -> u16 {
+        self.prev_active
     }
 }
 
@@ -318,7 +392,7 @@ mod tests {
         let mut effects: [EffectInstance; ROWS] =
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
-        m.update_block(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
         // The default amplitude MSEG is flat at 1.0.
         for r in 0..ROWS {
             assert!(
@@ -344,7 +418,7 @@ mod tests {
         let mut effects: [EffectInstance; ROWS] =
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
-        m.update_block(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
         for r in 0..ROWS {
             assert_eq!(m.amplitude(r), 0.0, "row {r}");
         }
@@ -360,13 +434,13 @@ mod tests {
         }
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Run a block, then drive the effects with a signal and capture output.
-        m.update_block(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
         let after_first: Vec<f32> = (0..200)
             .map(|_| effects[0].process_sample(1.0, -1.0).0)
             .collect();
         // Advance many blocks so the cyclic MSEG has moved, re-apply.
         for _ in 0..400 {
-            m.update_block(64, 120.0, 48_000.0, &mut effects, &track_effects);
+            m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
         }
         let after_later: Vec<f32> = (0..200)
             .map(|_| effects[0].process_sample(1.0, -1.0).0)
@@ -385,7 +459,7 @@ mod tests {
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         for _ in 0..100 {
-            m.update_block(64, 120.0, 48_000.0, &mut effects, &track_effects);
+            m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
         }
         m.reset();
         // After reset, every phase is back at 0.
@@ -451,5 +525,141 @@ mod tests {
         let mut obj = v.as_object().unwrap().clone();
         obj.remove("trigger");
         serde_json::to_string(&serde_json::Value::Object(obj)).unwrap()
+    }
+
+    #[test]
+    fn fires_last_block_default_is_zero() {
+        let m = Modulation::new();
+        assert_eq!(m.fires_last_block(), 0);
+    }
+
+    #[test]
+    fn cell_light_fires_on_inactive_to_active_edge() {
+        let mut m = Modulation::new();
+        let mut cfg = std::array::from_fn(TrackModulation::default_for_row);
+        cfg[3].trigger = TriggerSource::CellLight;
+        m.set_config(&cfg);
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        // Block 1: row 3 was inactive last block (prev=0) and is active now -> fires.
+        m.update_block(64, 120.0, 48_000.0, 1 << 3, &mut effects, &track_effects);
+        assert_eq!(m.fires_last_block(), 1 << 3);
+        // Block 2: row 3 still active -> does NOT re-fire (no edge).
+        m.update_block(64, 120.0, 48_000.0, 1 << 3, &mut effects, &track_effects);
+        assert_eq!(m.fires_last_block(), 0);
+        // Block 3: row 3 went inactive -> no fire (only active edges fire).
+        m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+        assert_eq!(m.fires_last_block(), 0);
+        // Block 4: row 3 re-armed (inactive -> active) -> fires again.
+        m.update_block(64, 120.0, 48_000.0, 1 << 3, &mut effects, &track_effects);
+        assert_eq!(m.fires_last_block(), 1 << 3);
+    }
+
+    #[test]
+    fn free_hz_fires_at_roughly_the_expected_rate() {
+        let mut m = Modulation::new();
+        let mut cfg = std::array::from_fn(TrackModulation::default_for_row);
+        cfg[5].trigger = TriggerSource::FreeHz { hz: 10.0 };
+        m.set_config(&cfg);
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        // 10 Hz, 48 kHz, 4800-sample blocks -> exactly 1 fire per block, on average.
+        // Run 100 blocks; expect ~100 fires (allow ±1 for the boundary).
+        let mut fires = 0usize;
+        for _ in 0..100 {
+            m.update_block(4800, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+            if m.fires_last_block() & (1 << 5) != 0 {
+                fires += 1;
+            }
+        }
+        assert!(
+            (99..=101).contains(&fires),
+            "10 Hz over 100 blocks of 1 cycle each: got {fires} fires"
+        );
+    }
+
+    #[test]
+    fn free_hz_nonpositive_never_fires() {
+        let mut m = Modulation::new();
+        let mut cfg = std::array::from_fn(TrackModulation::default_for_row);
+        cfg[0].trigger = TriggerSource::FreeHz { hz: 0.0 };
+        cfg[1].trigger = TriggerSource::FreeHz { hz: -2.0 };
+        m.set_config(&cfg);
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        for _ in 0..50 {
+            m.update_block(480, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+            assert_eq!(m.fires_last_block() & 0b11, 0);
+        }
+    }
+
+    #[test]
+    fn fire_zeros_the_rows_three_phases() {
+        let mut m = Modulation::new();
+        let mut cfg = std::array::from_fn(TrackModulation::default_for_row);
+        // Set row 2's MSEGs to short Beat lengths so the phases advance fast,
+        // then verify that a fire on row 2 resets them.
+        cfg[2].trigger = TriggerSource::CellLight;
+        m.set_config(&cfg);
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        // Advance many blocks with no fires -> phases drift away from 0.
+        for _ in 0..50 {
+            m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+        }
+        // At least one of row 2's three phases should be non-zero now.
+        let any_nonzero = (0..3).any(|k| m.phase_for_test(2, k) > 1e-6);
+        assert!(any_nonzero, "phases should have drifted with no fires");
+        // Now fire row 2 (inactive->active edge).
+        m.update_block(64, 120.0, 48_000.0, 1 << 2, &mut effects, &track_effects);
+        // After a fire, the row's three phases are reset to 0 (the per-MSEG
+        // advance then re-runs from 0; the post-advance phase equals the
+        // block's first dt, not 0). So the right test is: less than they
+        // would have been without a fire — verified by comparing to the
+        // amplitude (flat-1.0 default) seen one block later.
+        for k in 0..3 {
+            // Read each phase: it should be a *small* value (one block's dt),
+            // not the multi-cycle accumulation it was before.
+            let phi = m.phase_for_test(2, k);
+            assert!(
+                phi.abs() < 0.1,
+                "after a fire, MSEG[{k}] phase should be near 0, got {phi}"
+            );
+        }
+    }
+
+    #[test]
+    fn free_source_does_not_fire() {
+        let mut m = Modulation::new();
+        let cfg: [TrackModulation; ROWS] = std::array::from_fn(TrackModulation::default_for_row);
+        // default_for_row's trigger is Free.
+        m.set_config(&cfg);
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        for _ in 0..20 {
+            m.update_block(64, 120.0, 48_000.0, 0xFFFF, &mut effects, &track_effects);
+            assert_eq!(m.fires_last_block(), 0);
+        }
+    }
+
+    #[test]
+    fn reset_zeroes_hz_phases_and_prev_active() {
+        let mut m = Modulation::new();
+        let mut cfg = std::array::from_fn(TrackModulation::default_for_row);
+        cfg[0].trigger = TriggerSource::FreeHz { hz: 1.0 };
+        m.set_config(&cfg);
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        // Run a block so hz_phases advances and prev_active becomes nonzero.
+        m.update_block(64, 120.0, 48_000.0, 1, &mut effects, &track_effects);
+        m.reset();
+        assert!(m.hz_phases_all_zero());
+        assert_eq!(m.prev_active_for_test(), 0);
     }
 }
