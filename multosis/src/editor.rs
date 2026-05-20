@@ -5,7 +5,7 @@
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::editor::effect_editor::EffectHit;
@@ -98,6 +98,10 @@ struct MultosisWindow {
     grid_handoff: Arc<GridHandoff>,
     /// Audio→GUI mirror of the engine's active-row mask. Task 3 draws with it.
     active_rows: Arc<AtomicU16>,
+    /// Audio→GUI mirror of every MSEG's free-running phase, as f32 bit-patterns.
+    /// Slot `row*3 + k`. The editor's playhead overlay reads the active one
+    /// each frame.
+    mseg_phases: Arc<[AtomicU32; 48]>,
     /// Latest cursor position in physical pixels, updated on CursorMoved.
     mouse_pos: (f32, f32),
     text_renderer: widgets::TextRenderer,
@@ -157,6 +161,7 @@ impl MultosisWindow {
         gui_context: Arc<dyn GuiContext>,
         reset_request: Arc<AtomicBool>,
         active_rows: Arc<AtomicU16>,
+        mseg_phases: Arc<[AtomicU32; 48]>,
         config_dirty: Arc<AtomicBool>,
         scale_factor: f32,
     ) -> Self {
@@ -175,6 +180,7 @@ impl MultosisWindow {
             seq_status,
             grid_handoff,
             active_rows,
+            mseg_phases,
             mouse_pos: (0.0, 0.0),
             text_renderer,
             gui_context,
@@ -503,6 +509,16 @@ impl MultosisWindow {
                 );
             }
         }
+        // Playhead overlay: a thin vertical line at the active MSEG's current
+        // phase, drawn last so it sits over the curve.
+        let phase =
+            f32::from_bits(self.mseg_phases[self.selected_track * 3 + sel].load(Ordering::Relaxed));
+        effect_editor::draw_mseg_playhead(
+            &mut self.surface.pixmap,
+            lay.mseg_pane,
+            phase,
+            self.scale_factor,
+        );
         // Selector + target + depth (when on an assignable MSEG).
         let (target, depth) = if sel == 0 {
             (None, 0.0)
@@ -1278,11 +1294,13 @@ struct MultosisEditor {
     grid_handoff: Arc<GridHandoff>,
     reset_request: Arc<AtomicBool>,
     active_rows: Arc<AtomicU16>,
+    mseg_phases: Arc<[AtomicU32; 48]>,
     config_dirty: Arc<AtomicBool>,
     pending_resize: Arc<AtomicU64>,
 }
 
 /// Build the editor.
+#[allow(clippy::too_many_arguments)]
 pub fn create(
     params: Arc<MultosisParams>,
     wavefront_display: Arc<WavefrontDisplay>,
@@ -1290,6 +1308,7 @@ pub fn create(
     grid_handoff: Arc<GridHandoff>,
     reset_request: Arc<AtomicBool>,
     active_rows: Arc<AtomicU16>,
+    mseg_phases: Arc<[AtomicU32; 48]>,
     config_dirty: Arc<AtomicBool>,
 ) -> Option<Box<dyn Editor>> {
     Some(Box::new(MultosisEditor {
@@ -1299,6 +1318,7 @@ pub fn create(
         grid_handoff,
         reset_request,
         active_rows,
+        mseg_phases,
         config_dirty,
         pending_resize: Arc::new(AtomicU64::new(0)),
     }))
@@ -1321,6 +1341,7 @@ impl Editor for MultosisEditor {
         let gui_context = Arc::clone(&context);
         let reset_request = Arc::clone(&self.reset_request);
         let active_rows = Arc::clone(&self.active_rows);
+        let mseg_phases = Arc::clone(&self.mseg_phases);
         let config_dirty = Arc::clone(&self.config_dirty);
 
         let window = baseview::Window::open_parented(
@@ -1342,6 +1363,7 @@ impl Editor for MultosisEditor {
                     gui_context,
                     reset_request,
                     active_rows,
+                    mseg_phases,
                     config_dirty,
                     sf,
                 )

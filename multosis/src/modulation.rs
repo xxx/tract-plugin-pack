@@ -177,6 +177,12 @@ impl Modulation {
         self.amplitudes[row]
     }
 
+    /// The current free-running phase of MSEG `k` (`0..3`) on `row` (`0..ROWS`).
+    /// Published to the editor for the playhead overlay.
+    pub fn phase(&self, row: usize, k: usize) -> f32 {
+        self.phases[row][k]
+    }
+
     /// Advance every MSEG one process block, evaluate it, and apply: the
     /// amplitude MSEG sets `amplitudes[row]`; each assigned assignable MSEG
     /// writes its target effect parameter via `set_param`. Allocation-free.

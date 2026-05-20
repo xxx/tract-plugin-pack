@@ -282,6 +282,28 @@ pub fn trigger_to_item(src: TriggerSource) -> usize {
 pub const TRIGGER_RATE_MIN_HZ: f32 = 0.05;
 pub const TRIGGER_RATE_MAX_HZ: f32 = 20.0;
 
+/// Draw a thin vertical playhead line at `phase` (0..1) over the MSEG editor's
+/// plot area. `mseg_pane` is the same rect passed to `draw_mseg`. Drawn last
+/// (after the curve) so it sits on top.
+pub fn draw_mseg_playhead(
+    pixmap: &mut Pixmap,
+    mseg_pane: (f32, f32, f32, f32),
+    phase: f32,
+    scale: f32,
+) {
+    let layout = widgets::mseg::mseg_layout(mseg_pane, false, scale);
+    let (px_, py_, pw_, ph_) = layout.plot;
+    if pw_ <= 0.0 || ph_ <= 0.0 {
+        return;
+    }
+    let x = widgets::mseg::phase_to_x(&layout, phase.clamp(0.0, 1.0));
+    // Keep the line strictly inside the plot so it doesn't overflow at phase 1.
+    let line_w = (scale).max(1.0);
+    let x = x.min(px_ + pw_ - line_w);
+    let color = tiny_skia::Color::from_rgba8(0xE8, 0xC9, 0x8A, 0x80);
+    widgets::draw_rect(pixmap, x, py_, line_w, ph_, color);
+}
+
 /// Draw the per-track trigger dropdown trigger and (when the source is
 /// `FreeHz`) the rate dial. Called as part of the MODULATION section draw.
 pub fn draw_trigger_controls(

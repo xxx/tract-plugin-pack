@@ -128,6 +128,12 @@ impl AudioEngine {
         self.last_active
     }
 
+    /// The current free-running phase of MSEG `k` on `row` (0..1). For the
+    /// editor's MSEG playhead overlay.
+    pub fn modulation_phase(&self, row: usize, k: usize) -> f32 {
+        self.modulation.phase(row, k)
+    }
+
     /// Bitmask (bit `R`) of rows holding at least one cell that is both lit in
     /// `wf` and `enabled` in `grid`. A disabled lit cell contributes nothing;
     /// two lit cells in one row collapse to a single bit.

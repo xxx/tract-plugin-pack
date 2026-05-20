@@ -115,6 +115,10 @@ pub struct Multosis {
     reset_request: Arc<std::sync::atomic::AtomicBool>,
     /// Audio→GUI mirror of the engine's active-row mask, shared with the editor.
     active_rows: Arc<AtomicU16>,
+    /// Audio→GUI mirror of every MSEG's free-running phase, as f32 bit-patterns.
+    /// Slot `row*3 + k` holds phase of MSEG `k` on row `r`. For the editor's
+    /// playhead overlay; 48 stores per process block, allocation-free.
+    mseg_phases: Arc<[std::sync::atomic::AtomicU32; 48]>,
     /// Set by the editor on any effect/modulation edit; consumed by `process`
     /// to re-bridge the persisted config into the engine.
     config_dirty: Arc<std::sync::atomic::AtomicBool>,
@@ -133,6 +137,9 @@ impl Default for Multosis {
             seq_status: Arc::new(crate::seq_status::SeqStatusDisplay::new()),
             reset_request: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             active_rows: Arc::new(AtomicU16::new(0)),
+            mseg_phases: Arc::new(std::array::from_fn(|_| {
+                std::sync::atomic::AtomicU32::new(0)
+            })),
             config_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -168,6 +175,7 @@ impl Plugin for Multosis {
             self.grid_handoff.clone(),
             self.reset_request.clone(),
             self.active_rows.clone(),
+            self.mseg_phases.clone(),
             self.config_dirty.clone(),
         )
     }
@@ -275,6 +283,14 @@ impl Plugin for Multosis {
             self.engine.active_mask(),
             std::sync::atomic::Ordering::Relaxed,
         );
+        // Publish the 16x3 MSEG phases for the editor's playhead overlay.
+        for row in 0..16 {
+            for k in 0..3 {
+                let phase = self.engine.modulation_phase(row, k);
+                self.mseg_phases[row * 3 + k]
+                    .store(phase.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            }
+        }
 
         // Post-mix output gain (smoothed per sample).
         for i in 0..n {
