@@ -383,20 +383,55 @@ impl Effect for BitcrushEffect {
     }
 }
 
+/// A passthrough "no-effect" — used when a track has no effect assigned.
+/// Audio passes through unchanged; declares no modulatable parameters.
+pub struct NoneEffect;
+
+impl NoneEffect {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for NoneEffect {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Effect for NoneEffect {
+    fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
+        (left, right)
+    }
+
+    fn set_sample_rate(&mut self, _sample_rate: f32) {}
+
+    fn reset(&mut self) {}
+
+    fn parameters(&self) -> &'static [ParamSpec] {
+        &[]
+    }
+
+    fn set_param(&mut self, _index: usize, _value: f32) {}
+}
+
 /// The effect registry — which effects exist. `Copy`, serde-derivable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum EffectKind {
+    /// No effect — audio passes through this track unchanged.
+    None,
     Lowpass,
     Bitcrush,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 2] = [EffectKind::Lowpass, EffectKind::Bitcrush];
+    pub const ALL: [EffectKind; 3] = [EffectKind::None, EffectKind::Lowpass, EffectKind::Bitcrush];
 
     /// The kind's display name.
     pub fn name(self) -> &'static str {
         match self {
+            EffectKind::None => "None",
             EffectKind::Lowpass => "Lowpass",
             EffectKind::Bitcrush => "Bitcrush",
         }
@@ -424,6 +459,7 @@ pub fn default_params_for_kind(kind: EffectKind) -> [f32; MAX_EFFECT_PARAMS] {
 /// A live effect instance — enum dispatch over the effect structs, so the
 /// audio engine holds `[EffectInstance; 16]` with no heap and no `dyn`.
 pub enum EffectInstance {
+    None(NoneEffect),
     Lowpass(LowpassEffect),
     Bitcrush(BitcrushEffect),
 }
@@ -432,6 +468,7 @@ impl EffectInstance {
     /// A fresh instance of `kind` at default parameters.
     pub fn new(kind: EffectKind) -> Self {
         match kind {
+            EffectKind::None => EffectInstance::None(NoneEffect::new()),
             EffectKind::Lowpass => EffectInstance::Lowpass(LowpassEffect::new()),
             EffectKind::Bitcrush => EffectInstance::Bitcrush(BitcrushEffect::new()),
         }
@@ -440,6 +477,7 @@ impl EffectInstance {
     /// Which kind this instance is.
     pub fn kind(&self) -> EffectKind {
         match self {
+            EffectInstance::None(_) => EffectKind::None,
             EffectInstance::Lowpass(_) => EffectKind::Lowpass,
             EffectInstance::Bitcrush(_) => EffectKind::Bitcrush,
         }
@@ -449,6 +487,7 @@ impl EffectInstance {
 impl Effect for EffectInstance {
     fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
         match self {
+            EffectInstance::None(e) => e.process_sample(left, right),
             EffectInstance::Lowpass(e) => e.process_sample(left, right),
             EffectInstance::Bitcrush(e) => e.process_sample(left, right),
         }
@@ -456,6 +495,7 @@ impl Effect for EffectInstance {
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
         match self {
+            EffectInstance::None(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Lowpass(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Bitcrush(e) => e.set_sample_rate(sample_rate),
         }
@@ -463,6 +503,7 @@ impl Effect for EffectInstance {
 
     fn reset(&mut self) {
         match self {
+            EffectInstance::None(e) => e.reset(),
             EffectInstance::Lowpass(e) => e.reset(),
             EffectInstance::Bitcrush(e) => e.reset(),
         }
@@ -470,6 +511,7 @@ impl Effect for EffectInstance {
 
     fn parameters(&self) -> &'static [ParamSpec] {
         match self {
+            EffectInstance::None(e) => e.parameters(),
             EffectInstance::Lowpass(e) => e.parameters(),
             EffectInstance::Bitcrush(e) => e.parameters(),
         }
@@ -477,6 +519,7 @@ impl Effect for EffectInstance {
 
     fn set_param(&mut self, index: usize, value: f32) {
         match self {
+            EffectInstance::None(e) => e.set_param(index, value),
             EffectInstance::Lowpass(e) => e.set_param(index, value),
             EffectInstance::Bitcrush(e) => e.set_param(index, value),
         }
@@ -498,23 +541,13 @@ pub struct TrackEffect {
 }
 
 impl TrackEffect {
-    /// The default effect for track row `row` (`0..16`). Alternates the two
-    /// kinds and spreads parameters by row so the sequencer plays with
-    /// audible per-track variety before the 2c assignment UI exists.
-    pub fn default_for_row(row: usize) -> Self {
-        let t = row as f32 / 15.0;
-        if row.is_multiple_of(2) {
-            let cutoff = 300.0 * (12_000.0_f32 / 300.0).powf(t);
-            TrackEffect {
-                kind: EffectKind::Lowpass,
-                params: [cutoff, 0.15, 0.0, 0.0],
-            }
-        } else {
-            let bits = 3.0 + t * 11.0;
-            TrackEffect {
-                kind: EffectKind::Bitcrush,
-                params: [bits, 1.0, 0.0, 0.0],
-            }
+    /// The default effect for a track row — no effect. Audio passes through
+    /// the track unchanged. Users assign an effect kind via the editor's
+    /// dropdown.
+    pub fn default_for_row(_row: usize) -> Self {
+        TrackEffect {
+            kind: EffectKind::None,
+            params: [0.0; MAX_EFFECT_PARAMS],
         }
     }
 }
@@ -659,9 +692,29 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 2);
+        assert_eq!(EffectKind::ALL.len(), 3);
+        assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Lowpass.name(), "Lowpass");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
+    }
+
+    #[test]
+    fn none_effect_is_a_passthrough() {
+        let mut e = NoneEffect::new();
+        assert_eq!(e.process_sample(0.5, -0.3), (0.5, -0.3));
+        assert_eq!(e.parameters().len(), 0);
+        e.set_param(0, 1.0); // no-op
+        e.set_sample_rate(48_000.0); // no-op
+        e.reset(); // no-op
+    }
+
+    #[test]
+    fn default_params_for_kind_none_is_all_zero() {
+        assert_eq!(
+            default_params_for_kind(EffectKind::None),
+            [0.0; MAX_EFFECT_PARAMS]
+        );
+        assert_eq!(param_count(EffectKind::None), 0);
     }
 
     #[test]
@@ -720,11 +773,12 @@ mod tests {
     }
 
     #[test]
-    fn default_for_row_varies_and_exercises_both_kinds() {
+    fn default_for_row_is_none_for_every_track() {
+        // Every track defaults to the passthrough None effect; users assign
+        // an effect kind via the editor's dropdown.
         let config: [TrackEffect; 16] = std::array::from_fn(TrackEffect::default_for_row);
-        assert!(config.iter().any(|t| t.kind == EffectKind::Lowpass));
-        assert!(config.iter().any(|t| t.kind == EffectKind::Bitcrush));
-        assert!(config.iter().any(|t| *t != config[0]));
+        assert!(config.iter().all(|t| t.kind == EffectKind::None));
+        assert!(config.iter().all(|t| t.params == [0.0; MAX_EFFECT_PARAMS]));
     }
 
     #[test]

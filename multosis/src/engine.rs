@@ -498,8 +498,13 @@ mod tests {
     fn engine_applies_modulation() {
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
+        // Default effects are now `None` (passthrough); set every track to
+        // Lowpass so the modulation has an audible parameter to sweep.
         let effect_cfg: [crate::effects::TrackEffect; ROWS] =
-            std::array::from_fn(crate::effects::TrackEffect::default_for_row);
+            std::array::from_fn(|_| crate::effects::TrackEffect {
+                kind: crate::effects::EffectKind::Lowpass,
+                params: [2_000.0, 0.15, 0.0, 0.0],
+            });
         engine.set_effects(&effect_cfg);
         let mod_cfg: [crate::modulation::TrackModulation; ROWS] =
             std::array::from_fn(crate::modulation::TrackModulation::default_for_row);
