@@ -383,8 +383,10 @@ impl Effect for BitcrushEffect {
     }
 }
 
-/// A passthrough "no-effect" — used when a track has no effect assigned.
-/// Audio passes through unchanged; declares no modulatable parameters.
+/// A silent "no-effect" — used when a track has no effect assigned. The row
+/// still occupies a lane and the propagation engine still lights its cells,
+/// but the lane contributes nothing to the wet sum (an unassigned track has
+/// no audio to forward). Declares no modulatable parameters.
 pub struct NoneEffect;
 
 impl NoneEffect {
@@ -400,8 +402,8 @@ impl Default for NoneEffect {
 }
 
 impl Effect for NoneEffect {
-    fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
-        (left, right)
+    fn process_sample(&mut self, _left: f32, _right: f32) -> (f32, f32) {
+        (0.0, 0.0)
     }
 
     fn set_sample_rate(&mut self, _sample_rate: f32) {}
@@ -699,9 +701,12 @@ mod tests {
     }
 
     #[test]
-    fn none_effect_is_a_passthrough() {
+    fn none_effect_outputs_silence() {
+        // An unassigned track must not forward audio: a row with no effect
+        // contributes nothing to the wet sum, regardless of input level.
         let mut e = NoneEffect::new();
-        assert_eq!(e.process_sample(0.5, -0.3), (0.5, -0.3));
+        assert_eq!(e.process_sample(0.5, -0.3), (0.0, 0.0));
+        assert_eq!(e.process_sample(1.0, 1.0), (0.0, 0.0));
         assert_eq!(e.parameters().len(), 0);
         e.set_param(0, 1.0); // no-op
         e.set_sample_rate(48_000.0); // no-op

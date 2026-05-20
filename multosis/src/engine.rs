@@ -385,9 +385,17 @@ mod tests {
     fn process_arms_and_produces_wet_signal() {
         // Playing, default grid, a short step: once the clock crosses its
         // first boundary the start cells arm, rows become active, and the
-        // fully-wet output is no longer silent.
+        // fully-wet output is no longer silent. The default config has every
+        // row set to EffectKind::None (which intentionally outputs silence
+        // for an unassigned lane), so install a real effect on row 0 first.
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
+        let mut effects = [TrackEffect::default_for_row(0); ROWS];
+        effects[0] = TrackEffect {
+            kind: crate::effects::EffectKind::Lowpass,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Lowpass),
+        };
+        engine.set_effects(&effects);
         let grid = Grid::default_routing();
         let mut left = [0.3_f32; 128];
         let mut right = [0.3_f32; 128];
