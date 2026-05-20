@@ -371,8 +371,11 @@ impl MultosisWindow {
                 self.reset_request
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            // Mix/Output drags are begun in on_event's ButtonPressed arm.
-            ToolbarControl::Mix | ToolbarControl::Output => {}
+            // Slider drags are begun in on_event's ButtonPressed arm.
+            ToolbarControl::Mix
+            | ToolbarControl::Output
+            | ToolbarControl::CompThreshold
+            | ToolbarControl::CompRatio => {}
         }
     }
 
@@ -406,6 +409,10 @@ impl MultosisWindow {
         match ctrl {
             ToolbarControl::Mix => self.params.mix.unmodulated_normalized_value(),
             ToolbarControl::Output => self.params.output_gain.unmodulated_normalized_value(),
+            ToolbarControl::CompThreshold => {
+                self.params.comp_threshold.unmodulated_normalized_value()
+            }
+            ToolbarControl::CompRatio => self.params.comp_ratio.unmodulated_normalized_value(),
             _ => 0.0,
         }
     }
@@ -416,6 +423,10 @@ impl MultosisWindow {
         match ctrl {
             ToolbarControl::Mix => setter.begin_set_parameter(&self.params.mix),
             ToolbarControl::Output => setter.begin_set_parameter(&self.params.output_gain),
+            ToolbarControl::CompThreshold => {
+                setter.begin_set_parameter(&self.params.comp_threshold)
+            }
+            ToolbarControl::CompRatio => setter.begin_set_parameter(&self.params.comp_ratio),
             _ => {}
         }
     }
@@ -426,12 +437,14 @@ impl MultosisWindow {
         match ctrl {
             ToolbarControl::Mix => setter.end_set_parameter(&self.params.mix),
             ToolbarControl::Output => setter.end_set_parameter(&self.params.output_gain),
+            ToolbarControl::CompThreshold => setter.end_set_parameter(&self.params.comp_threshold),
+            ToolbarControl::CompRatio => setter.end_set_parameter(&self.params.comp_ratio),
             _ => {}
         }
     }
 
     /// Reset a toolbar slider to its default value (double-click handler).
-    /// Mix → 1.0 (100%); Output → 0 dB.
+    /// Mix → 100%; Output → 0 dB; Comp Threshold → −6 dB; Comp Ratio → 4:1.
     fn reset_toolbar_slider(&self, ctrl: ToolbarControl) {
         let setter = ParamSetter::new(self.gui_context.as_ref());
         match ctrl {
@@ -445,6 +458,16 @@ impl MultosisWindow {
                 setter.set_parameter(&self.params.output_gain, nih_plug::util::db_to_gain(0.0));
                 setter.end_set_parameter(&self.params.output_gain);
             }
+            ToolbarControl::CompThreshold => {
+                setter.begin_set_parameter(&self.params.comp_threshold);
+                setter.set_parameter(&self.params.comp_threshold, -6.0);
+                setter.end_set_parameter(&self.params.comp_threshold);
+            }
+            ToolbarControl::CompRatio => {
+                setter.begin_set_parameter(&self.params.comp_ratio);
+                setter.set_parameter(&self.params.comp_ratio, 4.0);
+                setter.end_set_parameter(&self.params.comp_ratio);
+            }
             _ => {}
         }
     }
@@ -457,6 +480,12 @@ impl MultosisWindow {
             ToolbarControl::Mix => setter.set_parameter_normalized(&self.params.mix, norm),
             ToolbarControl::Output => {
                 setter.set_parameter_normalized(&self.params.output_gain, norm)
+            }
+            ToolbarControl::CompThreshold => {
+                setter.set_parameter_normalized(&self.params.comp_threshold, norm)
+            }
+            ToolbarControl::CompRatio => {
+                setter.set_parameter_normalized(&self.params.comp_ratio, norm)
             }
             _ => {}
         }
@@ -1231,7 +1260,12 @@ impl baseview::WindowHandler for MultosisWindow {
                     return baseview::EventStatus::Captured;
                 }
                 match toolbar::toolbar_hit(px, py, self.scale_factor) {
-                    Some(ctrl @ (ToolbarControl::Mix | ToolbarControl::Output)) => {
+                    Some(
+                        ctrl @ (ToolbarControl::Mix
+                        | ToolbarControl::Output
+                        | ToolbarControl::CompThreshold
+                        | ToolbarControl::CompRatio),
+                    ) => {
                         if self.toolbar_click.check_and_update(ctrl) {
                             self.reset_toolbar_slider(ctrl);
                         } else {

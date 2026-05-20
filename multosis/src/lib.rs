@@ -5,6 +5,7 @@
 //! propagation engine, and the step clock. No GUI, no audio, no nih-plug.
 
 pub mod clock;
+pub mod compressor;
 pub mod editor;
 pub mod effects;
 pub mod engine;
@@ -57,6 +58,15 @@ pub struct MultosisParams {
     #[id = "output_gain"]
     pub output_gain: FloatParam,
 
+    /// Wet-bus compressor threshold (dBFS). The compressor tames the +N×dry
+    /// peaks produced by many parallel-row effect outputs summing.
+    #[id = "comp_threshold"]
+    pub comp_threshold: FloatParam,
+
+    /// Wet-bus compressor ratio (≥ 1.0; 1.0 = bypass).
+    #[id = "comp_ratio"]
+    pub comp_ratio: FloatParam,
+
     /// When on, a dead-ended wavefront re-arms the start cells.
     #[id = "auto_restart"]
     pub auto_restart: BoolParam,
@@ -91,6 +101,27 @@ impl Default for MultosisParams {
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_gain_to_db(1))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            comp_threshold: FloatParam::new(
+                "Comp Threshold",
+                -6.0,
+                FloatRange::Linear {
+                    min: -24.0,
+                    max: 0.0,
+                },
+            )
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+            comp_ratio: FloatParam::new(
+                "Comp Ratio",
+                4.0,
+                FloatRange::Skewed {
+                    min: 1.0,
+                    max: 20.0,
+                    factor: FloatRange::skew_factor(-1.0),
+                },
+            )
+            .with_unit(":1")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
             auto_restart: BoolParam::new("Auto Restart", true),
         }
     }
@@ -257,6 +288,11 @@ impl Plugin for Multosis {
             crate::clock::samples_per_step(self.params.speed.value(), bpm, self.sample_rate as f64);
         let mix = self.params.mix.value();
         let auto_restart = self.params.auto_restart.value();
+        // Bridge the wet-bus compressor's user-facing params each block.
+        self.engine.set_compressor(
+            self.params.comp_threshold.value(),
+            self.params.comp_ratio.value(),
+        );
 
         let n = buffer.samples();
         let channels = buffer.as_slice();

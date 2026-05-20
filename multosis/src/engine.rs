@@ -4,6 +4,7 @@
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §6.
 
 use crate::clock::StepClock;
+use crate::compressor::Compressor;
 use crate::effects::{Effect, EffectInstance, TrackEffect};
 use crate::grid::{Grid, COLS, ROWS};
 use crate::modulation::{Modulation, TrackModulation};
@@ -35,6 +36,10 @@ pub struct AudioEngine {
     /// post-tick set is diffed against its pre-tick set, then consumed by the
     /// next block's `Modulation::update_block` for the `CellLight` trigger.
     pending_cell_lights: u16,
+    /// Wet-bus compressor (soft-knee peak) — tames the +N×dry peak that the
+    /// per-row effect sum produces when many rows are active simultaneously.
+    /// Inserted between the per-sample wet sum and the dry/wet mix.
+    compressor: Compressor,
     sample_rate: f32,
 }
 
@@ -56,6 +61,7 @@ impl AudioEngine {
             modulation: Modulation::new(),
             last_active: 0,
             pending_cell_lights: 0,
+            compressor: Compressor::new(),
             sample_rate: 48_000.0,
         }
     }
@@ -96,6 +102,13 @@ impl AudioEngine {
         for e in &mut self.effects {
             e.set_sample_rate(sample_rate);
         }
+        self.compressor.set_sample_rate(sample_rate);
+    }
+
+    /// Update the wet-bus compressor's user-facing parameters. `threshold_db`
+    /// is in dBFS (negative); `ratio` is ≥ 1.0.
+    pub fn set_compressor(&mut self, threshold_db: f32, ratio: f32) {
+        self.compressor.set_params(threshold_db, ratio);
     }
 
     /// Reset the sequence, clock, and filter state. Called on the transport
@@ -107,6 +120,7 @@ impl AudioEngine {
             e.reset();
         }
         self.modulation.reset();
+        self.compressor.reset();
         self.last_active = 0;
         self.pending_cell_lights = 0;
     }
@@ -238,8 +252,10 @@ impl AudioEngine {
             for i in cursor..seg_end {
                 let (dry_l, dry_r) = (left[i], right[i]);
                 let (wet_l, wet_r) = self.process_sample(dry_l, dry_r, active);
-                left[i] = dry_l + (wet_l - dry_l) * mix;
-                right[i] = dry_r + (wet_r - dry_r) * mix;
+                // Tame the parallel-row sum on the wet bus, then mix dry/wet.
+                let (cw_l, cw_r) = self.compressor.process_sample(wet_l, wet_r);
+                left[i] = dry_l + (cw_l - dry_l) * mix;
+                right[i] = dry_r + (cw_r - dry_r) * mix;
             }
             cursor = seg_end;
             if bi < n_boundaries {

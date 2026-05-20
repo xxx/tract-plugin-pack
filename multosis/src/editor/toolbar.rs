@@ -21,28 +21,38 @@ pub enum ToolbarControl {
     Mix,
     /// Drag slider — output gain.
     Output,
+    /// Drag slider — wet-bus compressor threshold (dBFS).
+    CompThreshold,
+    /// Drag slider — wet-bus compressor ratio.
+    CompRatio,
     /// Resets the sequence.
     Reset,
 }
 
 impl ToolbarControl {
-    /// The five controls, left to right.
-    pub const ALL: [ToolbarControl; 5] = [
+    /// The seven controls, left to right.
+    pub const ALL: [ToolbarControl; 7] = [
         ToolbarControl::Speed,
         ToolbarControl::AutoRestart,
         ToolbarControl::Mix,
         ToolbarControl::Output,
+        ToolbarControl::CompThreshold,
+        ToolbarControl::CompRatio,
         ToolbarControl::Reset,
     ];
 
-    /// Logical `(x, width)` of this control. The row is 1050 logical wide.
+    /// Logical `(x, width)` of this control. The row is 1050 logical wide
+    /// (content span 1044, with the 6 px lead). Seven equal-width controls
+    /// with 6 px gaps fit exactly.
     fn logical_x_w(self) -> (f32, f32) {
         match self {
-            ToolbarControl::Speed => (6.0, 204.0),
-            ToolbarControl::AutoRestart => (216.0, 204.0),
-            ToolbarControl::Mix => (426.0, 204.0),
-            ToolbarControl::Output => (636.0, 204.0),
-            ToolbarControl::Reset => (846.0, 204.0),
+            ToolbarControl::Speed => (6.0, 144.0),
+            ToolbarControl::AutoRestart => (156.0, 144.0),
+            ToolbarControl::Mix => (306.0, 144.0),
+            ToolbarControl::Output => (456.0, 144.0),
+            ToolbarControl::CompThreshold => (606.0, 144.0),
+            ToolbarControl::CompRatio => (756.0, 144.0),
+            ToolbarControl::Reset => (906.0, 144.0),
         }
     }
 }
@@ -226,6 +236,40 @@ pub fn draw_toolbar(
                     h,
                     "Out",
                     &format!("{db:.1} dB"),
+                    norm,
+                    None,
+                    false,
+                );
+            }
+            ToolbarControl::CompThreshold => {
+                let norm = params.comp_threshold.unmodulated_normalized_value();
+                let db = params.comp_threshold.value();
+                widgets::draw_slider(
+                    pixmap,
+                    tr,
+                    x,
+                    y,
+                    w,
+                    h,
+                    "Thresh",
+                    &format!("{db:.1} dB"),
+                    norm,
+                    None,
+                    false,
+                );
+            }
+            ToolbarControl::CompRatio => {
+                let norm = params.comp_ratio.unmodulated_normalized_value();
+                let ratio = params.comp_ratio.value();
+                widgets::draw_slider(
+                    pixmap,
+                    tr,
+                    x,
+                    y,
+                    w,
+                    h,
+                    "Ratio",
+                    &format!("{ratio:.1}:1"),
                     norm,
                     None,
                     false,
