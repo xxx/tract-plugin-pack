@@ -630,6 +630,14 @@ impl MultosisWindow {
             self.kind_dropdown.is_open_for(EffectAction::Trigger),
             self.scale_factor,
         );
+        // Active MSEG's sync/length controls (sit on the modulation row to
+        // the right of the depth dial).
+        effect_editor::draw_mseg_controls(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            &modu.msegs[sel],
+            self.scale_factor,
+        );
     }
 
     /// Handle a left press while in `View::Effect`. Returns `true` if the
@@ -776,8 +784,84 @@ impl MultosisWindow {
                     return false;
                 }
             }
+            EffectHit::MsegSync(seg) => {
+                self.apply_mseg_sync(seg);
+            }
+            EffectHit::MsegLength => {
+                let norm = self.active_mseg_length_norm();
+                self.effect_dial_drag
+                    .begin_drag(EffectHit::MsegLength, norm, false);
+            }
         }
         true
+    }
+
+    /// The normalized 0..1 position of the active MSEG's length slider, given
+    /// its current sync mode (the slider range and scaling depend on it).
+    fn active_mseg_length_norm(&self) -> f32 {
+        let modu = self.selected_track_modulation();
+        let sel = self.selected_mseg.min(2);
+        let mseg = modu.msegs[sel];
+        match mseg.sync_mode {
+            tiny_skia_widgets::SyncMode::Time => effects::value_to_norm(
+                mseg.time_seconds,
+                effect_editor::MSEG_LENGTH_TIME_MIN,
+                effect_editor::MSEG_LENGTH_TIME_MAX,
+                effects::ParamScaling::Log,
+            ),
+            tiny_skia_widgets::SyncMode::Beat => effects::value_to_norm(
+                mseg.beats,
+                effect_editor::MSEG_LENGTH_BEATS_MIN,
+                effect_editor::MSEG_LENGTH_BEATS_MAX,
+                effects::ParamScaling::Log,
+            ),
+        }
+    }
+
+    /// Switch the active MSEG's sync mode to `seg` (0 = Time, 1 = Beat).
+    /// Both `time_seconds` and `beats` persist independently on the MsegData;
+    /// switching just changes which field the engine consults.
+    fn apply_mseg_sync(&mut self, seg: usize) {
+        let new_mode = if seg == 0 {
+            tiny_skia_widgets::SyncMode::Time
+        } else {
+            tiny_skia_widgets::SyncMode::Beat
+        };
+        let row = self.selected_track;
+        let k = self.selected_mseg.min(2);
+        if let Ok(mut modu) = self.params.track_modulation.lock() {
+            modu[row].msegs[k].sync_mode = new_mode;
+        }
+        self.mark_config_dirty();
+    }
+
+    /// Apply a length-slider drag value (norm) to the active MSEG. Writes
+    /// `beats` or `time_seconds` depending on the active sync mode.
+    fn apply_mseg_length_drag(&mut self, norm: f32) {
+        let row = self.selected_track;
+        let k = self.selected_mseg.min(2);
+        if let Ok(mut modu) = self.params.track_modulation.lock() {
+            let mseg = &mut modu[row].msegs[k];
+            match mseg.sync_mode {
+                tiny_skia_widgets::SyncMode::Time => {
+                    mseg.time_seconds = effects::norm_to_value(
+                        norm,
+                        effect_editor::MSEG_LENGTH_TIME_MIN,
+                        effect_editor::MSEG_LENGTH_TIME_MAX,
+                        effects::ParamScaling::Log,
+                    );
+                }
+                tiny_skia_widgets::SyncMode::Beat => {
+                    mseg.beats = effects::norm_to_value(
+                        norm,
+                        effect_editor::MSEG_LENGTH_BEATS_MIN,
+                        effect_editor::MSEG_LENGTH_BEATS_MAX,
+                        effects::ParamScaling::Log,
+                    );
+                }
+            }
+        }
+        self.mark_config_dirty();
     }
 
     /// The parameter count of the currently selected track's effect kind.
@@ -1137,6 +1221,12 @@ impl baseview::WindowHandler for MultosisWindow {
                         );
                         if let Some(norm) = self.effect_dial_drag.update_drag(shift, current) {
                             self.apply_trigger_rate_drag(norm);
+                        }
+                    }
+                    Some(EffectHit::MsegLength) => {
+                        let current = self.active_mseg_length_norm();
+                        if let Some(norm) = self.effect_dial_drag.update_drag(shift, current) {
+                            self.apply_mseg_length_drag(norm);
                         }
                     }
                     _ => {}

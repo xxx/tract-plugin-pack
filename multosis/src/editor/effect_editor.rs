@@ -39,6 +39,10 @@ pub struct EffectLayout {
     pub trigger: (f32, f32, f32, f32),
     /// Trigger-rate dial — only hot when the source is `FreeHz`.
     pub trigger_rate: (f32, f32, f32, f32),
+    /// Active-MSEG sync-mode selector (Time / Beat).
+    pub mseg_sync: (f32, f32, f32, f32),
+    /// Active-MSEG length slider (beats or seconds, depending on sync mode).
+    pub mseg_length: (f32, f32, f32, f32),
 }
 
 /// Compute the effect-editor layout at `scale`.
@@ -65,6 +69,9 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
     // Depth dial: 60×60 and raised to oy+144 so its value text doesn't fall
     // into the MSEG pane below (which starts at oy+208).
     let depth = l(ox + 664.0, oy + 144.0, 60.0, 60.0);
+    // Active-MSEG sync + length, on the modulation row to the right of depth.
+    let mseg_sync = l(ox + 740.0, oy + 168.0, 110.0, 26.0);
+    let mseg_length = l(ox + 860.0, oy + 168.0, 140.0, 26.0);
     let mseg_pane = l(ox, oy + 208.0, mw - inset, 422.0);
     EffectLayout {
         back,
@@ -76,6 +83,8 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
         mseg_pane,
         trigger,
         trigger_rate,
+        mseg_sync,
+        mseg_length,
     }
 }
 
@@ -99,6 +108,10 @@ pub enum EffectHit {
     Trigger,
     /// The per-track trigger-rate dial (only hot when the source is FreeHz).
     TriggerRate,
+    /// Active-MSEG sync-mode selector segment (0 = Time, 1 = Beat).
+    MsegSync(usize),
+    /// Active-MSEG length slider (its scale depends on the sync mode).
+    MsegLength,
 }
 
 /// The effect-editor control under physical-pixel point `(px, py)` at `scale`,
@@ -137,6 +150,15 @@ pub fn effect_hit(
     if px >= sx && px < sx + sw && py >= sy && py < sy + sh {
         let seg = (((px - sx) / (sw / 3.0)) as usize).min(2);
         return Some(EffectHit::MsegSelector(seg));
+    }
+    // Active-MSEG sync mode (2-segment selector) + length slider.
+    let (sx, sy, sw, sh) = lay.mseg_sync;
+    if px >= sx && px < sx + sw && py >= sy && py < sy + sh {
+        let seg = (((px - sx) / (sw / 2.0)) as usize).min(1);
+        return Some(EffectHit::MsegSync(seg));
+    }
+    if in_rect(lay.mseg_length, px, py) {
+        return Some(EffectHit::MsegLength);
     }
     // Target dropdown + depth dial only exist for an assignable MSEG.
     if selected_mseg != 0 {
@@ -286,6 +308,75 @@ pub fn trigger_to_item(src: TriggerSource) -> usize {
 /// The trigger-rate dial range (Hz).
 pub const TRIGGER_RATE_MIN_HZ: f32 = 0.05;
 pub const TRIGGER_RATE_MAX_HZ: f32 = 20.0;
+
+/// Length slider range when the active MSEG is Beat-synced (beats per cycle).
+pub const MSEG_LENGTH_BEATS_MIN: f32 = 1.0;
+pub const MSEG_LENGTH_BEATS_MAX: f32 = 64.0;
+/// Length slider range when the active MSEG is Time-synced (seconds per cycle).
+pub const MSEG_LENGTH_TIME_MIN: f32 = 0.05;
+pub const MSEG_LENGTH_TIME_MAX: f32 = 32.0;
+
+/// Draw the active-MSEG sync-mode selector + length slider on the modulation
+/// row. Reads sync mode + length from `mseg`.
+pub fn draw_mseg_controls(
+    pixmap: &mut Pixmap,
+    tr: &mut widgets::TextRenderer,
+    mseg: &tiny_skia_widgets::MsegData,
+    scale: f32,
+) {
+    let lay = effect_layout(scale);
+    let active = match mseg.sync_mode {
+        tiny_skia_widgets::SyncMode::Time => 0,
+        tiny_skia_widgets::SyncMode::Beat => 1,
+    };
+    widgets::controls::draw_stepped_selector(
+        pixmap,
+        tr,
+        lay.mseg_sync.0,
+        lay.mseg_sync.1,
+        lay.mseg_sync.2,
+        lay.mseg_sync.3,
+        &["Time", "Beat"],
+        active,
+    );
+    let (norm, label) = match mseg.sync_mode {
+        tiny_skia_widgets::SyncMode::Time => {
+            let v = mseg.time_seconds;
+            let n = crate::effects::value_to_norm(
+                v,
+                MSEG_LENGTH_TIME_MIN,
+                MSEG_LENGTH_TIME_MAX,
+                crate::effects::ParamScaling::Log,
+            );
+            (n, format!("{v:.2} s"))
+        }
+        tiny_skia_widgets::SyncMode::Beat => {
+            let v = mseg.beats;
+            let n = crate::effects::value_to_norm(
+                v,
+                MSEG_LENGTH_BEATS_MIN,
+                MSEG_LENGTH_BEATS_MAX,
+                crate::effects::ParamScaling::Log,
+            );
+            let rounded = v.round() as i32;
+            let suffix = if rounded == 1 { "" } else { "s" };
+            (n, format!("{rounded} beat{suffix}"))
+        }
+    };
+    widgets::draw_slider(
+        pixmap,
+        tr,
+        lay.mseg_length.0,
+        lay.mseg_length.1,
+        lay.mseg_length.2,
+        lay.mseg_length.3,
+        "Length",
+        &label,
+        norm,
+        None,
+        false,
+    );
+}
 
 /// Draw a thin vertical playhead line at `phase` (0..1) over the MSEG editor's
 /// plot area. `mseg_pane` is the same rect passed to `draw_mseg`. Drawn last
