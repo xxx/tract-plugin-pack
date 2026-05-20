@@ -69,9 +69,9 @@ enum View {
 }
 
 /// Which dropdown an `EffectAction`-tagged `DropdownState` event refers to.
-/// The effect-kind dropdown (`Kind`) and the modulation target dropdown
-/// (`Target`) share a single `DropdownState<EffectAction>` — only one is open
-/// at a time, and the payload distinguishes which trigger opened it.
+/// The effect-kind, modulation-target, and per-track trigger-source dropdowns
+/// share a single `DropdownState<EffectAction>` — only one is open at a time,
+/// and the payload distinguishes which trigger opened it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum EffectAction {
     Kind,

@@ -154,7 +154,12 @@ impl Modulation {
     }
 
     /// Replace the per-track modulation config (bridged from persisted state
-    /// at init — off the audio thread).
+    /// at init, and again on each live edit — off the audio thread).
+    ///
+    /// Runtime state (`phases`, `hz_phases`, `prev_active`, `amplitudes`) is
+    /// deliberately preserved across config changes so editing a parameter or
+    /// switching trigger source mid-playback does not glitch the modulation.
+    /// Only `reset()` clears that state.
     pub fn set_config(&mut self, config: &[TrackModulation; ROWS]) {
         self.config = config.clone();
     }

@@ -95,11 +95,11 @@ All of this is allocation-free, lock-free, no `unsafe`. The arrays are stack-siz
 
 ### §3.1 The plumbing into `AudioEngine::process`
 
-`AudioEngine::process` already has `active` (the per-segment row mask) and stores `last_active` at the end. `Modulation::update_block` runs **before** the engine's segment loop, so it gets the **previous block's last active mask** — exactly what we want for cell-light: a row that lit *this* block fires *this* block (because `prev_active` inside `Modulation` was the mask at the end of the previous block; the engine passes the *current* `last_active` field — which is last block's value, since this block's update hasn't run yet — as `active_mask`).
-
-Concretely: at the top of `AudioEngine::process`, before computing block-start `active`, the engine calls
+`AudioEngine::process` already has `active` (the per-segment row mask) and stores `last_active` at the end. `Modulation::update_block` runs **before** the engine's segment loop, with the engine's `last_active` field passed as `active_mask`. Concretely: at the top of `AudioEngine::process`, the engine calls
 `self.modulation.update_block(n, bpm, sr, active_mask = self.last_active, &mut self.effects, &self.track_effects)`.
 This is the only `process()`-side change; `last_active` is read in the same place 2b reads it.
+
+**Cell-light latency.** Because the engine passes the **previous** block's final mask, a row whose first lit segment occurred during block N fires at the **start of block N+1** — up to one block of latency (≈1.3 ms at 64-sample blocks, ≈21 ms at 1024-sample blocks). This is intentional: the fire-decision lives at the natural call site (top of `process`) and the modulation engine is already block-resolution. A future polish can move edge detection into the segment loop for sample-accurate response if the latency turns out to be musically problematic.
 
 For the first block ever (`last_active = 0`), no row will fire on cell-light — correct: nothing was active before.
 
