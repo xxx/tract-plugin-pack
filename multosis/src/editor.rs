@@ -471,20 +471,9 @@ impl MultosisWindow {
         // MODULATION section.
         let modu = self.selected_track_modulation();
         let sel = self.selected_mseg.min(2);
-        // Ghosts (inactive MSEGs) first, behind the active curve.
-        for m in 0..3 {
-            if m != sel {
-                widgets::mseg::draw_mseg_ghost(
-                    &mut self.surface.pixmap,
-                    lay.mseg_pane,
-                    &modu.msegs[m],
-                    &self.mseg_edit,
-                    self.scale_factor,
-                    0x5A5040FF,
-                );
-            }
-        }
-        // Active MSEG.
+        // Active MSEG first — `draw_mseg` opens with an opaque canvas fill
+        // that would otherwise wipe the ghosts. Ghosts are then drawn on top
+        // at low alpha (≈ 38%) so they read as faint context, not foreground.
         widgets::mseg::draw_mseg(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
@@ -493,6 +482,18 @@ impl MultosisWindow {
             &self.mseg_edit,
             self.scale_factor,
         );
+        for m in 0..3 {
+            if m != sel {
+                widgets::mseg::draw_mseg_ghost(
+                    &mut self.surface.pixmap,
+                    lay.mseg_pane,
+                    &modu.msegs[m],
+                    &self.mseg_edit,
+                    self.scale_factor,
+                    0x5A504060,
+                );
+            }
+        }
         // Selector + target + depth (when on an assignable MSEG).
         let (target, depth) = if sel == 0 {
             (None, 0.0)
@@ -705,15 +706,24 @@ impl MultosisWindow {
                 );
             }
             View::Effect => {
-                // The grid cache already paints the full window background;
-                // reuse it as the backdrop, then draw the effect editor over
-                // the main area.
-                let grid = self.params.grid.lock().map(|g| *g).unwrap_or_default();
-                self.grid_cache.update(&grid, self.scale_factor);
-                self.surface
-                    .pixmap
-                    .data_mut()
-                    .copy_from_slice(self.grid_cache.pixmap().data());
+                // Paint the window background, then cover the main area
+                // (right of the track panel, below the toolbar) with the
+                // editor backdrop so no grid cells bleed through between the
+                // effect-editor controls. The toolbar and track listing are
+                // drawn fresh below.
+                widgets::fill_pixmap_opaque(&mut self.surface.pixmap, widgets::color_bg());
+                let ox = (grid_view::MARGIN + grid_view::TRACK_PANEL_W) * self.scale_factor;
+                let oy = (grid_view::STATUS_H + grid_view::GUTTER) * self.scale_factor;
+                let mw = self.physical_width as f32 - ox - grid_view::MARGIN * self.scale_factor;
+                let mh = self.physical_height as f32 - oy - grid_view::MARGIN * self.scale_factor;
+                widgets::draw_rect(
+                    &mut self.surface.pixmap,
+                    ox,
+                    oy,
+                    mw,
+                    mh,
+                    widgets::color_control_bg(),
+                );
                 self.draw_effect_view();
             }
         }
