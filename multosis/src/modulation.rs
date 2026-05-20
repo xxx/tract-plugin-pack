@@ -4,7 +4,9 @@
 //!
 //! See `docs/superpowers/specs/2026-05-19-multosis-phase-2b-design.md`.
 
-use crate::effects::{Effect, EffectInstance, ParamSpec, TrackEffect};
+use crate::effects::{
+    norm_to_value, value_to_norm, Effect, EffectInstance, ParamScaling, ParamSpec, TrackEffect,
+};
 use tiny_skia_widgets::{advance, value_at_phase, MsegData, PlayMode, SyncMode};
 
 /// The number of track rows. Matches `crate::grid::ROWS`.
@@ -128,10 +130,25 @@ pub fn mseg_phase_delta(mseg: &MsegData, block_len: usize, bpm: f64, sample_rate
 /// `depth` is the bipolar (−1..1) modulation depth. The MSEG midline (0.5)
 /// leaves the parameter at `base`; the result is clamped to the parameter's
 /// range.
+///
+/// Honours `spec.scaling`: Linear params modulate in value-space (`depth` is
+/// a fraction of the full value range); Log params modulate in norm-space
+/// (`depth` is a fraction of the log range), so a log-scaled cutoff sweeps
+/// audibly even-handed across its decades instead of being clamped at the
+/// dark end half the time.
 pub fn assignable_value(mseg_value: f32, base: f32, depth: f32, spec: ParamSpec) -> f32 {
     let bipolar = mseg_value * 2.0 - 1.0;
-    let deviation = bipolar * depth * (spec.max - spec.min);
-    (base + deviation).clamp(spec.min, spec.max)
+    match spec.scaling {
+        ParamScaling::Linear => {
+            let deviation = bipolar * depth * (spec.max - spec.min);
+            (base + deviation).clamp(spec.min, spec.max)
+        }
+        ParamScaling::Log => {
+            let norm_base = value_to_norm(base, spec.min, spec.max, ParamScaling::Log);
+            let norm_eff = (norm_base + bipolar * depth).clamp(0.0, 1.0);
+            norm_to_value(norm_eff, spec.min, spec.max, ParamScaling::Log)
+        }
+    }
 }
 
 /// The modulation runtime owned by the audio engine — the per-track config,
@@ -434,6 +451,32 @@ mod tests {
                 assert!((5.0..=9.0).contains(&out), "v {v} d {d} -> {out}");
             }
         }
+    }
+
+    #[test]
+    fn assignable_value_log_swings_in_norm_space() {
+        // A 20..20000 Hz log param at base 2000 has norm 0.667; depth 0.4
+        // means ±0.4 norm. So mseg 0 → norm 0.267 → ~126 Hz; mseg 1 → norm
+        // 1.067 clamped to 1.0 → 20000 Hz. The earlier linear formula gave
+        // ~20 Hz / ~9992 Hz for the same input (mostly clamped at the dark
+        // end, hence the "barely audible" complaint).
+        let spec = ParamSpec {
+            name: "Cutoff",
+            min: 20.0,
+            max: 20_000.0,
+            default: 2_000.0,
+            scaling: crate::effects::ParamScaling::Log,
+            format: crate::effects::ParamFormat::Hertz,
+        };
+        let lo = assignable_value(0.0, 2_000.0, 0.4, spec);
+        let mid = assignable_value(0.5, 2_000.0, 0.4, spec);
+        let hi = assignable_value(1.0, 2_000.0, 0.4, spec);
+        // Midline still equals the base, exactly.
+        assert!((mid - 2_000.0).abs() < 1e-3, "midline {mid}");
+        // Low end is audibly above the parameter floor — well above 20 Hz.
+        assert!(lo > 100.0 && lo < 200.0, "log low end {lo}");
+        // High end is the full max (clamped by `norm + depth > 1`).
+        assert!((hi - 20_000.0).abs() < 1e-3, "log high end {hi}");
     }
 
     #[test]
