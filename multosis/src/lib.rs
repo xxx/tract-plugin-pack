@@ -168,6 +168,7 @@ impl Plugin for Multosis {
             self.grid_handoff.clone(),
             self.reset_request.clone(),
             self.active_rows.clone(),
+            self.config_dirty.clone(),
         )
     }
 

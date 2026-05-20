@@ -8,7 +8,9 @@ use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::editor::effect_editor::EffectHit;
 use crate::editor::toolbar::{ToolbarControl, ToolbarOp};
+use crate::effects::{EffectKind, ParamSpec};
 use crate::grid::LoopRegion;
 use crate::handoff::GridHandoff;
 use crate::region::RegionSnapshot;
@@ -17,6 +19,7 @@ use crate::wavefront_display::WavefrontDisplay;
 use crate::MultosisParams;
 use tiny_skia_widgets as widgets;
 
+pub mod effect_editor;
 pub mod grid_view;
 pub mod toolbar;
 pub mod track_list;
@@ -64,9 +67,29 @@ enum View {
     Effect,
 }
 
+/// Which dropdown an `EffectAction`-tagged `DropdownState` event refers to.
+/// Today: the effect-kind dropdown (Kind) and the modulation target dropdown
+/// (Target, wired in Task 9).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EffectAction {
+    Kind,
+    #[allow(dead_code)]
+    Target,
+}
+
 /// Clamp a candidate selected-track index into `0..ROWS`.
 fn clamp_track(row: usize) -> usize {
     row.min(crate::grid::ROWS - 1)
+}
+
+/// Map a parameter `value` to `[0, 1]` against its spec range. Degenerate
+/// (max <= min) specs map to 0.
+fn normalize_param(value: f32, spec: ParamSpec) -> f32 {
+    if spec.max > spec.min {
+        ((value - spec.min) / (spec.max - spec.min)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// The baseview window handler — owns the surface and draws each frame.
@@ -101,6 +124,18 @@ struct MultosisWindow {
     view: View,
     /// The track the Effect view edits (`0..ROWS`).
     selected_track: usize,
+    /// Which MSEG slot the modulation section currently edits (0..3); 0 is the
+    /// always-on amplitude MSEG, 1/2 are assignable. Read by `effect_hit`; the
+    /// MODULATION-section UI is wired in Task 9.
+    selected_mseg: usize,
+    /// The effect editor's dropdown state — owns the open kind/target popup.
+    kind_dropdown: widgets::dropdown::DropdownState<EffectAction>,
+    /// The effect editor's parameter-dial drag state — one in-flight dial drag
+    /// at a time, tagged with the slot index via `EffectHit::Dial(i)`.
+    effect_dial_drag: widgets::DragState<EffectHit>,
+    /// Audio→GUI dirty flag: every edit (param dial, kind switch, …) sets it
+    /// so `process()` re-bridges the persisted config into the engine.
+    config_dirty: Arc<AtomicBool>,
 }
 
 impl MultosisWindow {
@@ -115,6 +150,7 @@ impl MultosisWindow {
         gui_context: Arc<dyn GuiContext>,
         reset_request: Arc<AtomicBool>,
         active_rows: Arc<AtomicU16>,
+        config_dirty: Arc<AtomicBool>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -143,6 +179,10 @@ impl MultosisWindow {
             grid_cache: grid_view::GridCache::new(pw, ph),
             view: View::Grid,
             selected_track: 0,
+            selected_mseg: 0,
+            kind_dropdown: widgets::dropdown::DropdownState::new(),
+            effect_dial_drag: widgets::DragState::new(),
+            config_dirty,
         }
     }
 
@@ -359,15 +399,119 @@ impl MultosisWindow {
         }
     }
 
-    /// The temporary "Back to Grid" button rect (physical px), used by both
-    /// the `View::Effect` draw arm and its press hit-test. Replaced by the
-    /// real editor bar in Task 8.
-    fn back_button_rect(&self) -> (f32, f32, f32, f32) {
-        let bx = (grid_view::MARGIN + grid_view::TRACK_PANEL_W) * self.scale_factor;
-        let by = (grid_view::STATUS_H + grid_view::GUTTER) * self.scale_factor;
-        let bw = 90.0 * self.scale_factor;
-        let bh = 26.0 * self.scale_factor;
-        (bx, by, bw, bh)
+    /// Mark the persisted effect/modulation config dirty so the audio thread
+    /// re-bridges it on the next process block.
+    fn mark_config_dirty(&self) {
+        self.config_dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// The persisted `TrackEffect` for the currently selected track, or its
+    /// row default if the mutex is contended.
+    fn selected_track_effect(&self) -> crate::effects::TrackEffect {
+        let row = self.selected_track;
+        if let Ok(cfg) = self.params.track_effects.lock() {
+            cfg[row]
+        } else {
+            crate::effects::TrackEffect::default_for_row(row)
+        }
+    }
+
+    /// Draw the effect editor (right of the track panel). The toolbar and
+    /// track listing are drawn separately in `draw`.
+    fn draw_effect_view(&mut self) {
+        let track = self.selected_track_effect();
+        effect_editor::draw_effect_section(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            &track,
+            self.selected_track,
+            self.kind_dropdown.is_open_for(EffectAction::Kind),
+            self.scale_factor,
+        );
+    }
+
+    /// Handle a left press while in `View::Effect`. Returns `true` if the
+    /// press hit a control owned by the effect editor (so the caller can stop
+    /// further routing).
+    fn on_effect_press(&mut self, px: f32, py: f32) -> bool {
+        let params = self.selected_track_param_count();
+        let Some(hit) =
+            effect_editor::effect_hit(px, py, self.scale_factor, params, self.selected_mseg)
+        else {
+            return false;
+        };
+        match hit {
+            EffectHit::Back => {
+                self.view = View::Grid;
+            }
+            EffectHit::Kind => {
+                let lay = effect_editor::effect_layout(self.scale_factor);
+                let items: Vec<&'static str> = effect_editor::kind_items();
+                let current = EffectKind::ALL
+                    .iter()
+                    .position(|k| *k == self.selected_track_effect().kind)
+                    .unwrap_or(0);
+                let win = (self.physical_width as f32, self.physical_height as f32);
+                self.kind_dropdown
+                    .open(EffectAction::Kind, lay.kind, &items, current, false, win);
+            }
+            EffectHit::Dial(i) => {
+                if let Some(spec) = self.param_spec(i) {
+                    let value = self.selected_track_effect().params[i];
+                    let norm = normalize_param(value, spec);
+                    self.effect_dial_drag
+                        .begin_drag(EffectHit::Dial(i), norm, false);
+                }
+            }
+            // Wired in Task 9.
+            EffectHit::MsegSelector(_) => {}
+            EffectHit::Target => {}
+            EffectHit::Depth => {}
+            EffectHit::MsegPane => {}
+        }
+        true
+    }
+
+    /// The parameter count of the currently selected track's effect kind.
+    fn selected_track_param_count(&self) -> usize {
+        crate::effects::param_count(self.selected_track_effect().kind)
+    }
+
+    /// The `ParamSpec` for slot `i` of the currently selected track's effect
+    /// kind, or `None` if the slot is out of range.
+    fn param_spec(&self, i: usize) -> Option<ParamSpec> {
+        use crate::effects::Effect;
+        let kind = self.selected_track_effect().kind;
+        let instance = crate::effects::EffectInstance::new(kind);
+        instance.parameters().get(i).copied()
+    }
+
+    /// Apply a dial drag's new normalized value to slot `i` of the currently
+    /// selected track's effect, marking config dirty.
+    fn apply_effect_dial(&mut self, i: usize, norm: f32) {
+        let Some(spec) = self.param_spec(i) else {
+            return;
+        };
+        let value = spec.min + norm.clamp(0.0, 1.0) * (spec.max - spec.min);
+        if let Ok(mut cfg) = self.params.track_effects.lock() {
+            cfg[self.selected_track].params[i] = value;
+        }
+        self.mark_config_dirty();
+    }
+
+    /// Apply a kind switch for the currently selected track: replace the kind,
+    /// reset the params to its defaults, and clamp the track's modulation
+    /// targets to the new arity. Marks config dirty.
+    fn apply_kind_switch(&mut self, kind: EffectKind) {
+        let row = self.selected_track;
+        if let Ok(mut cfg) = self.params.track_effects.lock() {
+            cfg[row].kind = kind;
+            cfg[row].params = crate::effects::default_params_for_kind(kind);
+        }
+        if let Ok(mut modu) = self.params.track_modulation.lock() {
+            modu[row].clamp_targets(crate::effects::param_count(kind));
+        }
+        self.mark_config_dirty();
     }
 
     fn draw(&mut self) {
@@ -394,27 +538,14 @@ impl MultosisWindow {
             View::Effect => {
                 // The grid cache already paints the full window background;
                 // reuse it as the backdrop, then draw the effect editor over
-                // the main area. (Task 8 replaces this with the real editor.)
+                // the main area.
                 let grid = self.params.grid.lock().map(|g| *g).unwrap_or_default();
                 self.grid_cache.update(&grid, self.scale_factor);
                 self.surface
                     .pixmap
                     .data_mut()
                     .copy_from_slice(self.grid_cache.pixmap().data());
-                // Temporary "Back to Grid" button — replaced by the real
-                // editor bar in Task 8.
-                let (bx, by, bw, bh) = self.back_button_rect();
-                widgets::draw_button(
-                    &mut self.surface.pixmap,
-                    &mut self.text_renderer,
-                    bx,
-                    by,
-                    bw,
-                    bh,
-                    "< Grid",
-                    false,
-                    false,
-                );
+                self.draw_effect_view();
             }
         }
         // Track listing — both views.
@@ -440,6 +571,18 @@ impl MultosisWindow {
             &self.seq_status,
             self.scale_factor,
         );
+        // Drop popups draw last so they overlay every other control.
+        if self.view == View::Effect && self.kind_dropdown.is_open() {
+            let items: Vec<&'static str> = effect_editor::kind_items();
+            let win = (self.physical_width as f32, self.physical_height as f32);
+            widgets::dropdown::draw_dropdown_popup(
+                &mut self.surface.pixmap,
+                &mut self.text_renderer,
+                &self.kind_dropdown,
+                &items,
+                win,
+            );
+        }
     }
 }
 
@@ -480,11 +623,31 @@ impl baseview::WindowHandler for MultosisWindow {
                 let (px, py) = (position.x as f32, position.y as f32);
                 self.mouse_pos = (px, py);
                 self.toolbar_drag.set_mouse(px, py);
+                self.effect_dial_drag.set_mouse(px, py);
                 if let Some(&ctrl) = self.toolbar_drag.active_action() {
                     let current = self.slider_normalized(ctrl);
                     if let Some(norm) = self.toolbar_drag.update_drag(false, current) {
                         self.set_slider(ctrl, norm);
                     }
+                }
+                // Effect dial drag: vertical drag → normalized → ParamSpec.
+                if let Some(EffectHit::Dial(i)) = self.effect_dial_drag.active_action().copied() {
+                    let current = if let Some(spec) = self.param_spec(i) {
+                        let value = self.selected_track_effect().params[i];
+                        normalize_param(value, spec)
+                    } else {
+                        0.0
+                    };
+                    let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                    if let Some(norm) = self.effect_dial_drag.update_drag(shift, current) {
+                        self.apply_effect_dial(i, norm);
+                    }
+                }
+                // Dropdown popup hover.
+                if self.kind_dropdown.is_open() {
+                    let items: Vec<&'static str> = effect_editor::kind_items();
+                    let win = (self.physical_width as f32, self.physical_height as f32);
+                    self.kind_dropdown.on_mouse_move(px, py, &items, win);
                 }
                 let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
                 // Grid/region/paint gestures only apply in the grid view.
@@ -530,6 +693,23 @@ impl baseview::WindowHandler for MultosisWindow {
                 ..
             }) => {
                 let (px, py) = self.mouse_pos;
+                // An open dropdown owns every click — selecting a row applies
+                // it, clicking outside closes. Route this BEFORE checking any
+                // other control so a click on the popup never hits the
+                // control behind it.
+                if self.kind_dropdown.is_open() {
+                    let items: Vec<&'static str> = effect_editor::kind_items();
+                    let win = (self.physical_width as f32, self.physical_height as f32);
+                    if let Some(widgets::dropdown::DropdownEvent::Selected(action, idx)) =
+                        self.kind_dropdown.on_mouse_down(px, py, &items, win)
+                    {
+                        if action == EffectAction::Kind {
+                            let kind = EffectKind::ALL[idx.min(EffectKind::ALL.len() - 1)];
+                            self.apply_kind_switch(kind);
+                        }
+                    }
+                    return baseview::EventStatus::Captured;
+                }
                 match toolbar::toolbar_hit(px, py, self.scale_factor) {
                     Some(ctrl @ (ToolbarControl::Mix | ToolbarControl::Output)) => {
                         let current = self.slider_normalized(ctrl);
@@ -540,14 +720,10 @@ impl baseview::WindowHandler for MultosisWindow {
                     None => match toolbar::op_hit(px, py, self.scale_factor) {
                         Some(op) => self.handle_toolbar_op(op),
                         None => {
-                            // Returning to the grid takes priority over
-                            // re-selecting a track.
-                            if self.view == View::Effect {
-                                let (bx, by, bw, bh) = self.back_button_rect();
-                                if px >= bx && px < bx + bw && py >= by && py < by + bh {
-                                    self.view = View::Grid;
-                                    return baseview::EventStatus::Captured;
-                                }
+                            // The effect editor owns its own main-area hits;
+                            // they take priority over re-selecting a track.
+                            if self.view == View::Effect && self.on_effect_press(px, py) {
+                                return baseview::EventStatus::Captured;
                             }
                             // Track listing — both views.
                             if let Some(row) = track_list::track_at(px, py, self.scale_factor) {
@@ -566,7 +742,6 @@ impl baseview::WindowHandler for MultosisWindow {
                                         Some(LeftGesture::GridPending { row, col, zone });
                                 }
                             }
-                            // View::Effect main-area hits are wired in Task 8.
                         }
                     },
                 }
@@ -585,6 +760,8 @@ impl baseview::WindowHandler for MultosisWindow {
                 if let Some(ctrl) = self.toolbar_drag.end_drag() {
                     self.end_slider(ctrl);
                 }
+                let _ = self.effect_dial_drag.end_drag();
+                self.kind_dropdown.on_mouse_up();
                 if let Some(LeftGesture::GridPending { row, col, zone }) = self.left_gesture {
                     self.commit_click(row, col, zone, false);
                 }
@@ -604,6 +781,7 @@ struct MultosisEditor {
     grid_handoff: Arc<GridHandoff>,
     reset_request: Arc<AtomicBool>,
     active_rows: Arc<AtomicU16>,
+    config_dirty: Arc<AtomicBool>,
     pending_resize: Arc<AtomicU64>,
 }
 
@@ -615,6 +793,7 @@ pub fn create(
     grid_handoff: Arc<GridHandoff>,
     reset_request: Arc<AtomicBool>,
     active_rows: Arc<AtomicU16>,
+    config_dirty: Arc<AtomicBool>,
 ) -> Option<Box<dyn Editor>> {
     Some(Box::new(MultosisEditor {
         params,
@@ -623,6 +802,7 @@ pub fn create(
         grid_handoff,
         reset_request,
         active_rows,
+        config_dirty,
         pending_resize: Arc::new(AtomicU64::new(0)),
     }))
 }
@@ -644,6 +824,7 @@ impl Editor for MultosisEditor {
         let gui_context = Arc::clone(&context);
         let reset_request = Arc::clone(&self.reset_request);
         let active_rows = Arc::clone(&self.active_rows);
+        let config_dirty = Arc::clone(&self.config_dirty);
 
         let window = baseview::Window::open_parented(
             &widgets::ParentWindowHandleAdapter(parent),
@@ -664,6 +845,7 @@ impl Editor for MultosisEditor {
                     gui_context,
                     reset_request,
                     active_rows,
+                    config_dirty,
                     sf,
                 )
             },
