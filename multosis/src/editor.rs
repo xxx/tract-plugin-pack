@@ -809,12 +809,7 @@ impl MultosisWindow {
                 effect_editor::MSEG_LENGTH_TIME_MAX,
                 effects::ParamScaling::Log,
             ),
-            tiny_skia_widgets::SyncMode::Beat => effects::value_to_norm(
-                mseg.beats,
-                effect_editor::MSEG_LENGTH_BEATS_MIN,
-                effect_editor::MSEG_LENGTH_BEATS_MAX,
-                effects::ParamScaling::Log,
-            ),
+            tiny_skia_widgets::SyncMode::Beat => effect_editor::beats_value_to_norm(mseg.beats),
         }
     }
 
@@ -852,12 +847,7 @@ impl MultosisWindow {
                     );
                 }
                 tiny_skia_widgets::SyncMode::Beat => {
-                    mseg.beats = effects::norm_to_value(
-                        norm,
-                        effect_editor::MSEG_LENGTH_BEATS_MIN,
-                        effect_editor::MSEG_LENGTH_BEATS_MAX,
-                        effects::ParamScaling::Log,
-                    );
+                    mseg.beats = effect_editor::beats_norm_to_value(norm);
                 }
             }
         }

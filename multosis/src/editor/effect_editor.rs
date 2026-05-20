@@ -309,40 +309,75 @@ pub fn trigger_to_item(src: TriggerSource) -> usize {
 pub const TRIGGER_RATE_MIN_HZ: f32 = 0.05;
 pub const TRIGGER_RATE_MAX_HZ: f32 = 20.0;
 
-/// Length slider range when the active MSEG is Beat-synced (beats per cycle).
-/// 0.25 beats = a sixteenth note in 4/4 (1 beat = quarter note).
-pub const MSEG_LENGTH_BEATS_MIN: f32 = 0.25;
-pub const MSEG_LENGTH_BEATS_MAX: f32 = 64.0;
 /// Length slider range when the active MSEG is Time-synced (seconds per cycle).
 pub const MSEG_LENGTH_TIME_MIN: f32 = 0.05;
 pub const MSEG_LENGTH_TIME_MAX: f32 = 32.0;
 
-/// Format a Beat-synced length value for the slider's right-side readout.
-///
-/// Common musical subdivisions snap to a name (`"1/16 note"`, `"1/8 note"`,
-/// `"1 beat"`, `"2 beats"`, ...); off-grid values fall back to a decimal
-/// (`"0.32 beat"`, `"1.7 beats"`). Tolerance is 1.5 % — tight enough that
-/// only values inside a slider pixel of the named division snap.
-fn format_beats_label(v: f32) -> String {
-    const NAMED: &[(f32, &str)] = &[(0.25, "1/16 note"), (0.5, "1/8 note"), (0.75, "dotted 1/8")];
-    let tol = 0.015 * v.max(1.0);
-    for (target, name) in NAMED {
-        if (v - target).abs() <= tol {
-            return (*name).to_string();
+/// Discrete musical subdivisions the Beat-synced length slider snaps to,
+/// in units of beats with their display label. Each entry doubles the
+/// previous: `1/16` note (0.25 beats) up to `64 bars` (256 beats) in 4/4.
+/// Sub-bar values keep their note-fraction notation (`1/16`, `1/4`);
+/// whole-bar values switch to `N bar(s)`.
+pub const BEAT_LADDER: &[(f32, &str)] = &[
+    (0.25, "1/16"),
+    (0.5, "1/8"),
+    (1.0, "1/4"),
+    (2.0, "1/2"),
+    (4.0, "1 bar"),
+    (8.0, "2 bars"),
+    (16.0, "4 bars"),
+    (32.0, "8 bars"),
+    (64.0, "16 bars"),
+    (128.0, "32 bars"),
+    (256.0, "64 bars"),
+];
+
+/// The Beat-synced length floor and ceiling, kept as `pub` for callers that
+/// want the absolute bounds (e.g. clamping a deserialized value). Equal to
+/// `BEAT_LADDER`'s endpoints.
+pub const MSEG_LENGTH_BEATS_MIN: f32 = 0.25;
+pub const MSEG_LENGTH_BEATS_MAX: f32 = 256.0;
+
+/// Map a normalized 0..1 slider position to a Beat-synced length value by
+/// quantizing to the nearest `BEAT_LADDER` index.
+pub fn beats_norm_to_value(norm: f32) -> f32 {
+    let max_idx = (BEAT_LADDER.len() - 1) as f32;
+    let idx = (norm.clamp(0.0, 1.0) * max_idx).round() as usize;
+    BEAT_LADDER[idx.min(BEAT_LADDER.len() - 1)].0
+}
+
+/// Inverse of `beats_norm_to_value`: find the nearest ladder entry (by log
+/// distance, since the ladder doubles each step) and return its normalized
+/// 0..1 slider position.
+pub fn beats_value_to_norm(v: f32) -> f32 {
+    let log_v = v.max(1e-6).ln();
+    let mut best = 0usize;
+    let mut best_d = f32::INFINITY;
+    for (i, (b, _)) in BEAT_LADDER.iter().enumerate() {
+        let d = (b.ln() - log_v).abs();
+        if d < best_d {
+            best_d = d;
+            best = i;
         }
     }
-    if v >= 1.0 {
-        let rounded = v.round();
-        if (v - rounded).abs() <= tol {
-            let n = rounded as i32;
-            let s = if n == 1 { "" } else { "s" };
-            return format!("{n} beat{s}");
+    best as f32 / (BEAT_LADDER.len() - 1) as f32
+}
+
+/// Display label for a Beat-synced length value: the nearest ladder entry's
+/// name. The slider snaps on drag so off-grid values are only ever seen if
+/// the persisted state was set by an older build.
+fn format_beats_label(v: f32) -> &'static str {
+    let log_v = v.max(1e-6).ln();
+    let mut best = 0usize;
+    let mut best_d = f32::INFINITY;
+    for (i, (b, _)) in BEAT_LADDER.iter().enumerate() {
+        let d = (b.ln() - log_v).abs();
+        if d < best_d {
+            best_d = d;
+            best = i;
         }
-        let s = if v >= 1.5 { "s" } else { "" };
-        format!("{v:.2} beat{s}")
-    } else {
-        format!("{v:.2} beat")
     }
+    BEAT_LADDER[best].1
 }
 
 /// Draw the active-MSEG sync-mode selector + length slider on the modulation
@@ -381,13 +416,7 @@ pub fn draw_mseg_controls(
         }
         tiny_skia_widgets::SyncMode::Beat => {
             let v = mseg.beats;
-            let n = crate::effects::value_to_norm(
-                v,
-                MSEG_LENGTH_BEATS_MIN,
-                MSEG_LENGTH_BEATS_MAX,
-                crate::effects::ParamScaling::Log,
-            );
-            (n, format_beats_label(v))
+            (beats_value_to_norm(v), format_beats_label(v).to_string())
         }
     };
     widgets::draw_slider(
@@ -550,21 +579,49 @@ mod tests {
     }
 
     #[test]
-    fn format_beats_label_names_common_subdivisions() {
-        assert_eq!(format_beats_label(0.25), "1/16 note");
-        assert_eq!(format_beats_label(0.5), "1/8 note");
-        assert_eq!(format_beats_label(0.75), "dotted 1/8");
-        assert_eq!(format_beats_label(1.0), "1 beat");
-        assert_eq!(format_beats_label(2.0), "2 beats");
-        assert_eq!(format_beats_label(64.0), "64 beats");
+    fn format_beats_label_names_every_ladder_entry() {
+        // Each ladder entry maps to exactly its registered label.
+        for &(v, name) in BEAT_LADDER {
+            assert_eq!(format_beats_label(v), name, "v = {v}");
+        }
     }
 
     #[test]
-    fn format_beats_label_falls_back_to_decimal_off_grid() {
-        // 0.32 isn't near any named subdivision → decimal beat.
-        assert_eq!(format_beats_label(0.32), "0.32 beat");
-        // 1.7 isn't an integer → "X.XX beats".
-        assert_eq!(format_beats_label(1.7), "1.70 beats");
+    fn format_beats_label_snaps_off_grid_to_nearest() {
+        // An off-grid value falls to whichever ladder entry is closest in log
+        // space. 0.32 sits between 1/16 (0.25) and 1/8 (0.5) and is closer
+        // (geometrically) to 1/16.
+        assert_eq!(format_beats_label(0.32), "1/16");
+        // 1.7 sits between 1/2 (2.0) and 1/4 (1.0); the geometric midpoint is
+        // sqrt(2) ≈ 1.414, so 1.7 lands on 1/2.
+        assert_eq!(format_beats_label(1.7), "1/2");
+    }
+
+    #[test]
+    fn beats_norm_and_value_round_trip_through_the_ladder() {
+        let n = BEAT_LADDER.len();
+        for (i, &(v, _)) in BEAT_LADDER.iter().enumerate() {
+            let norm = i as f32 / (n - 1) as f32;
+            // norm at the ladder position maps back to exactly that beats value.
+            assert_eq!(beats_norm_to_value(norm), v, "ladder index {i}");
+            // The reverse also lands on the same normalized position.
+            assert!(
+                (beats_value_to_norm(v) - norm).abs() < 1e-5,
+                "value_to_norm({v}) gave {} not {norm}",
+                beats_value_to_norm(v)
+            );
+        }
+    }
+
+    #[test]
+    fn beats_norm_to_value_snaps_continuous_norm_to_nearest_step() {
+        // A norm just past the boundary between two ladder steps lands on the
+        // upper one; just before, on the lower one.
+        let n = BEAT_LADDER.len();
+        let step = 1.0 / (n - 1) as f32;
+        let mid = 0.5 * step;
+        assert_eq!(beats_norm_to_value(mid - 0.01), BEAT_LADDER[0].0);
+        assert_eq!(beats_norm_to_value(mid + 0.01), BEAT_LADDER[1].0);
     }
 
     #[test]
