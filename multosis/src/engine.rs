@@ -30,6 +30,11 @@ pub struct AudioEngine {
     /// The most recent process block's active-row bitmask (bit `r` = row `r`
     /// had a lit, enabled cell under the wavefront). Published to the editor.
     last_active: u16,
+    /// Per-row "had a new lit-and-enabled cell light up at a step-boundary
+    /// tick this block" mask. Accumulated within `process()` as each tick's
+    /// post-tick set is diffed against its pre-tick set, then consumed by the
+    /// next block's `Modulation::update_block` for the `CellLight` trigger.
+    pending_cell_lights: u16,
     sample_rate: f32,
 }
 
@@ -50,6 +55,7 @@ impl AudioEngine {
             track_effects: std::array::from_fn(TrackEffect::default_for_row),
             modulation: Modulation::new(),
             last_active: 0,
+            pending_cell_lights: 0,
             sample_rate: 48_000.0,
         }
     }
@@ -101,6 +107,8 @@ impl AudioEngine {
             e.reset();
         }
         self.modulation.reset();
+        self.last_active = 0;
+        self.pending_cell_lights = 0;
     }
 
     /// The current wavefront — exposed so the Milestone 1b-ii editor can draw
@@ -192,11 +200,14 @@ impl AudioEngine {
     ) {
         let n = left.len().min(right.len());
 
+        // Hand the modulation engine LAST block's accumulated cell-light
+        // events; clear the buffer so we start fresh for THIS block's ticks.
+        let cell_light_events = std::mem::take(&mut self.pending_cell_lights);
         self.modulation.update_block(
             n,
             bpm,
             self.sample_rate as f64,
-            self.last_active,
+            cell_light_events,
             &mut self.effects,
             &self.track_effects,
         );
@@ -232,12 +243,38 @@ impl AudioEngine {
             }
             cursor = seg_end;
             if bi < n_boundaries {
+                // Snapshot the lit-and-enabled set per row BEFORE and AFTER
+                // the tick; rows with any newly-lit cell get a bit set in
+                // `pending_cell_lights` for the NEXT block's CellLight trigger.
+                let before = Self::lit_enabled_per_row(grid, &self.propagator.wavefront);
                 self.propagator.tick(grid, auto_restart);
+                let after = Self::lit_enabled_per_row(grid, &self.propagator.wavefront);
+                for r in 0..ROWS {
+                    if (after[r] & !before[r]) != 0 {
+                        self.pending_cell_lights |= 1 << r;
+                    }
+                }
                 active = Self::active_rows(grid, &self.propagator.wavefront);
                 bi += 1;
             }
         }
         self.last_active = active;
+    }
+
+    /// The per-row bitmask of columns currently lit-and-enabled. Bit `c` of
+    /// the returned slot is set when cell `(r, c)` is lit in the wavefront
+    /// and `enabled` in the grid. Used to detect new cell-light events at
+    /// step boundaries.
+    fn lit_enabled_per_row(grid: &Grid, wf: &Wavefront) -> [u32; ROWS] {
+        let mut out = [0u32; ROWS];
+        for (r, slot) in out.iter_mut().enumerate() {
+            for c in 0..COLS {
+                if wf.is_lit(r, c) && grid.cell(r, c).enabled {
+                    *slot |= 1 << c;
+                }
+            }
+        }
+        out
     }
 }
 
