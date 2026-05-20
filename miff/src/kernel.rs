@@ -90,6 +90,10 @@ impl Default for KernelHandoff {
 /// miff's default document: a flat curve at value 0.5. Two nodes, both 0.5.
 /// Bakes (bipolar map) to an all-zero kernel, i.e. clean dry passthrough — a
 /// fresh miff colors nothing. NOT the MSEG core's `default()`, which is a ramp.
+///
+/// Polarity defaults to `Bipolar` here because miff's `2·value − 1` tap
+/// mapping makes 0.5 the meaningful zero — users want the midline marker by
+/// default, even though the shared widget's default is Unipolar.
 pub fn default_flat_curve() -> MsegData {
     let mut d = MsegData::default(); // ramp; we overwrite the two node values
     d.nodes[0] = MsegNode {
@@ -104,6 +108,7 @@ pub fn default_flat_curve() -> MsegData {
         tension: 0.0,
         stepped: false,
     };
+    d.polarity = tiny_skia_widgets::Polarity::Bipolar;
     d.debug_assert_valid();
     d
 }

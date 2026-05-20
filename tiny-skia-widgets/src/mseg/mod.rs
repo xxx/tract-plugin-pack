@@ -37,6 +37,21 @@ pub enum SyncMode {
     Beat,
 }
 
+/// How the editor presents the envelope's value axis.
+///
+/// Purely a viewing preference — the document's stored values are always
+/// `0..1` and `value_at_phase` always returns `0..1`. `Unipolar` treats the
+/// axis as 0..1 (the bottom of the plot is the "zero" reference). `Bipolar`
+/// treats 0..1 as `-1..+1` and draws a midline marker at `value = 0.5`,
+/// which is the convention consumers like miff (kernel taps `2·v − 1`) and
+/// multosis (assignable modulation) follow.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub enum Polarity {
+    #[default]
+    Unipolar,
+    Bipolar,
+}
+
 /// The hold behaviour — sustain point or loop region. Mutually exclusive.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum HoldMode {
@@ -94,6 +109,9 @@ pub struct MsegData {
     /// Vertical grid: N value levels.
     pub value_steps: u32,
     pub snap: bool,
+    /// View preference — affects the midline marker only; node values are
+    /// still stored and reported as 0..1 regardless.
+    pub polarity: Polarity,
 }
 
 impl Default for MsegData {
@@ -123,6 +141,7 @@ impl Default for MsegData {
             time_divisions: 16,
             value_steps: 8,
             snap: true,
+            polarity: Polarity::Unipolar,
         }
     }
 }
@@ -305,6 +324,10 @@ struct MsegDataSerde {
     time_divisions: u32,
     value_steps: u32,
     snap: bool,
+    /// Defaulted on deserialize so saves predating this field load cleanly
+    /// (as Unipolar — the new default view).
+    #[serde(default)]
+    polarity: Polarity,
 }
 
 impl From<&MsegData> for MsegDataSerde {
@@ -319,6 +342,7 @@ impl From<&MsegData> for MsegDataSerde {
             time_divisions: d.time_divisions,
             value_steps: d.value_steps,
             snap: d.snap,
+            polarity: d.polarity,
         }
     }
 }
@@ -343,6 +367,7 @@ impl<'de> serde::Deserialize<'de> for MsegData {
             time_divisions: raw.time_divisions,
             value_steps: raw.value_steps,
             snap: raw.snap,
+            polarity: raw.polarity,
         };
         for (i, n) in raw.nodes.iter().take(MAX_NODES).enumerate() {
             data.nodes[i] = *n;
@@ -861,6 +886,38 @@ mod tests {
             result.is_err(),
             "invalid blob must be rejected, got {result:?}"
         );
+    }
+
+    #[test]
+    fn polarity_round_trips_through_serde() {
+        // Both Polarity variants must survive serialization.
+        let mut d = MsegData::default();
+        d.polarity = Polarity::Bipolar;
+        let json = serde_json::to_string(&d).unwrap();
+        let back: MsegData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.polarity, Polarity::Bipolar);
+    }
+
+    #[test]
+    fn legacy_serde_blob_without_polarity_loads_as_unipolar() {
+        // A blob saved before the `polarity` field existed must still load —
+        // missing field defaults to Unipolar (the new default view).
+        let legacy = r#"{
+            "nodes": [
+                {"time": 0.0, "value": 0.0, "tension": 0.0, "stepped": false},
+                {"time": 1.0, "value": 1.0, "tension": 0.0, "stepped": false}
+            ],
+            "play_mode": "Triggered",
+            "hold": "None",
+            "sync_mode": "Time",
+            "time_seconds": 1.0,
+            "beats": 1.0,
+            "time_divisions": 16,
+            "value_steps": 8,
+            "snap": true
+        }"#;
+        let d: MsegData = serde_json::from_str(legacy).expect("legacy blob must load");
+        assert_eq!(d.polarity, Polarity::Unipolar);
     }
 
     #[test]

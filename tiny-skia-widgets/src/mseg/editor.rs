@@ -329,6 +329,14 @@ impl MsegEditState {
                 if in_rect(b.snap, x, y) {
                     data.snap = !data.snap;
                     Some(MsegEdit::Changed)
+                } else if in_rect(b.polarity, x, y) {
+                    // Pure view toggle — node values stay 0..1, only the
+                    // midline marker draw branches on this.
+                    data.polarity = match data.polarity {
+                        crate::mseg::Polarity::Unipolar => crate::mseg::Polarity::Bipolar,
+                        crate::mseg::Polarity::Bipolar => crate::mseg::Polarity::Unipolar,
+                    };
+                    Some(MsegEdit::Changed)
                 } else if in_rect(b.grid, x, y) {
                     // Open the grid dropdown; no document change yet. Skipped
                     // if this same click just closed a dropdown, so clicking an
@@ -914,6 +922,27 @@ mod tests {
         let y = l.strip.1 + l.strip.3 * 0.5;
         state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
         assert_eq!(data.snap, !was);
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn polarity_button_toggles_between_unipolar_and_bipolar() {
+        use crate::mseg::render::strip_buttons;
+        use crate::mseg::Polarity;
+        let mut data = MsegData::default();
+        assert_eq!(data.polarity, Polarity::Unipolar, "default is unipolar");
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        let b = strip_buttons(l.strip, 1.0);
+        let x = b.polarity.0 + b.polarity.2 * 0.5;
+        let y = b.polarity.1 + b.polarity.3 * 0.5;
+        let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        assert_eq!(ev, Some(MsegEdit::Changed));
+        assert_eq!(data.polarity, Polarity::Bipolar);
+        state.on_mouse_up(&mut data);
+        // Click again -> back to unipolar.
+        state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        assert_eq!(data.polarity, Polarity::Unipolar);
         state.on_mouse_up(&mut data);
     }
 

@@ -210,13 +210,15 @@ fn draw_canvas(
         draw_rect(pixmap, px0, gy, pw, 1.0, grid_color);
     }
 
-    // Midline marker at value = 0.5 — the bipolar zero for consumers that
-    // re-map the curve via `2·value − 1` (miff's kernel taps, multosis's
-    // assignable modulation). Drawn after the grid so it sits over any grid
-    // line at the same row, and noticeably brighter so the eye finds zero.
-    let mid_color = tiny_skia::Color::from_rgba8(0x82, 0x86, 0x90, 0xff);
-    let my = value_to_y(layout, 0.5);
-    draw_rect(pixmap, px0, my, pw, 1.0, mid_color);
+    // Midline marker at value = 0.5 — only meaningful in Bipolar view (the
+    // zero point for consumers that re-map via `2·value − 1`: miff's kernel
+    // taps, multosis's assignable modulation). In Unipolar view the bottom
+    // of the plot is "zero" and the midline would be visual noise.
+    if matches!(data.polarity, crate::mseg::Polarity::Bipolar) {
+        let mid_color = tiny_skia::Color::from_rgba8(0x82, 0x86, 0x90, 0xff);
+        let my = value_to_y(layout, 0.5);
+        draw_rect(pixmap, px0, my, pw, 1.0, mid_color);
+    }
 
     // Envelope polyline: sample `value_at_phase` per pixel column of the plot.
     let cols = pw.max(1.0) as usize;
@@ -319,21 +321,23 @@ fn draw_nodes(
     }
 }
 
-/// The four interactive controls of the MSEG control strip, each `(x, y, w, h)`.
-/// `snap` is a toggle button, `grid` and `style` are dropdown triggers, and
-/// `randomize` triggers the randomizer. Shared by `draw_strip` and hit-testing
-/// so the drawn controls and the click zones can never drift apart.
+/// The five interactive controls of the MSEG control strip, each `(x, y, w, h)`.
+/// `snap` and `polarity` are toggle buttons, `grid` and `style` are dropdown
+/// triggers, and `randomize` triggers the randomizer. Shared by `draw_strip`
+/// and hit-testing so the drawn controls and the click zones can never drift
+/// apart.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StripButtons {
     pub snap: (f32, f32, f32, f32),
     pub grid: (f32, f32, f32, f32),
     pub style: (f32, f32, f32, f32),
+    pub polarity: (f32, f32, f32, f32),
     pub randomize: (f32, f32, f32, f32),
 }
 
 /// Lay out the MSEG control-strip buttons within `strip` (`scale` is the DPI
-/// factor). `randomize` is a fixed width at the right end; `snap`/`grid`/`style`
-/// share the remaining width in three equal segments.
+/// factor). `randomize` is a fixed width at the right end; `snap`/`grid`/
+/// `style`/`polarity` share the remaining width in four equal segments.
 pub(crate) fn strip_buttons(strip: (f32, f32, f32, f32), scale: f32) -> StripButtons {
     let (sx, sy, sw, sh) = strip;
     let pad = 6.0 * scale;
@@ -344,14 +348,16 @@ pub(crate) fn strip_buttons(strip: (f32, f32, f32, f32), scale: f32) -> StripBut
     let randomize = (sx + sw - rand_w - pad, by, rand_w, bh);
     let left = sx + pad;
     let avail = (randomize.0 - gap - left).max(0.0);
-    let seg_w = ((avail - 2.0 * gap) / 3.0).max(0.0);
+    let seg_w = ((avail - 3.0 * gap) / 4.0).max(0.0);
     let snap = (left, by, seg_w, bh);
     let grid = (left + seg_w + gap, by, seg_w, bh);
     let style = (left + 2.0 * (seg_w + gap), by, seg_w, bh);
+    let polarity = (left + 3.0 * (seg_w + gap), by, seg_w, bh);
     StripButtons {
         snap,
         grid,
         style,
+        polarity,
         randomize,
     }
 }
@@ -408,6 +414,22 @@ fn draw_strip(
         b.style,
         &style_label,
         state.dropdown_is_open_for(StripId::Style),
+    );
+
+    // Polarity: toggle between Unipolar (default) and Bipolar view. Active
+    // state highlights when bipolar, mirroring the Snap button's convention.
+    let bipolar = matches!(data.polarity, crate::mseg::Polarity::Bipolar);
+    let polarity_label = if bipolar { "Bipolar" } else { "Unipolar" };
+    draw_button(
+        pixmap,
+        text_renderer,
+        b.polarity.0,
+        b.polarity.1,
+        b.polarity.2,
+        b.polarity.3,
+        polarity_label,
+        bipolar,
+        false,
     );
 
     // Randomize: plain button.
