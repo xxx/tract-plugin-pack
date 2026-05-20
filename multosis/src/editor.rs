@@ -1177,6 +1177,13 @@ impl baseview::WindowHandler for MultosisWindow {
                     self.selected_mseg,
                     is_free_hz,
                 ) {
+                    // Right-clicking a *different* dial while one is already
+                    // being edited would silently discard the prior edit if we
+                    // jumped straight to `begin` (which clears the buffer).
+                    // Commit-and-apply the prior edit first.
+                    if let Some((EffectHit::Dial(prev), text)) = self.text_edit.commit() {
+                        self.commit_dial_text_edit(prev, &text);
+                    }
                     if let Some(spec) = self.param_spec(i) {
                         let value = self.selected_track_effect().params[i];
                         self.text_edit.begin(
