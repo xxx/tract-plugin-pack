@@ -243,15 +243,29 @@ impl Modulation {
         self.prev_active = active_mask;
 
         for row in 0..ROWS {
+            // For `FreeHz` tracks the trigger rate IS the modulation rate —
+            // all three MSEGs sweep in lockstep at the dial's Hz, ignoring
+            // each MSEG's own sync/length. Free and CellLight tracks keep
+            // their per-MSEG clocks.
+            let free_hz_phase = match self.config[row].trigger {
+                TriggerSource::FreeHz { .. } => Some(self.hz_phases[row]),
+                _ => None,
+            };
             for k in 0..3 {
                 // `MsegData` is `Copy`; copy the needed config out so the
                 // immutable `self.config` borrow does not span the
                 // `self.phases` / `self.amplitudes` writes below.
                 let mseg = self.config[row].msegs[k];
-                let dt = mseg_phase_delta(&mseg, block_len, bpm, sample_rate);
-                let (next, _finished) = advance(&mseg, self.phases[row][k], dt, false);
-                self.phases[row][k] = next;
-                let value = value_at_phase(&mseg, next);
+                let phase = match free_hz_phase {
+                    Some(p) => p,
+                    None => {
+                        let dt = mseg_phase_delta(&mseg, block_len, bpm, sample_rate);
+                        let (next, _finished) = advance(&mseg, self.phases[row][k], dt, false);
+                        next
+                    }
+                };
+                self.phases[row][k] = phase;
+                let value = value_at_phase(&mseg, phase);
                 if k == 0 {
                     // Amplitude MSEG.
                     self.amplitudes[row] = value;
