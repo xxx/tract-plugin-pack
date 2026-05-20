@@ -68,12 +68,12 @@ enum View {
 }
 
 /// Which dropdown an `EffectAction`-tagged `DropdownState` event refers to.
-/// Today: the effect-kind dropdown (Kind) and the modulation target dropdown
-/// (Target, wired in Task 9).
+/// The effect-kind dropdown (`Kind`) and the modulation target dropdown
+/// (`Target`) share a single `DropdownState<EffectAction>` — only one is open
+/// at a time, and the payload distinguishes which trigger opened it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum EffectAction {
     Kind,
-    #[allow(dead_code)]
     Target,
 }
 
@@ -131,8 +131,18 @@ struct MultosisWindow {
     /// The effect editor's dropdown state — owns the open kind/target popup.
     kind_dropdown: widgets::dropdown::DropdownState<EffectAction>,
     /// The effect editor's parameter-dial drag state — one in-flight dial drag
-    /// at a time, tagged with the slot index via `EffectHit::Dial(i)`.
+    /// at a time, tagged with the slot index via `EffectHit::Dial(i)` or by
+    /// `EffectHit::Depth` for the modulation depth dial.
     effect_dial_drag: widgets::DragState<EffectHit>,
+    /// MSEG editor state — owns hover/drag/last-node info for the active MSEG.
+    /// Curve-only mode: the strip controls are external (per-MSEG selectors).
+    mseg_edit: widgets::mseg::MsegEditState,
+    /// Timestamp of the last left press on the MSEG pane, for double-click
+    /// detection (~400 ms / ~8 px).
+    mseg_last_click_time: std::time::Instant,
+    /// Position of the last left press on the MSEG pane, for double-click
+    /// detection.
+    mseg_last_click_pos: (f32, f32),
     /// Audio→GUI dirty flag: every edit (param dial, kind switch, …) sets it
     /// so `process()` re-bridges the persisted config into the engine.
     config_dirty: Arc<AtomicBool>,
@@ -182,6 +192,9 @@ impl MultosisWindow {
             selected_mseg: 0,
             kind_dropdown: widgets::dropdown::DropdownState::new(),
             effect_dial_drag: widgets::DragState::new(),
+            mseg_edit: widgets::mseg::MsegEditState::new_curve_only(),
+            mseg_last_click_time: std::time::Instant::now(),
+            mseg_last_click_pos: (-999.0, -999.0),
             config_dirty,
         }
     }
@@ -416,10 +429,36 @@ impl MultosisWindow {
         }
     }
 
+    /// The persisted `TrackModulation` for the currently selected track, or
+    /// its row default if the mutex is contended.
+    fn selected_track_modulation(&self) -> crate::modulation::TrackModulation {
+        let row = self.selected_track;
+        if let Ok(cfg) = self.params.track_modulation.lock() {
+            cfg[row].clone()
+        } else {
+            crate::modulation::TrackModulation::default_for_row(row)
+        }
+    }
+
+    /// Check if `(x, y)` is a double-click on the MSEG pane. Records the click
+    /// position/time and returns `true` if the previous click was within
+    /// 400 ms and within 8 pixels.
+    fn mseg_double_click_check(&mut self, x: f32, y: f32) -> bool {
+        let now = std::time::Instant::now();
+        let elapsed_ms = now.duration_since(self.mseg_last_click_time).as_millis();
+        let (px, py) = self.mseg_last_click_pos;
+        let dist_sq = (x - px) * (x - px) + (y - py) * (y - py);
+        let is_double = elapsed_ms < 400 && dist_sq < 64.0;
+        self.mseg_last_click_time = now;
+        self.mseg_last_click_pos = (x, y);
+        is_double
+    }
+
     /// Draw the effect editor (right of the track panel). The toolbar and
     /// track listing are drawn separately in `draw`.
     fn draw_effect_view(&mut self) {
         let track = self.selected_track_effect();
+        let lay = effect_editor::effect_layout(self.scale_factor);
         effect_editor::draw_effect_section(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
@@ -428,24 +467,67 @@ impl MultosisWindow {
             self.kind_dropdown.is_open_for(EffectAction::Kind),
             self.scale_factor,
         );
+        // MODULATION section.
+        let modu = self.selected_track_modulation();
+        let sel = self.selected_mseg.min(2);
+        // Ghosts (inactive MSEGs) first, behind the active curve.
+        for m in 0..3 {
+            if m != sel {
+                widgets::mseg::draw_mseg_ghost(
+                    &mut self.surface.pixmap,
+                    lay.mseg_pane,
+                    &modu.msegs[m],
+                    &self.mseg_edit,
+                    self.scale_factor,
+                    0x5A5040FF,
+                );
+            }
+        }
+        // Active MSEG.
+        widgets::mseg::draw_mseg(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            lay.mseg_pane,
+            &modu.msegs[sel],
+            &self.mseg_edit,
+            self.scale_factor,
+        );
+        // Selector + target + depth (when on an assignable MSEG).
+        let (target, depth) = if sel == 0 {
+            (None, 0.0)
+        } else {
+            let k = sel - 1;
+            (modu.targets[k], modu.depths[k])
+        };
+        effect_editor::draw_modulation_controls(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            sel,
+            track.kind,
+            target,
+            depth,
+            self.kind_dropdown.is_open_for(EffectAction::Target),
+            self.scale_factor,
+        );
     }
 
     /// Handle a left press while in `View::Effect`. Returns `true` if the
     /// press hit a control owned by the effect editor (so the caller can stop
-    /// further routing).
-    fn on_effect_press(&mut self, px: f32, py: f32) -> bool {
+    /// further routing). `shift` is read from the cursor-modifier set for
+    /// fine-grained MSEG node placement.
+    fn on_effect_press(&mut self, px: f32, py: f32, shift: bool) -> bool {
         let params = self.selected_track_param_count();
         let Some(hit) =
             effect_editor::effect_hit(px, py, self.scale_factor, params, self.selected_mseg)
         else {
             return false;
         };
+        let lay = effect_editor::effect_layout(self.scale_factor);
         match hit {
             EffectHit::Back => {
                 self.view = View::Grid;
             }
             EffectHit::Kind => {
-                let lay = effect_editor::effect_layout(self.scale_factor);
                 let items: Vec<&'static str> = effect_editor::kind_items();
                 let current = EffectKind::ALL
                     .iter()
@@ -463,11 +545,67 @@ impl MultosisWindow {
                         .begin_drag(EffectHit::Dial(i), norm, false);
                 }
             }
-            // Wired in Task 9.
-            EffectHit::MsegSelector(_) => {}
-            EffectHit::Target => {}
-            EffectHit::Depth => {}
-            EffectHit::MsegPane => {}
+            EffectHit::MsegSelector(seg) => {
+                self.selected_mseg = seg.min(2);
+            }
+            EffectHit::Target => {
+                let kind = self.selected_track_effect().kind;
+                let items: Vec<&'static str> = effect_editor::target_items(kind);
+                let current = if self.selected_mseg == 0 {
+                    0
+                } else {
+                    let modu = self.selected_track_modulation();
+                    effect_editor::target_to_item(modu.targets[self.selected_mseg - 1])
+                };
+                let win = (self.physical_width as f32, self.physical_height as f32);
+                self.kind_dropdown.open(
+                    EffectAction::Target,
+                    lay.target,
+                    &items,
+                    current,
+                    false,
+                    win,
+                );
+            }
+            EffectHit::Depth => {
+                if self.selected_mseg != 0 {
+                    let modu = self.selected_track_modulation();
+                    let depth = modu.depths[self.selected_mseg - 1];
+                    let norm = ((depth + 1.0) / 2.0).clamp(0.0, 1.0);
+                    self.effect_dial_drag
+                        .begin_drag(EffectHit::Depth, norm, false);
+                }
+            }
+            EffectHit::MsegPane => {
+                let sel = self.selected_mseg.min(2);
+                let is_double = self.mseg_double_click_check(px, py);
+                let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
+                    let row = self.selected_track;
+                    if is_double {
+                        self.mseg_edit.on_double_click(
+                            px,
+                            py,
+                            &mut modu[row].msegs[sel],
+                            lay.mseg_pane,
+                            self.scale_factor,
+                        )
+                    } else {
+                        self.mseg_edit.on_mouse_down(
+                            px,
+                            py,
+                            &mut modu[row].msegs[sel],
+                            lay.mseg_pane,
+                            self.scale_factor,
+                            shift,
+                        )
+                    }
+                } else {
+                    None
+                };
+                if changed == Some(widgets::mseg::MsegEdit::Changed) {
+                    self.mark_config_dirty();
+                }
+            }
         }
         true
     }
@@ -510,6 +648,36 @@ impl MultosisWindow {
         }
         if let Ok(mut modu) = self.params.track_modulation.lock() {
             modu[row].clamp_targets(crate::effects::param_count(kind));
+        }
+        self.mark_config_dirty();
+    }
+
+    /// Apply a depth-dial drag value (normalized 0..1) to the selected
+    /// assignable MSEG's depth (mapped to bipolar -1..1). Marks config dirty.
+    fn apply_depth_drag(&mut self, norm: f32) {
+        if self.selected_mseg == 0 {
+            return;
+        }
+        let depth = (norm.clamp(0.0, 1.0) * 2.0 - 1.0).clamp(-1.0, 1.0);
+        let row = self.selected_track;
+        let k = self.selected_mseg - 1;
+        if let Ok(mut modu) = self.params.track_modulation.lock() {
+            modu[row].depths[k] = depth;
+        }
+        self.mark_config_dirty();
+    }
+
+    /// Apply a target-dropdown selection (item index) to the selected
+    /// assignable MSEG. Marks config dirty.
+    fn apply_target_selection(&mut self, item: usize) {
+        if self.selected_mseg == 0 {
+            return;
+        }
+        let target = effect_editor::target_from_item(item);
+        let row = self.selected_track;
+        let k = self.selected_mseg - 1;
+        if let Ok(mut modu) = self.params.track_modulation.lock() {
+            modu[row].targets[k] = target;
         }
         self.mark_config_dirty();
     }
@@ -571,9 +739,16 @@ impl MultosisWindow {
             &self.seq_status,
             self.scale_factor,
         );
-        // Drop popups draw last so they overlay every other control.
+        // Drop popups draw last so they overlay every other control. One
+        // shared `kind_dropdown` state handles both Kind and Target; the
+        // items list depends on which one is open.
         if self.view == View::Effect && self.kind_dropdown.is_open() {
-            let items: Vec<&'static str> = effect_editor::kind_items();
+            let kind = self.selected_track_effect().kind;
+            let items: Vec<&'static str> = if self.kind_dropdown.is_open_for(EffectAction::Target) {
+                effect_editor::target_items(kind)
+            } else {
+                effect_editor::kind_items()
+            };
             let win = (self.physical_width as f32, self.physical_height as f32);
             widgets::dropdown::draw_dropdown_popup(
                 &mut self.surface.pixmap,
@@ -630,26 +805,70 @@ impl baseview::WindowHandler for MultosisWindow {
                         self.set_slider(ctrl, norm);
                     }
                 }
-                // Effect dial drag: vertical drag → normalized → ParamSpec.
-                if let Some(EffectHit::Dial(i)) = self.effect_dial_drag.active_action().copied() {
-                    let current = if let Some(spec) = self.param_spec(i) {
-                        let value = self.selected_track_effect().params[i];
-                        normalize_param(value, spec)
-                    } else {
-                        0.0
-                    };
-                    let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
-                    if let Some(norm) = self.effect_dial_drag.update_drag(shift, current) {
-                        self.apply_effect_dial(i, norm);
+                // Effect dial drag: vertical drag → normalized → ParamSpec or
+                // depth dial (bipolar).
+                let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                match self.effect_dial_drag.active_action().copied() {
+                    Some(EffectHit::Dial(i)) => {
+                        let current = if let Some(spec) = self.param_spec(i) {
+                            let value = self.selected_track_effect().params[i];
+                            normalize_param(value, spec)
+                        } else {
+                            0.0
+                        };
+                        if let Some(norm) = self.effect_dial_drag.update_drag(shift, current) {
+                            self.apply_effect_dial(i, norm);
+                        }
                     }
+                    Some(EffectHit::Depth) => {
+                        let current = if self.selected_mseg == 0 {
+                            0.5
+                        } else {
+                            let modu = self.selected_track_modulation();
+                            ((modu.depths[self.selected_mseg - 1] + 1.0) / 2.0).clamp(0.0, 1.0)
+                        };
+                        if let Some(norm) = self.effect_dial_drag.update_drag(shift, current) {
+                            self.apply_depth_drag(norm);
+                        }
+                    }
+                    _ => {}
                 }
-                // Dropdown popup hover.
+                // Dropdown popup hover — pick the items list matching the open
+                // dropdown so highlight indices map to the right labels.
                 if self.kind_dropdown.is_open() {
-                    let items: Vec<&'static str> = effect_editor::kind_items();
+                    let kind = self.selected_track_effect().kind;
+                    let items: Vec<&'static str> =
+                        if self.kind_dropdown.is_open_for(EffectAction::Target) {
+                            effect_editor::target_items(kind)
+                        } else {
+                            effect_editor::kind_items()
+                        };
                     let win = (self.physical_width as f32, self.physical_height as f32);
                     self.kind_dropdown.on_mouse_move(px, py, &items, win);
                 }
-                let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                // MSEG node-drag follow: when the user is dragging a node, the
+                // pointer can leave the pane rect and the drag should keep
+                // tracking (matches miff's behaviour).
+                if self.view == View::Effect {
+                    let lay = effect_editor::effect_layout(self.scale_factor);
+                    let sel = self.selected_mseg.min(2);
+                    let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
+                        let row = self.selected_track;
+                        self.mseg_edit.on_mouse_move(
+                            px,
+                            py,
+                            &mut modu[row].msegs[sel],
+                            lay.mseg_pane,
+                            self.scale_factor,
+                            shift,
+                        )
+                    } else {
+                        None
+                    };
+                    if changed == Some(widgets::mseg::MsegEdit::Changed) {
+                        self.mark_config_dirty();
+                    }
+                }
                 // Grid/region/paint gestures only apply in the grid view.
                 if self.view == View::Grid {
                     match self.left_gesture {
@@ -690,22 +909,34 @@ impl baseview::WindowHandler for MultosisWindow {
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
                 button: baseview::MouseButton::Left,
-                ..
+                modifiers,
             }) => {
                 let (px, py) = self.mouse_pos;
+                let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
                 // An open dropdown owns every click — selecting a row applies
                 // it, clicking outside closes. Route this BEFORE checking any
                 // other control so a click on the popup never hits the
                 // control behind it.
                 if self.kind_dropdown.is_open() {
-                    let items: Vec<&'static str> = effect_editor::kind_items();
+                    let kind = self.selected_track_effect().kind;
+                    let items: Vec<&'static str> =
+                        if self.kind_dropdown.is_open_for(EffectAction::Target) {
+                            effect_editor::target_items(kind)
+                        } else {
+                            effect_editor::kind_items()
+                        };
                     let win = (self.physical_width as f32, self.physical_height as f32);
                     if let Some(widgets::dropdown::DropdownEvent::Selected(action, idx)) =
                         self.kind_dropdown.on_mouse_down(px, py, &items, win)
                     {
-                        if action == EffectAction::Kind {
-                            let kind = EffectKind::ALL[idx.min(EffectKind::ALL.len() - 1)];
-                            self.apply_kind_switch(kind);
+                        match action {
+                            EffectAction::Kind => {
+                                let kind = EffectKind::ALL[idx.min(EffectKind::ALL.len() - 1)];
+                                self.apply_kind_switch(kind);
+                            }
+                            EffectAction::Target => {
+                                self.apply_target_selection(idx);
+                            }
                         }
                     }
                     return baseview::EventStatus::Captured;
@@ -722,7 +953,7 @@ impl baseview::WindowHandler for MultosisWindow {
                         None => {
                             // The effect editor owns its own main-area hits;
                             // they take priority over re-selecting a track.
-                            if self.view == View::Effect && self.on_effect_press(px, py) {
+                            if self.view == View::Effect && self.on_effect_press(px, py, shift) {
                                 return baseview::EventStatus::Captured;
                             }
                             // Track listing — both views.
@@ -753,6 +984,36 @@ impl baseview::WindowHandler for MultosisWindow {
                 // Right-click cell editing applies only in the grid view.
                 self.handle_grid_click(true);
             }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Right,
+                ..
+            }) if self.view == View::Effect => {
+                // Right-click on the MSEG pane toggles segment-stepped flag
+                // (see `MsegEditState::on_right_click`). Ignored elsewhere.
+                let (px, py) = self.mouse_pos;
+                if self.effect_dial_drag.active_action().is_some() {
+                    return baseview::EventStatus::Captured;
+                }
+                let lay = effect_editor::effect_layout(self.scale_factor);
+                if effect_editor::in_rect(lay.mseg_pane, px, py) {
+                    let sel = self.selected_mseg.min(2);
+                    let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
+                        let row = self.selected_track;
+                        self.mseg_edit.on_right_click(
+                            px,
+                            py,
+                            &mut modu[row].msegs[sel],
+                            lay.mseg_pane,
+                            self.scale_factor,
+                        )
+                    } else {
+                        None
+                    };
+                    if changed == Some(widgets::mseg::MsegEdit::Changed) {
+                        self.mark_config_dirty();
+                    }
+                }
+            }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
                 button: baseview::MouseButton::Left,
                 ..
@@ -762,6 +1023,20 @@ impl baseview::WindowHandler for MultosisWindow {
                 }
                 let _ = self.effect_dial_drag.end_drag();
                 self.kind_dropdown.on_mouse_up();
+                // A release always terminates any in-flight MSEG node drag,
+                // regardless of where the cursor is.
+                if self.view == View::Effect {
+                    let sel = self.selected_mseg.min(2);
+                    let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
+                        let row = self.selected_track;
+                        self.mseg_edit.on_mouse_up(&mut modu[row].msegs[sel])
+                    } else {
+                        None
+                    };
+                    if changed == Some(widgets::mseg::MsegEdit::Changed) {
+                        self.mark_config_dirty();
+                    }
+                }
                 if let Some(LeftGesture::GridPending { row, col, zone }) = self.left_gesture {
                     self.commit_click(row, col, zone, false);
                 }

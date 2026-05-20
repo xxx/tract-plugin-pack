@@ -189,6 +189,87 @@ pub fn kind_items() -> Vec<&'static str> {
     EffectKind::ALL.iter().map(|k| k.name()).collect()
 }
 
+/// The target-dropdown items for `kind`: `(none)` followed by each parameter
+/// name, in parameter-index order.
+pub fn target_items(kind: EffectKind) -> Vec<&'static str> {
+    let instance = crate::effects::EffectInstance::new(kind);
+    let mut items = vec!["(none)"];
+    items.extend(instance.parameters().iter().map(|s| s.name));
+    items
+}
+
+/// The `targets` value for target-dropdown item `item` (0 = `(none)`).
+pub fn target_from_item(item: usize) -> Option<usize> {
+    item.checked_sub(1)
+}
+
+/// The target-dropdown item index for a `targets` value.
+pub fn target_to_item(target: Option<usize>) -> usize {
+    match target {
+        None => 0,
+        Some(i) => i + 1,
+    }
+}
+
+/// Draw the MODULATION section: the MSEG selector, and — for an assignable
+/// MSEG — the target dropdown trigger and depth dial. `selected_mseg` is
+/// 0 (amplitude) / 1 / 2; `target` and `depth` belong to the active assignable
+/// MSEG (ignored when `selected_mseg == 0`). The MSEG pane itself is drawn by
+/// the caller (it needs the window's `MsegEditState`).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_modulation_controls(
+    pixmap: &mut Pixmap,
+    tr: &mut widgets::TextRenderer,
+    selected_mseg: usize,
+    kind: EffectKind,
+    target: Option<usize>,
+    depth: f32,
+    target_dropdown_open: bool,
+    scale: f32,
+) {
+    let lay = effect_layout(scale);
+    widgets::controls::draw_stepped_selector(
+        pixmap,
+        tr,
+        lay.mseg_selector.0,
+        lay.mseg_selector.1,
+        lay.mseg_selector.2,
+        lay.mseg_selector.3,
+        &["Amp", "MSEG 1", "MSEG 2"],
+        selected_mseg.min(2),
+    );
+    if selected_mseg != 0 {
+        let label = match target {
+            None => "(none)",
+            Some(i) => crate::effects::EffectInstance::new(kind)
+                .parameters()
+                .get(i)
+                .map(|s| s.name)
+                .unwrap_or("(none)"),
+        };
+        widgets::dropdown::draw_dropdown_trigger(
+            pixmap,
+            tr,
+            lay.target,
+            label,
+            target_dropdown_open,
+        );
+        // depth dial: bipolar -1..1 mapped to a 0..1 arc.
+        let (dx, dy, dw, dh) = lay.depth;
+        let norm = ((depth + 1.0) / 2.0).clamp(0.0, 1.0);
+        widgets::param_dial::draw_dial(
+            pixmap,
+            tr,
+            dx + dw / 2.0,
+            dy + dh / 2.0,
+            (dw.min(dh) / 2.0) - 8.0 * scale,
+            "Depth",
+            &format!("{depth:+.2}"),
+            norm,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +295,26 @@ mod tests {
 
     fn rects_overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
         a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+    }
+
+    #[test]
+    fn target_items_lists_none_then_each_parameter() {
+        let items = target_items(crate::effects::EffectKind::Lowpass);
+        assert_eq!(items[0], "(none)");
+        assert_eq!(items[1], "Cutoff");
+        assert_eq!(items[2], "Resonance");
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn target_index_round_trips_through_the_dropdown_indexing() {
+        // Dropdown item 0 => None; item i+1 => Some(i).
+        assert_eq!(target_from_item(0), None);
+        assert_eq!(target_from_item(1), Some(0));
+        assert_eq!(target_from_item(3), Some(2));
+        // And back: None => 0; Some(i) => i+1.
+        assert_eq!(target_to_item(None), 0);
+        assert_eq!(target_to_item(Some(0)), 1);
+        assert_eq!(target_to_item(Some(2)), 3);
     }
 }
