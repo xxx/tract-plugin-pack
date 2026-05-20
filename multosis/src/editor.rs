@@ -84,6 +84,36 @@ fn clamp_track(row: usize) -> usize {
     row.min(crate::grid::ROWS - 1)
 }
 
+/// Time window for double-click-to-reset on sliders/dials.
+const DOUBLE_CLICK_MS: u128 = 400;
+
+/// Two consecutive presses on the same control within `DOUBLE_CLICK_MS`
+/// register as a double-click. The control's identity is carried in `A`.
+struct ClickTracker<A: Copy + PartialEq> {
+    last_time: std::time::Instant,
+    last_action: Option<A>,
+}
+
+impl<A: Copy + PartialEq> ClickTracker<A> {
+    fn new() -> Self {
+        Self {
+            last_time: std::time::Instant::now(),
+            last_action: None,
+        }
+    }
+
+    /// Record this press; return `true` if it is a double-click on the same
+    /// control as the previous press within the time window.
+    fn check_and_update(&mut self, action: A) -> bool {
+        let now = std::time::Instant::now();
+        let is_double = self.last_action == Some(action)
+            && now.duration_since(self.last_time).as_millis() < DOUBLE_CLICK_MS;
+        self.last_time = now;
+        self.last_action = Some(action);
+        is_double
+    }
+}
+
 /// The baseview window handler — owns the surface and draws each frame.
 struct MultosisWindow {
     surface: widgets::SoftbufferSurface,
@@ -147,6 +177,11 @@ struct MultosisWindow {
     /// Audio→GUI dirty flag: every edit (param dial, kind switch, …) sets it
     /// so `process()` re-bridges the persisted config into the engine.
     config_dirty: Arc<AtomicBool>,
+    /// Double-click detector for the toolbar Mix / Output sliders.
+    toolbar_click: ClickTracker<ToolbarControl>,
+    /// Double-click detector for the effect-editor parameter / depth /
+    /// trigger-rate dials.
+    effect_click: ClickTracker<EffectHit>,
 }
 
 impl MultosisWindow {
@@ -181,6 +216,8 @@ impl MultosisWindow {
             grid_handoff,
             active_rows,
             mseg_phases,
+            toolbar_click: ClickTracker::new(),
+            effect_click: ClickTracker::new(),
             mouse_pos: (0.0, 0.0),
             text_renderer,
             gui_context,
@@ -393,6 +430,25 @@ impl MultosisWindow {
         }
     }
 
+    /// Reset a toolbar slider to its default value (double-click handler).
+    /// Mix → 1.0 (100%); Output → 0 dB.
+    fn reset_toolbar_slider(&self, ctrl: ToolbarControl) {
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        match ctrl {
+            ToolbarControl::Mix => {
+                setter.begin_set_parameter(&self.params.mix);
+                setter.set_parameter(&self.params.mix, 1.0);
+                setter.end_set_parameter(&self.params.mix);
+            }
+            ToolbarControl::Output => {
+                setter.begin_set_parameter(&self.params.output_gain);
+                setter.set_parameter(&self.params.output_gain, nih_plug::util::db_to_gain(0.0));
+                setter.end_set_parameter(&self.params.output_gain);
+            }
+            _ => {}
+        }
+    }
+
     /// Set a slider control to a normalized value mid-gesture. `begin_slider`
     /// and `end_slider` bracket the whole drag.
     fn set_slider(&self, ctrl: ToolbarControl, norm: f32) {
@@ -581,7 +637,9 @@ impl MultosisWindow {
                     .open(EffectAction::Kind, lay.kind, &items, current, false, win);
             }
             EffectHit::Dial(i) => {
-                if let Some(spec) = self.param_spec(i) {
+                if self.effect_click.check_and_update(EffectHit::Dial(i)) {
+                    self.reset_effect_dial_to_default(i);
+                } else if let Some(spec) = self.param_spec(i) {
                     let value = self.selected_track_effect().params[i];
                     let norm = effects::value_to_norm(value, spec.min, spec.max, spec.scaling);
                     self.effect_dial_drag
@@ -612,11 +670,15 @@ impl MultosisWindow {
             }
             EffectHit::Depth => {
                 if self.selected_mseg != 0 {
-                    let modu = self.selected_track_modulation();
-                    let depth = modu.depths[self.selected_mseg - 1];
-                    let norm = ((depth + 1.0) / 2.0).clamp(0.0, 1.0);
-                    self.effect_dial_drag
-                        .begin_drag(EffectHit::Depth, norm, false);
+                    if self.effect_click.check_and_update(EffectHit::Depth) {
+                        self.reset_depth_to_default();
+                    } else {
+                        let modu = self.selected_track_modulation();
+                        let depth = modu.depths[self.selected_mseg - 1];
+                        let norm = ((depth + 1.0) / 2.0).clamp(0.0, 1.0);
+                        self.effect_dial_drag
+                            .begin_drag(EffectHit::Depth, norm, false);
+                    }
                 }
             }
             EffectHit::MsegPane => {
@@ -666,14 +728,21 @@ impl MultosisWindow {
             EffectHit::TriggerRate => {
                 let trigger = self.selected_track_modulation().trigger;
                 if let TriggerSource::FreeHz { hz } = trigger {
-                    let current_norm = effects::value_to_norm(
-                        hz,
-                        effect_editor::TRIGGER_RATE_MIN_HZ,
-                        effect_editor::TRIGGER_RATE_MAX_HZ,
-                        effects::ParamScaling::Log,
-                    );
-                    self.effect_dial_drag
-                        .begin_drag(EffectHit::TriggerRate, current_norm, false);
+                    if self.effect_click.check_and_update(EffectHit::TriggerRate) {
+                        self.reset_trigger_rate_to_default();
+                    } else {
+                        let current_norm = effects::value_to_norm(
+                            hz,
+                            effect_editor::TRIGGER_RATE_MIN_HZ,
+                            effect_editor::TRIGGER_RATE_MAX_HZ,
+                            effects::ParamScaling::Log,
+                        );
+                        self.effect_dial_drag.begin_drag(
+                            EffectHit::TriggerRate,
+                            current_norm,
+                            false,
+                        );
+                    }
                 } else {
                     return false;
                 }
@@ -799,6 +868,42 @@ impl MultosisWindow {
             modu[row].targets[k] = target;
         }
         self.mark_config_dirty();
+    }
+
+    /// Reset effect-param dial slot `i` to the ParamSpec default. Marks dirty.
+    fn reset_effect_dial_to_default(&mut self, i: usize) {
+        let Some(spec) = self.param_spec(i) else {
+            return;
+        };
+        if let Ok(mut cfg) = self.params.track_effects.lock() {
+            cfg[self.selected_track].params[i] = spec.default;
+        }
+        self.mark_config_dirty();
+    }
+
+    /// Reset the active assignable MSEG's modulation depth to 0 (no
+    /// modulation). Marks dirty. No-op when the amplitude MSEG is selected.
+    fn reset_depth_to_default(&mut self) {
+        if self.selected_mseg == 0 {
+            return;
+        }
+        let row = self.selected_track;
+        let k = self.selected_mseg - 1;
+        if let Ok(mut modu) = self.params.track_modulation.lock() {
+            modu[row].depths[k] = 0.0;
+        }
+        self.mark_config_dirty();
+    }
+
+    /// Reset the per-track FreeHz trigger rate to 1.0 Hz. Marks dirty.
+    /// No-op when the active trigger source is not `FreeHz`.
+    fn reset_trigger_rate_to_default(&mut self) {
+        if let Ok(mut cfg) = self.params.track_modulation.lock() {
+            if let TriggerSource::FreeHz { hz } = &mut cfg[self.selected_track].trigger {
+                *hz = 1.0;
+                self.mark_config_dirty();
+            }
+        }
     }
 
     /// Update the trigger rate from the rate-dial drag's normalised value.
@@ -1127,9 +1232,13 @@ impl baseview::WindowHandler for MultosisWindow {
                 }
                 match toolbar::toolbar_hit(px, py, self.scale_factor) {
                     Some(ctrl @ (ToolbarControl::Mix | ToolbarControl::Output)) => {
-                        let current = self.slider_normalized(ctrl);
-                        self.toolbar_drag.begin_drag(ctrl, current, false);
-                        self.begin_slider(ctrl);
+                        if self.toolbar_click.check_and_update(ctrl) {
+                            self.reset_toolbar_slider(ctrl);
+                        } else {
+                            let current = self.slider_normalized(ctrl);
+                            self.toolbar_drag.begin_drag(ctrl, current, false);
+                            self.begin_slider(ctrl);
+                        }
                     }
                     Some(ctrl) => self.handle_toolbar_button(ctrl),
                     None => match toolbar::op_hit(px, py, self.scale_factor) {
