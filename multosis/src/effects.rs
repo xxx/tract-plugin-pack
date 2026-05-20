@@ -827,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_value_hertz_handles_k_kHz_Hz() {
+    fn parse_value_hertz_handles_k_khz_hz() {
         let f = ParamFormat::Hertz;
         assert_eq!(parse_value("80", f), Some(80.0));
         assert_eq!(parse_value("80 Hz", f), Some(80.0));
