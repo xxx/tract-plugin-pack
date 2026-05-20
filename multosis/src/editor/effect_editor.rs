@@ -310,11 +310,40 @@ pub const TRIGGER_RATE_MIN_HZ: f32 = 0.05;
 pub const TRIGGER_RATE_MAX_HZ: f32 = 20.0;
 
 /// Length slider range when the active MSEG is Beat-synced (beats per cycle).
-pub const MSEG_LENGTH_BEATS_MIN: f32 = 1.0;
+/// 0.25 beats = a sixteenth note in 4/4 (1 beat = quarter note).
+pub const MSEG_LENGTH_BEATS_MIN: f32 = 0.25;
 pub const MSEG_LENGTH_BEATS_MAX: f32 = 64.0;
 /// Length slider range when the active MSEG is Time-synced (seconds per cycle).
 pub const MSEG_LENGTH_TIME_MIN: f32 = 0.05;
 pub const MSEG_LENGTH_TIME_MAX: f32 = 32.0;
+
+/// Format a Beat-synced length value for the slider's right-side readout.
+///
+/// Common musical subdivisions snap to a name (`"1/16 note"`, `"1/8 note"`,
+/// `"1 beat"`, `"2 beats"`, ...); off-grid values fall back to a decimal
+/// (`"0.32 beat"`, `"1.7 beats"`). Tolerance is 1.5 % — tight enough that
+/// only values inside a slider pixel of the named division snap.
+fn format_beats_label(v: f32) -> String {
+    const NAMED: &[(f32, &str)] = &[(0.25, "1/16 note"), (0.5, "1/8 note"), (0.75, "dotted 1/8")];
+    let tol = 0.015 * v.max(1.0);
+    for (target, name) in NAMED {
+        if (v - target).abs() <= tol {
+            return (*name).to_string();
+        }
+    }
+    if v >= 1.0 {
+        let rounded = v.round();
+        if (v - rounded).abs() <= tol {
+            let n = rounded as i32;
+            let s = if n == 1 { "" } else { "s" };
+            return format!("{n} beat{s}");
+        }
+        let s = if v >= 1.5 { "s" } else { "" };
+        format!("{v:.2} beat{s}")
+    } else {
+        format!("{v:.2} beat")
+    }
+}
 
 /// Draw the active-MSEG sync-mode selector + length slider on the modulation
 /// row. Reads sync mode + length from `mseg`.
@@ -358,9 +387,7 @@ pub fn draw_mseg_controls(
                 MSEG_LENGTH_BEATS_MAX,
                 crate::effects::ParamScaling::Log,
             );
-            let rounded = v.round() as i32;
-            let suffix = if rounded == 1 { "" } else { "s" };
-            (n, format!("{rounded} beat{suffix}"))
+            (n, format_beats_label(v))
         }
     };
     widgets::draw_slider(
@@ -520,6 +547,24 @@ mod tests {
 
     fn rects_overlap(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
         a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
+    }
+
+    #[test]
+    fn format_beats_label_names_common_subdivisions() {
+        assert_eq!(format_beats_label(0.25), "1/16 note");
+        assert_eq!(format_beats_label(0.5), "1/8 note");
+        assert_eq!(format_beats_label(0.75), "dotted 1/8");
+        assert_eq!(format_beats_label(1.0), "1 beat");
+        assert_eq!(format_beats_label(2.0), "2 beats");
+        assert_eq!(format_beats_label(64.0), "64 beats");
+    }
+
+    #[test]
+    fn format_beats_label_falls_back_to_decimal_off_grid() {
+        // 0.32 isn't near any named subdivision → decimal beat.
+        assert_eq!(format_beats_label(0.32), "0.32 beat");
+        // 1.7 isn't an integer → "X.XX beats".
+        assert_eq!(format_beats_label(1.7), "1.70 beats");
     }
 
     #[test]
