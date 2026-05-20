@@ -194,17 +194,29 @@ fn draw_canvas(
     let (px0, py0, pw, ph) = layout.plot;
 
     // Vertical time-grid lines.
+    // Grid colour sits between the canvas (color_control_bg, ~#2a2c32) and
+    // the border (~#404040) — visible but quiet enough not to fight the
+    // envelope polyline. `color_bg()` was too close to the canvas to read.
+    let grid_color = tiny_skia::Color::from_rgba8(0x44, 0x47, 0x4e, 0xff);
     let tdiv = data.time_divisions.max(1);
     for i in 1..tdiv {
         let gx = phase_to_x(layout, i as f32 / tdiv as f32);
-        draw_rect(pixmap, gx, py0, 1.0, ph, color_bg());
+        draw_rect(pixmap, gx, py0, 1.0, ph, grid_color);
     }
     // Horizontal value-grid lines.
     let vsteps = data.value_steps.max(1);
     for i in 1..vsteps {
         let gy = value_to_y(layout, i as f32 / vsteps as f32);
-        draw_rect(pixmap, px0, gy, pw, 1.0, color_bg());
+        draw_rect(pixmap, px0, gy, pw, 1.0, grid_color);
     }
+
+    // Midline marker at value = 0.5 — the bipolar zero for consumers that
+    // re-map the curve via `2·value − 1` (miff's kernel taps, multosis's
+    // assignable modulation). Drawn after the grid so it sits over any grid
+    // line at the same row, and noticeably brighter so the eye finds zero.
+    let mid_color = tiny_skia::Color::from_rgba8(0x82, 0x86, 0x90, 0xff);
+    let my = value_to_y(layout, 0.5);
+    draw_rect(pixmap, px0, my, pw, 1.0, mid_color);
 
     // Envelope polyline: sample `value_at_phase` per pixel column of the plot.
     let cols = pw.max(1.0) as usize;
