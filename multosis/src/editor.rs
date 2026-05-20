@@ -13,6 +13,7 @@ use crate::editor::toolbar::{ToolbarControl, ToolbarOp};
 use crate::effects::{EffectKind, ParamSpec};
 use crate::grid::LoopRegion;
 use crate::handoff::GridHandoff;
+use crate::modulation::TriggerSource;
 use crate::region::RegionSnapshot;
 use crate::seq_status::SeqStatusDisplay;
 use crate::wavefront_display::WavefrontDisplay;
@@ -75,6 +76,7 @@ enum View {
 enum EffectAction {
     Kind,
     Target,
+    Trigger,
 }
 
 /// Clamp a candidate selected-track index into `0..ROWS`.
@@ -511,6 +513,15 @@ impl MultosisWindow {
             self.kind_dropdown.is_open_for(EffectAction::Target),
             self.scale_factor,
         );
+        // Per-track trigger control + (conditionally) rate dial.
+        let trigger = self.selected_track_modulation().trigger;
+        effect_editor::draw_trigger_controls(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            trigger,
+            self.kind_dropdown.is_open_for(EffectAction::Trigger),
+            self.scale_factor,
+        );
     }
 
     /// Handle a left press while in `View::Effect`. Returns `true` if the
@@ -519,9 +530,16 @@ impl MultosisWindow {
     /// fine-grained MSEG node placement.
     fn on_effect_press(&mut self, px: f32, py: f32, shift: bool) -> bool {
         let params = self.selected_track_param_count();
-        let Some(hit) =
-            effect_editor::effect_hit(px, py, self.scale_factor, params, self.selected_mseg, false)
-        else {
+        let trigger = self.selected_track_modulation().trigger;
+        let is_free_hz = matches!(trigger, TriggerSource::FreeHz { .. });
+        let Some(hit) = effect_editor::effect_hit(
+            px,
+            py,
+            self.scale_factor,
+            params,
+            self.selected_mseg,
+            is_free_hz,
+        ) else {
             return false;
         };
         let lay = effect_editor::effect_layout(self.scale_factor);
@@ -608,8 +626,30 @@ impl MultosisWindow {
                     self.mark_config_dirty();
                 }
             }
-            // Phase 3 Task 3 placeholders — wired in Task 4.
-            EffectHit::Trigger | EffectHit::TriggerRate => {}
+            EffectHit::Trigger => {
+                let trigger = self.selected_track_modulation().trigger;
+                let current = effect_editor::trigger_to_item(trigger);
+                let items = effect_editor::trigger_items();
+                let win = (self.physical_width as f32, self.physical_height as f32);
+                self.kind_dropdown.open(
+                    EffectAction::Trigger,
+                    lay.trigger,
+                    &items,
+                    current,
+                    false,
+                    win,
+                );
+            }
+            EffectHit::TriggerRate => {
+                let trigger = self.selected_track_modulation().trigger;
+                if let TriggerSource::FreeHz { hz } = trigger {
+                    let current_norm = effect_editor::hz_to_norm(hz);
+                    self.effect_dial_drag
+                        .begin_drag(EffectHit::TriggerRate, current_norm, false);
+                } else {
+                    return false;
+                }
+            }
         }
         true
     }
@@ -686,6 +726,31 @@ impl MultosisWindow {
         self.mark_config_dirty();
     }
 
+    /// Update the trigger rate from the rate-dial drag's normalised value.
+    fn apply_trigger_rate_drag(&mut self, norm: f32) {
+        let new_hz = effect_editor::norm_to_hz(norm);
+        if let Ok(mut cfg) = self.params.track_modulation.lock() {
+            if let TriggerSource::FreeHz { hz } = &mut cfg[self.selected_track].trigger {
+                *hz = new_hz;
+                self.mark_config_dirty();
+            }
+        }
+    }
+
+    /// Apply a trigger-dropdown selection: convert the item index to a
+    /// `TriggerSource` (carrying the current Hz if any), write it, mark dirty.
+    fn apply_trigger_selection(&mut self, idx: usize) {
+        let carried_hz = match self.selected_track_modulation().trigger {
+            TriggerSource::FreeHz { hz } => hz,
+            _ => 1.0,
+        };
+        let new_trigger = effect_editor::trigger_from_item(idx, carried_hz);
+        if let Ok(mut cfg) = self.params.track_modulation.lock() {
+            cfg[self.selected_track].trigger = new_trigger;
+            self.mark_config_dirty();
+        }
+    }
+
     fn draw(&mut self) {
         match self.view {
             View::Grid => {
@@ -753,12 +818,14 @@ impl MultosisWindow {
             self.scale_factor,
         );
         // Drop popups draw last so they overlay every other control. One
-        // shared `kind_dropdown` state handles both Kind and Target; the
-        // items list depends on which one is open.
+        // shared `kind_dropdown` state handles Kind, Target, and Trigger;
+        // the items list depends on which one is open.
         if self.view == View::Effect && self.kind_dropdown.is_open() {
             let kind = self.selected_track_effect().kind;
             let items: Vec<&'static str> = if self.kind_dropdown.is_open_for(EffectAction::Target) {
                 effect_editor::target_items(kind)
+            } else if self.kind_dropdown.is_open_for(EffectAction::Trigger) {
+                effect_editor::trigger_items().to_vec()
             } else {
                 effect_editor::kind_items()
             };
@@ -844,6 +911,17 @@ impl baseview::WindowHandler for MultosisWindow {
                             self.apply_depth_drag(norm);
                         }
                     }
+                    Some(EffectHit::TriggerRate) => {
+                        let current = effect_editor::hz_to_norm(
+                            match self.selected_track_modulation().trigger {
+                                TriggerSource::FreeHz { hz } => hz,
+                                _ => 1.0,
+                            },
+                        );
+                        if let Some(norm) = self.effect_dial_drag.update_drag(shift, current) {
+                            self.apply_trigger_rate_drag(norm);
+                        }
+                    }
                     _ => {}
                 }
                 // Dropdown popup hover — pick the items list matching the open
@@ -853,6 +931,8 @@ impl baseview::WindowHandler for MultosisWindow {
                     let items: Vec<&'static str> =
                         if self.kind_dropdown.is_open_for(EffectAction::Target) {
                             effect_editor::target_items(kind)
+                        } else if self.kind_dropdown.is_open_for(EffectAction::Trigger) {
+                            effect_editor::trigger_items().to_vec()
                         } else {
                             effect_editor::kind_items()
                         };
@@ -935,6 +1015,8 @@ impl baseview::WindowHandler for MultosisWindow {
                     let items: Vec<&'static str> =
                         if self.kind_dropdown.is_open_for(EffectAction::Target) {
                             effect_editor::target_items(kind)
+                        } else if self.kind_dropdown.is_open_for(EffectAction::Trigger) {
+                            effect_editor::trigger_items().to_vec()
                         } else {
                             effect_editor::kind_items()
                         };
@@ -950,6 +1032,7 @@ impl baseview::WindowHandler for MultosisWindow {
                             EffectAction::Target => {
                                 self.apply_target_selection(idx);
                             }
+                            EffectAction::Trigger => self.apply_trigger_selection(idx),
                         }
                     }
                     return baseview::EventStatus::Captured;
