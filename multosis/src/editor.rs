@@ -135,7 +135,8 @@ struct MultosisWindow {
     /// `EffectHit::Depth` for the modulation depth dial.
     effect_dial_drag: widgets::DragState<EffectHit>,
     /// MSEG editor state — owns hover/drag/last-node info for the active MSEG.
-    /// Curve-only mode: the strip controls are external (per-MSEG selectors).
+    /// Full-editor mode: the strip (sync/length/play-mode/randomize/style) is
+    /// drawn inside the MSEG pane and routed through the widget's own handlers.
     mseg_edit: widgets::mseg::MsegEditState,
     /// Timestamp of the last left press on the MSEG pane, for double-click
     /// detection (~400 ms / ~8 px).
@@ -192,7 +193,7 @@ impl MultosisWindow {
             selected_mseg: 0,
             kind_dropdown: widgets::dropdown::DropdownState::new(),
             effect_dial_drag: widgets::DragState::new(),
-            mseg_edit: widgets::mseg::MsegEditState::new_curve_only(),
+            mseg_edit: widgets::mseg::MsegEditState::new(),
             mseg_last_click_time: std::time::Instant::now(),
             mseg_last_click_pos: (-999.0, -999.0),
             config_dirty,
