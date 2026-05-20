@@ -68,23 +68,34 @@ pub fn samples_per_step(speed: Speed, bpm: f64, sample_rate: f64) -> f64 {
 
 /// Accumulates elapsed samples and reports when step boundaries are crossed.
 /// The accumulator is the number of samples elapsed since the last boundary;
-/// it is always kept in `[0, samples_per_step)`.
+/// it is always kept in `[0, samples_per_step)`. After `new()` or `reset()`
+/// the clock fires a boundary on its FIRST `advance()` call — pressing Play
+/// arms the sequence immediately rather than waiting a full step.
 #[derive(Clone, Copy, Debug)]
 pub struct StepClock {
     accum: f64,
+    /// Pending sample-0 boundary for the very first `advance` after reset,
+    /// so the sequencer arms on the same sample the user pressed Play.
+    pending_first: bool,
 }
 
 impl StepClock {
-    /// A clock with its accumulator at zero — the first boundary is a full
-    /// step away.
+    /// A fresh clock — the first `advance` will fire a boundary at offset 0
+    /// (immediate arm), and subsequent boundaries follow at `samples_per_step`
+    /// intervals.
     pub fn new() -> Self {
-        Self { accum: 0.0 }
+        Self {
+            accum: 0.0,
+            pending_first: true,
+        }
     }
 
-    /// Clear the accumulator. Used when the sequence is reset so the next
-    /// step boundary is a full step away.
+    /// Clear the accumulator AND re-arm the first-boundary-on-next-advance
+    /// flag. Used when the sequence is reset (transport stopped→playing edge,
+    /// manual Reset).
     pub fn reset(&mut self) {
         self.accum = 0.0;
+        self.pending_first = true;
     }
 
     /// Advance the clock across a process block of `block_len` samples at the
@@ -100,6 +111,11 @@ impl StepClock {
     ) {
         if samples_per_step <= 0.0 || block_len == 0 {
             return;
+        }
+        // Immediate first boundary after reset, then regular accumulation.
+        if self.pending_first {
+            self.pending_first = false;
+            on_step(0);
         }
         self.accum += block_len as f64;
         while self.accum >= samples_per_step {
@@ -151,19 +167,20 @@ mod tests {
     }
 
     #[test]
-    fn step_clock_fires_at_each_boundary_with_offsets() {
+    fn step_clock_fires_immediately_then_at_each_boundary() {
         let mut clk = StepClock::new();
         let mut offsets = Vec::new();
-        // 100 samples per step; a 250-sample block crosses two boundaries.
+        // 100 samples per step; the first advance fires at sample 0 plus
+        // 100 and 200 within the 250-sample block.
         clk.advance(250, 100.0, |off| offsets.push(off));
-        assert_eq!(offsets, vec![100, 200]);
+        assert_eq!(offsets, vec![0, 100, 200]);
     }
 
     #[test]
     fn step_clock_carries_the_remainder_across_blocks() {
         let mut clk = StepClock::new();
         let mut offsets = Vec::new();
-        clk.advance(250, 100.0, |off| offsets.push(off)); // accum left at 50
+        clk.advance(250, 100.0, |off| offsets.push(off)); // 0, 100, 200; accum=50
         offsets.clear();
         // Next boundary is 50 samples in (100 - 50 carried).
         clk.advance(100, 100.0, |off| offsets.push(off));
@@ -171,14 +188,15 @@ mod tests {
     }
 
     #[test]
-    fn step_clock_block_shorter_than_a_step_fires_nothing() {
+    fn step_clock_block_shorter_than_a_step_still_arms_immediately() {
         let mut clk = StepClock::new();
         let mut count = 0;
-        clk.advance(40, 100.0, |_| count += 1);
-        clk.advance(40, 100.0, |_| count += 1);
-        assert_eq!(count, 0); // 80 samples total, no boundary yet
-        clk.advance(40, 100.0, |_| count += 1);
-        assert_eq!(count, 1); // 120 samples total crosses the 100 boundary
+        clk.advance(40, 100.0, |_| count += 1); // immediate sample-0 fire
+        assert_eq!(count, 1);
+        clk.advance(40, 100.0, |_| count += 1); // 80 samples since last fire
+        assert_eq!(count, 1);
+        clk.advance(40, 100.0, |_| count += 1); // 120 samples total crosses 100
+        assert_eq!(count, 2);
     }
 
     #[test]
@@ -190,25 +208,27 @@ mod tests {
     }
 
     #[test]
-    fn step_clock_block_equal_to_step_fires_once_per_block() {
-        // Regression: when block_len exactly equals samples_per_step, the clock
-        // must keep firing one boundary per block, never stalling.
+    fn step_clock_block_equal_to_step_fires_once_per_block_after_arming() {
+        // Regression: when block_len exactly equals samples_per_step, the
+        // clock fires one boundary per block. The first advance also fires
+        // the immediate sample-0 arm, giving N+1 fires over N blocks.
         let mut clk = StepClock::new();
         let mut count = 0;
         for _ in 0..10 {
             clk.advance(100, 100.0, |_| count += 1);
         }
-        assert_eq!(count, 10);
+        assert_eq!(count, 11);
     }
 
     #[test]
-    fn step_clock_reset_clears_the_accumulator() {
+    fn step_clock_reset_re_arms_the_immediate_first_boundary() {
         let mut clk = StepClock::new();
-        clk.advance(70, 100.0, |_| {});
+        clk.advance(70, 100.0, |_| {}); // consume the initial sample-0 fire
         clk.reset();
         let mut offsets = Vec::new();
-        // After reset the next boundary is a full step away.
+        // After reset, the next advance fires immediately at 0 again, then at
+        // the regular step boundary 100 samples in.
         clk.advance(150, 100.0, |off| offsets.push(off));
-        assert_eq!(offsets, vec![100]);
+        assert_eq!(offsets, vec![0, 100]);
     }
 }
