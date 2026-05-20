@@ -46,23 +46,33 @@ impl TrackModulation {
     /// effect parameter 0, its loop length spread by row so each track drifts
     /// at its own rate; `msegs[2]` is an unused cyclic default.
     pub fn default_for_row(row: usize) -> Self {
+        // All three MSEGs on a row default to the SAME beat-synced length so
+        // their playheads visibly stay in lockstep. The length varies by row
+        // (4..34 beats) for audible per-track variety. The user can re-tune
+        // any single MSEG's clock via its strip.
+        let beats = 4.0 + row as f32 * 2.0;
+
         // msegs[0] — amplitude: flat at 1.0.
         let mut amplitude = MsegData::default();
         amplitude.nodes[0].value = 1.0;
         amplitude.nodes[1].value = 1.0;
         amplitude.play_mode = PlayMode::Cyclic;
+        amplitude.sync_mode = SyncMode::Beat;
+        amplitude.beats = beats;
 
-        // msegs[1] — assignable: a cyclic triangle, Beat-synced, length by row.
+        // msegs[1] — assignable: a cyclic triangle.
         let mut sweep = MsegData::default(); // nodes (0,0) and (1,1)
         let _ = sweep.insert_node(0.5, 1.0); // -> (0,0) (0.5,1.0) (1,1.0)
         sweep.move_node(2, 1.0, 0.0); // last node value -> 0: triangle
         sweep.play_mode = PlayMode::Cyclic;
         sweep.sync_mode = SyncMode::Beat;
-        sweep.beats = 4.0 + row as f32 * 2.0; // 4..34 beats across the rows
+        sweep.beats = beats;
 
-        // msegs[2] — assignable: unused default.
+        // msegs[2] — assignable: unused default, same clock as the others.
         let spare = MsegData {
             play_mode: PlayMode::Cyclic,
+            sync_mode: SyncMode::Beat,
+            beats,
             ..MsegData::default()
         };
 
