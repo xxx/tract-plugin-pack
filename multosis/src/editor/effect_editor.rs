@@ -47,7 +47,10 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
     let ox = MARGIN + TRACK_PANEL_W;
     let oy = STATUS_H + GUTTER;
     let mw = WINDOW_WIDTH as f32 - MARGIN - ox;
-    let l = |x: f32, y: f32, w: f32, h: f32| (x * scale, y * scale, w * scale, h * scale);
+    // Left margin between the track panel and the effect-editor controls so
+    // they don't butt against the listing on the left.
+    let inset = 14.0_f32;
+    let l = |x: f32, y: f32, w: f32, h: f32| ((x + inset) * scale, y * scale, w * scale, h * scale);
     // Editor bar.
     let back = l(ox, oy + 4.0, 90.0, 26.0);
     // EFFECT section.
@@ -59,8 +62,10 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
     let trigger_rate = l(ox + 146.0, oy + 162.0, 60.0, 38.0);
     let mseg_selector = l(ox + 222.0, oy + 168.0, 240.0, 26.0);
     let target = l(ox + 478.0, oy + 167.0, 170.0, 28.0);
-    let depth = l(ox + 664.0, oy + 162.0, 70.0, 70.0);
-    let mseg_pane = l(ox, oy + 208.0, mw, 422.0);
+    // Depth dial: 60×60 and raised to oy+144 so its value text doesn't fall
+    // into the MSEG pane below (which starts at oy+208).
+    let depth = l(ox + 664.0, oy + 144.0, 60.0, 60.0);
+    let mseg_pane = l(ox, oy + 208.0, mw - inset, 422.0);
     EffectLayout {
         back,
         kind,
