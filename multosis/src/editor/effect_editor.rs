@@ -8,6 +8,7 @@
 use crate::editor::grid_view::{GUTTER, MARGIN, STATUS_H, TRACK_PANEL_W};
 use crate::editor::WINDOW_WIDTH;
 use crate::effects::{Effect, EffectKind, TrackEffect, MAX_EFFECT_PARAMS};
+use crate::modulation::TriggerSource;
 use tiny_skia::Pixmap;
 use tiny_skia_widgets as widgets;
 
@@ -34,6 +35,10 @@ pub struct EffectLayout {
     pub depth: (f32, f32, f32, f32),
     /// MSEG editor pane — used in Task 9.
     pub mseg_pane: (f32, f32, f32, f32),
+    /// Trigger-source dropdown trigger.
+    pub trigger: (f32, f32, f32, f32),
+    /// Trigger-rate dial — only hot when the source is `FreeHz`.
+    pub trigger_rate: (f32, f32, f32, f32),
 }
 
 /// Compute the effect-editor layout at `scale`.
@@ -48,10 +53,13 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
     // EFFECT section.
     let kind = l(ox, oy + 50.0, 150.0, 28.0);
     let dials = std::array::from_fn(|i| l(ox + 180.0 + i as f32 * 96.0, oy + 44.0, 80.0, 80.0));
-    // MODULATION section.
-    let mseg_selector = l(ox, oy + 168.0, 240.0, 26.0);
-    let target = l(ox + 470.0, oy + 167.0, 170.0, 28.0);
-    let depth = l(ox + 660.0, oy + 162.0, 70.0, 70.0);
+    // MODULATION section — trigger + rate on the left, then MSEG selector +
+    // target + depth. The trigger and rate are PER-TRACK (govern all 3 MSEGs).
+    let trigger = l(ox, oy + 168.0, 130.0, 26.0);
+    let trigger_rate = l(ox + 146.0, oy + 162.0, 60.0, 38.0);
+    let mseg_selector = l(ox + 222.0, oy + 168.0, 240.0, 26.0);
+    let target = l(ox + 478.0, oy + 167.0, 170.0, 28.0);
+    let depth = l(ox + 664.0, oy + 162.0, 70.0, 70.0);
     let mseg_pane = l(ox, oy + 208.0, mw, 422.0);
     EffectLayout {
         back,
@@ -61,6 +69,8 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
         target,
         depth,
         mseg_pane,
+        trigger,
+        trigger_rate,
     }
 }
 
@@ -80,6 +90,10 @@ pub enum EffectHit {
     Target,
     Depth,
     MsegPane,
+    /// The per-track trigger-source dropdown.
+    Trigger,
+    /// The per-track trigger-rate dial (only hot when the source is FreeHz).
+    TriggerRate,
 }
 
 /// The effect-editor control under physical-pixel point `(px, py)` at `scale`,
@@ -92,6 +106,7 @@ pub fn effect_hit(
     scale: f32,
     param_count: usize,
     selected_mseg: usize,
+    is_free_hz: bool,
 ) -> Option<EffectHit> {
     let lay = effect_layout(scale);
     if in_rect(lay.back, px, py) {
@@ -104,6 +119,13 @@ pub fn effect_hit(
         if in_rect(lay.dials[i], px, py) {
             return Some(EffectHit::Dial(i));
         }
+    }
+    // Per-track trigger controls — checked before the per-MSEG selector.
+    if in_rect(lay.trigger, px, py) {
+        return Some(EffectHit::Trigger);
+    }
+    if is_free_hz && in_rect(lay.trigger_rate, px, py) {
+        return Some(EffectHit::TriggerRate);
     }
     // MSEG selector — three equal segments.
     let (sx, sy, sw, sh) = lay.mseg_selector;
@@ -208,6 +230,82 @@ pub fn target_to_item(target: Option<usize>) -> usize {
     match target {
         None => 0,
         Some(i) => i + 1,
+    }
+}
+
+/// The trigger-source dropdown items, in `TriggerSource` discriminant order.
+pub fn trigger_items() -> [&'static str; 3] {
+    ["Free run", "Cell light", "Free Hz"]
+}
+
+/// Build a `TriggerSource` from a dropdown item index. `carried_hz` is the
+/// `hz` to seed `FreeHz` with (the dial's current value, or a default).
+pub fn trigger_from_item(item: usize, carried_hz: f32) -> TriggerSource {
+    match item {
+        0 => TriggerSource::Free,
+        1 => TriggerSource::CellLight,
+        _ => TriggerSource::FreeHz { hz: carried_hz },
+    }
+}
+
+/// The dropdown item index for a `TriggerSource`.
+pub fn trigger_to_item(src: TriggerSource) -> usize {
+    match src {
+        TriggerSource::Free => 0,
+        TriggerSource::CellLight => 1,
+        TriggerSource::FreeHz { .. } => 2,
+    }
+}
+
+/// The trigger-rate dial range (Hz).
+pub const TRIGGER_RATE_MIN_HZ: f32 = 0.05;
+pub const TRIGGER_RATE_MAX_HZ: f32 = 20.0;
+
+/// Map a 0..1 dial position to a Hz value, log-skewed across the rate range.
+pub fn norm_to_hz(norm: f32) -> f32 {
+    let n = norm.clamp(0.0, 1.0);
+    TRIGGER_RATE_MIN_HZ * (TRIGGER_RATE_MAX_HZ / TRIGGER_RATE_MIN_HZ).powf(n)
+}
+
+/// Map a Hz value to a 0..1 dial position. Clamps to the rate range.
+pub fn hz_to_norm(hz: f32) -> f32 {
+    if hz <= TRIGGER_RATE_MIN_HZ {
+        return 0.0;
+    }
+    if hz >= TRIGGER_RATE_MAX_HZ {
+        return 1.0;
+    }
+    (hz / TRIGGER_RATE_MIN_HZ).log(TRIGGER_RATE_MAX_HZ / TRIGGER_RATE_MIN_HZ)
+}
+
+/// Draw the per-track trigger dropdown trigger and (when the source is
+/// `FreeHz`) the rate dial. Called as part of the MODULATION section draw.
+pub fn draw_trigger_controls(
+    pixmap: &mut Pixmap,
+    tr: &mut widgets::TextRenderer,
+    trigger: TriggerSource,
+    trigger_dropdown_open: bool,
+    scale: f32,
+) {
+    let lay = effect_layout(scale);
+    let label = match trigger {
+        TriggerSource::Free => "Free run",
+        TriggerSource::CellLight => "Cell light",
+        TriggerSource::FreeHz { .. } => "Free Hz",
+    };
+    widgets::dropdown::draw_dropdown_trigger(pixmap, tr, lay.trigger, label, trigger_dropdown_open);
+    if let TriggerSource::FreeHz { hz } = trigger {
+        let (rx, ry, rw, rh) = lay.trigger_rate;
+        widgets::param_dial::draw_dial(
+            pixmap,
+            tr,
+            rx + rw / 2.0,
+            ry + rh / 2.0,
+            (rw.min(rh) / 2.0) - 6.0 * scale,
+            "Rate",
+            &format!("{hz:.2} Hz"),
+            hz_to_norm(hz),
+        );
     }
 }
 
@@ -316,5 +414,82 @@ mod tests {
         assert_eq!(target_to_item(None), 0);
         assert_eq!(target_to_item(Some(0)), 1);
         assert_eq!(target_to_item(Some(2)), 3);
+    }
+
+    #[test]
+    fn trigger_items_lists_three_sources() {
+        let items = trigger_items();
+        assert_eq!(items, ["Free run", "Cell light", "Free Hz"]);
+    }
+
+    #[test]
+    fn trigger_from_and_to_item_round_trip() {
+        // 0 -> Free, 1 -> CellLight, 2 -> FreeHz{<carried hz>}.
+        assert_eq!(trigger_from_item(0, 1.0), TriggerSource::Free);
+        assert_eq!(trigger_from_item(1, 1.0), TriggerSource::CellLight);
+        assert_eq!(trigger_from_item(2, 3.5), TriggerSource::FreeHz { hz: 3.5 });
+        assert_eq!(trigger_to_item(TriggerSource::Free), 0);
+        assert_eq!(trigger_to_item(TriggerSource::CellLight), 1);
+        assert_eq!(trigger_to_item(TriggerSource::FreeHz { hz: 99.0 }), 2);
+    }
+
+    #[test]
+    fn hz_norm_round_trips_within_range() {
+        for &hz in &[0.05_f32, 0.1, 1.0, 5.0, 20.0] {
+            let norm = hz_to_norm(hz);
+            assert!((0.0..=1.0).contains(&norm), "norm for hz {hz}: {norm}");
+            let back = norm_to_hz(norm);
+            // Log mapping: relative error < 1e-4.
+            assert!(
+                ((back - hz) / hz).abs() < 1e-4,
+                "round-trip {hz} -> {norm} -> {back}"
+            );
+        }
+        // hz below range clamps to min; above clamps to max.
+        assert_eq!(hz_to_norm(0.001), 0.0);
+        assert_eq!(hz_to_norm(100.0), 1.0);
+    }
+
+    #[test]
+    fn layout_includes_trigger_rects_disjoint_from_other_controls() {
+        let lay = effect_layout(1.0);
+        assert!(!rects_overlap(lay.trigger, lay.mseg_selector));
+        assert!(!rects_overlap(lay.trigger, lay.trigger_rate));
+        assert!(!rects_overlap(lay.trigger_rate, lay.mseg_selector));
+        // Trigger sits to the LEFT of the MSEG selector on the same row.
+        assert!(lay.trigger.0 < lay.mseg_selector.0);
+        // Both fit within the main area.
+        assert!(lay.trigger.0 >= 0.0);
+    }
+
+    #[test]
+    fn effect_hit_returns_trigger_on_the_dropdown_rect() {
+        let lay = effect_layout(1.0);
+        let (tx, ty, tw, th) = lay.trigger;
+        // Trigger hit fires regardless of selected_mseg.
+        assert_eq!(
+            effect_hit(tx + tw / 2.0, ty + th / 2.0, 1.0, 2, 0, false),
+            Some(EffectHit::Trigger)
+        );
+        assert_eq!(
+            effect_hit(tx + tw / 2.0, ty + th / 2.0, 1.0, 2, 1, false),
+            Some(EffectHit::Trigger)
+        );
+    }
+
+    #[test]
+    fn effect_hit_returns_trigger_rate_only_when_free_hz() {
+        let lay = effect_layout(1.0);
+        let (rx, ry, rw, rh) = lay.trigger_rate;
+        // FreeHz: rate dial is hot.
+        assert_eq!(
+            effect_hit(rx + rw / 2.0, ry + rh / 2.0, 1.0, 2, 0, true),
+            Some(EffectHit::TriggerRate)
+        );
+        // Not FreeHz: rate dial is not returned (falls through).
+        let other = effect_hit(rx + rw / 2.0, ry + rh / 2.0, 1.0, 2, 0, false);
+        // The fall-through may resolve to MsegPane or None depending on
+        // layout; the important check is that it is NOT TriggerRate.
+        assert_ne!(other, Some(EffectHit::TriggerRate));
     }
 }

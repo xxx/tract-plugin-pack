@@ -520,7 +520,7 @@ impl MultosisWindow {
     fn on_effect_press(&mut self, px: f32, py: f32, shift: bool) -> bool {
         let params = self.selected_track_param_count();
         let Some(hit) =
-            effect_editor::effect_hit(px, py, self.scale_factor, params, self.selected_mseg)
+            effect_editor::effect_hit(px, py, self.scale_factor, params, self.selected_mseg, false)
         else {
             return false;
         };
@@ -608,6 +608,8 @@ impl MultosisWindow {
                     self.mark_config_dirty();
                 }
             }
+            // Phase 3 Task 3 placeholders — wired in Task 4.
+            EffectHit::Trigger | EffectHit::TriggerRate => {}
         }
         true
     }
