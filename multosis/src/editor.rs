@@ -1188,7 +1188,7 @@ impl baseview::WindowHandler for MultosisWindow {
                         let value = self.selected_track_effect().params[i];
                         self.text_edit.begin(
                             EffectHit::Dial(i),
-                            &effects::format_value(value, spec.format),
+                            &effects::format_value_bare(value, spec.format),
                         );
                     }
                     return baseview::EventStatus::Captured;

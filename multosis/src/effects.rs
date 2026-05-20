@@ -100,6 +100,28 @@ pub fn format_value(value: f32, format: ParamFormat) -> String {
     }
 }
 
+/// Format a parameter value as a bare number with no unit suffix and no
+/// kHz auto-scaling — for seeding the right-click text-entry buffer, where
+/// the user expects to edit a plain number rather than re-type the unit.
+/// Decimal precision matches `format_value` (Number uses its declared
+/// decimals; Hertz uses 2 decimals below 1 Hz and 0 decimals above, but
+/// stays in Hz units regardless of magnitude).
+pub fn format_value_bare(value: f32, format: ParamFormat) -> String {
+    match format {
+        ParamFormat::Number { decimals, .. } => {
+            let dec = decimals as usize;
+            format!("{value:.dec$}")
+        }
+        ParamFormat::Hertz => {
+            if value.abs() < 1.0 {
+                format!("{value:.2}")
+            } else {
+                format!("{value:.0}")
+            }
+        }
+    }
+}
+
 /// Parse a user-typed string back to a parameter value. Returns `None` on
 /// empty input or an unparseable number. The consumer should clamp the
 /// result into the parameter's `[min, max]` range.
@@ -802,6 +824,36 @@ mod tests {
         assert_eq!(format_value(80.0, ParamFormat::Hertz), "80 Hz");
         assert_eq!(format_value(2_000.0, ParamFormat::Hertz), "2.0 kHz");
         assert_eq!(format_value(18_500.0, ParamFormat::Hertz), "18.5 kHz");
+    }
+
+    #[test]
+    fn format_value_bare_drops_unit_and_khz_scaling() {
+        // Number: drop the unit suffix; keep decimals.
+        assert_eq!(
+            format_value_bare(
+                8.0,
+                ParamFormat::Number {
+                    decimals: 0,
+                    unit: "bits"
+                }
+            ),
+            "8"
+        );
+        assert_eq!(
+            format_value_bare(
+                0.15,
+                ParamFormat::Number {
+                    decimals: 2,
+                    unit: ""
+                }
+            ),
+            "0.15"
+        );
+        // Hertz: stay in Hz units regardless of magnitude.
+        assert_eq!(format_value_bare(0.05, ParamFormat::Hertz), "0.05");
+        assert_eq!(format_value_bare(80.0, ParamFormat::Hertz), "80");
+        assert_eq!(format_value_bare(2_000.0, ParamFormat::Hertz), "2000");
+        assert_eq!(format_value_bare(18_500.0, ParamFormat::Hertz), "18500");
     }
 
     #[test]
