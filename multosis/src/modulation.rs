@@ -358,6 +358,11 @@ mod tests {
             min: 0.0,
             max: 100.0,
             default: 50.0,
+            scaling: crate::effects::ParamScaling::Linear,
+            format: crate::effects::ParamFormat::Number {
+                decimals: 0,
+                unit: "",
+            },
         };
         assert!((assignable_value(0.5, 40.0, 1.0, spec) - 40.0).abs() < 1e-6);
     }
@@ -369,6 +374,11 @@ mod tests {
             min: 0.0,
             max: 100.0,
             default: 50.0,
+            scaling: crate::effects::ParamScaling::Linear,
+            format: crate::effects::ParamFormat::Number {
+                decimals: 0,
+                unit: "",
+            },
         };
         assert_eq!(assignable_value(1.0, 40.0, 1.0, spec), 100.0);
         assert_eq!(assignable_value(1.0, 40.0, -1.0, spec), 0.0);
@@ -382,6 +392,11 @@ mod tests {
             min: 5.0,
             max: 9.0,
             default: 7.0,
+            scaling: crate::effects::ParamScaling::Linear,
+            format: crate::effects::ParamFormat::Number {
+                decimals: 0,
+                unit: "",
+            },
         };
         for &v in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
             for &d in &[-1.0_f32, -0.3, 0.0, 0.6, 1.0] {

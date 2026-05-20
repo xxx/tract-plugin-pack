@@ -5,6 +5,28 @@
 //!
 //! See `docs/superpowers/specs/2026-05-18-multosis-phase-2a-design.md`.
 
+/// How a dial's normalised 0..1 position maps to its parameter value range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParamScaling {
+    /// `value = min + norm * (max - min)`; norm `= (value - min) / (max - min)`.
+    Linear,
+    /// `value = min * (max / min).powf(norm)`; norm `= log_(max/min)(value / min)`.
+    /// Requires `min > 0` and `max > min`; degenerate ranges fall back to 0/min.
+    Log,
+}
+
+/// How a parameter value renders as a string on the dial and how a typed
+/// string parses back to a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParamFormat {
+    /// Fixed-decimals number, optional unit suffix. An empty unit prints no
+    /// suffix; a non-empty unit prints with a single space separator.
+    Number { decimals: u8, unit: &'static str },
+    /// Auto Hz/kHz scaling: < 1 → `"0.05 Hz"` (2 dec); 1..1000 → `"80 Hz"`
+    /// (0 dec); ≥ 1000 → `"2.0 kHz"` (1 dec).
+    Hertz,
+}
+
 /// A modulatable parameter of an effect: its name and value range. Static per
 /// effect kind; used by the 2b modulation engine and the 2c effect editor.
 #[derive(Clone, Copy, Debug)]
@@ -13,6 +35,105 @@ pub struct ParamSpec {
     pub min: f32,
     pub max: f32,
     pub default: f32,
+    pub scaling: ParamScaling,
+    pub format: ParamFormat,
+}
+
+/// Map a parameter value to a `0..1` normalised dial position, given the
+/// parameter's range and scaling. Clamps to `0..1`. Degenerate ranges
+/// (`max <= min`, or `Log` with `min <= 0`) return `0.0`.
+pub fn value_to_norm(value: f32, min: f32, max: f32, scaling: ParamScaling) -> f32 {
+    if max <= min {
+        return 0.0;
+    }
+    match scaling {
+        ParamScaling::Linear => ((value - min) / (max - min)).clamp(0.0, 1.0),
+        ParamScaling::Log => {
+            if min <= 0.0 {
+                return 0.0;
+            }
+            ((value / min).log(max / min)).clamp(0.0, 1.0)
+        }
+    }
+}
+
+/// Map a normalised dial position to a parameter value, given the
+/// parameter's range and scaling. `norm` is clamped to `0..1`. Degenerate
+/// ranges return `min`.
+pub fn norm_to_value(norm: f32, min: f32, max: f32, scaling: ParamScaling) -> f32 {
+    if max <= min {
+        return min;
+    }
+    let n = norm.clamp(0.0, 1.0);
+    match scaling {
+        ParamScaling::Linear => min + n * (max - min),
+        ParamScaling::Log => {
+            if min <= 0.0 {
+                return min;
+            }
+            min * (max / min).powf(n)
+        }
+    }
+}
+
+/// Format a parameter value as a display string.
+pub fn format_value(value: f32, format: ParamFormat) -> String {
+    match format {
+        ParamFormat::Number { decimals, unit } => {
+            let dec = decimals as usize;
+            if unit.is_empty() {
+                format!("{value:.dec$}")
+            } else {
+                format!("{value:.dec$} {unit}")
+            }
+        }
+        ParamFormat::Hertz => {
+            let v = value;
+            if v.abs() < 1.0 {
+                format!("{v:.2} Hz")
+            } else if v.abs() < 1000.0 {
+                format!("{v:.0} Hz")
+            } else {
+                format!("{:.1} kHz", v / 1000.0)
+            }
+        }
+    }
+}
+
+/// Parse a user-typed string back to a parameter value. Returns `None` on
+/// empty input or an unparseable number. The consumer should clamp the
+/// result into the parameter's `[min, max]` range.
+pub fn parse_value(text: &str, format: ParamFormat) -> Option<f32> {
+    let t = text.trim();
+    if t.is_empty() {
+        return None;
+    }
+    match format {
+        ParamFormat::Number { unit, .. } => {
+            // Strip the unit suffix (case-insensitive) if present.
+            let body = if !unit.is_empty()
+                && t.to_ascii_lowercase().ends_with(&unit.to_ascii_lowercase())
+            {
+                t[..t.len() - unit.len()].trim()
+            } else {
+                t
+            };
+            body.parse::<f32>().ok()
+        }
+        ParamFormat::Hertz => {
+            let lower = t.to_ascii_lowercase();
+            let (body, mult) = if lower.ends_with("khz") {
+                (&t[..t.len() - 3], 1000.0)
+            } else if lower.ends_with("hz") {
+                (&t[..t.len() - 2], 1.0)
+            } else if lower.ends_with('k') {
+                (&t[..t.len() - 1], 1000.0)
+            } else {
+                (t, 1.0)
+            };
+            body.trim().parse::<f32>().ok().map(|v| v * mult)
+        }
+    }
 }
 
 /// The standardized audio-effect contract. Implemented by each effect struct;
@@ -56,12 +177,19 @@ impl LowpassEffect {
             min: 20.0,
             max: 20_000.0,
             default: 2_000.0,
+            scaling: ParamScaling::Log,
+            format: ParamFormat::Hertz,
         },
         ParamSpec {
             name: "Resonance",
             min: 0.0,
             max: 1.0,
             default: 0.1,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Number {
+                decimals: 2,
+                unit: "",
+            },
         },
     ];
 
@@ -155,12 +283,22 @@ impl BitcrushEffect {
             min: 1.0,
             max: 16.0,
             default: 16.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "bits",
+            },
         },
         ParamSpec {
             name: "Rate Reduction",
             min: 1.0,
             max: 50.0,
             default: 1.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "x",
+            },
         },
     ];
 
@@ -583,5 +721,178 @@ mod tests {
     fn param_count_reports_each_kinds_arity() {
         assert_eq!(param_count(EffectKind::Lowpass), 2);
         assert_eq!(param_count(EffectKind::Bitcrush), 2);
+    }
+
+    #[test]
+    fn value_to_norm_linear_round_trips() {
+        // Linear: midpoint of 0..1 is 0.5; midpoint of 20..40 is 0.5.
+        assert!((value_to_norm(0.5, 0.0, 1.0, ParamScaling::Linear) - 0.5).abs() < 1e-6);
+        assert!((value_to_norm(30.0, 20.0, 40.0, ParamScaling::Linear) - 0.5).abs() < 1e-6);
+        // Round trip.
+        for v in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            let n = value_to_norm(v, 0.0, 1.0, ParamScaling::Linear);
+            let back = norm_to_value(n, 0.0, 1.0, ParamScaling::Linear);
+            assert!((back - v).abs() < 1e-6, "v={v} n={n} back={back}");
+        }
+        // Out of range clamps.
+        assert_eq!(value_to_norm(-1.0, 0.0, 1.0, ParamScaling::Linear), 0.0);
+        assert_eq!(value_to_norm(2.0, 0.0, 1.0, ParamScaling::Linear), 1.0);
+    }
+
+    #[test]
+    fn value_to_norm_log_round_trips() {
+        // Log: 20 -> 0.0, 20000 -> 1.0, midpoint (geometric mean) ≈ 632 Hz.
+        assert!((value_to_norm(20.0, 20.0, 20_000.0, ParamScaling::Log) - 0.0).abs() < 1e-4);
+        assert!((value_to_norm(20_000.0, 20.0, 20_000.0, ParamScaling::Log) - 1.0).abs() < 1e-4);
+        // 20 * sqrt(1000) ≈ 632.4555
+        let geo = 20.0_f32 * 1000.0_f32.sqrt();
+        assert!((value_to_norm(geo, 20.0, 20_000.0, ParamScaling::Log) - 0.5).abs() < 1e-4);
+        // Round trip.
+        for v in [20.0_f32, 80.0, 200.0, 2_000.0, 20_000.0] {
+            let n = value_to_norm(v, 20.0, 20_000.0, ParamScaling::Log);
+            let back = norm_to_value(n, 20.0, 20_000.0, ParamScaling::Log);
+            assert!((back - v).abs() / v < 1e-4, "v={v} n={n} back={back}");
+        }
+        // Out of range clamps; degenerate (min<=0) returns 0.
+        assert_eq!(value_to_norm(1.0, 20.0, 20_000.0, ParamScaling::Log), 0.0);
+        assert_eq!(
+            value_to_norm(40_000.0, 20.0, 20_000.0, ParamScaling::Log),
+            1.0
+        );
+        assert_eq!(value_to_norm(5.0, 0.0, 100.0, ParamScaling::Log), 0.0);
+    }
+
+    #[test]
+    fn format_value_number_with_and_without_unit() {
+        assert_eq!(
+            format_value(
+                0.15,
+                ParamFormat::Number {
+                    decimals: 2,
+                    unit: ""
+                }
+            ),
+            "0.15"
+        );
+        assert_eq!(
+            format_value(
+                8.0,
+                ParamFormat::Number {
+                    decimals: 0,
+                    unit: "bits"
+                }
+            ),
+            "8 bits"
+        );
+        assert_eq!(
+            format_value(
+                4.0,
+                ParamFormat::Number {
+                    decimals: 0,
+                    unit: "x"
+                }
+            ),
+            "4 x"
+        );
+    }
+
+    #[test]
+    fn format_value_hertz_auto_scales() {
+        assert_eq!(format_value(0.05, ParamFormat::Hertz), "0.05 Hz");
+        assert_eq!(format_value(80.0, ParamFormat::Hertz), "80 Hz");
+        assert_eq!(format_value(2_000.0, ParamFormat::Hertz), "2.0 kHz");
+        assert_eq!(format_value(18_500.0, ParamFormat::Hertz), "18.5 kHz");
+    }
+
+    #[test]
+    fn parse_value_number_strips_unit() {
+        let fmt = ParamFormat::Number {
+            decimals: 0,
+            unit: "bits",
+        };
+        assert_eq!(parse_value("8 bits", fmt), Some(8.0));
+        assert_eq!(parse_value("8", fmt), Some(8.0));
+        assert_eq!(
+            parse_value(
+                "0.15",
+                ParamFormat::Number {
+                    decimals: 2,
+                    unit: ""
+                }
+            ),
+            Some(0.15)
+        );
+        assert_eq!(parse_value("", fmt), None);
+        assert_eq!(parse_value("abc", fmt), None);
+    }
+
+    #[test]
+    fn parse_value_hertz_handles_k_kHz_Hz() {
+        let f = ParamFormat::Hertz;
+        assert_eq!(parse_value("80", f), Some(80.0));
+        assert_eq!(parse_value("80 Hz", f), Some(80.0));
+        assert_eq!(parse_value("80hz", f), Some(80.0));
+        assert_eq!(parse_value("2k", f), Some(2_000.0));
+        assert_eq!(parse_value("2 kHz", f), Some(2_000.0));
+        assert_eq!(parse_value("2.5kHz", f), Some(2_500.0));
+        assert_eq!(parse_value("0.5", f), Some(0.5));
+        assert_eq!(parse_value("", f), None);
+        assert_eq!(parse_value("xyz", f), None);
+    }
+
+    #[test]
+    fn format_then_parse_round_trips_each_format() {
+        let cases: &[(f32, ParamFormat)] = &[
+            (
+                0.15,
+                ParamFormat::Number {
+                    decimals: 2,
+                    unit: "",
+                },
+            ),
+            (
+                8.0,
+                ParamFormat::Number {
+                    decimals: 0,
+                    unit: "bits",
+                },
+            ),
+            (0.05, ParamFormat::Hertz),
+            (80.0, ParamFormat::Hertz),
+            (2_000.0, ParamFormat::Hertz),
+            (18_500.0, ParamFormat::Hertz),
+        ];
+        for &(v, f) in cases {
+            let s = format_value(v, f);
+            let back = parse_value(&s, f).unwrap_or_else(|| panic!("parse failed for {s:?}"));
+            assert!(
+                (back - v).abs() / v.abs().max(1.0) < 0.05,
+                "round-trip {v} -> {s} -> {back}"
+            );
+        }
+    }
+
+    #[test]
+    fn lowpass_cutoff_is_log_hertz_and_resonance_is_linear_number() {
+        let specs = LowpassEffect::new().parameters();
+        assert!(matches!(specs[0].scaling, ParamScaling::Log));
+        assert!(matches!(specs[0].format, ParamFormat::Hertz));
+        assert!(matches!(specs[1].scaling, ParamScaling::Linear));
+        assert!(matches!(specs[1].format, ParamFormat::Number { .. }));
+    }
+
+    #[test]
+    fn bitcrush_param_formats_carry_their_units() {
+        let specs = BitcrushEffect::new().parameters();
+        if let ParamFormat::Number { unit, .. } = specs[0].format {
+            assert_eq!(unit, "bits");
+        } else {
+            panic!("bit-depth format should be Number");
+        }
+        if let ParamFormat::Number { unit, .. } = specs[1].format {
+            assert_eq!(unit, "x");
+        } else {
+            panic!("rate-reduction format should be Number");
+        }
     }
 }
