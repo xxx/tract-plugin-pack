@@ -66,10 +66,6 @@ pub struct MultosisParams {
     /// Wet-bus compressor ratio (≥ 1.0; 1.0 = bypass).
     #[id = "comp_ratio"]
     pub comp_ratio: FloatParam,
-
-    /// When on, a dead-ended wavefront re-arms the start cells.
-    #[id = "auto_restart"]
-    pub auto_restart: BoolParam,
 }
 
 impl Default for MultosisParams {
@@ -122,7 +118,6 @@ impl Default for MultosisParams {
             )
             .with_unit(":1")
             .with_value_to_string(formatters::v2s_f32_rounded(1)),
-            auto_restart: BoolParam::new("Auto Restart", true),
         }
     }
 }
@@ -287,7 +282,6 @@ impl Plugin for Multosis {
         let sps =
             crate::clock::samples_per_step(self.params.speed.value(), bpm, self.sample_rate as f64);
         let mix = self.params.mix.value();
-        let auto_restart = self.params.auto_restart.value();
         // Bridge the wet-bus compressor's user-facing params each block.
         self.engine.set_compressor(
             self.params.comp_threshold.value(),
@@ -307,7 +301,6 @@ impl Plugin for Multosis {
             sps,
             bpm,
             mix,
-            auto_restart,
             &self.grid,
         );
 

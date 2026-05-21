@@ -361,12 +361,6 @@ impl MultosisWindow {
                 setter.set_parameter(&self.params.speed, next);
                 setter.end_set_parameter(&self.params.speed);
             }
-            ToolbarControl::AutoRestart => {
-                let next = !self.params.auto_restart.value();
-                setter.begin_set_parameter(&self.params.auto_restart);
-                setter.set_parameter(&self.params.auto_restart, next);
-                setter.end_set_parameter(&self.params.auto_restart);
-            }
             ToolbarControl::Reset => {
                 self.reset_request
                     .store(true, std::sync::atomic::Ordering::Relaxed);

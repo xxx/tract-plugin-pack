@@ -15,8 +15,6 @@ use tiny_skia_widgets as widgets;
 pub enum ToolbarControl {
     /// Cycles the wavefront speed.
     Speed,
-    /// Toggles auto-restart.
-    AutoRestart,
     /// Drag slider — dry/wet mix.
     Mix,
     /// Drag slider — output gain.
@@ -30,10 +28,9 @@ pub enum ToolbarControl {
 }
 
 impl ToolbarControl {
-    /// The seven controls, left to right.
-    pub const ALL: [ToolbarControl; 7] = [
+    /// The six controls, left to right.
+    pub const ALL: [ToolbarControl; 6] = [
         ToolbarControl::Speed,
-        ToolbarControl::AutoRestart,
         ToolbarControl::Mix,
         ToolbarControl::Output,
         ToolbarControl::CompThreshold,
@@ -41,18 +38,16 @@ impl ToolbarControl {
         ToolbarControl::Reset,
     ];
 
-    /// Logical `(x, width)` of this control. The row is 1050 logical wide
-    /// (content span 1044, with the 6 px lead). Seven equal-width controls
-    /// with 6 px gaps fit exactly.
+    /// Logical `(x, width)` of this control. Six equal-width controls
+    /// with 6 px gaps.
     fn logical_x_w(self) -> (f32, f32) {
         match self {
             ToolbarControl::Speed => (6.0, 144.0),
-            ToolbarControl::AutoRestart => (156.0, 144.0),
-            ToolbarControl::Mix => (306.0, 144.0),
-            ToolbarControl::Output => (456.0, 144.0),
-            ToolbarControl::CompThreshold => (606.0, 144.0),
-            ToolbarControl::CompRatio => (756.0, 144.0),
-            ToolbarControl::Reset => (906.0, 144.0),
+            ToolbarControl::Mix => (156.0, 144.0),
+            ToolbarControl::Output => (306.0, 144.0),
+            ToolbarControl::CompThreshold => (456.0, 144.0),
+            ToolbarControl::CompRatio => (606.0, 144.0),
+            ToolbarControl::Reset => (756.0, 144.0),
         }
     }
 }
@@ -202,10 +197,6 @@ pub fn draw_toolbar(
             ToolbarControl::Speed => {
                 let label = format!("Speed: {}", speed_label(params.speed.value()));
                 widgets::draw_button(pixmap, tr, x, y, w, h, &label, false, false);
-            }
-            ToolbarControl::AutoRestart => {
-                let on = params.auto_restart.value();
-                widgets::draw_button(pixmap, tr, x, y, w, h, "Auto-Restart", on, false);
             }
             ToolbarControl::Mix => {
                 let v = params.mix.value();

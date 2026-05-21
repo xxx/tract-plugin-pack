@@ -209,7 +209,6 @@ impl AudioEngine {
         samples_per_step: f64,
         bpm: f64,
         mix: f32,
-        auto_restart: bool,
         grid: &Grid,
     ) {
         let n = left.len().min(right.len());
@@ -263,7 +262,7 @@ impl AudioEngine {
                 // the tick; rows with any newly-lit cell get a bit set in
                 // `pending_cell_lights` for the NEXT block's CellLight trigger.
                 let before = Self::lit_enabled_per_row(grid, &self.propagator.wavefront);
-                self.propagator.tick(grid, auto_restart);
+                self.propagator.tick(grid);
                 let after = Self::lit_enabled_per_row(grid, &self.propagator.wavefront);
                 for r in 0..ROWS {
                     if (after[r] & !before[r]) != 0 {
@@ -342,7 +341,7 @@ mod tests {
         let grid = Grid::default_routing();
         let mut left = [0.2_f32; 128];
         let mut right = [0.2_f32; 128];
-        engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, true, &grid);
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, &grid);
         assert!(
             engine.active_mask() != 0,
             "after arming, at least one row should be active"
@@ -362,7 +361,7 @@ mod tests {
         let grid = Grid::default_routing();
         let mut left = [0.1_f32; 64];
         let mut right = [-0.2_f32; 64];
-        engine.process(&mut left, &mut right, true, 10.0, 120.0, 0.0, true, &grid);
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 0.0, &grid);
         assert!(left.iter().all(|&s| (s - 0.1).abs() < 1e-6));
         assert!(right.iter().all(|&s| (s + 0.2).abs() < 1e-6));
     }
@@ -376,7 +375,7 @@ mod tests {
         let grid = Grid::default_routing();
         let mut left = [0.5_f32; 64];
         let mut right = [0.5_f32; 64];
-        engine.process(&mut left, &mut right, false, 10.0, 120.0, 1.0, true, &grid);
+        engine.process(&mut left, &mut right, false, 10.0, 120.0, 1.0, &grid);
         assert!(left.iter().all(|&s| s == 0.0));
         assert!(right.iter().all(|&s| s == 0.0));
     }
@@ -399,7 +398,7 @@ mod tests {
         let grid = Grid::default_routing();
         let mut left = [0.3_f32; 128];
         let mut right = [0.3_f32; 128];
-        engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, true, &grid);
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, &grid);
         assert!(
             left[127] != 0.0,
             "after arming, a fully-wet block should not be silent"
@@ -413,12 +412,12 @@ mod tests {
         let grid = Grid::default_routing();
         let mut buf = [0.3_f32; 128];
         let mut buf2 = [0.3_f32; 128];
-        engine.process(&mut buf, &mut buf2, true, 10.0, 120.0, 1.0, true, &grid);
+        engine.process(&mut buf, &mut buf2, true, 10.0, 120.0, 1.0, &grid);
         engine.reset();
         // After reset, not playing: empty wavefront -> silent at full wet.
         let mut left = [0.4_f32; 64];
         let mut right = [0.4_f32; 64];
-        engine.process(&mut left, &mut right, false, 10.0, 120.0, 1.0, true, &grid);
+        engine.process(&mut left, &mut right, false, 10.0, 120.0, 1.0, &grid);
         assert!(left.iter().all(|&s| s == 0.0));
         assert!(right.iter().all(|&s| s == 0.0));
     }
@@ -441,7 +440,7 @@ mod tests {
         let mut left = [0.0_f32; 64];
         let mut right = [0.0_f32; 64];
         // One short step arms the start cells -> Running.
-        engine.process(&mut left, &mut right, true, 10.0, 120.0, 0.0, true, &grid);
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 0.0, &grid);
         assert_eq!(
             engine.sequence_state(),
             crate::propagation::SequenceState::Running
@@ -458,7 +457,7 @@ mod tests {
         let grid = Grid::default_routing();
         let mut left = [0.3_f32; 64];
         let mut right = [0.3_f32; 64];
-        engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, true, &grid);
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, &grid);
         assert!(left.iter().all(|s| s.is_finite()));
         assert!(
             left.iter().any(|&s| (s - 0.3).abs() > 1e-6),
@@ -539,14 +538,14 @@ mod tests {
         let mut a = [0.4_f32; 64];
         let mut b = [0.4_f32; 64];
         let mut a_r = a;
-        engine.process(&mut a, &mut a_r, true, 10.0, 120.0, 1.0, true, &grid);
+        engine.process(&mut a, &mut a_r, true, 10.0, 120.0, 1.0, &grid);
         for _ in 0..300 {
             let mut l = [0.4_f32; 64];
             let mut r = [0.4_f32; 64];
-            engine.process(&mut l, &mut r, true, 10.0, 120.0, 1.0, true, &grid);
+            engine.process(&mut l, &mut r, true, 10.0, 120.0, 1.0, &grid);
         }
         let mut b_r = b;
-        engine.process(&mut b, &mut b_r, true, 10.0, 120.0, 1.0, true, &grid);
+        engine.process(&mut b, &mut b_r, true, 10.0, 120.0, 1.0, &grid);
         assert!(a.iter().all(|s| s.is_finite()) && b.iter().all(|s| s.is_finite()));
         assert!(a != b, "modulation should make the output drift over time");
     }
