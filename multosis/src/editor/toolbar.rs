@@ -154,7 +154,7 @@ pub fn op_hit(px: f32, py: f32, scale: f32) -> Option<ToolbarOp> {
 /// them.
 pub fn apply_grid_op(grid: &mut crate::grid::Grid, op: ToolbarOp, seed: u32) {
     match op {
-        ToolbarOp::ReinitCells => grid.reinit_activations(),
+        ToolbarOp::ReinitCells => grid.reinit(),
         ToolbarOp::RandomizeActivations => crate::randomize::randomize_activations(grid, seed),
         ToolbarOp::Copy | ToolbarOp::Paste => {}
     }
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn apply_grid_op_reinit_cells_restores_activations() {
         use crate::grid::Grid;
-        let mut g = Grid::default_routing();
+        let mut g = Grid::default();
         g.cell_mut(4, 4).enabled = false;
         apply_grid_op(&mut g, ToolbarOp::ReinitCells, 0);
         assert!(g.cell(4, 4).enabled);
@@ -382,8 +382,8 @@ mod tests {
     #[test]
     fn apply_grid_op_randomize_is_deterministic_in_seed() {
         use crate::grid::Grid;
-        let mut a = Grid::default_routing();
-        let mut b = Grid::default_routing();
+        let mut a = Grid::default();
+        let mut b = Grid::default();
         apply_grid_op(&mut a, ToolbarOp::RandomizeActivations, 1234);
         apply_grid_op(&mut b, ToolbarOp::RandomizeActivations, 1234);
         assert_eq!(a, b);
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn apply_grid_op_copy_and_paste_do_not_mutate_the_grid() {
         use crate::grid::Grid;
-        let mut g = Grid::default_routing();
+        let mut g = Grid::default();
         let before = g;
         apply_grid_op(&mut g, ToolbarOp::Copy, 0);
         apply_grid_op(&mut g, ToolbarOp::Paste, 0);

@@ -49,11 +49,11 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{Direction, LoopRegion};
+    use crate::grid::LoopRegion;
 
     #[test]
     fn copy_region_snapshots_the_loop_region() {
-        let mut g = Grid::default_routing();
+        let mut g = Grid::default();
         g.loop_region = LoopRegion {
             row0: 1,
             row1: 3,
@@ -71,15 +71,14 @@ mod tests {
 
     #[test]
     fn paste_region_writes_at_the_loop_region_top_left() {
-        let mut g = Grid::default_routing();
-        // Copy a 2×2 block from rows 0..2, cols 0..2 with a marker.
+        let mut g = Grid::default();
         g.loop_region = LoopRegion {
             row0: 0,
             row1: 1,
             col0: 0,
             col1: 1,
         };
-        g.cell_mut(0, 0).sends = 0b1111_1111;
+        g.cell_mut(0, 0).enabled = false;
         let snap = g.copy_region();
         // Move the loop region and paste.
         g.loop_region = LoopRegion {
@@ -89,14 +88,16 @@ mod tests {
             col1: 21,
         };
         g.paste_region(&snap);
-        assert_eq!(g.cell(10, 20).sends, 0b1111_1111);
-        // A cell outside the pasted block is unchanged (still East-only).
-        assert_eq!(g.cell(12, 22).sends, 1u8 << Direction::E.bit());
+        assert!(!g.cell(10, 20).enabled);
+        assert!(
+            g.cell(12, 22).enabled,
+            "a cell outside the paste is unchanged"
+        );
     }
 
     #[test]
     fn paste_region_truncates_on_overflow() {
-        let mut g = Grid::default_routing();
+        let mut g = Grid::default();
         // Copy a 3×3 block.
         g.loop_region = LoopRegion {
             row0: 0,

@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn active_rows_marks_enabled_cells_in_the_loop_zone_at_the_column() {
         use crate::propagation::active_rows;
-        let mut grid = Grid::default_routing();
+        let mut grid = Grid::default();
         grid.cell_mut(3, 5).enabled = true;
         grid.cell_mut(7, 5).enabled = false;
         let mask = active_rows(&grid, &grid.loop_region, 5);
@@ -279,10 +279,15 @@ mod tests {
 
     #[test]
     fn active_rows_excludes_rows_outside_the_loop_zone() {
-        use crate::propagation::active_rows;
         use crate::grid::LoopRegion;
-        let mut grid = Grid::default_routing();
-        grid.loop_region = LoopRegion { row0: 4, row1: 8, col0: 0, col1: 31 };
+        use crate::propagation::active_rows;
+        let mut grid = Grid::default();
+        grid.loop_region = LoopRegion {
+            row0: 4,
+            row1: 8,
+            col0: 0,
+            col1: 31,
+        };
         let mask = active_rows(&grid, &grid.loop_region, 0);
         assert!(mask & (1 << 2) == 0, "row 2 is above the loop zone");
         assert!(mask & (1 << 6) != 0, "row 6 is inside the loop zone");
@@ -295,7 +300,7 @@ mod tests {
         engine.set_sample_rate(48_000.0);
         assert_eq!(engine.active_mask(), 0);
         // After a playing block on the default grid, some rows are active.
-        let grid = Grid::default_routing();
+        let grid = Grid::default();
         let mut left = [0.2_f32; 128];
         let mut right = [0.2_f32; 128];
         engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, &grid);
@@ -316,7 +321,7 @@ mod tests {
     fn process_at_mix_zero_is_dry_passthrough() {
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
-        let grid = Grid::default_routing();
+        let grid = Grid::default();
         let mut left = [0.1_f32; 64];
         let mut right = [-0.2_f32; 64];
         engine.process(&mut left, &mut right, true, 10.0, 120.0, 0.0, &grid);
@@ -331,7 +336,7 @@ mod tests {
         // fully-wet output is silence.
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
-        let grid = Grid::default_routing();
+        let grid = Grid::default();
         let mut left = [0.5_f32; 64];
         let mut right = [0.5_f32; 64];
         engine.process(&mut left, &mut right, false, 10.0, 120.0, 1.0, &grid);
@@ -354,7 +359,7 @@ mod tests {
             params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Lowpass),
         };
         engine.set_effects(&effects);
-        let grid = Grid::default_routing();
+        let grid = Grid::default();
         let mut left = [0.3_f32; 128];
         let mut right = [0.3_f32; 128];
         engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, &grid);
@@ -368,7 +373,7 @@ mod tests {
     fn process_reset_returns_to_silence() {
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
-        let grid = Grid::default_routing();
+        let grid = Grid::default();
         let mut buf = [0.3_f32; 128];
         let mut buf2 = [0.3_f32; 128];
         engine.process(&mut buf, &mut buf2, true, 10.0, 120.0, 1.0, &grid);
@@ -383,7 +388,7 @@ mod tests {
 
     #[test]
     fn engine_advances_the_playhead_after_a_step_boundary() {
-        let grid = Grid::default_routing(); // full loop region, col0 = 0
+        let grid = Grid::default(); // full loop region, col0 = 0
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
         // A short block with one boundary (`pending_first` only — the
@@ -394,7 +399,11 @@ mod tests {
         let mut right = [0.0_f32; 4];
         engine.process(&mut left, &mut right, true, 10.0, 120.0, 0.0, &grid);
         assert_eq!(engine.playhead_column(), grid.loop_region.col0);
-        assert_eq!(engine.step(), 1, "the first boundary tick advances the step");
+        assert_eq!(
+            engine.step(),
+            1,
+            "the first boundary tick advances the step"
+        );
         // A longer block crosses several boundaries; the playhead scans right.
         let mut l2 = [0.0_f32; 64];
         let mut r2 = [0.0_f32; 64];
@@ -412,7 +421,7 @@ mod tests {
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
         engine.set_effects(&config);
-        let grid = Grid::default_routing();
+        let grid = Grid::default();
         let mut left = [0.3_f32; 64];
         let mut right = [0.3_f32; 64];
         engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, &grid);
@@ -490,7 +499,7 @@ mod tests {
         let mod_cfg: [crate::modulation::TrackModulation; ROWS] =
             std::array::from_fn(crate::modulation::TrackModulation::default_for_row);
         engine.set_modulation(&mod_cfg);
-        let grid = Grid::default_routing();
+        let grid = Grid::default();
         // Run two well-separated stretches of audio; the default per-track
         // assignable MSEG should make the wet output drift over time.
         let mut a = [0.4_f32; 64];

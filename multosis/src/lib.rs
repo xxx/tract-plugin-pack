@@ -294,15 +294,8 @@ impl Plugin for Multosis {
         let left = &mut first[0][..n];
         let right = &mut rest[0][..n];
 
-        self.engine.process(
-            &mut *left,
-            &mut *right,
-            playing,
-            sps,
-            bpm,
-            mix,
-            &self.grid,
-        );
+        self.engine
+            .process(&mut *left, &mut *right, playing, sps, bpm, mix, &self.grid);
 
         // Publish the playhead column for the editor to draw.
         self.playhead_display.publish(self.engine.playhead_column());

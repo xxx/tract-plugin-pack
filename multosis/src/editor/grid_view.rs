@@ -434,7 +434,7 @@ impl GridCache {
     pub fn new(w: u32, h: u32) -> Self {
         Self {
             pixmap: Pixmap::new(w, h).expect("editor window size is valid"),
-            grid: Grid::default_routing(),
+            grid: Grid::default(),
             scale: 0.0,
             built: false,
         }
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn apply_grid_click_toggles_the_whole_cell() {
-        let mut g = Grid::default_routing();
+        let mut g = Grid::default();
         assert!(g.cell(4, 9).enabled);
         apply_grid_click(&mut g, 4, 9); // any point on the cell
         assert!(!g.cell(4, 9).enabled, "first click turns the cell off");
@@ -520,11 +520,10 @@ mod tests {
 
     #[test]
     fn grid_cache_matches_an_uncached_cell_render() {
-        let mut grid = Grid::default_routing();
+        let mut grid = Grid::default();
         for r in 0..ROWS {
             for c in 0..COLS {
                 grid.cell_mut(r, c).enabled = (r + c) % 2 == 0;
-                grid.cell_mut(r, c).sends = ((r * 7 + c) & 0xFF) as u8;
             }
         }
         let w = crate::editor::WINDOW_WIDTH;
@@ -540,7 +539,7 @@ mod tests {
             "cold cache differs"
         );
         grid.cell_mut(3, 5).enabled = !grid.cell(3, 5).enabled;
-        grid.cell_mut(9, 20).sends ^= 0b0101_0101;
+        grid.cell_mut(9, 20).enabled = !grid.cell(9, 20).enabled;
         cache.update(&grid, 1.0);
         let mut reference2 = Pixmap::new(w, h).unwrap();
         widgets::fill_pixmap_opaque(&mut reference2, widgets::color_bg());
@@ -554,7 +553,7 @@ mod tests {
 
     #[test]
     fn grid_cache_rebuilds_on_scale_change() {
-        let grid = Grid::default_routing();
+        let grid = Grid::default();
         let (w, h) = (crate::editor::WINDOW_WIDTH, crate::editor::WINDOW_HEIGHT);
         let mut cache = GridCache::new(w, h);
         cache.update(&grid, 1.0);
@@ -587,14 +586,8 @@ mod tests {
     fn bench_editor_draw() {
         let (w, h) = (crate::editor::WINDOW_WIDTH, crate::editor::WINDOW_HEIGHT);
 
-        // Dense worst-case grid: every cell enabled, all 8 sends lit.
-        let mut grid = crate::grid::Grid::default_routing();
-        for r in 0..ROWS {
-            for c in 0..COLS {
-                grid.cell_mut(r, c).enabled = true;
-                grid.cell_mut(r, c).sends = 0xFF;
-            }
-        }
+        // Dense worst-case grid: the default already has every cell enabled.
+        let mut grid = crate::grid::Grid::default();
 
         let mut surface_pixmap = tiny_skia::Pixmap::new(w, h).unwrap();
         let blit_src = tiny_skia::Pixmap::new(w, h).unwrap();
@@ -617,7 +610,12 @@ mod tests {
                 .data_mut()
                 .copy_from_slice(cache.pixmap().data());
             draw_region_overlay(&mut surface_pixmap, &grid, scale, None);
-            draw_playhead(&mut surface_pixmap, playhead.column(), grid.loop_region, scale);
+            draw_playhead(
+                &mut surface_pixmap,
+                playhead.column(),
+                grid.loop_region,
+                scale,
+            );
             crate::editor::toolbar::draw_toolbar(
                 &mut surface_pixmap,
                 &mut tr,
@@ -647,13 +645,13 @@ mod tests {
             let r1 = (i + 1) % ROWS;
             let c1 = (i + 3) % COLS;
             grid.cell_mut(r0, c0).enabled = !grid.cell(r0, c0).enabled;
-            grid.cell_mut(r1, c1).sends ^= 0b0101_0101;
+            grid.cell_mut(r1, c1).enabled = !grid.cell(r1, c1).enabled;
             let t1 = std::time::Instant::now();
             cache.update(&grid, scale);
             cache_2cell_samples.push(t1.elapsed().as_nanos() as f64 / 1_000.0);
             // restore for reproducibility
             grid.cell_mut(r0, c0).enabled = !grid.cell(r0, c0).enabled;
-            grid.cell_mut(r1, c1).sends ^= 0b0101_0101;
+            grid.cell_mut(r1, c1).enabled = !grid.cell(r1, c1).enabled;
             cache.update(&grid, scale); // rebuild clean cache
 
             // --- full frame timing ---
@@ -668,7 +666,12 @@ mod tests {
             overlay_samples.push(to.elapsed().as_nanos() as f64 / 1_000.0);
 
             let tw = std::time::Instant::now();
-            draw_playhead(&mut surface_pixmap, playhead.column(), grid.loop_region, scale);
+            draw_playhead(
+                &mut surface_pixmap,
+                playhead.column(),
+                grid.loop_region,
+                scale,
+            );
             wf_samples.push(tw.elapsed().as_nanos() as f64 / 1_000.0);
 
             let tt = std::time::Instant::now();

@@ -14,9 +14,9 @@ use crate::effects::{self, EffectKind, ParamSpec};
 use crate::grid::LoopRegion;
 use crate::handoff::GridHandoff;
 use crate::modulation::TriggerSource;
+use crate::playhead_display::PlayheadDisplay;
 use crate::region::RegionSnapshot;
 use crate::seq_status::SeqStatusDisplay;
-use crate::playhead_display::PlayheadDisplay;
 use crate::MultosisParams;
 use tiny_skia_widgets as widgets;
 
@@ -44,10 +44,7 @@ enum LeftGesture {
     /// A left press on a grid cell that has not moved yet — a click in
     /// waiting. Becomes a click on release, or a paint drag if the cursor
     /// leaves the cell (later task).
-    GridPending {
-        row: usize,
-        col: usize,
-    },
+    GridPending { row: usize, col: usize },
     /// An active paint drag — `value` is the `enabled` state being painted
     /// across the stroke, `last` is the most recently painted cell.
     GridPaint { value: bool, last: (usize, usize) },
@@ -1361,8 +1358,7 @@ impl baseview::WindowHandler for MultosisWindow {
                                 } else if let Some((row, col)) =
                                     grid_view::cell_at(px, py, self.scale_factor)
                                 {
-                                    self.left_gesture =
-                                        Some(LeftGesture::GridPending { row, col });
+                                    self.left_gesture = Some(LeftGesture::GridPending { row, col });
                                 }
                             }
                         }

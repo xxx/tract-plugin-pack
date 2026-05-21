@@ -1,4 +1,4 @@
-//! Deterministic randomization of cell activations and routing.
+//! Deterministic randomization of cell activations.
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §4.3.
 
@@ -30,7 +30,7 @@ impl Rng {
 }
 
 /// Randomize `enabled` for every cell inside the loop region. Deterministic in
-/// `seed`. Leaves `sends`, `is_start`, and cells outside the region untouched.
+/// `seed`. Leaves cells outside the region untouched.
 pub fn randomize_activations(grid: &mut Grid, seed: u32) {
     let mut rng = Rng::new(seed);
     let lr = grid.loop_region;
@@ -48,8 +48,8 @@ mod tests {
 
     #[test]
     fn randomize_activations_is_deterministic() {
-        let mut a = Grid::default_routing();
-        let mut b = Grid::default_routing();
+        let mut a = Grid::default();
+        let mut b = Grid::default();
         randomize_activations(&mut a, 4242);
         randomize_activations(&mut b, 4242);
         assert_eq!(a, b);
@@ -57,16 +57,16 @@ mod tests {
 
     #[test]
     fn randomize_activations_differs_by_seed() {
-        let mut a = Grid::default_routing();
-        let mut b = Grid::default_routing();
+        let mut a = Grid::default();
+        let mut b = Grid::default();
         randomize_activations(&mut a, 1);
         randomize_activations(&mut b, 2);
         assert_ne!(a, b);
     }
 
     #[test]
-    fn randomize_activations_only_touches_enabled_inside_the_region() {
-        let mut g = Grid::default_routing();
+    fn randomize_activations_only_touches_cells_inside_the_region() {
+        let mut g = Grid::default();
         g.loop_region = LoopRegion {
             row0: 4,
             row1: 6,
@@ -76,13 +76,11 @@ mod tests {
         randomize_activations(&mut g, 99);
         for r in 0..crate::grid::ROWS {
             for c in 0..crate::grid::COLS {
-                let cell = g.cell(r, c);
-                // sends and is_start are never altered.
-                assert_eq!(cell.sends, 1u8 << crate::grid::Direction::E.bit());
-                assert_eq!(cell.is_start, c == 0);
-                // Outside the region, enabled is left at its default (true).
                 if !g.loop_region.contains(r, c) {
-                    assert!(cell.enabled, "cell ({r},{c}) outside region changed");
+                    assert!(
+                        g.cell(r, c).enabled,
+                        "cell ({r},{c}) outside region changed"
+                    );
                 }
             }
         }

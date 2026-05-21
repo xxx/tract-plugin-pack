@@ -19,7 +19,10 @@ pub struct Playhead {
 impl Playhead {
     /// A fresh playhead that has not yet started scanning.
     pub fn new() -> Self {
-        Self { column: 0, started: false }
+        Self {
+            column: 0,
+            started: false,
+        }
     }
 
     /// The column the playhead currently occupies.
@@ -76,7 +79,12 @@ mod tests {
     use crate::grid::LoopRegion;
 
     fn region(col0: usize, col1: usize) -> LoopRegion {
-        LoopRegion { row0: 0, row1: ROWS - 1, col0, col1 }
+        LoopRegion {
+            row0: 0,
+            row1: ROWS - 1,
+            col0,
+            col1,
+        }
     }
 
     #[test]

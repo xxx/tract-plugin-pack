@@ -13,7 +13,9 @@ pub struct SeqStatusDisplay {
 impl SeqStatusDisplay {
     /// A display reading step 0.
     pub fn new() -> Self {
-        Self { step: AtomicU64::new(0) }
+        Self {
+            step: AtomicU64::new(0),
+        }
     }
 
     /// Audio thread: publish the current step count.

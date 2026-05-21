@@ -15,7 +15,9 @@ pub struct PlayheadDisplay {
 impl PlayheadDisplay {
     /// A display with the playhead at column 0.
     pub fn new() -> Self {
-        Self { column: AtomicU32::new(0) }
+        Self {
+            column: AtomicU32::new(0),
+        }
     }
 
     /// Audio thread: publish the current playhead column.
