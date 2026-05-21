@@ -66,6 +66,8 @@ pub enum DragTarget {
     Marker(MarkerHandle),
     /// Painting stepped nodes (Alt held).
     StepDraw,
+    /// Moving the whole selection; `anchor` is the node under the cursor.
+    Group { anchor: usize },
 }
 
 /// Which hold marker is being dragged.
@@ -87,6 +89,10 @@ pub struct MsegEditState {
     /// Selected node indices, bit `i` = node `i`. `MAX_NODES` is 128, so a
     /// `u128` covers every node. Transient — never persisted.
     selection: u128,
+    /// Snapshot of every active node's `(time, value)` taken when a group
+    /// drag begins — the source of truth for the drag's delta math, so
+    /// boundary clamping never corrupts the group's relative geometry.
+    group_snapshot: Vec<(f32, f32)>,
     /// During a stepped-draw, the last time-grid cell a node was painted in
     /// (so dragging within one cell does not insert duplicates).
     step_last_cell: Option<u32>,
@@ -130,6 +136,7 @@ impl MsegEditState {
             drag: None,
             hover: None,
             selection: 0,
+            group_snapshot: Vec::new(),
             step_last_cell: None,
             stepped_draw_held: false,
             style: RandomStyle::Smooth,
@@ -332,7 +339,18 @@ impl MsegEditState {
                 } else if !self.is_node_selected(i) {
                     self.select_only(i);
                 }
-                self.drag = Some(DragTarget::Node(i));
+                // A drag of a node that is part of a multi-node selection
+                // moves the whole group; otherwise it is a single-node drag.
+                // A Ctrl-click that deselects the pressed node falls through
+                // to a solo drag of that node — it is no longer in the
+                // selection.
+                if self.selection_count() > 1 && self.is_node_selected(i) {
+                    self.group_snapshot =
+                        data.active().iter().map(|n| (n.time, n.value)).collect();
+                    self.drag = Some(DragTarget::Group { anchor: i });
+                } else {
+                    self.drag = Some(DragTarget::Node(i));
+                }
                 None
             }
             MsegHit::Tension(i) => {
@@ -489,6 +507,10 @@ impl MsegEditState {
                 Some(MsegEdit::Changed)
             }
             Some(DragTarget::StepDraw) => self.step_draw_paint(x, y, data, &layout),
+            Some(DragTarget::Group { anchor }) => {
+                self.apply_group_move(anchor, x, y, data, &layout, fine);
+                Some(MsegEdit::Changed)
+            }
             _ => None,
         }
     }
@@ -498,6 +520,7 @@ impl MsegEditState {
     pub fn on_mouse_up(&mut self, _data: &mut MsegData) -> Option<MsegEdit> {
         self.dropdown.on_mouse_up();
         self.drag = None;
+        self.group_snapshot.clear();
         self.step_last_cell = None;
         None
     }
@@ -577,6 +600,89 @@ impl MsegEditState {
         data.nodes[seg].stepped = !data.nodes[seg].stepped;
         data.debug_assert_valid();
         Some(MsegEdit::Changed)
+    }
+
+    /// Translate every selected node rigidly by the delta implied by dragging
+    /// `anchor` to the cursor. Only `anchor` snaps; the horizontal delta is
+    /// clamped group-wide so no selected node crosses an unselected neighbor
+    /// or a pinned endpoint; each value is clamped to 0..1 per-node. The delta
+    /// is measured from `group_snapshot` — never from the live (clamped)
+    /// positions — so dragging a group back un-clamps every node exactly.
+    fn apply_group_move(
+        &mut self,
+        anchor: usize,
+        x: f32,
+        y: f32,
+        data: &mut MsegData,
+        layout: &crate::mseg::render::MsegLayout,
+        fine: bool,
+    ) {
+        use crate::mseg::render::{x_to_phase, y_to_value};
+        let n = data.node_count;
+        if anchor >= n || self.group_snapshot.len() != n {
+            return;
+        }
+        // `on_mouse_down` only ever builds `DragTarget::Group` with a selected
+        // anchor — the clamp/write loops below assume it.
+        debug_assert!(self.is_node_selected(anchor));
+        let gap = MsegData::MIN_NODE_GAP;
+
+        // Anchor's snapped target -> raw group delta, measured from the
+        // snapshot. Only the anchor lands on the grid; the rigid group carries
+        // every other selected node off-grid by the same delta, by design.
+        let (anchor_t0, anchor_v0) = self.group_snapshot[anchor];
+        let (snap_t, snap_v) =
+            snap_point(x_to_phase(layout, x), y_to_value(layout, y), data, fine);
+        let mut d_phase = snap_t - anchor_t0;
+        let d_value = snap_v - anchor_v0;
+
+        // Horizontal clamp: the group is rigid. Each selected node's travel is
+        // bounded by the gap to its nearest UNSELECTED neighbor; a selected
+        // endpoint locks horizontal motion outright.
+        let mut max_right = f32::INFINITY;
+        let mut max_left = f32::INFINITY;
+        for i in 0..n {
+            if !self.is_node_selected(i) {
+                continue;
+            }
+            if i == 0 || i + 1 == n {
+                max_right = 0.0;
+                max_left = 0.0;
+                break;
+            }
+            let t0 = self.group_snapshot[i].0;
+            // First unselected node to the right of node i.
+            let mut j = i + 1;
+            while j < n && self.is_node_selected(j) {
+                j += 1;
+            }
+            let right_limit = if j < n { data.nodes[j].time - gap } else { 1.0 - gap };
+            max_right = max_right.min(right_limit - t0);
+            // First unselected node to the left of node i.
+            let mut k = i;
+            while k > 0 && self.is_node_selected(k - 1) {
+                k -= 1;
+            }
+            let left_limit = if k > 0 { data.nodes[k - 1].time + gap } else { gap };
+            max_left = max_left.min(t0 - left_limit);
+        }
+        // Travel limits are >= 0 in a valid document; `.max(0.0)` guards the
+        // degenerate case where a node already sits inside the gap.
+        d_phase = d_phase.clamp(-max_left.max(0.0), max_right.max(0.0));
+
+        // Write each selected node = snapshot + delta. Endpoints keep their
+        // pinned time; every value is clamped to 0..1 per-node.
+        for i in 0..n {
+            if !self.is_node_selected(i) {
+                continue;
+            }
+            let (t0, v0) = self.group_snapshot[i];
+            if i != 0 && i + 1 != n {
+                data.nodes[i].time = t0 + d_phase;
+            }
+            data.nodes[i].value = (v0 + d_value).clamp(0.0, 1.0);
+        }
+        data.debug_assert_valid();
     }
 
     /// Insert a node snapped to the current time-grid cell's left edge and
@@ -1266,6 +1372,143 @@ mod tests {
             !state.dropdown_is_open_for(StripId::Style),
             "dropdown should close after selection"
         );
+        state.on_mouse_up(&mut data);
+    }
+
+    // --- Task 2: group move tests ---
+
+    /// Select the nodes at `idxs` (first plain-click, the rest Ctrl-click).
+    fn select_nodes(
+        state: &mut MsegEditState,
+        data: &mut MsegData,
+        l: &crate::mseg::render::MsegLayout,
+        idxs: &[usize],
+    ) {
+        for (n, &idx) in idxs.iter().enumerate() {
+            let (t, v) = { let a = data.active(); (a[idx].time, a[idx].value) };
+            let ctrl = n > 0;
+            state.on_mouse_down(phase_to_x(l, t), value_to_y(l, v), data, RECT, 1.0, ctrl);
+            state.on_mouse_up(data);
+        }
+    }
+
+    #[test]
+    fn group_move_applies_a_uniform_delta() {
+        let mut data = MsegData::default();
+        data.snap = false;
+        data.insert_node(0.3, 0.4); // node 1
+        data.insert_node(0.6, 0.7); // node 2
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        select_nodes(&mut state, &mut data, &l, &[1, 2]);
+        let (t1, v1) = { let a = data.active(); (a[1].time, a[1].value) };
+        let (t2, v2) = { let a = data.active(); (a[2].time, a[2].value) };
+        state.on_mouse_down(phase_to_x(&l, t1), value_to_y(&l, v1), &mut data, RECT, 1.0, false);
+        state.on_mouse_move(phase_to_x(&l, t1 + 0.1), value_to_y(&l, v1 - 0.1), &mut data, RECT, 1.0, false);
+        assert!((data.nodes[1].time - (t1 + 0.1)).abs() < 0.02);
+        assert!((data.nodes[1].value - (v1 - 0.1)).abs() < 0.02);
+        assert!((data.nodes[2].time - (t2 + 0.1)).abs() < 0.02);
+        assert!((data.nodes[2].value - (v2 - 0.1)).abs() < 0.02);
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn group_move_horizontal_clamp_stops_at_an_unselected_node() {
+        let mut data = MsegData::default();
+        data.snap = false;
+        data.insert_node(0.3, 0.5); // node 1 — selected
+        data.insert_node(0.5, 0.5); // node 2 — selected
+        data.insert_node(0.7, 0.5); // node 3 — unselected blocker
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        select_nodes(&mut state, &mut data, &l, &[1, 2]);
+        // Anchor node 1, drag the group far right past node 3.
+        state.on_mouse_down(phase_to_x(&l, 0.3), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
+        state.on_mouse_move(phase_to_x(&l, 0.95), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
+        // The group is rigid: node 2 stopped short of unselected node 3, and
+        // the group keeps its internal order.
+        assert!(data.nodes[2].time < data.nodes[3].time,
+            "selected node 2 ({}) must not cross unselected node 3 ({})",
+            data.nodes[2].time, data.nodes[3].time);
+        assert!(data.nodes[1].time < data.nodes[2].time, "group stays ordered");
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn group_move_endpoint_in_selection_locks_horizontal() {
+        let mut data = MsegData::default();
+        data.snap = false;
+        data.insert_node(0.5, 0.5); // node 1
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        // Select node 1 and endpoint node 0.
+        select_nodes(&mut state, &mut data, &l, &[1, 0]);
+        let t1 = data.nodes[1].time;
+        state.on_mouse_down(phase_to_x(&l, 0.5), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
+        state.on_mouse_move(phase_to_x(&l, 0.8), value_to_y(&l, 0.3), &mut data, RECT, 1.0, false);
+        // The endpoint can't move in time -> the whole group is horizontally
+        // locked; node 1's time is unchanged. Vertical still applies.
+        assert!((data.nodes[1].time - t1).abs() < 1e-4, "endpoint in selection locks horizontal motion");
+        assert!(data.nodes[1].value < 0.5, "vertical group move still applies");
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn group_move_value_clamps_per_node_at_the_top() {
+        let mut data = MsegData::default();
+        data.snap = false;
+        data.insert_node(0.3, 0.5); // node 1
+        data.insert_node(0.6, 0.9); // node 2 — already near the top
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        select_nodes(&mut state, &mut data, &l, &[1, 2]);
+        // Anchor node 1, drag up — node 2 (0.9 + delta) overflows the top.
+        state.on_mouse_down(phase_to_x(&l, 0.3), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
+        state.on_mouse_move(phase_to_x(&l, 0.3), value_to_y(&l, 0.8), &mut data, RECT, 1.0, false);
+        assert!((data.nodes[2].value - 1.0).abs() < 1e-4, "overflowed node clamps to the top");
+        assert!(data.nodes[1].value > 0.7, "in-range node moved");
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn group_move_speculative_drag_unclamps_on_return() {
+        let mut data = MsegData::default();
+        data.snap = false;
+        data.insert_node(0.3, 0.5); // node 1
+        data.insert_node(0.6, 0.9); // node 2
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        select_nodes(&mut state, &mut data, &l, &[1, 2]);
+        let v1_before = data.nodes[1].value;
+        let v2_before = data.nodes[2].value;
+        state.on_mouse_down(phase_to_x(&l, 0.3), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
+        // Drag up so node 2 overflows and is clamped at the top...
+        state.on_mouse_move(phase_to_x(&l, 0.3), value_to_y(&l, 0.95), &mut data, RECT, 1.0, false);
+        assert!((data.nodes[2].value - 1.0).abs() < 1e-4);
+        // ...then drag back to the start: both nodes return to exactly where
+        // they were — clamping did not corrupt the group geometry.
+        state.on_mouse_move(phase_to_x(&l, 0.3), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
+        assert!((data.nodes[1].value - v1_before).abs() < 1e-3, "node 1 returned");
+        assert!((data.nodes[2].value - v2_before).abs() < 1e-3, "node 2 un-clamped and returned");
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn ctrl_click_deselecting_the_pressed_node_drags_it_solo() {
+        let mut data = MsegData::default();
+        data.snap = false;
+        data.insert_node(0.3, 0.5); // node 1
+        data.insert_node(0.6, 0.5); // node 2
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        select_nodes(&mut state, &mut data, &l, &[1, 2]);
+        let t2_before = data.nodes[2].time;
+        // Ctrl-press node 1 toggles it OUT of the selection; the same press
+        // then drags it — a solo single-node drag, not a group move.
+        state.on_mouse_down(phase_to_x(&l, 0.3), value_to_y(&l, 0.5), &mut data, RECT, 1.0, true);
+        state.on_mouse_move(phase_to_x(&l, 0.4), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
+        assert!((data.nodes[1].time - 0.4).abs() < 0.02, "node 1 dragged solo");
+        assert!((data.nodes[2].time - t2_before).abs() < 1e-4, "node 2 (still selected, not pressed) untouched");
         state.on_mouse_up(&mut data);
     }
 
