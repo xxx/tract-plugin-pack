@@ -22,6 +22,8 @@ pub const DIAL_SLOTS: usize = MAX_EFFECT_PARAMS;
 pub struct EffectLayout {
     /// `< Grid` back button.
     pub back: (f32, f32, f32, f32),
+    /// EFFECT section header band (caption + divider rule). Draw-only.
+    pub effect_header: (f32, f32, f32, f32),
     /// Effect-kind dropdown trigger.
     pub kind: (f32, f32, f32, f32),
     /// Parameter dial bounding boxes, slot order. Only the first
@@ -29,6 +31,8 @@ pub struct EffectLayout {
     pub dials: [(f32, f32, f32, f32); DIAL_SLOTS],
     /// Per-track Mix dial — a fixed slot right of the parameter dials.
     pub mix: (f32, f32, f32, f32),
+    /// MODULATION section header band (caption + divider rule). Draw-only.
+    pub modulation_header: (f32, f32, f32, f32),
     /// MSEG selector (stepped) — laid out here, used in Task 9.
     pub mseg_selector: (f32, f32, f32, f32),
     /// Target dropdown trigger — used in Task 9.
@@ -58,35 +62,34 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
     let inset = 14.0_f32;
     let l = |x: f32, y: f32, w: f32, h: f32| ((x + inset) * scale, y * scale, w * scale, h * scale);
     // Editor bar.
-    // Control heights drive widget font size (the shared widgets use
-    // `height·0.5`), so the bands below are sized generously — the modulation
-    // row is 34 px tall, giving ~17 px text instead of the cramped 13 px the
-    // earlier 26 px rows produced.
     let back = l(ox, oy + 4.0, 90.0, 30.0);
-    // EFFECT section.
-    let kind = l(ox, oy + 50.0, 150.0, 34.0);
-    let dials = std::array::from_fn(|i| l(ox + 180.0 + i as f32 * 96.0, oy + 44.0, 88.0, 88.0));
+    // EFFECT section — a header band, then the controls shifted down to clear it.
+    let effect_header = l(ox, oy + 36.0, mw - inset, 16.0);
+    let kind = l(ox, oy + 66.0, 150.0, 34.0);
+    let dials = std::array::from_fn(|i| l(ox + 180.0 + i as f32 * 96.0, oy + 60.0, 88.0, 88.0));
     // Per-track Mix dial: a fixed slot to the right of the four param-dial
     // slots (which end at ox+556), clearly set apart from them.
-    let mix = l(ox + 580.0, oy + 44.0, 88.0, 88.0);
-    // MODULATION section — trigger + rate on the left, then MSEG selector +
-    // target + depth. The trigger and rate are PER-TRACK (govern all 3 MSEGs).
-    let trigger = l(ox, oy + 168.0, 130.0, 34.0);
-    let trigger_rate = l(ox + 146.0, oy + 160.0, 60.0, 42.0);
-    let mseg_selector = l(ox + 222.0, oy + 168.0, 240.0, 34.0);
-    let target = l(ox + 478.0, oy + 168.0, 170.0, 34.0);
-    // Depth dial: raised so its value text doesn't fall into the MSEG pane
-    // below (which starts at oy+208).
-    let depth = l(ox + 664.0, oy + 140.0, 64.0, 64.0);
+    let mix = l(ox + 580.0, oy + 60.0, 88.0, 88.0);
+    // MODULATION section — its own header band, then the controls. The trigger
+    // and rate are PER-TRACK (govern all 3 MSEGs).
+    let modulation_header = l(ox, oy + 152.0, mw - inset, 16.0);
+    let trigger = l(ox, oy + 200.0, 130.0, 34.0);
+    let trigger_rate = l(ox + 146.0, oy + 192.0, 60.0, 42.0);
+    let mseg_selector = l(ox + 222.0, oy + 200.0, 240.0, 34.0);
+    let target = l(ox + 478.0, oy + 200.0, 170.0, 34.0);
+    // Depth dial: raised so its value text doesn't fall into the MSEG pane below.
+    let depth = l(ox + 664.0, oy + 172.0, 64.0, 64.0);
     // Active-MSEG sync + length, on the modulation row to the right of depth.
-    let mseg_sync = l(ox + 740.0, oy + 168.0, 110.0, 34.0);
-    let mseg_length = l(ox + 860.0, oy + 168.0, 140.0, 34.0);
-    let mseg_pane = l(ox, oy + 208.0, mw - inset, 422.0);
+    let mseg_sync = l(ox + 740.0, oy + 200.0, 110.0, 34.0);
+    let mseg_length = l(ox + 860.0, oy + 200.0, 140.0, 34.0);
+    let mseg_pane = l(ox, oy + 240.0, mw - inset, 390.0);
     EffectLayout {
         back,
+        effect_header,
         kind,
         dials,
         mix,
+        modulation_header,
         mseg_selector,
         target,
         depth,
@@ -188,6 +191,36 @@ pub fn effect_hit(
         return Some(EffectHit::MsegPane);
     }
     None
+}
+
+/// Draw a section header into `rect`: a left-aligned caption followed by a
+/// thin divider rule running to the rect's right edge.
+pub fn draw_section_header(
+    pixmap: &mut Pixmap,
+    tr: &mut widgets::TextRenderer,
+    rect: (f32, f32, f32, f32),
+    label: &str,
+    scale: f32,
+) {
+    let (x, y, w, h) = rect;
+    let size = 13.0 * scale;
+    let baseline = y + (h + size) * 0.5 - 2.0;
+    tr.draw_text(pixmap, x, baseline, label, size, widgets::color_muted());
+    // Divider rule, vertically centred, starting a gap past the caption.
+    let caption_w = tr.text_width(label, size);
+    let rule_x = x + caption_w + 8.0 * scale;
+    let rule_w = (x + w) - rule_x;
+    if rule_w > 0.0 {
+        let rule_h = scale.max(1.0);
+        widgets::draw_rect(
+            pixmap,
+            rule_x,
+            y + (h - rule_h) * 0.5,
+            rule_w,
+            rule_h,
+            widgets::color_border(),
+        );
+    }
 }
 
 /// Draw the editor bar and EFFECT section. The MODULATION section is drawn by
@@ -601,6 +634,31 @@ pub fn draw_modulation_controls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn section_headers_are_disjoint_from_their_section_controls() {
+        let lay = effect_layout(1.0);
+        // EFFECT header clears the editor bar above and the EFFECT controls below.
+        assert!(!rects_overlap(lay.effect_header, lay.back));
+        assert!(!rects_overlap(lay.effect_header, lay.kind));
+        for d in lay.dials {
+            assert!(!rects_overlap(lay.effect_header, d));
+        }
+        assert!(!rects_overlap(lay.effect_header, lay.mix));
+        // MODULATION header clears the EFFECT dials above and the MODULATION
+        // controls below.
+        for d in lay.dials {
+            assert!(!rects_overlap(lay.modulation_header, d));
+        }
+        assert!(!rects_overlap(lay.modulation_header, lay.trigger));
+        assert!(!rects_overlap(lay.modulation_header, lay.depth));
+        assert!(!rects_overlap(lay.modulation_header, lay.mseg_pane));
+        // The two headers do not overlap each other.
+        assert!(!rects_overlap(lay.effect_header, lay.modulation_header));
+        // The MSEG pane still sits below both sections.
+        assert!(lay.mseg_pane.1 >= lay.modulation_header.1 + lay.modulation_header.3);
+        assert!(lay.mseg_pane.1 >= lay.depth.1 + lay.depth.3);
+    }
 
     #[test]
     fn layout_rects_are_disjoint_for_the_main_controls() {

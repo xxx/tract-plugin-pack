@@ -559,6 +559,20 @@ impl MultosisWindow {
             editing_mix,
             self.scale_factor,
         );
+        effect_editor::draw_section_header(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            lay.effect_header,
+            "EFFECT",
+            self.scale_factor,
+        );
+        effect_editor::draw_section_header(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            lay.modulation_header,
+            "MODULATION",
+            self.scale_factor,
+        );
         // MODULATION section.
         let modu = self.selected_track_modulation();
         let sel = self.selected_mseg.min(2);
