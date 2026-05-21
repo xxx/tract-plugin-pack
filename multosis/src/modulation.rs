@@ -7,7 +7,7 @@
 use crate::effects::{
     norm_to_value, value_to_norm, Effect, EffectInstance, ParamScaling, ParamSpec, TrackEffect,
 };
-use tiny_skia_widgets::{advance, value_at_phase, MsegData, PlayMode, SyncMode};
+use tiny_skia_widgets::{advance, value_at_phase, MsegData, PlayMode, Polarity, SyncMode};
 
 /// The number of track rows. Matches `crate::grid::ROWS`.
 const ROWS: usize = 16;
@@ -127,25 +127,43 @@ pub fn mseg_phase_delta(mseg: &MsegData, block_len: usize, bpm: f64, sample_rate
 
 /// The effective effect-parameter value for an assignable MSEG modulating
 /// parameter `spec` around `base`. `mseg_value` is the MSEG's 0..1 output;
-/// `depth` is the bipolar (−1..1) modulation depth. The MSEG midline (0.5)
-/// leaves the parameter at `base`; the result is clamped to the parameter's
-/// range.
+/// `depth` is the modulation depth (−1..1); `polarity` decides where the
+/// MSEG's zero-deviation reference sits. The result is clamped to the
+/// parameter's range.
+///
+/// - `Bipolar`: the MSEG midline (value 0.5) leaves the parameter at `base`;
+///   the curve sweeps ±`depth` either side of it.
+/// - `Unipolar`: value 0 references `base` (no modulation) and the curve is
+///   additive — value 1 reaches `base + depth·range`. With an open Cutoff
+///   and positive depth a Unipolar curve only ever pushes up, so it clamps
+///   silently instead of pulling the filter closed.
 ///
 /// Honours `spec.scaling`: Linear params modulate in value-space (`depth` is
 /// a fraction of the full value range); Log params modulate in norm-space
 /// (`depth` is a fraction of the log range), so a log-scaled cutoff sweeps
 /// audibly even-handed across its decades instead of being clamped at the
 /// dark end half the time.
-pub fn assignable_value(mseg_value: f32, base: f32, depth: f32, spec: ParamSpec) -> f32 {
-    let bipolar = mseg_value * 2.0 - 1.0;
+pub fn assignable_value(
+    mseg_value: f32,
+    base: f32,
+    depth: f32,
+    spec: ParamSpec,
+    polarity: Polarity,
+) -> f32 {
+    // Signed deviation factor: Bipolar centres on the midline (0.5 → 0),
+    // Unipolar references `base` at value 0 (the raw 0..1 output).
+    let factor = match polarity {
+        Polarity::Bipolar => mseg_value * 2.0 - 1.0,
+        Polarity::Unipolar => mseg_value,
+    };
     match spec.scaling {
         ParamScaling::Linear => {
-            let deviation = bipolar * depth * (spec.max - spec.min);
+            let deviation = factor * depth * (spec.max - spec.min);
             (base + deviation).clamp(spec.min, spec.max)
         }
         ParamScaling::Log => {
             let norm_base = value_to_norm(base, spec.min, spec.max, ParamScaling::Log);
-            let norm_eff = (norm_base + bipolar * depth).clamp(0.0, 1.0);
+            let norm_eff = (norm_base + factor * depth).clamp(0.0, 1.0);
             norm_to_value(norm_eff, spec.min, spec.max, ParamScaling::Log)
         }
     }
@@ -287,7 +305,10 @@ impl Modulation {
                     if let Some(&spec) = effects[row].parameters().get(target) {
                         let base = track_effects[row].params[target];
                         let depth = self.config[row].depths[k - 1];
-                        effects[row].set_param(target, assignable_value(value, base, depth, spec));
+                        effects[row].set_param(
+                            target,
+                            assignable_value(value, base, depth, spec, mseg.polarity),
+                        );
                     }
                 }
             }
@@ -401,7 +422,7 @@ mod tests {
                 unit: "",
             },
         };
-        assert!((assignable_value(0.5, 40.0, 1.0, spec) - 40.0).abs() < 1e-6);
+        assert!((assignable_value(0.5, 40.0, 1.0, spec, Polarity::Bipolar) - 40.0).abs() < 1e-6);
     }
 
     #[test]
@@ -417,9 +438,62 @@ mod tests {
                 unit: "",
             },
         };
-        assert_eq!(assignable_value(1.0, 40.0, 1.0, spec), 100.0);
-        assert_eq!(assignable_value(1.0, 40.0, -1.0, spec), 0.0);
-        assert!((assignable_value(1.0, 20.0, 0.5, spec) - 70.0).abs() < 1e-4);
+        assert_eq!(
+            assignable_value(1.0, 40.0, 1.0, spec, Polarity::Bipolar),
+            100.0
+        );
+        assert_eq!(
+            assignable_value(1.0, 40.0, -1.0, spec, Polarity::Bipolar),
+            0.0
+        );
+        assert!((assignable_value(1.0, 20.0, 0.5, spec, Polarity::Bipolar) - 70.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn assignable_value_unipolar_references_base_at_zero() {
+        let spec = ParamSpec {
+            name: "p",
+            min: 0.0,
+            max: 100.0,
+            default: 50.0,
+            scaling: crate::effects::ParamScaling::Linear,
+            format: crate::effects::ParamFormat::Number {
+                decimals: 0,
+                unit: "",
+            },
+        };
+        // Unipolar: value 0 leaves the parameter at base (no modulation),
+        // and the curve is additive — value 1 reaches base + depth·range.
+        assert!((assignable_value(0.0, 40.0, 1.0, spec, Polarity::Unipolar) - 40.0).abs() < 1e-6);
+        assert!((assignable_value(0.5, 40.0, 1.0, spec, Polarity::Unipolar) - 90.0).abs() < 1e-4);
+        assert_eq!(
+            assignable_value(1.0, 40.0, 1.0, spec, Polarity::Unipolar),
+            100.0
+        );
+        // Negative depth pushes the additive curve downward from base.
+        assert!((assignable_value(1.0, 40.0, -0.3, spec, Polarity::Unipolar) - 10.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn assignable_value_unipolar_open_param_clamps_silently() {
+        // The user's case: a log Cutoff fully open (base = max). A Unipolar
+        // curve with positive depth only ever pushes up, so every sample
+        // clamps at max — no audible downward sweep.
+        let spec = ParamSpec {
+            name: "Cutoff",
+            min: 20.0,
+            max: 20_000.0,
+            default: 2_000.0,
+            scaling: crate::effects::ParamScaling::Log,
+            format: crate::effects::ParamFormat::Hertz,
+        };
+        for &v in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            let out = assignable_value(v, 20_000.0, 0.4, spec, Polarity::Unipolar);
+            assert!(
+                (out - 20_000.0).abs() < 1e-3,
+                "v {v} -> {out}, expected max"
+            );
+        }
     }
 
     #[test]
@@ -437,8 +511,10 @@ mod tests {
         };
         for &v in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
             for &d in &[-1.0_f32, -0.3, 0.0, 0.6, 1.0] {
-                let out = assignable_value(v, 8.0, d, spec);
-                assert!((5.0..=9.0).contains(&out), "v {v} d {d} -> {out}");
+                for &pol in &[Polarity::Bipolar, Polarity::Unipolar] {
+                    let out = assignable_value(v, 8.0, d, spec, pol);
+                    assert!((5.0..=9.0).contains(&out), "v {v} d {d} {pol:?} -> {out}");
+                }
             }
         }
     }
@@ -458,9 +534,9 @@ mod tests {
             scaling: crate::effects::ParamScaling::Log,
             format: crate::effects::ParamFormat::Hertz,
         };
-        let lo = assignable_value(0.0, 2_000.0, 0.4, spec);
-        let mid = assignable_value(0.5, 2_000.0, 0.4, spec);
-        let hi = assignable_value(1.0, 2_000.0, 0.4, spec);
+        let lo = assignable_value(0.0, 2_000.0, 0.4, spec, Polarity::Bipolar);
+        let mid = assignable_value(0.5, 2_000.0, 0.4, spec, Polarity::Bipolar);
+        let hi = assignable_value(1.0, 2_000.0, 0.4, spec, Polarity::Bipolar);
         // Midline still equals the base, exactly.
         assert!((mid - 2_000.0).abs() < 1e-3, "midline {mid}");
         // Low end is audibly above the parameter floor — well above 20 Hz.
