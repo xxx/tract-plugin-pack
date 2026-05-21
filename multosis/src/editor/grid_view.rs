@@ -1,10 +1,9 @@
-//! Renders the 16×32 routing grid and the live wavefront into the editor
+//! Renders the 16×32 grid and the live playhead into the editor
 //! pixmap. Geometry is in logical units; every draw multiplies by `scale`.
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §7.
 
 use crate::grid::{Grid, LoopRegion, COLS, ROWS};
-use crate::wavefront_display::WavefrontDisplay;
 use tiny_skia::Pixmap;
 use tiny_skia_widgets as widgets;
 
@@ -337,7 +336,7 @@ fn draw_cell(pixmap: &mut Pixmap, row: usize, col: usize, cell: &crate::grid::Ce
 }
 
 /// Draw every grid cell into `pixmap` (the cacheable part of the grid — no
-/// loop-region overlay, no wavefront). `GridCache` and `draw_region_overlay`
+/// loop-region overlay, no playhead). `GridCache` and `draw_region_overlay`
 /// together replace the old `draw_grid`.
 pub fn draw_grid_cells(pixmap: &mut Pixmap, grid: &Grid, scale: f32) {
     for r in 0..ROWS {
@@ -468,29 +467,18 @@ impl GridCache {
     }
 }
 
-/// A lit wavefront cell.
-fn color_wavefront() -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba8(0xd8, 0x89, 0x3a, 0xFF)
+/// The playhead column highlight — translucent so each cell's on/off state
+/// reads through the overlay.
+fn color_playhead() -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(0xd8, 0x89, 0x3a, 0x66)
 }
 
-/// Overlay the live wavefront — every lit cell gets an orange core square.
-pub fn draw_wavefront(pixmap: &mut Pixmap, wf: &WavefrontDisplay, scale: f32) {
-    for r in 0..ROWS {
-        for c in 0..COLS {
-            if !wf.is_lit(r, c) {
-                continue;
-            }
-            let (x, y, w, h) = cell_rect(r, c, scale);
-            let inset = w * 0.22;
-            widgets::draw_rect(
-                pixmap,
-                x + inset,
-                y + inset,
-                w - 2.0 * inset,
-                h - 2.0 * inset,
-                color_wavefront(),
-            );
-        }
+/// Overlay the playhead — a translucent highlight over the current column,
+/// spanning the loop zone's rows.
+pub fn draw_playhead(pixmap: &mut Pixmap, column: usize, loop_region: LoopRegion, scale: f32) {
+    for row in loop_region.row0..=loop_region.row1.min(ROWS - 1) {
+        let (x, y, w, h) = cell_rect(row, column, scale);
+        widgets::draw_rect(pixmap, x, y, w, h, color_playhead());
     }
 }
 
@@ -611,7 +599,7 @@ mod tests {
         let mut surface_pixmap = tiny_skia::Pixmap::new(w, h).unwrap();
         let blit_src = tiny_skia::Pixmap::new(w, h).unwrap();
 
-        let wf = crate::wavefront_display::WavefrontDisplay::new();
+        let playhead = crate::playhead_display::PlayheadDisplay::new();
         let params = crate::MultosisParams::default();
         let mut tr = widgets::TextRenderer::new(include_bytes!("../fonts/DejaVuSans.ttf"));
         let seq = crate::seq_status::SeqStatusDisplay::new();
@@ -629,7 +617,7 @@ mod tests {
                 .data_mut()
                 .copy_from_slice(cache.pixmap().data());
             draw_region_overlay(&mut surface_pixmap, &grid, scale, None);
-            draw_wavefront(&mut surface_pixmap, &wf, scale);
+            draw_playhead(&mut surface_pixmap, playhead.column(), grid.loop_region, scale);
             crate::editor::toolbar::draw_toolbar(
                 &mut surface_pixmap,
                 &mut tr,
@@ -680,7 +668,7 @@ mod tests {
             overlay_samples.push(to.elapsed().as_nanos() as f64 / 1_000.0);
 
             let tw = std::time::Instant::now();
-            draw_wavefront(&mut surface_pixmap, &wf, scale);
+            draw_playhead(&mut surface_pixmap, playhead.column(), grid.loop_region, scale);
             wf_samples.push(tw.elapsed().as_nanos() as f64 / 1_000.0);
 
             let tt = std::time::Instant::now();
@@ -701,7 +689,7 @@ mod tests {
         bench_stats("grid_cache.update (2 cells)", &cache_2cell_samples);
         bench_stats("blit copy_from_slice       ", &blit_samples);
         bench_stats("draw_region_overlay        ", &overlay_samples);
-        bench_stats("draw_wavefront             ", &wf_samples);
+        bench_stats("draw_playhead              ", &wf_samples);
         bench_stats("draw_toolbar               ", &toolbar_samples);
         bench_stats("frame total                ", &total_samples);
         eprintln!("=== END bench_editor_draw ===\n");

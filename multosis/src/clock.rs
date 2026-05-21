@@ -1,10 +1,10 @@
-//! The tempo-synced step clock that drives wavefront propagation.
+//! The tempo-synced step clock that drives the playhead.
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §5.2.
 
 use nih_plug::prelude::Enum;
 
-/// How fast the wavefront advances — a musical note division. Backs the
+/// How fast the playhead advances — a musical note division. Backs the
 /// plugin's `speed` parameter, so it derives nih-plug's `Enum`.
 #[derive(Enum, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Speed {

@@ -1,6 +1,6 @@
 //! Softbuffer + tiny-skia CPU editor for Multosis.
 //!
-//! Milestone 1b-ii-a: opens the window and renders the grid + live wavefront.
+//! Milestone 1b-ii-a: opens the window and renders the grid + live playhead.
 //! Interaction (cell editing, loop-region drag, toolbar) is Milestone 1b-ii-b.
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
@@ -16,7 +16,7 @@ use crate::handoff::GridHandoff;
 use crate::modulation::TriggerSource;
 use crate::region::RegionSnapshot;
 use crate::seq_status::SeqStatusDisplay;
-use crate::wavefront_display::WavefrontDisplay;
+use crate::playhead_display::PlayheadDisplay;
 use crate::MultosisParams;
 use tiny_skia_widgets as widgets;
 
@@ -122,7 +122,7 @@ struct MultosisWindow {
     /// Packed `(w << 32) | h` pending host-initiated resize, read next frame.
     pending_resize: Arc<AtomicU64>,
     params: Arc<MultosisParams>,
-    wavefront_display: Arc<WavefrontDisplay>,
+    playhead_display: Arc<PlayheadDisplay>,
     seq_status: Arc<SeqStatusDisplay>,
     grid_handoff: Arc<GridHandoff>,
     /// Audio→GUI mirror of the engine's active-row mask. Task 3 draws with it.
@@ -188,7 +188,7 @@ impl MultosisWindow {
     fn new(
         window: &mut baseview::Window<'_>,
         params: Arc<MultosisParams>,
-        wavefront_display: Arc<WavefrontDisplay>,
+        playhead_display: Arc<PlayheadDisplay>,
         seq_status: Arc<SeqStatusDisplay>,
         grid_handoff: Arc<GridHandoff>,
         pending_resize: Arc<AtomicU64>,
@@ -210,7 +210,7 @@ impl MultosisWindow {
             scale_factor,
             pending_resize,
             params,
-            wavefront_display,
+            playhead_display,
             seq_status,
             grid_handoff,
             active_rows,
@@ -1038,9 +1038,10 @@ impl MultosisWindow {
                     self.scale_factor,
                     Some(self.mouse_pos),
                 );
-                grid_view::draw_wavefront(
+                grid_view::draw_playhead(
                     &mut self.surface.pixmap,
-                    &self.wavefront_display,
+                    self.playhead_display.column(),
+                    grid.loop_region,
                     self.scale_factor,
                 );
             }
@@ -1489,7 +1490,7 @@ impl baseview::WindowHandler for MultosisWindow {
 /// The nih-plug `Editor` — spawns the window.
 struct MultosisEditor {
     params: Arc<MultosisParams>,
-    wavefront_display: Arc<WavefrontDisplay>,
+    playhead_display: Arc<PlayheadDisplay>,
     seq_status: Arc<SeqStatusDisplay>,
     grid_handoff: Arc<GridHandoff>,
     reset_request: Arc<AtomicBool>,
@@ -1503,7 +1504,7 @@ struct MultosisEditor {
 #[allow(clippy::too_many_arguments)]
 pub fn create(
     params: Arc<MultosisParams>,
-    wavefront_display: Arc<WavefrontDisplay>,
+    playhead_display: Arc<PlayheadDisplay>,
     seq_status: Arc<SeqStatusDisplay>,
     grid_handoff: Arc<GridHandoff>,
     reset_request: Arc<AtomicBool>,
@@ -1513,7 +1514,7 @@ pub fn create(
 ) -> Option<Box<dyn Editor>> {
     Some(Box::new(MultosisEditor {
         params,
-        wavefront_display,
+        playhead_display,
         seq_status,
         grid_handoff,
         reset_request,
@@ -1534,7 +1535,7 @@ impl Editor for MultosisEditor {
         let sf = (persisted_w as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
 
         let params = Arc::clone(&self.params);
-        let wavefront_display = Arc::clone(&self.wavefront_display);
+        let playhead_display = Arc::clone(&self.playhead_display);
         let seq_status = Arc::clone(&self.seq_status);
         let grid_handoff = Arc::clone(&self.grid_handoff);
         let pending_resize = Arc::clone(&self.pending_resize);
@@ -1556,7 +1557,7 @@ impl Editor for MultosisEditor {
                 MultosisWindow::new(
                     window,
                     params,
-                    wavefront_display,
+                    playhead_display,
                     seq_status,
                     grid_handoff,
                     pending_resize,

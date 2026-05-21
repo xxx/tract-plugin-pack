@@ -1,50 +1,29 @@
-//! Lock-free audio→GUI mirror of the sequence lifecycle state and step count.
+//! Lock-free audio→GUI mirror of the sequencer step counter.
 //!
-//! The audio thread publishes once per process block; the editor reads it each
-//! frame to draw the status readout. Two `Relaxed` atomics — a torn pair is
-//! sub-frame and visually irrelevant.
-//!
-//! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §3.1.
+//! The audio thread publishes once per process block; the editor reads it
+//! each frame to draw the status readout. One `Relaxed` atomic.
 
-use crate::propagation::SequenceState;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// The audio→GUI mirror: the lifecycle state (as a `u8` code) and the step
-/// count.
+/// The audio→GUI mirror of the running step count.
 pub struct SeqStatusDisplay {
-    /// 0 = Initial, 1 = Running, 2 = Stopped.
-    state: AtomicU8,
     step: AtomicU64,
 }
 
 impl SeqStatusDisplay {
-    /// A display reading `Initial`, step 0.
+    /// A display reading step 0.
     pub fn new() -> Self {
-        Self {
-            state: AtomicU8::new(0),
-            step: AtomicU64::new(0),
-        }
+        Self { step: AtomicU64::new(0) }
     }
 
-    /// Audio thread: publish the current lifecycle state and step count.
-    pub fn publish(&self, state: SequenceState, step: u64) {
-        let code = match state {
-            SequenceState::Initial => 0,
-            SequenceState::Running => 1,
-            SequenceState::Stopped => 2,
-        };
-        self.state.store(code, Ordering::Relaxed);
+    /// Audio thread: publish the current step count.
+    pub fn publish(&self, step: u64) {
         self.step.store(step, Ordering::Relaxed);
     }
 
-    /// GUI thread: read the last published `(state, step)`.
-    pub fn read(&self) -> (SequenceState, u64) {
-        let state = match self.state.load(Ordering::Relaxed) {
-            0 => SequenceState::Initial,
-            1 => SequenceState::Running,
-            _ => SequenceState::Stopped,
-        };
-        (state, self.step.load(Ordering::Relaxed))
+    /// GUI thread: read the last published step count.
+    pub fn read(&self) -> u64 {
+        self.step.load(Ordering::Relaxed)
     }
 }
 
@@ -59,21 +38,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_display_reads_initial_state() {
-        let d = SeqStatusDisplay::new();
-        assert_eq!(d.read(), (SequenceState::Initial, 0));
+    fn new_display_reads_step_zero() {
+        assert_eq!(SeqStatusDisplay::new().read(), 0);
     }
 
     #[test]
-    fn publish_round_trips_every_state() {
+    fn publish_round_trips_the_step() {
         let d = SeqStatusDisplay::new();
-        for (state, step) in [
-            (SequenceState::Initial, 0),
-            (SequenceState::Running, 14),
-            (SequenceState::Stopped, 7),
-        ] {
-            d.publish(state, step);
-            assert_eq!(d.read(), (state, step));
-        }
+        d.publish(42);
+        assert_eq!(d.read(), 42);
     }
 }

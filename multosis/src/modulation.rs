@@ -14,7 +14,7 @@ const ROWS: usize = 16;
 
 /// The event that causes a track's three MSEG phases to reset to 0.
 /// Per Phase 3 design — Free is the Phase 2b free-running default; CellLight
-/// fires on the row's inactive→active edge under the wavefront; FreeHz fires
+/// fires on the row's inactive→active edge at the playhead; FreeHz fires
 /// every `1.0/hz` seconds independently of any sync.
 #[derive(Clone, Copy, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum TriggerSource {

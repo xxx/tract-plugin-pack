@@ -6,9 +6,9 @@
 use crate::clock::StepClock;
 use crate::compressor::Compressor;
 use crate::effects::{Effect, EffectInstance, TrackEffect};
-use crate::grid::{Grid, COLS, ROWS};
+use crate::grid::{Grid, ROWS};
 use crate::modulation::{Modulation, TrackModulation};
-use crate::propagation::{Propagator, Wavefront};
+use crate::propagation::{active_rows, Playhead};
 
 /// Upper bound on step boundaries handled within one process block. At any
 /// realistic tempo/speed/sample-rate, `samples_per_step` is at least a few
@@ -17,10 +17,12 @@ use crate::propagation::{Propagator, Wavefront};
 /// large block are simply dropped (graceful, never panics).
 const MAX_BOUNDARIES: usize = 64;
 
-/// Ties the propagation engine, step clock, and per-track effects into a
+/// Ties the playhead, step clock, and per-track effects into a
 /// stereo block processor.
 pub struct AudioEngine {
-    propagator: Propagator,
+    playhead: Playhead,
+    /// Steps since the last reset — for the editor's status readout.
+    step: u64,
     clock: StepClock,
     effects: [EffectInstance; ROWS],
     /// Per-track effect configuration — kept so the modulation engine can read
@@ -29,7 +31,7 @@ pub struct AudioEngine {
     /// The 3-MSEG-per-track modulation engine driving the effects.
     modulation: Modulation,
     /// The most recent process block's active-row bitmask (bit `r` = row `r`
-    /// had a lit, enabled cell under the wavefront). Published to the editor.
+    /// had an enabled cell at the playhead column). Published to the editor.
     last_active: u16,
     /// Per-row "had a new lit-and-enabled cell light up at a step-boundary
     /// tick this block" mask. Accumulated within `process()` as each tick's
@@ -44,10 +46,11 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
-    /// A fresh engine: `Initial` propagator, zeroed clock, default per-track effects.
+    /// A fresh engine: unstarted playhead, zeroed clock, default per-track effects.
     pub fn new() -> Self {
         Self {
-            propagator: Propagator::new(),
+            playhead: Playhead::new(),
+            step: 0,
             clock: StepClock::new(),
             effects: std::array::from_fn(|r| {
                 let cfg = TrackEffect::default_for_row(r);
@@ -114,7 +117,8 @@ impl AudioEngine {
     /// Reset the sequence, clock, and filter state. Called on the transport
     /// stopped→playing edge and on the host's `reset()`.
     pub fn reset(&mut self) {
-        self.propagator.reset();
+        self.playhead.reset();
+        self.step = 0;
         self.clock.reset();
         for e in &mut self.effects {
             e.reset();
@@ -125,26 +129,19 @@ impl AudioEngine {
         self.pending_cell_lights = 0;
     }
 
-    /// The current wavefront — exposed so the Milestone 1b-ii editor can draw
-    /// it.
-    pub fn wavefront(&self) -> &Wavefront {
-        &self.propagator.wavefront
-    }
-
-    /// The current sequence lifecycle state — exposed for the editor's status
-    /// readout.
-    pub fn sequence_state(&self) -> crate::propagation::SequenceState {
-        self.propagator.state
-    }
-
-    /// Steps since the wavefront was last armed — exposed for the editor's
-    /// status readout.
+    /// Steps since the last reset — exposed for the editor's status readout.
     pub fn step(&self) -> u64 {
-        self.propagator.step
+        self.step
+    }
+
+    /// The playhead's current column — exposed for the editor's column
+    /// highlight overlay.
+    pub fn playhead_column(&self) -> usize {
+        self.playhead.column()
     }
 
     /// The last process block's active-row bitmask — bit `r` set when row `r`
-    /// had a lit, enabled cell under the wavefront. For the editor's track
+    /// had an enabled cell at the playhead column. For the editor's track
     /// listing "currently sounding" indicator.
     pub fn active_mask(&self) -> u16 {
         self.last_active
@@ -154,22 +151,6 @@ impl AudioEngine {
     /// editor's MSEG playhead overlay.
     pub fn modulation_phase(&self, row: usize, k: usize) -> f32 {
         self.modulation.phase(row, k)
-    }
-
-    /// Bitmask (bit `R`) of rows holding at least one cell that is both lit in
-    /// `wf` and `enabled` in `grid`. A disabled lit cell contributes nothing;
-    /// two lit cells in one row collapse to a single bit.
-    fn active_rows(grid: &Grid, wf: &Wavefront) -> u16 {
-        let mut mask = 0u16;
-        for r in 0..ROWS {
-            for c in 0..COLS {
-                if wf.is_lit(r, c) && grid.cell(r, c).enabled {
-                    mask |= 1 << r;
-                    break;
-                }
-            }
-        }
-        mask
     }
 
     /// Apply the active rows' effects to one dry stereo sample and sum them.
@@ -196,9 +177,9 @@ impl AudioEngine {
     /// Process one stereo block in place. `left`/`right` carry the dry input
     /// on entry and the mixed `dry + (wet - dry) * mix` output on return.
     ///
-    /// While `playing`, the clock advances and the wavefront propagates at
-    /// each step boundary; while stopped, the wavefront is frozen and the
-    /// block is processed with the current lit set. `samples_per_step` comes
+    /// While `playing`, the clock advances and the playhead advances at
+    /// each step boundary; while stopped, the playhead is frozen and the
+    /// block is processed at the current column. `samples_per_step` comes
     /// from `clock::samples_per_step`.
     #[allow(clippy::too_many_arguments)]
     pub fn process(
@@ -237,9 +218,9 @@ impl AudioEngine {
             });
         }
 
-        // Walk the block in segments split at each boundary; the wavefront is
-        // constant within a segment.
-        let mut active = Self::active_rows(grid, &self.propagator.wavefront);
+        // Walk the block in segments split at each boundary; the playhead's
+        // column is constant within a segment.
+        let mut active = active_rows(grid, &grid.loop_region, self.playhead.column());
         let mut cursor = 0usize;
         let mut bi = 0usize;
         while cursor < n {
@@ -258,38 +239,20 @@ impl AudioEngine {
             }
             cursor = seg_end;
             if bi < n_boundaries {
-                // Snapshot the lit-and-enabled set per row BEFORE and AFTER
-                // the tick; rows with any newly-lit cell get a bit set in
+                // Snapshot the active-row mask BEFORE and AFTER the tick;
+                // rows that became active get a bit set in
                 // `pending_cell_lights` for the NEXT block's CellLight trigger.
-                let before = Self::lit_enabled_per_row(grid, &self.propagator.wavefront);
-                self.propagator.tick(grid);
-                let after = Self::lit_enabled_per_row(grid, &self.propagator.wavefront);
-                for r in 0..ROWS {
-                    if (after[r] & !before[r]) != 0 {
-                        self.pending_cell_lights |= 1 << r;
-                    }
-                }
-                active = Self::active_rows(grid, &self.propagator.wavefront);
+                let before = active_rows(grid, &grid.loop_region, self.playhead.column());
+                self.playhead.tick(&grid.loop_region);
+                self.step += 1;
+                let after = active_rows(grid, &grid.loop_region, self.playhead.column());
+                let newly = after & !before;
+                self.pending_cell_lights |= newly;
+                active = after;
                 bi += 1;
             }
         }
         self.last_active = active;
-    }
-
-    /// The per-row bitmask of columns currently lit-and-enabled. Bit `c` of
-    /// the returned slot is set when cell `(r, c)` is lit in the wavefront
-    /// and `enabled` in the grid. Used to detect new cell-light events at
-    /// step boundaries.
-    fn lit_enabled_per_row(grid: &Grid, wf: &Wavefront) -> [u32; ROWS] {
-        let mut out = [0u32; ROWS];
-        for (r, slot) in out.iter_mut().enumerate() {
-            for c in 0..COLS {
-                if wf.is_lit(r, c) && grid.cell(r, c).enabled {
-                    *slot |= 1 << c;
-                }
-            }
-        }
-        out
     }
 }
 
@@ -304,31 +267,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn active_rows_marks_lit_enabled_cells() {
-        let grid = Grid::default_routing();
-        let mut wf = Wavefront::empty();
-        wf.set(3, 0, true);
-        wf.set(9, 5, true);
-        let mask = AudioEngine::active_rows(&grid, &wf);
-        assert_eq!(mask, (1 << 3) | (1 << 9));
-    }
-
-    #[test]
-    fn active_rows_ignores_disabled_cells() {
+    fn active_rows_marks_enabled_cells_in_the_loop_zone_at_the_column() {
+        use crate::propagation::active_rows;
         let mut grid = Grid::default_routing();
-        grid.cell_mut(7, 2).enabled = false;
-        let mut wf = Wavefront::empty();
-        wf.set(7, 2, true); // lit but disabled -> not active
-        assert_eq!(AudioEngine::active_rows(&grid, &wf), 0);
+        grid.cell_mut(3, 5).enabled = true;
+        grid.cell_mut(7, 5).enabled = false;
+        let mask = active_rows(&grid, &grid.loop_region, 5);
+        assert!(mask & (1 << 3) != 0, "row 3 enabled at col 5 -> active");
+        assert!(mask & (1 << 7) == 0, "row 7 disabled at col 5 -> inactive");
     }
 
     #[test]
-    fn active_rows_dedupes_a_row_with_two_lit_cells() {
-        let grid = Grid::default_routing();
-        let mut wf = Wavefront::empty();
-        wf.set(4, 1, true);
-        wf.set(4, 30, true); // same row, twice -> one bit
-        assert_eq!(AudioEngine::active_rows(&grid, &wf), 1 << 4);
+    fn active_rows_excludes_rows_outside_the_loop_zone() {
+        use crate::propagation::active_rows;
+        use crate::grid::LoopRegion;
+        let mut grid = Grid::default_routing();
+        grid.loop_region = LoopRegion { row0: 4, row1: 8, col0: 0, col1: 31 };
+        let mask = active_rows(&grid, &grid.loop_region, 0);
+        assert!(mask & (1 << 2) == 0, "row 2 is above the loop zone");
+        assert!(mask & (1 << 6) != 0, "row 6 is inside the loop zone");
     }
 
     #[test]
@@ -349,9 +306,10 @@ mod tests {
     }
 
     #[test]
-    fn new_engine_has_an_empty_wavefront() {
+    fn new_engine_has_an_unstarted_playhead() {
         let engine = AudioEngine::new();
-        assert!(engine.wavefront().is_empty());
+        assert_eq!(engine.playhead_column(), 0);
+        assert_eq!(engine.step(), 0);
     }
 
     #[test]
@@ -367,9 +325,10 @@ mod tests {
     }
 
     #[test]
-    fn process_empty_wavefront_full_wet_is_silent() {
-        // Not playing, fresh engine: the wavefront is empty, so no row is
-        // active and the fully-wet output is silence.
+    fn process_default_effects_full_wet_is_silent() {
+        // Not playing, fresh engine: every row's default effect is
+        // `EffectKind::None` (an unassigned lane outputs silence), so the
+        // fully-wet output is silence.
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
         let grid = Grid::default_routing();
@@ -414,7 +373,7 @@ mod tests {
         let mut buf2 = [0.3_f32; 128];
         engine.process(&mut buf, &mut buf2, true, 10.0, 120.0, 1.0, &grid);
         engine.reset();
-        // After reset, not playing: empty wavefront -> silent at full wet.
+        // After reset, not playing: default `None` effects -> silent at full wet.
         let mut left = [0.4_f32; 64];
         let mut right = [0.4_f32; 64];
         engine.process(&mut left, &mut right, false, 10.0, 120.0, 1.0, &grid);
@@ -423,27 +382,26 @@ mod tests {
     }
 
     #[test]
-    fn new_engine_reports_initial_state_and_zero_step() {
-        let engine = AudioEngine::new();
-        assert_eq!(
-            engine.sequence_state(),
-            crate::propagation::SequenceState::Initial
-        );
-        assert_eq!(engine.step(), 0);
-    }
-
-    #[test]
-    fn engine_reports_running_after_arming() {
-        let grid = Grid::default_routing(); // left column = start cells
+    fn engine_advances_the_playhead_after_a_step_boundary() {
+        let grid = Grid::default_routing(); // full loop region, col0 = 0
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
-        let mut left = [0.0_f32; 64];
-        let mut right = [0.0_f32; 64];
-        // One short step arms the start cells -> Running.
+        // A short block with one boundary (`pending_first` only — the
+        // 4-sample accumulation stays below `samples_per_step`): the single
+        // tick lands the playhead on the loop zone's left edge and bumps the
+        // step counter.
+        let mut left = [0.0_f32; 4];
+        let mut right = [0.0_f32; 4];
         engine.process(&mut left, &mut right, true, 10.0, 120.0, 0.0, &grid);
-        assert_eq!(
-            engine.sequence_state(),
-            crate::propagation::SequenceState::Running
+        assert_eq!(engine.playhead_column(), grid.loop_region.col0);
+        assert_eq!(engine.step(), 1, "the first boundary tick advances the step");
+        // A longer block crosses several boundaries; the playhead scans right.
+        let mut l2 = [0.0_f32; 64];
+        let mut r2 = [0.0_f32; 64];
+        engine.process(&mut l2, &mut r2, true, 10.0, 120.0, 0.0, &grid);
+        assert!(
+            engine.playhead_column() > grid.loop_region.col0,
+            "subsequent ticks move the playhead off the left edge"
         );
     }
 

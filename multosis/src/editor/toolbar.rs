@@ -13,7 +13,7 @@ use tiny_skia_widgets as widgets;
 /// One toolbar control in the upper row.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolbarControl {
-    /// Cycles the wavefront speed.
+    /// Cycles the playhead speed.
     Speed,
     /// Drag slider — dry/wet mix.
     Mix,
@@ -267,12 +267,8 @@ pub fn draw_toolbar(
     }
 
     // Sequence-status readout, at the right end of the lower row.
-    let (state, step) = seq_status.read();
-    let status = match state {
-        crate::propagation::SequenceState::Initial => "Initial".to_string(),
-        crate::propagation::SequenceState::Running => format!("Running · {step}"),
-        crate::propagation::SequenceState::Stopped => "Stopped".to_string(),
-    };
+    let step = seq_status.read();
+    let status = format!("Step {step}");
     let size = 16.0 * scale;
     let sx = remap(878.0, 0.0).0 * scale;
     let sy = (TOOLBAR_ROW_H + TOOLBAR_ROW_H / 2.0) * scale + size * 0.36;

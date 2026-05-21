@@ -1,8 +1,8 @@
 //! `multosis` — a multi-FX routing sequencer.
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md`.
-//! Milestone 1a is the headless routing model: the grid, the wavefront
-//! propagation engine, and the step clock. No GUI, no audio, no nih-plug.
+//! Milestone 1a is the headless routing model: the grid, the playhead
+//! sequencer, and the step clock. No GUI, no audio, no nih-plug.
 
 pub mod clock;
 pub mod compressor;
@@ -12,11 +12,11 @@ pub mod engine;
 pub mod grid;
 pub mod handoff;
 pub mod modulation;
+pub mod playhead_display;
 pub mod propagation;
 pub mod randomize;
 pub mod region;
 pub mod seq_status;
-pub mod wavefront_display;
 
 use crate::clock::Speed;
 use crate::engine::AudioEngine;
@@ -46,7 +46,7 @@ pub struct MultosisParams {
     #[persist = "track-modulation"]
     pub track_modulation: Arc<Mutex<[crate::modulation::TrackModulation; 16]>>,
 
-    /// Tempo-synced wavefront advance rate.
+    /// Tempo-synced playhead advance rate.
     #[id = "speed"]
     pub speed: EnumParam<Speed>,
 
@@ -133,8 +133,8 @@ pub struct Multosis {
     sample_rate: f32,
     /// Previous block's transport state, for stopped→playing edge detection.
     was_playing: bool,
-    /// Audio→GUI wavefront mirror, shared with the editor.
-    wavefront_display: Arc<crate::wavefront_display::WavefrontDisplay>,
+    /// Audio→GUI playhead-column mirror, shared with the editor.
+    playhead_display: Arc<crate::playhead_display::PlayheadDisplay>,
     /// Audio→GUI sequence-status mirror, shared with the editor.
     seq_status: Arc<crate::seq_status::SeqStatusDisplay>,
     /// Set by the editor's Reset button; consumed once per process block.
@@ -159,7 +159,7 @@ impl Default for Multosis {
             engine: AudioEngine::new(),
             sample_rate: 44_100.0,
             was_playing: false,
-            wavefront_display: Arc::new(crate::wavefront_display::WavefrontDisplay::new()),
+            playhead_display: Arc::new(crate::playhead_display::PlayheadDisplay::new()),
             seq_status: Arc::new(crate::seq_status::SeqStatusDisplay::new()),
             reset_request: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             active_rows: Arc::new(AtomicU16::new(0)),
@@ -196,7 +196,7 @@ impl Plugin for Multosis {
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         editor::create(
             self.params.clone(),
-            self.wavefront_display.clone(),
+            self.playhead_display.clone(),
             self.seq_status.clone(),
             self.grid_handoff.clone(),
             self.reset_request.clone(),
@@ -304,10 +304,9 @@ impl Plugin for Multosis {
             &self.grid,
         );
 
-        // Publish the wavefront for the editor to draw.
-        self.wavefront_display.publish(self.engine.wavefront());
-        self.seq_status
-            .publish(self.engine.sequence_state(), self.engine.step());
+        // Publish the playhead column for the editor to draw.
+        self.playhead_display.publish(self.engine.playhead_column());
+        self.seq_status.publish(self.engine.step());
         self.active_rows.store(
             self.engine.active_mask(),
             std::sync::atomic::Ordering::Relaxed,
