@@ -1444,14 +1444,15 @@ impl baseview::WindowHandler for MultosisWindow {
                 let param_count = self.selected_track_param_count();
                 let trigger = self.selected_track_modulation().trigger;
                 let is_free_hz = matches!(trigger, TriggerSource::FreeHz { .. });
-                if let Some(EffectHit::Dial(i)) = effect_editor::effect_hit(
+                let hit = effect_editor::effect_hit(
                     px,
                     py,
                     self.scale_factor,
                     param_count,
                     self.selected_mseg,
                     is_free_hz,
-                ) {
+                );
+                if let Some(EffectHit::Dial(i)) = hit {
                     // Right-clicking a *different* dial while one is already
                     // being edited would silently discard the prior edit if we
                     // jumped straight to `begin` (which clears the buffer).
@@ -1472,14 +1473,7 @@ impl baseview::WindowHandler for MultosisWindow {
                     }
                     return baseview::EventStatus::Captured;
                 }
-                if let Some(EffectHit::Mix) = effect_editor::effect_hit(
-                    px,
-                    py,
-                    self.scale_factor,
-                    param_count,
-                    self.selected_mseg,
-                    is_free_hz,
-                ) {
+                if let Some(EffectHit::Mix) = hit {
                     // Commit any prior edit before seeding a new one.
                     match self.text_edit.commit() {
                         Some((EffectHit::Dial(prev), text)) => {

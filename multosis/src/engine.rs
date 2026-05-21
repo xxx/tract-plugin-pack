@@ -576,6 +576,55 @@ mod tests {
     }
 
     #[test]
+    fn per_track_mix_half_is_the_midpoint_of_dry_and_wet() {
+        // The per-track blend is `lane = dry + (effect − dry)·mix`, so a mix
+        // of 0.5 must land exactly halfway between the dry (mix 0) and fully
+        // wet (mix 1) lanes. `process_sample` is called directly so the
+        // assertion isolates the lane blend — a fresh engine has amplitude
+        // 1.0 for every row (no `update_block`) and only row 0 is active, so
+        // the result is exactly that one lane: no compressor, no global mix.
+        use crate::effects::{EffectKind, TrackEffect};
+
+        // Three engines, identical but for row 0's mix.
+        let build = |mix: f32| {
+            let mut te = TrackEffect::default_for_row(0);
+            te.kind = EffectKind::Bitcrush;
+            te.params = crate::effects::default_params_for_kind(EffectKind::Bitcrush);
+            // 4-bit depth: a large enough quantization step that the wet lane
+            // genuinely differs from the dry one (so the midpoint isn't vacuous).
+            te.params[0] = 4.0;
+            te.mix = mix;
+            let mut e = AudioEngine::new();
+            e.set_sample_rate(48_000.0);
+            let mut effects = [TrackEffect::default_for_row(0); ROWS];
+            effects[0] = te;
+            e.set_effects(&effects);
+            e
+        };
+        let mut e_dry = build(0.0);
+        let mut e_half = build(0.5);
+        let mut e_wet = build(1.0);
+
+        // Active mask = row 0 only.
+        let dry = e_dry.process_sample(0.6, 0.6, 1 << 0).0;
+        let half = e_half.process_sample(0.6, 0.6, 1 << 0).0;
+        let wet = e_wet.process_sample(0.6, 0.6, 1 << 0).0;
+
+        // mix 0 → the lane is the dry input.
+        assert!((dry - 0.6).abs() < 1e-6, "mix 0.0 should be dry: dry={dry}");
+        // The 4-bit Bitcrush genuinely alters the signal — midpoint isn't vacuous.
+        assert!(
+            (wet - dry).abs() > 1e-4,
+            "wet lane must differ from dry: wet={wet}, dry={dry}"
+        );
+        // mix 0.5 lane is the exact midpoint of the dry (mix 0) and wet (mix 1) lanes.
+        assert!(
+            (half - (dry + wet) / 2.0).abs() < 1e-6,
+            "mix 0.5 should be the midpoint: half={half}, dry={dry}, wet={wet}"
+        );
+    }
+
+    #[test]
     fn set_effects_rebuilds_on_a_kind_change() {
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
