@@ -56,22 +56,26 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
     let inset = 14.0_f32;
     let l = |x: f32, y: f32, w: f32, h: f32| ((x + inset) * scale, y * scale, w * scale, h * scale);
     // Editor bar.
-    let back = l(ox, oy + 4.0, 90.0, 26.0);
+    // Control heights drive widget font size (the shared widgets use
+    // `height·0.5`), so the bands below are sized generously — the modulation
+    // row is 34 px tall, giving ~17 px text instead of the cramped 13 px the
+    // earlier 26 px rows produced.
+    let back = l(ox, oy + 4.0, 90.0, 30.0);
     // EFFECT section.
-    let kind = l(ox, oy + 50.0, 150.0, 28.0);
-    let dials = std::array::from_fn(|i| l(ox + 180.0 + i as f32 * 96.0, oy + 44.0, 80.0, 80.0));
+    let kind = l(ox, oy + 50.0, 150.0, 34.0);
+    let dials = std::array::from_fn(|i| l(ox + 180.0 + i as f32 * 96.0, oy + 44.0, 88.0, 88.0));
     // MODULATION section — trigger + rate on the left, then MSEG selector +
     // target + depth. The trigger and rate are PER-TRACK (govern all 3 MSEGs).
-    let trigger = l(ox, oy + 168.0, 130.0, 26.0);
-    let trigger_rate = l(ox + 146.0, oy + 162.0, 60.0, 38.0);
-    let mseg_selector = l(ox + 222.0, oy + 168.0, 240.0, 26.0);
-    let target = l(ox + 478.0, oy + 167.0, 170.0, 28.0);
-    // Depth dial: 60×60 and raised to oy+144 so its value text doesn't fall
-    // into the MSEG pane below (which starts at oy+208).
-    let depth = l(ox + 664.0, oy + 144.0, 60.0, 60.0);
+    let trigger = l(ox, oy + 168.0, 130.0, 34.0);
+    let trigger_rate = l(ox + 146.0, oy + 160.0, 60.0, 42.0);
+    let mseg_selector = l(ox + 222.0, oy + 168.0, 240.0, 34.0);
+    let target = l(ox + 478.0, oy + 168.0, 170.0, 34.0);
+    // Depth dial: raised so its value text doesn't fall into the MSEG pane
+    // below (which starts at oy+208).
+    let depth = l(ox + 664.0, oy + 140.0, 64.0, 64.0);
     // Active-MSEG sync + length, on the modulation row to the right of depth.
-    let mseg_sync = l(ox + 740.0, oy + 168.0, 110.0, 26.0);
-    let mseg_length = l(ox + 860.0, oy + 168.0, 140.0, 26.0);
+    let mseg_sync = l(ox + 740.0, oy + 168.0, 110.0, 34.0);
+    let mseg_length = l(ox + 860.0, oy + 168.0, 140.0, 34.0);
     let mseg_pane = l(ox, oy + 208.0, mw - inset, 422.0);
     EffectLayout {
         back,
@@ -196,7 +200,7 @@ pub fn draw_effect_section(
     widgets::controls::draw_button(
         pixmap, tr, lay.back.0, lay.back.1, lay.back.2, lay.back.3, "< Grid", false, false,
     );
-    let title_size = 13.0 * scale;
+    let title_size = 16.0 * scale;
     tr.draw_text(
         pixmap,
         lay.back.0 + lay.back.2 + 16.0 * scale,

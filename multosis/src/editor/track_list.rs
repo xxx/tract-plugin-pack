@@ -54,7 +54,10 @@ pub fn draw_track_list(
     let dot_dark = Color::from_rgba8(0x2A, 0x24, 0x1E, 0xFF);
     let dot_live = Color::from_rgba8(0x5F, 0xC9, 0x6A, 0xFF);
 
-    let text_size = 11.0 * scale;
+    // Track entries are CELL (40 px) tall — an 11 px font left them looking
+    // tiny in that band. 15 px reads clearly and still leaves the number +
+    // name + sounding-dot columns non-overlapping.
+    let text_size = 15.0 * scale;
     for (row, &kind) in kinds.iter().enumerate() {
         let (x, y, w, h) = track_entry_rect(row, scale);
         let is_sel = selected == Some(row);
