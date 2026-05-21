@@ -723,7 +723,7 @@ impl baseview::WindowHandler for MiffWindow {
                                         &mut curve,
                                         mseg_rect,
                                         s,
-                                        self.shift_held,
+                                        modifiers.contains(keyboard_types::Modifiers::CONTROL),
                                     )
                                 } else {
                                     None

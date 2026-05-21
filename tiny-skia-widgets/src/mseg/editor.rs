@@ -84,6 +84,9 @@ pub struct MsegEditState {
     drag: Option<DragTarget>,
     /// Hovered node index, for highlight.
     hover: Option<usize>,
+    /// Selected node indices, bit `i` = node `i`. `MAX_NODES` is 128, so a
+    /// `u128` covers every node. Transient — never persisted.
+    selection: u128,
     /// During a stepped-draw, the last time-grid cell a node was painted in
     /// (so dragging within one cell does not insert duplicates).
     step_last_cell: Option<u32>,
@@ -126,6 +129,7 @@ impl MsegEditState {
             curve_only,
             drag: None,
             hover: None,
+            selection: 0,
             step_last_cell: None,
             stepped_draw_held: false,
             style: RandomStyle::Smooth,
@@ -211,6 +215,37 @@ impl MsegEditState {
         self.hover
     }
 
+    /// Is node `i` currently selected?
+    pub fn is_node_selected(&self, i: usize) -> bool {
+        i < crate::mseg::MAX_NODES && self.selection & (1u128 << i) != 0
+    }
+
+    /// How many nodes are selected.
+    pub fn selection_count(&self) -> u32 {
+        self.selection.count_ones()
+    }
+
+    /// Clear the selection.
+    pub fn clear_selection(&mut self) {
+        self.selection = 0;
+    }
+
+    /// Make node `i` the sole selection.
+    fn select_only(&mut self, i: usize) {
+        self.selection = if i < crate::mseg::MAX_NODES {
+            1u128 << i
+        } else {
+            0
+        };
+    }
+
+    /// Toggle node `i`'s membership in the selection.
+    fn toggle_selected(&mut self, i: usize) {
+        if i < crate::mseg::MAX_NODES {
+            self.selection ^= 1u128 << i;
+        }
+    }
+
     /// The randomizer style currently selected in the strip.
     pub fn style(&self) -> RandomStyle {
         self.style
@@ -232,10 +267,10 @@ impl MsegEditState {
     }
 
     /// Primary-button press. Returns `MsegEdit::Changed` when the document
-    /// changed. With the stepped-draw modifier held, begins a stepped-draw on
-    /// empty canvas; otherwise adds a node on empty canvas, or begins a node
-    /// or tension drag on a hit handle. Strip clicks toggle snap, open a grid
-    /// or style dropdown, or fire the randomizer.
+    /// changed. Ctrl toggles node selection; plain click on a node selects it.
+    /// With the stepped-draw modifier held, begins a stepped-draw on empty
+    /// canvas. Strip clicks toggle snap, open a grid or style dropdown, or
+    /// fire the randomizer.
     pub fn on_mouse_down(
         &mut self,
         x: f32,
@@ -243,9 +278,9 @@ impl MsegEditState {
         data: &mut MsegData,
         rect: (f32, f32, f32, f32),
         scale: f32,
-        fine: bool,
+        ctrl: bool,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
+        use crate::mseg::render::{mseg_hit_test, mseg_layout, MsegHit};
         let layout = mseg_layout(rect, self.curve_only, scale);
 
         // If a dropdown is open, route the click to it first.
@@ -287,6 +322,16 @@ impl MsegEditState {
 
         match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
             MsegHit::Node(i) => {
+                // Click selects: Ctrl toggles membership; a plain click on an
+                // unselected node makes it the sole selection; a plain click
+                // on an already-selected node keeps the selection (so a
+                // multi-node group can be dragged). Selection is editor
+                // state, not a document change — returns None.
+                if ctrl {
+                    self.toggle_selected(i);
+                } else if !self.is_node_selected(i) {
+                    self.select_only(i);
+                }
                 self.drag = Some(DragTarget::Node(i));
                 None
             }
@@ -300,23 +345,22 @@ impl MsegEditState {
                 self.step_draw_paint(x, y, data, &layout)
             }
             MsegHit::Canvas => {
-                let (phase, value) =
-                    snap_point(x_to_phase(&layout, x), y_to_value(&layout, y), data, fine);
-                let inserted = data.insert_node(phase, value);
-                if let Some(idx) = inserted {
-                    self.drag = Some(DragTarget::Node(idx));
-                    Some(MsegEdit::Changed)
-                } else {
-                    None
+                // A plain click on empty canvas clears the selection; Ctrl
+                // preserves it. (Adding a node is now double-click — see
+                // `on_double_click`.)
+                if !ctrl {
+                    self.clear_selection();
                 }
+                None
             }
             MsegHit::Randomize => {
                 self.seed = self.seed.wrapping_add(1);
                 crate::mseg::randomize::randomize(data, self.style, self.seed);
-                // Randomize replaces every node — any drag/hover index is now
-                // stale, so clear them.
+                // Randomize replaces every node — any drag/hover/selection
+                // index is now stale, so clear them.
                 self.drag = None;
                 self.hover = None;
+                self.clear_selection();
                 Some(MsegEdit::Changed)
             }
             MsegHit::Strip => {
@@ -458,7 +502,9 @@ impl MsegEditState {
         None
     }
 
-    /// Double-click: delete the node under the pointer (endpoints excepted).
+    /// Double-click: delete the node under the pointer (endpoints excepted),
+    /// or insert a node when the pointer is on empty canvas. Either edit
+    /// clears the selection (node indices would otherwise go stale).
     pub fn on_double_click(
         &mut self,
         x: f32,
@@ -467,15 +513,24 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{mseg_hit_test, mseg_layout, MsegHit};
+        use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
         let layout = mseg_layout(rect, self.curve_only, scale);
-        if let MsegHit::Node(i) = mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
-            if data.remove_node(i) {
-                // drag/hover may reference the just-deleted node's index — clear both.
+        match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
+            MsegHit::Node(i) if data.remove_node(i) => {
                 self.drag = None;
                 self.hover = None;
+                self.clear_selection();
                 return Some(MsegEdit::Changed);
             }
+            MsegHit::Canvas => {
+                let (phase, value) =
+                    snap_point(x_to_phase(&layout, x), y_to_value(&layout, y), data, false);
+                if data.insert_node(phase, value).is_some() {
+                    self.clear_selection();
+                    return Some(MsegEdit::Changed);
+                }
+            }
+            _ => {}
         }
         None
     }
@@ -604,15 +659,71 @@ mod tests {
     // lands on Canvas and triggers insertion.
 
     #[test]
-    fn click_empty_canvas_inserts_a_node() {
-        let mut data = MsegData::default(); // 2 nodes
+    fn click_a_node_selects_it() {
+        let mut data = MsegData::default();
+        data.insert_node(0.5, 0.5);
         let mut state = MsegEditState::new();
         let l = mseg_layout(RECT, false, 1.0);
-        let x = phase_to_x(&l, 0.3);
-        let y = value_to_y(&l, 0.7);
-        let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        state.on_mouse_down(
+            phase_to_x(&l, 0.5), value_to_y(&l, 0.5),
+            &mut data, RECT, 1.0, false,
+        );
+        assert!(state.is_node_selected(1));
+        assert_eq!(state.selection_count(), 1);
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn ctrl_click_toggles_nodes_into_the_selection() {
+        let mut data = MsegData::default();
+        data.insert_node(0.3, 0.5);
+        data.insert_node(0.6, 0.5);
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        state.on_mouse_down(phase_to_x(&l, 0.3), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
+        state.on_mouse_up(&mut data);
+        state.on_mouse_down(phase_to_x(&l, 0.6), value_to_y(&l, 0.5), &mut data, RECT, 1.0, true);
+        assert!(state.is_node_selected(1));
+        assert!(state.is_node_selected(2));
+        assert_eq!(state.selection_count(), 2);
+        state.on_mouse_up(&mut data);
+        state.on_mouse_down(phase_to_x(&l, 0.6), value_to_y(&l, 0.5), &mut data, RECT, 1.0, true);
+        assert!(!state.is_node_selected(2));
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn click_empty_canvas_clears_the_selection() {
+        let mut data = MsegData::default();
+        data.insert_node(0.5, 0.5);
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        state.on_mouse_down(phase_to_x(&l, 0.5), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
+        state.on_mouse_up(&mut data);
+        assert_eq!(state.selection_count(), 1);
+        state.on_mouse_down(phase_to_x(&l, 0.3), value_to_y(&l, 0.7), &mut data, RECT, 1.0, false);
+        assert_eq!(state.selection_count(), 0);
+        state.on_mouse_up(&mut data);
+    }
+
+    #[test]
+    fn double_click_empty_canvas_inserts_a_node() {
+        let mut data = MsegData::default();
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        let ev = state.on_double_click(phase_to_x(&l, 0.3), value_to_y(&l, 0.7), &mut data, RECT, 1.0);
         assert_eq!(ev, Some(MsegEdit::Changed));
         assert_eq!(data.node_count, 3);
+    }
+
+    #[test]
+    fn single_click_empty_canvas_no_longer_inserts() {
+        let mut data = MsegData::default();
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        state.on_mouse_down(phase_to_x(&l, 0.3), value_to_y(&l, 0.7), &mut data, RECT, 1.0, false);
+        assert_eq!(data.node_count, 2, "single click must not insert anymore");
+        state.on_mouse_up(&mut data);
     }
 
     #[test]
@@ -690,7 +801,7 @@ mod tests {
             &mut data,
             RECT,
             1.0,
-            true,
+            false,
         );
         state.on_mouse_move(
             phase_to_x(&l, 0.5),
@@ -872,13 +983,13 @@ mod tests {
     }
 
     #[test]
-    fn stepped_draw_inactive_when_modifier_not_held() {
+    fn single_click_does_not_stepped_draw() {
         let mut data = MsegData::default();
         let mut state = MsegEditState::new(); // modifier NOT held
         let l = mseg_layout(RECT, false, 1.0);
         // Click at phase 0.3, value 0.7 — well away from any existing node or
-        // tension handle — so the hit lands on Canvas and triggers a single
-        // ordinary insert (not stepped-draw).
+        // tension handle — so the hit lands on Canvas. A plain click no longer
+        // inserts; it only clears the selection.
         state.on_mouse_down(
             phase_to_x(&l, 0.3),
             value_to_y(&l, 0.7),
@@ -887,8 +998,9 @@ mod tests {
             1.0,
             false,
         );
-        // Without the modifier this is an ordinary single-node insert.
-        assert_eq!(data.node_count, 3);
+        // Without the stepped-draw modifier, and with single-click no longer
+        // inserting, the node count stays at 2.
+        assert_eq!(data.node_count, 2);
     }
 
     #[test]

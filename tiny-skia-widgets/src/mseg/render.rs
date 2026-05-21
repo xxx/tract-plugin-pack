@@ -7,7 +7,7 @@ use crate::dropdown::draw_dropdown_trigger;
 use crate::mseg::editor::{style_items, MsegEditState, StripId};
 use crate::mseg::{value_at_phase, HoldMode, MsegData};
 use crate::primitives::{
-    color_accent, color_bg, color_border, color_control_bg, color_muted, draw_rect,
+    color_accent, color_bg, color_border, color_control_bg, color_muted, color_text, draw_rect,
     draw_rect_outline,
 };
 use crate::text::TextRenderer;
@@ -311,13 +311,19 @@ fn draw_nodes(
         // to the bright-accent node dots.
         draw_dot(pixmap, hx, hy, TENSION_R * scale, color_muted());
     }
-    // Node dots; the hovered node is drawn larger / accented.
+    // Node dots. The hovered node is drawn larger; a selected node is drawn in
+    // a brighter colour so the current selection reads at a glance.
     for (i, n) in a.iter().enumerate() {
         let nx = phase_to_x(layout, n.time);
         let ny = value_to_y(layout, n.value);
         let hovered = state.hovered_node() == Some(i);
         let r = (if hovered { NODE_R + HOVER_BUMP } else { NODE_R }) * scale;
-        draw_dot(pixmap, nx, ny, r, color_accent());
+        let color = if state.is_node_selected(i) {
+            color_text()
+        } else {
+            color_accent()
+        };
+        draw_dot(pixmap, nx, ny, r, color);
     }
 }
 

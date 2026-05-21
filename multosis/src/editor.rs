@@ -647,9 +647,8 @@ impl MultosisWindow {
 
     /// Handle a left press while in `View::Effect`. Returns `true` if the
     /// press hit a control owned by the effect editor (so the caller can stop
-    /// further routing). `shift` is read from the cursor-modifier set for
-    /// fine-grained MSEG node placement.
-    fn on_effect_press(&mut self, px: f32, py: f32, shift: bool) -> bool {
+    /// further routing). `ctrl` toggles MSEG node selection.
+    fn on_effect_press(&mut self, px: f32, py: f32, ctrl: bool) -> bool {
         let params = self.selected_track_param_count();
         let trigger = self.selected_track_modulation().trigger;
         let is_free_hz = matches!(trigger, TriggerSource::FreeHz { .. });
@@ -749,7 +748,7 @@ impl MultosisWindow {
                             &mut modu[row].msegs[sel],
                             lay.mseg_pane,
                             self.scale_factor,
-                            shift,
+                            ctrl,
                         )
                     }
                 } else {
@@ -1366,7 +1365,6 @@ impl baseview::WindowHandler for MultosisWindow {
                 modifiers,
             }) => {
                 let (px, py) = self.mouse_pos;
-                let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);
                 // Auto-commit/cancel any in-flight dial text edit BEFORE any
                 // other press routing. A press on the editing dial cancels (so
                 // the normal effect-press path can begin a drag); a press
@@ -1424,7 +1422,7 @@ impl baseview::WindowHandler for MultosisWindow {
                         None => {
                             // The effect editor owns its own main-area hits;
                             // they take priority over re-selecting a track.
-                            if self.view == View::Effect && self.on_effect_press(px, py, shift) {
+                            if self.view == View::Effect && self.on_effect_press(px, py, modifiers.contains(keyboard_types::Modifiers::CONTROL)) {
                                 return baseview::EventStatus::Captured;
                             }
                             // Track listing — both views.
