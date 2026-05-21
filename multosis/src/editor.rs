@@ -773,6 +773,14 @@ impl MultosisWindow {
                 self.effect_dial_drag
                     .begin_drag(EffectHit::MsegLength, norm, false);
             }
+            EffectHit::Mix => {
+                if self.effect_click.check_and_update(EffectHit::Mix) {
+                    self.reset_mix_to_default();
+                } else {
+                    let norm = self.selected_track_effect().mix;
+                    self.effect_dial_drag.begin_drag(EffectHit::Mix, norm, false);
+                }
+            }
         }
         true
     }
@@ -975,6 +983,25 @@ impl MultosisWindow {
         let k = self.selected_mseg - 1;
         if let Ok(mut modu) = self.params.track_modulation.lock() {
             modu[row].depths[k] = 0.0;
+        }
+        self.mark_config_dirty();
+    }
+
+    /// Apply a Mix-dial drag's new normalized value (0..1) to the selected
+    /// track's per-track mix, marking config dirty.
+    fn apply_mix(&mut self, norm: f32) {
+        let value = norm.clamp(0.0, 1.0);
+        if let Ok(mut cfg) = self.params.track_effects.lock() {
+            cfg[self.selected_track].mix = value;
+        }
+        self.mark_config_dirty();
+    }
+
+    /// Reset the selected track's per-track mix to fully wet (1.0). Marks
+    /// dirty. Backs double-clicking the Mix dial.
+    fn reset_mix_to_default(&mut self) {
+        if let Ok(mut cfg) = self.params.track_effects.lock() {
+            cfg[self.selected_track].mix = 1.0;
         }
         self.mark_config_dirty();
     }
@@ -1199,6 +1226,12 @@ impl baseview::WindowHandler for MultosisWindow {
                         let current = self.active_mseg_length_norm();
                         if let Some(norm) = self.effect_dial_drag.update_drag(shift, current) {
                             self.apply_mseg_length_drag(norm);
+                        }
+                    }
+                    Some(EffectHit::Mix) => {
+                        let current = self.selected_track_effect().mix;
+                        if let Some(norm) = self.effect_dial_drag.update_drag(shift, current) {
+                            self.apply_mix(norm);
                         }
                     }
                     _ => {}

@@ -27,6 +27,8 @@ pub struct EffectLayout {
     /// Parameter dial bounding boxes, slot order. Only the first
     /// `parameters().len()` are used by the current effect.
     pub dials: [(f32, f32, f32, f32); DIAL_SLOTS],
+    /// Per-track Mix dial — a fixed slot right of the parameter dials.
+    pub mix: (f32, f32, f32, f32),
     /// MSEG selector (stepped) — laid out here, used in Task 9.
     pub mseg_selector: (f32, f32, f32, f32),
     /// Target dropdown trigger — used in Task 9.
@@ -64,6 +66,9 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
     // EFFECT section.
     let kind = l(ox, oy + 50.0, 150.0, 34.0);
     let dials = std::array::from_fn(|i| l(ox + 180.0 + i as f32 * 96.0, oy + 44.0, 88.0, 88.0));
+    // Per-track Mix dial: a fixed slot to the right of the four param-dial
+    // slots (which end at ox+556), clearly set apart from them.
+    let mix = l(ox + 580.0, oy + 44.0, 88.0, 88.0);
     // MODULATION section — trigger + rate on the left, then MSEG selector +
     // target + depth. The trigger and rate are PER-TRACK (govern all 3 MSEGs).
     let trigger = l(ox, oy + 168.0, 130.0, 34.0);
@@ -81,6 +86,7 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
         back,
         kind,
         dials,
+        mix,
         mseg_selector,
         target,
         depth,
@@ -116,6 +122,8 @@ pub enum EffectHit {
     MsegSync(usize),
     /// Active-MSEG length slider (its scale depends on the sync mode).
     MsegLength,
+    /// The per-track Mix dial.
+    Mix,
 }
 
 /// The effect-editor control under physical-pixel point `(px, py)` at `scale`,
@@ -141,6 +149,9 @@ pub fn effect_hit(
         if in_rect(lay.dials[i], px, py) {
             return Some(EffectHit::Dial(i));
         }
+    }
+    if in_rect(lay.mix, px, py) {
+        return Some(EffectHit::Mix);
     }
     // Per-track trigger controls — checked before the per-MSEG selector.
     if in_rect(lay.trigger, px, py) {
@@ -255,6 +266,19 @@ pub fn draw_effect_section(
             }
         }
     }
+    // Per-track Mix dial — value shown as a percentage.
+    let (mx, my, mw, mh) = lay.mix;
+    let mix_pct = format!("{}%", (track.mix * 100.0).round() as i32);
+    widgets::param_dial::draw_dial(
+        pixmap,
+        tr,
+        mx + mw / 2.0,
+        my + mh / 2.0,
+        (mw.min(mh) / 2.0) - 8.0 * scale,
+        "Mix",
+        &mix_pct,
+        track.mix,
+    );
 }
 
 /// The list of effect-kind names for the kind dropdown, in `EffectKind::ALL`
@@ -691,6 +715,18 @@ mod tests {
             effect_hit(tx + tw / 2.0, ty + th / 2.0, 1.0, 2, 1, false),
             Some(EffectHit::Trigger)
         );
+    }
+
+    #[test]
+    fn mix_dial_is_hit_and_disjoint_from_other_effect_controls() {
+        let lay = effect_layout(1.0);
+        assert!(!rects_overlap(lay.mix, lay.kind));
+        for d in lay.dials {
+            assert!(!rects_overlap(lay.mix, d));
+        }
+        let (mx, my, mw, mh) = lay.mix;
+        let hit = effect_hit(mx + mw / 2.0, my + mh / 2.0, 1.0, 2, 0, false);
+        assert_eq!(hit, Some(EffectHit::Mix));
     }
 
     #[test]
