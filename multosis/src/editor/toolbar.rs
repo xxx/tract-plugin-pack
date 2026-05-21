@@ -88,14 +88,10 @@ pub fn toolbar_hit(px: f32, py: f32, scale: f32) -> Option<ToolbarControl> {
 /// One grid-operation button in the lower toolbar row.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolbarOp {
-    /// Restore default East-only routing.
-    ResetRouting,
     /// Restore default activations (all enabled, left column start).
     ReinitCells,
     /// Randomize the enabled flags in the loop region.
     RandomizeActivations,
-    /// Randomize the routing in the loop region (no dead ends).
-    RandomizeRouting,
     /// Copy the loop region to the clipboard.
     Copy,
     /// Paste the clipboard at the loop region.
@@ -103,12 +99,10 @@ pub enum ToolbarOp {
 }
 
 impl ToolbarOp {
-    /// The six operations, left to right.
-    pub const ALL: [ToolbarOp; 6] = [
-        ToolbarOp::ResetRouting,
+    /// The four operations, left to right.
+    pub const ALL: [ToolbarOp; 4] = [
         ToolbarOp::ReinitCells,
         ToolbarOp::RandomizeActivations,
-        ToolbarOp::RandomizeRouting,
         ToolbarOp::Copy,
         ToolbarOp::Paste,
     ];
@@ -116,22 +110,18 @@ impl ToolbarOp {
     /// Logical `(x, width)` of this op button within the 1056-wide row.
     fn logical_x_w(self) -> (f32, f32) {
         match self {
-            ToolbarOp::ResetRouting => (6.0, 140.0),
-            ToolbarOp::ReinitCells => (150.0, 140.0),
-            ToolbarOp::RandomizeActivations => (294.0, 140.0),
-            ToolbarOp::RandomizeRouting => (438.0, 140.0),
-            ToolbarOp::Copy => (582.0, 140.0),
-            ToolbarOp::Paste => (726.0, 140.0),
+            ToolbarOp::ReinitCells => (6.0, 140.0),
+            ToolbarOp::RandomizeActivations => (150.0, 140.0),
+            ToolbarOp::Copy => (294.0, 140.0),
+            ToolbarOp::Paste => (438.0, 140.0),
         }
     }
 
     /// The button's centred label.
     pub fn label(self) -> &'static str {
         match self {
-            ToolbarOp::ResetRouting => "Reset Route",
             ToolbarOp::ReinitCells => "Reinit Cells",
             ToolbarOp::RandomizeActivations => "Rnd Cells",
-            ToolbarOp::RandomizeRouting => "Rnd Route",
             ToolbarOp::Copy => "Copy",
             ToolbarOp::Paste => "Paste",
         }
@@ -158,16 +148,14 @@ pub fn op_hit(px: f32, py: f32, scale: f32) -> Option<ToolbarOp> {
     })
 }
 
-/// Apply a grid-mutating operation in place. `ResetRouting`/`ReinitCells`
-/// ignore `seed`; the randomize ops are deterministic in it. `Copy`/`Paste`
-/// are NOT handled here — they need the editor's clipboard, so this is a
-/// no-op for them.
+/// Apply a grid-mutating operation in place. `ReinitCells` ignores `seed`;
+/// `RandomizeActivations` is deterministic in it. `Copy`/`Paste` are NOT
+/// handled here — they need the editor's clipboard, so this is a no-op for
+/// them.
 pub fn apply_grid_op(grid: &mut crate::grid::Grid, op: ToolbarOp, seed: u32) {
     match op {
-        ToolbarOp::ResetRouting => grid.reset_routing(),
         ToolbarOp::ReinitCells => grid.reinit_activations(),
         ToolbarOp::RandomizeActivations => crate::randomize::randomize_activations(grid, seed),
-        ToolbarOp::RandomizeRouting => crate::randomize::randomize_routing(grid, seed),
         ToolbarOp::Copy | ToolbarOp::Paste => {}
     }
 }
@@ -272,7 +260,7 @@ pub fn draw_toolbar(
         }
     }
 
-    // Lower row: the six grid-operation buttons.
+    // Lower row: the four grid-operation buttons.
     for op in ToolbarOp::ALL {
         let (x, y, w, h) = op_rect(op, scale);
         widgets::draw_button(pixmap, tr, x, y, w, h, op.label(), false, false);
@@ -387,15 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_grid_op_reset_routing_restores_east() {
-        use crate::grid::{Direction, Grid};
-        let mut g = Grid::default_routing();
-        g.cell_mut(2, 2).sends = 0b1010_1010;
-        apply_grid_op(&mut g, ToolbarOp::ResetRouting, 0);
-        assert_eq!(g.cell(2, 2).sends, 1u8 << Direction::E.bit());
-    }
-
-    #[test]
     fn apply_grid_op_reinit_cells_restores_activations() {
         use crate::grid::Grid;
         let mut g = Grid::default_routing();
@@ -409,8 +388,8 @@ mod tests {
         use crate::grid::Grid;
         let mut a = Grid::default_routing();
         let mut b = Grid::default_routing();
-        apply_grid_op(&mut a, ToolbarOp::RandomizeRouting, 1234);
-        apply_grid_op(&mut b, ToolbarOp::RandomizeRouting, 1234);
+        apply_grid_op(&mut a, ToolbarOp::RandomizeActivations, 1234);
+        apply_grid_op(&mut b, ToolbarOp::RandomizeActivations, 1234);
         assert_eq!(a, b);
     }
 

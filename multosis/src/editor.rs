@@ -384,7 +384,7 @@ impl MultosisWindow {
                 self.rng_seed = self.rng_seed.wrapping_add(1);
             }
         }
-        // Paste / Reset / Reinit / Randomize all changed the grid — republish.
+        // Paste / Reinit / Randomize all changed the grid — republish.
         self.grid_handoff.publish(*grid);
     }
 
