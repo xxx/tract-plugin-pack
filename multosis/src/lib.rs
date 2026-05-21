@@ -1,7 +1,7 @@
-//! `multosis` — a multi-FX routing sequencer.
+//! `multosis` — a multi-FX step sequencer.
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md`.
-//! Milestone 1a is the headless routing model: the grid, the playhead
+//! Milestone 1a is the headless step-sequencer model: the grid, the playhead
 //! sequencer, and the step clock. No GUI, no audio, no nih-plug.
 
 pub mod clock;
@@ -326,7 +326,7 @@ impl Plugin for Multosis {
 
 impl ClapPlugin for Multosis {
     const CLAP_ID: &'static str = "com.mpd.multosis";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("A multi-FX routing sequencer");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("A multi-FX step sequencer");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] = &[

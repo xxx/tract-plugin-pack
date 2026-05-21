@@ -1,4 +1,4 @@
-//! Lock-free-ish GUI→audio handoff of the routing `Grid`.
+//! Lock-free-ish GUI→audio handoff of the `Grid`.
 //!
 //! Mirrors miff's `KernelHandoff`: the GUI thread publishes with a blocking
 //! lock; the audio thread reads with a non-blocking `try_lock` and keeps its

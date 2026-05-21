@@ -1,5 +1,5 @@
-//! The audio engine: drives the Milestone 1a `Propagator` + `StepClock`,
-//! applies each lit row's per-track effect to the dry input, and mixes.
+//! The audio engine: drives the Milestone 1a `Playhead` + `StepClock`,
+//! applies each active row's per-track effect to the dry input, and mixes.
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §6.
 
@@ -73,6 +73,14 @@ impl AudioEngine {
     #[cfg(test)]
     pub fn effects_mut_for_test(&mut self, row: usize) -> &mut EffectInstance {
         &mut self.effects[row]
+    }
+
+    /// Test-only: the per-row mask of modulation triggers that fired on the
+    /// most recent `update_block` (the previous process block's accumulated
+    /// cell-light events).
+    #[cfg(test)]
+    pub fn modulation_fires_for_test(&self) -> u16 {
+        self.modulation.fires_last_block()
     }
 
     /// Bridge `config` into the engine. For each row: if the effect kind is
@@ -242,7 +250,16 @@ impl AudioEngine {
                 // Snapshot the active-row mask BEFORE and AFTER the tick;
                 // rows that became active get a bit set in
                 // `pending_cell_lights` for the NEXT block's CellLight trigger.
-                let before = active_rows(grid, &grid.loop_region, self.playhead.column());
+                // Before the first tick the playhead has not started — nothing
+                // was playing, so the pre-tick set is empty. Without this gate
+                // an unstarted playhead reports column 0 and `tick()` snaps it
+                // to `col0`; for a `col0 == 0` loop zone `before == after` and
+                // the opening step's CellLight events would be suppressed.
+                let before = if self.playhead.started() {
+                    active_rows(grid, &grid.loop_region, self.playhead.column())
+                } else {
+                    0
+                };
                 self.playhead.tick(&grid.loop_region);
                 self.step += 1;
                 let after = active_rows(grid, &grid.loop_region, self.playhead.column());
@@ -306,7 +323,7 @@ mod tests {
         engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, &grid);
         assert!(
             engine.active_mask() != 0,
-            "after arming, at least one row should be active"
+            "after the playhead starts, at least one row should be active"
         );
     }
 
@@ -345,12 +362,13 @@ mod tests {
     }
 
     #[test]
-    fn process_arms_and_produces_wet_signal() {
+    fn process_starts_and_produces_wet_signal() {
         // Playing, default grid, a short step: once the clock crosses its
-        // first boundary the start cells arm, rows become active, and the
-        // fully-wet output is no longer silent. The default config has every
-        // row set to EffectKind::None (which intentionally outputs silence
-        // for an unassigned lane), so install a real effect on row 0 first.
+        // first boundary the playhead starts scanning, rows become active,
+        // and the fully-wet output is no longer silent. The default config
+        // has every row set to EffectKind::None (which intentionally outputs
+        // silence for an unassigned lane), so install a real effect on row 0
+        // first.
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
         let mut effects = [TrackEffect::default_for_row(0); ROWS];
@@ -365,7 +383,7 @@ mod tests {
         engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, &grid);
         assert!(
             left[127] != 0.0,
-            "after arming, a fully-wet block should not be silent"
+            "after the playhead starts, a fully-wet block should not be silent"
         );
     }
 
@@ -411,6 +429,42 @@ mod tests {
         assert!(
             engine.playhead_column() > grid.loop_region.col0,
             "subsequent ticks move the playhead off the left edge"
+        );
+    }
+
+    #[test]
+    fn cell_light_trigger_fires_on_the_sequences_first_step() {
+        // Regression: the cell-light edge detector diffs the active-row mask
+        // before/after each playhead tick. On the FIRST tick the unstarted
+        // playhead reports column 0 and `tick()` snaps it to `col0`; for a
+        // `col0 == 0` loop zone `before` and `after` would both sample column
+        // 0 and `before == after` would suppress the opening step's CellLight
+        // event. The `Playhead::started()` gate makes the pre-start `before`
+        // set empty, so the first step fires.
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        // Row 5 retriggers on a cell light; the rest stay Free.
+        let mut mod_cfg: [crate::modulation::TrackModulation; ROWS] =
+            std::array::from_fn(crate::modulation::TrackModulation::default_for_row);
+        mod_cfg[5].trigger = crate::modulation::TriggerSource::CellLight;
+        engine.set_modulation(&mod_cfg);
+        // The default grid has every cell enabled and a full loop region, so
+        // row 5's cell at the playhead's first column (col0 == 0) is enabled.
+        let grid = Grid::default();
+        // Block 1: crosses the sample-0 step boundary — the playhead starts,
+        // row 5's cell lights, and the engine accumulates the event into
+        // `pending_cell_lights`.
+        let mut l1 = [0.0_f32; 64];
+        let mut r1 = [0.0_f32; 64];
+        engine.process(&mut l1, &mut r1, true, 1000.0, 120.0, 1.0, &grid);
+        // Block 2: `update_block` consumes block 1's accumulated cell-light
+        // events; row 5's CellLight trigger fires for the opening step.
+        let mut l2 = [0.0_f32; 64];
+        let mut r2 = [0.0_f32; 64];
+        engine.process(&mut l2, &mut r2, true, 1000.0, 120.0, 1.0, &grid);
+        assert!(
+            engine.modulation_fires_for_test() & (1 << 5) != 0,
+            "row 5's CellLight trigger should fire on the sequence's first step"
         );
     }
 

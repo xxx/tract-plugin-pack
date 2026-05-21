@@ -88,7 +88,7 @@ pub fn toolbar_hit(px: f32, py: f32, scale: f32) -> Option<ToolbarControl> {
 /// One grid-operation button in the lower toolbar row.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolbarOp {
-    /// Restore default activations (all enabled, left column start).
+    /// Restore default activations (every cell enabled).
     ReinitCells,
     /// Randomize the enabled flags in the loop region.
     RandomizeActivations,

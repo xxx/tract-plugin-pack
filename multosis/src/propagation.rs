@@ -30,6 +30,12 @@ impl Playhead {
         self.column
     }
 
+    /// Whether the playhead has started scanning (false until the first tick
+    /// after a reset).
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
     /// Advance one step. The first tick after a reset snaps to the loop
     /// zone's left edge (`col0`); subsequent ticks move one column right,
     /// wrapping at `col1` back to `col0`. If the loop zone was resized so the
@@ -91,6 +97,19 @@ mod tests {
     fn new_playhead_has_not_started() {
         let p = Playhead::new();
         assert_eq!(p.column(), 0);
+        assert!(!p.started());
+    }
+
+    #[test]
+    fn started_flips_on_the_first_tick_and_a_reset_clears_it() {
+        let mut p = Playhead::new();
+        assert!(!p.started());
+        p.tick(&region(2, 9));
+        assert!(p.started(), "the first tick starts the playhead");
+        p.tick(&region(2, 9));
+        assert!(p.started(), "it stays started across ticks");
+        p.reset();
+        assert!(!p.started(), "reset returns it to unstarted");
     }
 
     #[test]
