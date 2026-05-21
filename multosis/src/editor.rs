@@ -788,7 +788,8 @@ impl MultosisWindow {
                     self.reset_mix_to_default();
                 } else {
                     let norm = self.selected_track_effect().mix;
-                    self.effect_dial_drag.begin_drag(EffectHit::Mix, norm, false);
+                    self.effect_dial_drag
+                        .begin_drag(EffectHit::Mix, norm, false);
                 }
             }
         }
@@ -1553,15 +1554,11 @@ impl baseview::WindowHandler for MultosisWindow {
                     }
                     keyboard_types::Key::Backspace => self.text_edit.backspace(),
                     keyboard_types::Key::Escape => self.text_edit.cancel(),
-                    keyboard_types::Key::Enter => {
-                        match self.text_edit.commit() {
-                            Some((EffectHit::Dial(i), text)) => {
-                                self.commit_dial_text_edit(i, &text)
-                            }
-                            Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
-                            _ => {}
-                        }
-                    }
+                    keyboard_types::Key::Enter => match self.text_edit.commit() {
+                        Some((EffectHit::Dial(i), text)) => self.commit_dial_text_edit(i, &text),
+                        Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
+                        _ => {}
+                    },
                     _ => return baseview::EventStatus::Ignored,
                 }
                 return baseview::EventStatus::Captured;

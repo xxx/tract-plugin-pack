@@ -551,7 +551,8 @@ mod tests {
         let mut e_dry = build(dry_mix);
 
         let mut grid = Grid::default();
-        grid.cell_mut(0, 0).enabled = true; // ensure row 0 is active at the playhead's start column
+        // Ensure row 0 is active at the playhead's start column.
+        grid.cell_mut(0, 0).enabled = true;
         // A constant non-zero input; fully wet so the lane reaches the output.
         let input = [0.6_f32; 128];
         let (mut wl, mut wr) = (input, input);
@@ -566,7 +567,9 @@ mod tests {
         );
         // At mix 1.0 the Bitcrush alters the signal — outputs differ.
         assert!(
-            wl.iter().zip(dl.iter()).any(|(&w, &d)| (w - d).abs() > 1e-4),
+            wl.iter()
+                .zip(dl.iter())
+                .any(|(&w, &d)| (w - d).abs() > 1e-4),
             "mix 1.0 should differ from mix 0.0"
         );
         let _ = (wr, dr); // right-channel arrays; Bitcrush is symmetric, left-only assertion suffices

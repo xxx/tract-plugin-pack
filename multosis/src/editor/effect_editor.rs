@@ -294,14 +294,7 @@ pub fn draw_effect_section(
         }
         None => {
             widgets::param_dial::draw_dial(
-                pixmap,
-                tr,
-                mix_cx,
-                mix_cy,
-                mix_radius,
-                "Mix",
-                &mix_pct,
-                track.mix,
+                pixmap, tr, mix_cx, mix_cy, mix_radius, "Mix", &mix_pct, track.mix,
             );
         }
     }
