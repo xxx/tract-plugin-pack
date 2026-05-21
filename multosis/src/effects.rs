@@ -533,23 +533,35 @@ impl Effect for EffectInstance {
 /// effects are added (current max is 2; 4 leaves headroom).
 pub const MAX_EFFECT_PARAMS: usize = 4;
 
-/// One track row's persisted effect configuration: which effect, and its
-/// parameter values. `params[i]` is the value for the kind's `parameters()[i]`;
-/// entries past the kind's parameter count are unused.
+/// One track row's persisted effect configuration: which effect, its
+/// parameter values, and its dry/wet mix. `params[i]` is the value for the
+/// kind's `parameters()[i]`; entries past the kind's parameter count are
+/// unused.
 #[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TrackEffect {
     pub kind: EffectKind,
     pub params: [f32; MAX_EFFECT_PARAMS],
+    /// Per-track dry/wet blend, 0.0 (dry) .. 1.0 (full effect). Defaulted on
+    /// deserialize so presets predating this field load as fully wet.
+    #[serde(default = "default_track_mix")]
+    pub mix: f32,
+}
+
+/// The serde default for `TrackEffect::mix` — fully wet, matching the
+/// pre-`mix` behaviour of any older preset.
+fn default_track_mix() -> f32 {
+    1.0
 }
 
 impl TrackEffect {
-    /// The default effect for a track row — no effect. Audio passes through
-    /// the track unchanged. Users assign an effect kind via the editor's
-    /// dropdown.
+    /// The default effect for a track row — no effect, fully wet. Audio
+    /// passes through the track unchanged. Users assign an effect kind via
+    /// the editor's dropdown.
     pub fn default_for_row(_row: usize) -> Self {
         TrackEffect {
             kind: EffectKind::None,
             params: [0.0; MAX_EFFECT_PARAMS],
+            mix: 1.0,
         }
     }
 }
@@ -762,11 +774,36 @@ mod tests {
         let te = TrackEffect {
             kind: EffectKind::Bitcrush,
             params: [3.0, 8.0, 0.0, 0.0],
+            mix: 1.0,
         };
         let json = serde_json::to_string(&te).unwrap();
         let back: TrackEffect = serde_json::from_str(&json).unwrap();
         assert_eq!(back.kind, EffectKind::Bitcrush);
         assert_eq!(back.params, [3.0, 8.0, 0.0, 0.0]);
+        assert_eq!(back.mix, 1.0);
+    }
+
+    #[test]
+    fn track_effect_default_is_fully_wet() {
+        assert_eq!(TrackEffect::default_for_row(0).mix, 1.0);
+        assert_eq!(TrackEffect::default().mix, 1.0);
+    }
+
+    #[test]
+    fn track_effect_mix_round_trips_through_serde() {
+        let mut te = TrackEffect::default_for_row(0);
+        te.mix = 0.35;
+        let json = serde_json::to_string(&te).unwrap();
+        let back: TrackEffect = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mix, 0.35);
+    }
+
+    #[test]
+    fn track_effect_legacy_blob_without_mix_loads_fully_wet() {
+        // A TrackEffect JSON saved before the `mix` field existed.
+        let legacy = r#"{"kind":"Lowpass","params":[0.0,0.0,0.0,0.0]}"#;
+        let te: TrackEffect = serde_json::from_str(legacy).expect("legacy blob must load");
+        assert_eq!(te.mix, 1.0);
     }
 
     #[test]

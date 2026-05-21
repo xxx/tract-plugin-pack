@@ -375,6 +375,7 @@ mod tests {
         effects[0] = TrackEffect {
             kind: crate::effects::EffectKind::Lowpass,
             params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Lowpass),
+            mix: 1.0,
         };
         engine.set_effects(&effects);
         let grid = Grid::default();
@@ -496,6 +497,7 @@ mod tests {
             std::array::from_fn(|_| crate::effects::TrackEffect {
                 kind: crate::effects::EffectKind::Lowpass,
                 params: [800.0, 0.2, 0.0, 0.0],
+                mix: 1.0,
             });
         engine.set_effects(&cfg);
         // Drive row 0's effect so it has non-zero internal state.
@@ -524,6 +526,7 @@ mod tests {
         cfg[0] = crate::effects::TrackEffect {
             kind: crate::effects::EffectKind::Lowpass,
             params: [2000.0, 0.1, 0.0, 0.0],
+            mix: 1.0,
         };
         engine.set_effects(&cfg);
         assert_eq!(
@@ -548,6 +551,7 @@ mod tests {
             std::array::from_fn(|_| crate::effects::TrackEffect {
                 kind: crate::effects::EffectKind::Lowpass,
                 params: [2_000.0, 0.15, 0.0, 0.0],
+                mix: 1.0,
             });
         engine.set_effects(&effect_cfg);
         let mod_cfg: [crate::modulation::TrackModulation; ROWS] =
