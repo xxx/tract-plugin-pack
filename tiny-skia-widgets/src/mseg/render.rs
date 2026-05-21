@@ -337,7 +337,7 @@ pub(crate) struct StripButtons {
 
 /// Lay out the MSEG control-strip buttons within `strip` (`scale` is the DPI
 /// factor). `randomize` is a fixed width at the right end; `snap`/`grid`/
-/// `style`/`polarity` share the remaining width in four equal segments.
+/// `polarity`/`style` share the remaining width in four equal segments.
 pub(crate) fn strip_buttons(strip: (f32, f32, f32, f32), scale: f32) -> StripButtons {
     let (sx, sy, sw, sh) = strip;
     let pad = 6.0 * scale;
@@ -351,8 +351,8 @@ pub(crate) fn strip_buttons(strip: (f32, f32, f32, f32), scale: f32) -> StripBut
     let seg_w = ((avail - 3.0 * gap) / 4.0).max(0.0);
     let snap = (left, by, seg_w, bh);
     let grid = (left + seg_w + gap, by, seg_w, bh);
-    let style = (left + 2.0 * (seg_w + gap), by, seg_w, bh);
-    let polarity = (left + 3.0 * (seg_w + gap), by, seg_w, bh);
+    let polarity = (left + 2.0 * (seg_w + gap), by, seg_w, bh);
+    let style = (left + 3.0 * (seg_w + gap), by, seg_w, bh);
     StripButtons {
         snap,
         grid,
