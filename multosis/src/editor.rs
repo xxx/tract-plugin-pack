@@ -150,8 +150,8 @@ struct MultosisWindow {
     /// always-on amplitude MSEG, 1/2 are assignable. Read by `effect_hit`; the
     /// MODULATION-section UI is wired in Task 9.
     selected_mseg: usize,
-    /// The effect editor's dropdown state — owns the open kind/target popup.
-    kind_dropdown: widgets::dropdown::DropdownState<EffectAction>,
+    /// The effect editor's shared dropdown state — owns the open Kind / Target / Trigger popup.
+    effect_dropdown: widgets::dropdown::DropdownState<EffectAction>,
     /// The effect editor's parameter-dial drag state — one in-flight dial drag
     /// at a time, tagged with the slot index via `EffectHit::Dial(i)` or by
     /// `EffectHit::Depth` for the modulation depth dial.
@@ -226,7 +226,7 @@ impl MultosisWindow {
             view: View::Grid,
             selected_track: 0,
             selected_mseg: 0,
-            kind_dropdown: widgets::dropdown::DropdownState::new(),
+            effect_dropdown: widgets::dropdown::DropdownState::new(),
             effect_dial_drag: widgets::DragState::new(),
             text_edit: widgets::TextEditState::new(),
             mseg_edit: widgets::mseg::MsegEditState::new(),
@@ -554,7 +554,7 @@ impl MultosisWindow {
             &mut self.text_renderer,
             &track,
             self.selected_track,
-            self.kind_dropdown.is_open_for(EffectAction::Kind),
+            self.effect_dropdown.is_open_for(EffectAction::Kind),
             editing_dial,
             editing_mix,
             self.scale_factor,
@@ -609,7 +609,7 @@ impl MultosisWindow {
             track.kind,
             target,
             depth,
-            self.kind_dropdown.is_open_for(EffectAction::Target),
+            self.effect_dropdown.is_open_for(EffectAction::Target),
             self.scale_factor,
         );
         // Per-track trigger control + (conditionally) rate dial.
@@ -618,7 +618,7 @@ impl MultosisWindow {
             &mut self.surface.pixmap,
             &mut self.text_renderer,
             trigger,
-            self.kind_dropdown.is_open_for(EffectAction::Trigger),
+            self.effect_dropdown.is_open_for(EffectAction::Trigger),
             self.scale_factor,
         );
         // Active MSEG's sync/length controls (sit on the modulation row to
@@ -661,7 +661,7 @@ impl MultosisWindow {
                     .position(|k| *k == self.selected_track_effect().kind)
                     .unwrap_or(0);
                 let win = (self.physical_width as f32, self.physical_height as f32);
-                self.kind_dropdown
+                self.effect_dropdown
                     .open(EffectAction::Kind, lay.kind, &items, current, false, win);
             }
             EffectHit::Dial(i) => {
@@ -687,7 +687,7 @@ impl MultosisWindow {
                     effect_editor::target_to_item(modu.targets[self.selected_mseg - 1])
                 };
                 let win = (self.physical_width as f32, self.physical_height as f32);
-                self.kind_dropdown.open(
+                self.effect_dropdown.open(
                     EffectAction::Target,
                     lay.target,
                     &items,
@@ -744,7 +744,7 @@ impl MultosisWindow {
                 let current = effect_editor::trigger_to_item(trigger);
                 let items = effect_editor::trigger_items();
                 let win = (self.physical_width as f32, self.physical_height as f32);
-                self.kind_dropdown.open(
+                self.effect_dropdown.open(
                     EffectAction::Trigger,
                     lay.trigger,
                     &items,
@@ -1144,13 +1144,13 @@ impl MultosisWindow {
             self.scale_factor,
         );
         // Drop popups draw last so they overlay every other control. One
-        // shared `kind_dropdown` state handles Kind, Target, and Trigger;
+        // shared `effect_dropdown` state handles Kind, Target, and Trigger;
         // the items list depends on which one is open.
-        if self.view == View::Effect && self.kind_dropdown.is_open() {
+        if self.view == View::Effect && self.effect_dropdown.is_open() {
             let kind = self.selected_track_effect().kind;
-            let items: Vec<&'static str> = if self.kind_dropdown.is_open_for(EffectAction::Target) {
+            let items: Vec<&'static str> = if self.effect_dropdown.is_open_for(EffectAction::Target) {
                 effect_editor::target_items(kind)
-            } else if self.kind_dropdown.is_open_for(EffectAction::Trigger) {
+            } else if self.effect_dropdown.is_open_for(EffectAction::Trigger) {
                 effect_editor::trigger_items().to_vec()
             } else {
                 effect_editor::kind_items()
@@ -1159,7 +1159,7 @@ impl MultosisWindow {
             widgets::dropdown::draw_dropdown_popup(
                 &mut self.surface.pixmap,
                 &mut self.text_renderer,
-                &self.kind_dropdown,
+                &self.effect_dropdown,
                 &items,
                 win,
             );
@@ -1267,18 +1267,18 @@ impl baseview::WindowHandler for MultosisWindow {
                 }
                 // Dropdown popup hover — pick the items list matching the open
                 // dropdown so highlight indices map to the right labels.
-                if self.kind_dropdown.is_open() {
+                if self.effect_dropdown.is_open() {
                     let kind = self.selected_track_effect().kind;
                     let items: Vec<&'static str> =
-                        if self.kind_dropdown.is_open_for(EffectAction::Target) {
+                        if self.effect_dropdown.is_open_for(EffectAction::Target) {
                             effect_editor::target_items(kind)
-                        } else if self.kind_dropdown.is_open_for(EffectAction::Trigger) {
+                        } else if self.effect_dropdown.is_open_for(EffectAction::Trigger) {
                             effect_editor::trigger_items().to_vec()
                         } else {
                             effect_editor::kind_items()
                         };
                     let win = (self.physical_width as f32, self.physical_height as f32);
-                    self.kind_dropdown.on_mouse_move(px, py, &items, win);
+                    self.effect_dropdown.on_mouse_move(px, py, &items, win);
                 }
                 // MSEG node-drag follow: when the user is dragging a node, the
                 // pointer can leave the pane rect and the drag should keep
@@ -1356,19 +1356,19 @@ impl baseview::WindowHandler for MultosisWindow {
                 // it, clicking outside closes. Route this BEFORE checking any
                 // other control so a click on the popup never hits the
                 // control behind it.
-                if self.kind_dropdown.is_open() {
+                if self.effect_dropdown.is_open() {
                     let kind = self.selected_track_effect().kind;
                     let items: Vec<&'static str> =
-                        if self.kind_dropdown.is_open_for(EffectAction::Target) {
+                        if self.effect_dropdown.is_open_for(EffectAction::Target) {
                             effect_editor::target_items(kind)
-                        } else if self.kind_dropdown.is_open_for(EffectAction::Trigger) {
+                        } else if self.effect_dropdown.is_open_for(EffectAction::Trigger) {
                             effect_editor::trigger_items().to_vec()
                         } else {
                             effect_editor::kind_items()
                         };
                     let win = (self.physical_width as f32, self.physical_height as f32);
                     if let Some(widgets::dropdown::DropdownEvent::Selected(action, idx)) =
-                        self.kind_dropdown.on_mouse_down(px, py, &items, win)
+                        self.effect_dropdown.on_mouse_down(px, py, &items, win)
                     {
                         match action {
                             EffectAction::Kind => {
@@ -1514,7 +1514,7 @@ impl baseview::WindowHandler for MultosisWindow {
                     self.end_slider(ctrl);
                 }
                 let _ = self.effect_dial_drag.end_drag();
-                self.kind_dropdown.on_mouse_up();
+                self.effect_dropdown.on_mouse_up();
                 // A release always terminates any in-flight MSEG node drag,
                 // regardless of where the cursor is.
                 if self.view == View::Effect {
