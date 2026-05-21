@@ -68,6 +68,8 @@ pub enum DragTarget {
     StepDraw,
     /// Moving the whole selection; `anchor` is the node under the cursor.
     Group { anchor: usize },
+    /// Dragging a selection marquee from the press anchor.
+    Marquee,
 }
 
 /// Which hold marker is being dragged.
@@ -93,6 +95,12 @@ pub struct MsegEditState {
     /// drag begins — the source of truth for the drag's delta math, so
     /// boundary clamping never corrupts the group's relative geometry.
     group_snapshot: Vec<(f32, f32)>,
+    /// While a marquee drag is active: `(anchor_x, anchor_y, cur_x, cur_y)` in
+    /// physical pixels. `None` when no marquee is in progress.
+    marquee: Option<(f32, f32, f32, f32)>,
+    /// Whether Ctrl was held when the marquee began (Ctrl adds to the
+    /// selection instead of replacing it).
+    marquee_ctrl: bool,
     /// During a stepped-draw, the last time-grid cell a node was painted in
     /// (so dragging within one cell does not insert duplicates).
     step_last_cell: Option<u32>,
@@ -137,6 +145,8 @@ impl MsegEditState {
             hover: None,
             selection: 0,
             group_snapshot: Vec::new(),
+            marquee: None,
+            marquee_ctrl: false,
             step_last_cell: None,
             stepped_draw_held: false,
             style: RandomStyle::Smooth,
@@ -220,6 +230,14 @@ impl MsegEditState {
     /// The currently hovered node index, if any.
     pub fn hovered_node(&self) -> Option<usize> {
         self.hover
+    }
+
+    /// The active marquee rectangle as `(x, y, w, h)` in physical pixels, if a
+    /// marquee drag is in progress. For the renderer.
+    pub fn marquee_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        self.marquee.map(|(ax, ay, cx, cy)| {
+            (ax.min(cx), ay.min(cy), (cx - ax).abs(), (cy - ay).abs())
+        })
     }
 
     /// Is node `i` currently selected?
@@ -363,12 +381,11 @@ impl MsegEditState {
                 self.step_draw_paint(x, y, data, &layout)
             }
             MsegHit::Canvas => {
-                // A plain click on empty canvas clears the selection; Ctrl
-                // preserves it. (Adding a node is now double-click — see
-                // `on_double_click`.)
-                if !ctrl {
-                    self.clear_selection();
-                }
+                // Begin a marquee. Whether it selects (on release) or just
+                // clears (a no-drag click) is decided in `on_mouse_up`.
+                self.drag = Some(DragTarget::Marquee);
+                self.marquee = Some((x, y, x, y));
+                self.marquee_ctrl = ctrl;
                 None
             }
             MsegHit::Randomize => {
@@ -511,15 +528,59 @@ impl MsegEditState {
                 self.apply_group_move(anchor, x, y, data, &layout, fine);
                 Some(MsegEdit::Changed)
             }
+            Some(DragTarget::Marquee) => {
+                if let Some((ax, ay, _, _)) = self.marquee {
+                    self.marquee = Some((ax, ay, x, y));
+                }
+                None
+            }
             _ => None,
         }
     }
 
-    /// Primary-button release. Ends any drag and any scrollbar-thumb drag
-    /// inside an open dropdown.
-    pub fn on_mouse_up(&mut self, _data: &mut MsegData) -> Option<MsegEdit> {
+    /// Primary-button release. Finalizes a marquee selection, ends any drag,
+    /// and ends any scrollbar-thumb drag inside an open dropdown.
+    pub fn on_mouse_up(
+        &mut self,
+        data: &mut MsegData,
+        rect: (f32, f32, f32, f32),
+        scale: f32,
+    ) -> Option<MsegEdit> {
+        use crate::mseg::render::{mseg_layout, phase_to_x, value_to_y};
         self.dropdown.on_mouse_up();
+        if matches!(self.drag, Some(DragTarget::Marquee)) {
+            if let Some((ax, ay, cx, cy)) = self.marquee {
+                let (rx, ry) = (ax.min(cx), ay.min(cy));
+                let (rw, rh) = ((cx - ax).abs(), (cy - ay).abs());
+                // A marquee that never really moved is a plain click on empty
+                // canvas — clear the selection (unless Ctrl preserved it).
+                let moved = rw > 2.0 * scale || rh > 2.0 * scale;
+                if !moved {
+                    if !self.marquee_ctrl {
+                        self.clear_selection();
+                    }
+                } else {
+                    let layout = mseg_layout(rect, self.curve_only, scale);
+                    if !self.marquee_ctrl {
+                        self.clear_selection();
+                    }
+                    for (i, n) in data.active().iter().enumerate() {
+                        let nx = phase_to_x(&layout, n.time);
+                        let ny = value_to_y(&layout, n.value);
+                        if nx >= rx
+                            && nx <= rx + rw
+                            && ny >= ry
+                            && ny <= ry + rh
+                            && i < crate::mseg::MAX_NODES
+                        {
+                            self.selection |= 1u128 << i;
+                        }
+                    }
+                }
+            }
+        }
         self.drag = None;
+        self.marquee = None;
         self.group_snapshot.clear();
         self.step_last_cell = None;
         None
@@ -776,7 +837,7 @@ mod tests {
         );
         assert!(state.is_node_selected(1));
         assert_eq!(state.selection_count(), 1);
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -787,15 +848,15 @@ mod tests {
         let mut state = MsegEditState::new();
         let l = mseg_layout(RECT, false, 1.0);
         state.on_mouse_down(phase_to_x(&l, 0.3), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
         state.on_mouse_down(phase_to_x(&l, 0.6), value_to_y(&l, 0.5), &mut data, RECT, 1.0, true);
         assert!(state.is_node_selected(1));
         assert!(state.is_node_selected(2));
         assert_eq!(state.selection_count(), 2);
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
         state.on_mouse_down(phase_to_x(&l, 0.6), value_to_y(&l, 0.5), &mut data, RECT, 1.0, true);
         assert!(!state.is_node_selected(2));
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -805,11 +866,13 @@ mod tests {
         let mut state = MsegEditState::new();
         let l = mseg_layout(RECT, false, 1.0);
         state.on_mouse_down(phase_to_x(&l, 0.5), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
         assert_eq!(state.selection_count(), 1);
+        // A no-move click on empty canvas clears the selection on mouse_up
+        // (the marquee path: press starts a marquee, release with no drag clears).
         state.on_mouse_down(phase_to_x(&l, 0.3), value_to_y(&l, 0.7), &mut data, RECT, 1.0, false);
+        state.on_mouse_up(&mut data, RECT, 1.0);
         assert_eq!(state.selection_count(), 0);
-        state.on_mouse_up(&mut data);
     }
 
     #[test]
@@ -829,7 +892,7 @@ mod tests {
         let l = mseg_layout(RECT, false, 1.0);
         state.on_mouse_down(phase_to_x(&l, 0.3), value_to_y(&l, 0.7), &mut data, RECT, 1.0, false);
         assert_eq!(data.node_count, 2, "single click must not insert anymore");
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -859,7 +922,7 @@ mod tests {
         // the node inserted at phase 0.5 sorts to index 1 (between the 0.0 and
         // 1.0 endpoints)
         assert!((data.nodes[1].value - 0.2).abs() < 0.05);
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -891,7 +954,7 @@ mod tests {
             "value {} should snap to the 1/8 grid (0.625)",
             data.nodes[1].value
         );
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -923,7 +986,7 @@ mod tests {
             "fine should bypass snap; value {}",
             data.nodes[1].value
         );
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -1014,7 +1077,7 @@ mod tests {
                 false,
             );
         }
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
         assert!(data.node_count > before, "stepped-draw inserted no nodes");
         // Painted nodes are stepped.
         assert!(data
@@ -1050,7 +1113,7 @@ mod tests {
                 false,
             );
         }
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
         let after_first = data.node_count;
         assert!(after_first > 2, "first pass inserted nodes");
 
@@ -1074,7 +1137,7 @@ mod tests {
                 false,
             );
         }
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
         assert_eq!(
             data.node_count, after_first,
             "repeated stepped-draw passes must not stack duplicate nodes"
@@ -1126,7 +1189,7 @@ mod tests {
         assert_eq!(ev, Some(MsegEdit::Changed));
         assert!(data.is_valid());
         assert_eq!(state.seed, 2);
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -1140,7 +1203,7 @@ mod tests {
         let y = l.strip.1 + l.strip.3 * 0.5;
         state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
         assert_eq!(data.snap, !was);
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -1157,11 +1220,11 @@ mod tests {
         let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
         assert_eq!(ev, Some(MsegEdit::Changed));
         assert_eq!(data.polarity, Polarity::Bipolar);
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
         // Click again -> back to unipolar.
         state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
         assert_eq!(data.polarity, Polarity::Unipolar);
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     // --- Grid dropdown tests ---
@@ -1186,7 +1249,7 @@ mod tests {
         );
         // Document not yet changed.
         assert_eq!(data.time_divisions, 16);
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -1222,7 +1285,7 @@ mod tests {
             !state.dropdown_is_open_for(StripId::TimeGrid),
             "dropdown should close after selection"
         );
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -1321,7 +1384,7 @@ mod tests {
         assert_eq!(ev, Some(MsegEdit::Changed));
         assert_eq!(data.time_divisions, 64);
         assert_eq!(data.value_steps, 64);
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     // --- Style dropdown tests ---
@@ -1341,7 +1404,7 @@ mod tests {
             state.dropdown_is_open_for(StripId::Style),
             "style dropdown not open after clicking style trigger"
         );
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -1372,7 +1435,7 @@ mod tests {
             !state.dropdown_is_open_for(StripId::Style),
             "dropdown should close after selection"
         );
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     // --- Task 2: group move tests ---
@@ -1388,7 +1451,7 @@ mod tests {
             let (t, v) = { let a = data.active(); (a[idx].time, a[idx].value) };
             let ctrl = n > 0;
             state.on_mouse_down(phase_to_x(l, t), value_to_y(l, v), data, RECT, 1.0, ctrl);
-            state.on_mouse_up(data);
+            state.on_mouse_up(data, RECT, 1.0);
         }
     }
 
@@ -1409,7 +1472,7 @@ mod tests {
         assert!((data.nodes[1].value - (v1 - 0.1)).abs() < 0.02);
         assert!((data.nodes[2].time - (t2 + 0.1)).abs() < 0.02);
         assert!((data.nodes[2].value - (v2 - 0.1)).abs() < 0.02);
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -1431,7 +1494,7 @@ mod tests {
             "selected node 2 ({}) must not cross unselected node 3 ({})",
             data.nodes[2].time, data.nodes[3].time);
         assert!(data.nodes[1].time < data.nodes[2].time, "group stays ordered");
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -1450,7 +1513,7 @@ mod tests {
         // locked; node 1's time is unchanged. Vertical still applies.
         assert!((data.nodes[1].time - t1).abs() < 1e-4, "endpoint in selection locks horizontal motion");
         assert!(data.nodes[1].value < 0.5, "vertical group move still applies");
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -1467,7 +1530,7 @@ mod tests {
         state.on_mouse_move(phase_to_x(&l, 0.3), value_to_y(&l, 0.8), &mut data, RECT, 1.0, false);
         assert!((data.nodes[2].value - 1.0).abs() < 1e-4, "overflowed node clamps to the top");
         assert!(data.nodes[1].value > 0.7, "in-range node moved");
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -1490,7 +1553,7 @@ mod tests {
         state.on_mouse_move(phase_to_x(&l, 0.3), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
         assert!((data.nodes[1].value - v1_before).abs() < 1e-3, "node 1 returned");
         assert!((data.nodes[2].value - v2_before).abs() < 1e-3, "node 2 un-clamped and returned");
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -1509,7 +1572,7 @@ mod tests {
         state.on_mouse_move(phase_to_x(&l, 0.4), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
         assert!((data.nodes[1].time - 0.4).abs() < 0.02, "node 1 dragged solo");
         assert!((data.nodes[2].time - t2_before).abs() < 1e-4, "node 2 (still selected, not pressed) untouched");
-        state.on_mouse_up(&mut data);
+        state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
     #[test]
@@ -1518,5 +1581,41 @@ mod tests {
             assert_eq!(style.index(), i);
             assert_eq!(RandomStyle::from_index(i), style);
         }
+    }
+
+    #[test]
+    fn marquee_selects_enclosed_nodes() {
+        let mut data = MsegData::default();
+        data.insert_node(0.25, 0.5); // node 1
+        data.insert_node(0.5, 0.5);  // node 2
+        data.insert_node(0.75, 0.5); // node 3
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        // Marquee from (phase 0.2, value 0.7) to (phase 0.55, value 0.3) —
+        // encloses nodes 1 and 2, not 3.
+        state.on_mouse_down(phase_to_x(&l, 0.2), value_to_y(&l, 0.7), &mut data, RECT, 1.0, false);
+        state.on_mouse_move(phase_to_x(&l, 0.55), value_to_y(&l, 0.3), &mut data, RECT, 1.0, false);
+        state.on_mouse_up(&mut data, RECT, 1.0);
+        assert!(state.is_node_selected(1));
+        assert!(state.is_node_selected(2));
+        assert!(!state.is_node_selected(3));
+    }
+
+    #[test]
+    fn ctrl_marquee_adds_to_the_selection() {
+        let mut data = MsegData::default();
+        data.insert_node(0.25, 0.5); // node 1
+        data.insert_node(0.75, 0.5); // node 2
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        // Select node 1 by click.
+        state.on_mouse_down(phase_to_x(&l, 0.25), value_to_y(&l, 0.5), &mut data, RECT, 1.0, false);
+        state.on_mouse_up(&mut data, RECT, 1.0);
+        // Ctrl-marquee around node 2 — node 1 stays selected, node 2 added.
+        state.on_mouse_down(phase_to_x(&l, 0.6), value_to_y(&l, 0.7), &mut data, RECT, 1.0, true);
+        state.on_mouse_move(phase_to_x(&l, 0.9), value_to_y(&l, 0.3), &mut data, RECT, 1.0, false);
+        state.on_mouse_up(&mut data, RECT, 1.0);
+        assert!(state.is_node_selected(1));
+        assert!(state.is_node_selected(2));
     }
 }

@@ -234,6 +234,16 @@ fn draw_canvas(
     }
 
     draw_nodes(pixmap, layout, data, state, scale);
+
+    // Marquee selection rectangle (drawn over the curve and nodes).
+    if let Some((mx, my, mw, mh)) = state.marquee_rect() {
+        if mw > 0.0 && mh > 0.0 {
+            let fill = tiny_skia::Color::from_rgba8(0x4f, 0xc3, 0xf7, 0x30);
+            draw_rect(pixmap, mx, my, mw, mh, fill);
+            draw_rect_outline(pixmap, mx, my, mw, mh, color_accent(), 1.0);
+        }
+    }
+
     draw_rect_outline(pixmap, cx, cy, cw, ch, color_border(), 1.0);
 }
 

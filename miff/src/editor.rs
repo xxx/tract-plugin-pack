@@ -860,7 +860,7 @@ impl baseview::WindowHandler for MiffWindow {
                 // End any MSEG drag.
                 let changed = {
                     if let Ok(mut curve) = self.params.curve.lock() {
-                        self.mseg_state.on_mouse_up(&mut curve)
+                        self.mseg_state.on_mouse_up(&mut curve, mseg_rect, s)
                     } else {
                         None
                     }

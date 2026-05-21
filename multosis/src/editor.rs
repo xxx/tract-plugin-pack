@@ -1537,9 +1537,14 @@ impl baseview::WindowHandler for MultosisWindow {
                 // regardless of where the cursor is.
                 if self.view == View::Effect {
                     let sel = self.selected_mseg.min(2);
+                    let lay = effect_editor::effect_layout(self.scale_factor);
                     let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
                         let row = self.selected_track;
-                        self.mseg_edit.on_mouse_up(&mut modu[row].msegs[sel])
+                        self.mseg_edit.on_mouse_up(
+                            &mut modu[row].msegs[sel],
+                            lay.mseg_pane,
+                            self.scale_factor,
+                        )
                     } else {
                         None
                     };
