@@ -162,11 +162,11 @@ impl AudioEngine {
     }
 
     /// Apply the active rows' effects to one dry stereo sample and sum them.
-    /// The sum is deliberately un-normalised — with many rows active the wet
-    /// signal can exceed the dry level; the `mix` and output-gain controls
-    /// manage that (design doc §6).
-    /// Each active row's wet contribution is scaled by that row's amplitude as
-    /// reported by the modulation engine's amplitude MSEG.
+    /// Each active row's effect output is first blended with the dry input by
+    /// that row's per-track `mix` (`lane = dry + (effect − dry)·mix`), then
+    /// scaled by the row's amplitude MSEG. The sum is deliberately
+    /// un-normalised — the wet-bus compressor and the global mix manage the
+    /// parallel-row peak.
     fn process_sample(&mut self, dry_l: f32, dry_r: f32, active: u16) -> (f32, f32) {
         let mut wet_l = 0.0;
         let mut wet_r = 0.0;
@@ -174,10 +174,14 @@ impl AudioEngine {
             if active & (1 << r) == 0 {
                 continue;
             }
-            let (l, r_out) = self.effects[r].process_sample(dry_l, dry_r);
+            let (eff_l, eff_r) = self.effects[r].process_sample(dry_l, dry_r);
+            // Per-track dry/wet blend, before the amplitude MSEG.
+            let mix = self.track_effects[r].mix;
+            let lane_l = dry_l + (eff_l - dry_l) * mix;
+            let lane_r = dry_r + (eff_r - dry_r) * mix;
             let amp = self.modulation.amplitude(r);
-            wet_l += amp * l;
-            wet_r += amp * r_out;
+            wet_l += amp * lane_l;
+            wet_r += amp * lane_r;
         }
         (wet_l, wet_r)
     }
@@ -515,6 +519,57 @@ mod tests {
             (after - before).abs() < 0.2,
             "kind-unchanged set_effects must keep DSP state: {before} -> {after}"
         );
+    }
+
+    #[test]
+    fn per_track_mix_zero_makes_an_active_track_contribute_dry() {
+        // Row 0 runs a Bitcrush effect (audibly alters the signal) at mix 0.0;
+        // the lane must collapse to the dry input. Compared against the same
+        // setup at mix 1.0, which alters it.
+        use crate::effects::{EffectKind, TrackEffect};
+
+        let mut wet = TrackEffect::default_for_row(0);
+        wet.kind = EffectKind::Bitcrush;
+        wet.params = crate::effects::default_params_for_kind(EffectKind::Bitcrush);
+        // Use 4-bit depth so the quantization error is large enough (≥ 1/16 ≈
+        // 0.0625) to exceed the 1e-4 test threshold.
+        wet.params[0] = 4.0;
+        wet.mix = 1.0;
+        let mut dry_mix = wet;
+        dry_mix.mix = 0.0;
+
+        // Two engines, identical but for row 0's mix.
+        let build = |te: TrackEffect| {
+            let mut e = AudioEngine::new();
+            e.set_sample_rate(48_000.0);
+            let mut effects = [TrackEffect::default_for_row(0); ROWS];
+            effects[0] = te;
+            e.set_effects(&effects);
+            e
+        };
+        let mut e_wet = build(wet);
+        let mut e_dry = build(dry_mix);
+
+        let mut grid = Grid::default();
+        grid.cell_mut(0, 0).enabled = true; // ensure row 0 is active at the playhead's start column
+        // A constant non-zero input; fully wet so the lane reaches the output.
+        let input = [0.6_f32; 128];
+        let (mut wl, mut wr) = (input, input);
+        let (mut dl, mut dr) = (input, input);
+        e_wet.process(&mut wl, &mut wr, true, 1000.0, 120.0, 1.0, &grid);
+        e_dry.process(&mut dl, &mut dr, true, 1000.0, 120.0, 1.0, &grid);
+
+        // At mix 0.0 row 0's lane is dry, so its output equals the dry input.
+        assert!(
+            dl.iter().all(|&s| (s - 0.6).abs() < 1e-4),
+            "mix 0.0 active track should output dry"
+        );
+        // At mix 1.0 the Bitcrush alters the signal — outputs differ.
+        assert!(
+            wl.iter().zip(dl.iter()).any(|(&w, &d)| (w - d).abs() > 1e-4),
+            "mix 1.0 should differ from mix 0.0"
+        );
+        let _ = (wr, dr); // right-channel arrays; Bitcrush is symmetric, left-only assertion suffices
     }
 
     #[test]
