@@ -204,6 +204,9 @@ pub fn draw_effect_section(
     track_index: usize,
     kind_dropdown_open: bool,
     editing_dial: Option<(usize, &str, bool)>,
+    // `Some((buffer, caret_on))` when a right-click text edit is active on
+    // the Mix dial; it renders the buffer + caret in place of the percentage.
+    editing_mix: Option<(&str, bool)>,
     scale: f32,
 ) {
     let lay = effect_layout(scale);
@@ -266,19 +269,42 @@ pub fn draw_effect_section(
             }
         }
     }
-    // Per-track Mix dial — value shown as a percentage.
+    // Per-track Mix dial — value shown as a percentage, or the edit buffer
+    // when a text entry is active on it.
     let (mx, my, mw, mh) = lay.mix;
+    let mix_cx = mx + mw / 2.0;
+    let mix_cy = my + mh / 2.0;
+    let mix_radius = (mw.min(mh) / 2.0) - 8.0 * scale;
     let mix_pct = format!("{}%", (track.mix * 100.0).round() as i32);
-    widgets::param_dial::draw_dial(
-        pixmap,
-        tr,
-        mx + mw / 2.0,
-        my + mh / 2.0,
-        (mw.min(mh) / 2.0) - 8.0 * scale,
-        "Mix",
-        &mix_pct,
-        track.mix,
-    );
+    match editing_mix {
+        Some((buf, caret_on)) => {
+            widgets::param_dial::draw_dial_ex(
+                pixmap,
+                tr,
+                mix_cx,
+                mix_cy,
+                mix_radius,
+                "Mix",
+                &mix_pct,
+                track.mix,
+                None,
+                Some(buf),
+                caret_on,
+            );
+        }
+        None => {
+            widgets::param_dial::draw_dial(
+                pixmap,
+                tr,
+                mix_cx,
+                mix_cy,
+                mix_radius,
+                "Mix",
+                &mix_pct,
+                track.mix,
+            );
+        }
+    }
 }
 
 /// The list of effect-kind names for the kind dropdown, in `EffectKind::ALL`

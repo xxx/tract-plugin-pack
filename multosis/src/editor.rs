@@ -540,6 +540,15 @@ impl MultosisWindow {
             }
             _ => None,
         };
+        let editing_mix: Option<(&str, bool)> = match self.text_edit.active_for_any() {
+            Some(EffectHit::Mix) => {
+                let caret_on = self.text_edit.caret_visible();
+                self.text_edit
+                    .active_for(&EffectHit::Mix)
+                    .map(|buf| (buf, caret_on))
+            }
+            _ => None,
+        };
         effect_editor::draw_effect_section(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
@@ -547,6 +556,7 @@ impl MultosisWindow {
             self.selected_track,
             self.kind_dropdown.is_open_for(EffectAction::Kind),
             editing_dial,
+            editing_mix,
             self.scale_factor,
         );
         // MODULATION section.
@@ -874,6 +884,20 @@ impl MultosisWindow {
         self.mark_config_dirty();
     }
 
+    /// Parse a Mix-dial text entry (a percentage number, e.g. `50`), clamp
+    /// to 0..100, and write it as a 0..1 mix. A parse failure is a silent
+    /// no-op — the dial keeps its previous value.
+    fn commit_mix_text_edit(&mut self, text: &str) {
+        let cleaned = text.trim();
+        if let Ok(pct) = cleaned.parse::<f32>() {
+            let value = (pct / 100.0).clamp(0.0, 1.0);
+            if let Ok(mut cfg) = self.params.track_effects.lock() {
+                cfg[self.selected_track].mix = value;
+            }
+            self.mark_config_dirty();
+        }
+    }
+
     /// If a dial-text edit is active, decide whether to commit or cancel it
     /// based on the incoming press location. A press on the active dial
     /// cancels (the user wants to drag); a press anywhere else commits.
@@ -897,10 +921,14 @@ impl MultosisWindow {
             // Click on the active dial → cancel; the normal effect-press path
             // then starts a drag.
             self.text_edit.cancel();
-        } else if let Some((EffectHit::Dial(i), text)) = self.text_edit.commit() {
-            self.commit_dial_text_edit(i, &text);
         } else {
-            self.text_edit.cancel();
+            match self.text_edit.commit() {
+                Some((EffectHit::Dial(i), text)) => self.commit_dial_text_edit(i, &text),
+                Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
+                // None: no edit was active — cancel() is a no-op. A new text-editable
+                // EffectHit variant needs its own Some(...) arm above, not this.
+                _ => self.text_edit.cancel(),
+            }
         }
     }
 
@@ -1427,8 +1455,12 @@ impl baseview::WindowHandler for MultosisWindow {
                     // being edited would silently discard the prior edit if we
                     // jumped straight to `begin` (which clears the buffer).
                     // Commit-and-apply the prior edit first.
-                    if let Some((EffectHit::Dial(prev), text)) = self.text_edit.commit() {
-                        self.commit_dial_text_edit(prev, &text);
+                    match self.text_edit.commit() {
+                        Some((EffectHit::Dial(prev), text)) => {
+                            self.commit_dial_text_edit(prev, &text)
+                        }
+                        Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
+                        _ => {}
                     }
                     if let Some(spec) = self.param_spec(i) {
                         let value = self.selected_track_effect().params[i];
@@ -1437,6 +1469,26 @@ impl baseview::WindowHandler for MultosisWindow {
                             &effects::format_value_bare(value, spec.format),
                         );
                     }
+                    return baseview::EventStatus::Captured;
+                }
+                if let Some(EffectHit::Mix) = effect_editor::effect_hit(
+                    px,
+                    py,
+                    self.scale_factor,
+                    param_count,
+                    self.selected_mseg,
+                    is_free_hz,
+                ) {
+                    // Commit any prior edit before seeding a new one.
+                    match self.text_edit.commit() {
+                        Some((EffectHit::Dial(prev), text)) => {
+                            self.commit_dial_text_edit(prev, &text)
+                        }
+                        Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
+                        _ => {}
+                    }
+                    let pct = (self.selected_track_effect().mix * 100.0).round() as i32;
+                    self.text_edit.begin(EffectHit::Mix, &format!("{pct}"));
                     return baseview::EventStatus::Captured;
                 }
                 let lay = effect_editor::effect_layout(self.scale_factor);
@@ -1502,8 +1554,12 @@ impl baseview::WindowHandler for MultosisWindow {
                     keyboard_types::Key::Backspace => self.text_edit.backspace(),
                     keyboard_types::Key::Escape => self.text_edit.cancel(),
                     keyboard_types::Key::Enter => {
-                        if let Some((EffectHit::Dial(i), text)) = self.text_edit.commit() {
-                            self.commit_dial_text_edit(i, &text);
+                        match self.text_edit.commit() {
+                            Some((EffectHit::Dial(i), text)) => {
+                                self.commit_dial_text_edit(i, &text)
+                            }
+                            Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
+                            _ => {}
                         }
                     }
                     _ => return baseview::EventStatus::Ignored,
