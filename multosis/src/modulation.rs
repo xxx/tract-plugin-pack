@@ -5,7 +5,8 @@
 //! See `docs/superpowers/specs/2026-05-19-multosis-phase-2b-design.md`.
 
 use crate::effects::{
-    norm_to_value, value_to_norm, Effect, EffectInstance, ParamScaling, ParamSpec, TrackEffect,
+    default_params_for_kind, norm_to_value, param_count, value_to_norm, Effect, EffectInstance,
+    EffectKind, ParamScaling, ParamSpec, TrackEffect,
 };
 use tiny_skia_widgets::{advance, value_at_phase, MsegData, PlayMode, Polarity, SyncMode};
 
@@ -167,6 +168,20 @@ pub fn assignable_value(
             norm_to_value(norm_eff, spec.min, spec.max, ParamScaling::Log)
         }
     }
+}
+
+/// Switch one track to effect `kind`: set the kind, reset its parameters to
+/// the kind's defaults, and clamp the track's assignable-MSEG targets to the
+/// new kind's parameter count (so a target can never reference a parameter
+/// the new effect lacks). The composable core of the editor's kind-switch.
+pub fn switch_effect_kind(
+    effect: &mut TrackEffect,
+    modulation: &mut TrackModulation,
+    kind: EffectKind,
+) {
+    effect.kind = kind;
+    effect.params = default_params_for_kind(kind);
+    modulation.clamp_targets(param_count(kind));
 }
 
 /// The modulation runtime owned by the audio engine — the per-track config,
@@ -788,6 +803,58 @@ mod tests {
                 "after a fire, MSEG[{k}] phase should be near 0, got {phi}"
             );
         }
+    }
+
+    #[test]
+    fn switch_effect_kind_resets_params_and_clamps_targets() {
+        use crate::effects::{EffectKind, TrackEffect};
+
+        // A Bitcrush track (2 params) whose first assignable MSEG targets
+        // parameter index 1.
+        let mut effect = TrackEffect {
+            kind: EffectKind::Bitcrush,
+            params: crate::effects::default_params_for_kind(EffectKind::Bitcrush),
+            mix: 1.0,
+        };
+        let mut modulation = TrackModulation::default_for_row(0);
+        modulation.targets[0] = Some(1);
+
+        // Switch to None (0 parameters).
+        switch_effect_kind(&mut effect, &mut modulation, EffectKind::None);
+
+        assert_eq!(effect.kind, EffectKind::None, "kind switched");
+        assert_eq!(
+            effect.params,
+            crate::effects::default_params_for_kind(EffectKind::None),
+            "params reset to the new kind's defaults"
+        );
+        assert_eq!(
+            modulation.targets[0], None,
+            "out-of-range target cleared — None has 0 params"
+        );
+    }
+
+    #[test]
+    fn switch_effect_kind_keeps_an_in_range_target() {
+        use crate::effects::{EffectKind, TrackEffect};
+
+        // Switching between two kinds that both have parameter index 0.
+        let mut effect = TrackEffect {
+            kind: EffectKind::Lowpass,
+            params: crate::effects::default_params_for_kind(EffectKind::Lowpass),
+            mix: 1.0,
+        };
+        let mut modulation = TrackModulation::default_for_row(0);
+        modulation.targets[0] = Some(0);
+
+        switch_effect_kind(&mut effect, &mut modulation, EffectKind::Bitcrush);
+
+        assert_eq!(effect.kind, EffectKind::Bitcrush);
+        assert_eq!(
+            modulation.targets[0],
+            Some(0),
+            "index 0 is in range for Bitcrush — target preserved"
+        );
     }
 
     #[test]

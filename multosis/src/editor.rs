@@ -951,12 +951,11 @@ impl MultosisWindow {
     /// targets to the new arity. Marks config dirty.
     fn apply_kind_switch(&mut self, kind: EffectKind) {
         let row = self.selected_track;
-        if let Ok(mut cfg) = self.params.track_effects.lock() {
-            cfg[row].kind = kind;
-            cfg[row].params = crate::effects::default_params_for_kind(kind);
-        }
-        if let Ok(mut modu) = self.params.track_modulation.lock() {
-            modu[row].clamp_targets(crate::effects::param_count(kind));
+        if let (Ok(mut eff), Ok(mut modu)) = (
+            self.params.track_effects.lock(),
+            self.params.track_modulation.lock(),
+        ) {
+            crate::modulation::switch_effect_kind(&mut eff[row], &mut modu[row], kind);
         }
         self.mark_config_dirty();
     }
