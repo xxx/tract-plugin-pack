@@ -47,7 +47,6 @@ enum LeftGesture {
     GridPending {
         row: usize,
         col: usize,
-        zone: grid_view::CellZone,
     },
     /// An active paint drag — `value` is the `enabled` state being painted
     /// across the stroke, `last` is the most recently painted cell.
@@ -248,10 +247,10 @@ impl MultosisWindow {
         self.params.editor_state.store_size(pw, ph);
     }
 
-    /// Apply a resolved cell edit and republish the grid.
-    fn commit_click(&mut self, row: usize, col: usize, zone: grid_view::CellZone, right: bool) {
+    /// Toggle the `enabled` flag of cell `(row, col)` and republish the grid.
+    fn commit_click(&mut self, row: usize, col: usize) {
         if let Ok(mut grid) = self.params.grid.lock() {
-            grid_view::apply_grid_click(&mut grid, row, col, zone, right);
+            grid_view::apply_grid_click(&mut grid, row, col);
             self.grid_handoff.publish(*grid);
         }
     }
@@ -266,15 +265,6 @@ impl MultosisWindow {
                 grid.cell_mut(row, col).enabled = value;
             }
             self.grid_handoff.publish(*grid);
-        }
-    }
-
-    /// Apply a click at the current cursor position (used for right-click,
-    /// which still edits on press).
-    fn handle_grid_click(&mut self, right: bool) {
-        let (px, py) = self.mouse_pos;
-        if let Some((row, col, zone)) = grid_view::cell_zone(px, py, self.scale_factor) {
-            self.commit_click(row, col, zone, right);
         }
     }
 
@@ -1261,7 +1251,7 @@ impl baseview::WindowHandler for MultosisWindow {
                             press,
                             region_at_press,
                         }) => self.update_region_move(press, region_at_press),
-                        Some(LeftGesture::GridPending { row, col, zone: _ }) => {
+                        Some(LeftGesture::GridPending { row, col }) => {
                             let cur = (
                                 grid_view::row_at(py, self.scale_factor),
                                 grid_view::column_at(px, self.scale_factor),
@@ -1367,23 +1357,16 @@ impl baseview::WindowHandler for MultosisWindow {
                                     self.left_gesture = Some(LeftGesture::ResizeRegion(handle));
                                 } else if self.try_begin_region_move() {
                                     // left_gesture set inside try_begin_region_move
-                                } else if let Some((row, col, zone)) =
-                                    grid_view::cell_zone(px, py, self.scale_factor)
+                                } else if let Some((row, col)) =
+                                    grid_view::cell_at(px, py, self.scale_factor)
                                 {
                                     self.left_gesture =
-                                        Some(LeftGesture::GridPending { row, col, zone });
+                                        Some(LeftGesture::GridPending { row, col });
                                 }
                             }
                         }
                     },
                 }
-            }
-            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
-                button: baseview::MouseButton::Right,
-                ..
-            }) if self.view == View::Grid => {
-                // Right-click cell editing applies only in the grid view.
-                self.handle_grid_click(true);
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
                 button: baseview::MouseButton::Right,
@@ -1469,8 +1452,8 @@ impl baseview::WindowHandler for MultosisWindow {
                         self.mark_config_dirty();
                     }
                 }
-                if let Some(LeftGesture::GridPending { row, col, zone }) = self.left_gesture {
-                    self.commit_click(row, col, zone, false);
+                if let Some(LeftGesture::GridPending { row, col }) = self.left_gesture {
+                    self.commit_click(row, col);
                 }
                 self.left_gesture = None;
             }

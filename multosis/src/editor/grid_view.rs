@@ -3,7 +3,7 @@
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §7.
 
-use crate::grid::{Direction, Grid, LoopRegion, COLS, ROWS};
+use crate::grid::{Grid, LoopRegion, COLS, ROWS};
 use crate::wavefront_display::WavefrontDisplay;
 use tiny_skia::Pixmap;
 use tiny_skia_widgets as widgets;
@@ -65,30 +65,6 @@ pub fn cell_at(px: f32, py: f32, scale: f32) -> Option<(usize, usize)> {
         return None;
     }
     Some((row, col))
-}
-
-/// A clickable zone within a cell: the centre, or one of the 8 send
-/// directions (the cell is split into a 3×3 — centre third + 8 surrounders).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum CellZone {
-    Center,
-    Send(Direction),
-}
-
-/// The cell and zone under physical-pixel point `(px, py)` at `scale`, or
-/// `None` if the point is outside the grid.
-pub fn cell_zone(px: f32, py: f32, scale: f32) -> Option<(usize, usize, CellZone)> {
-    let (row, col) = cell_at(px, py, scale)?;
-    let (cx, cy, w, h) = cell_rect(row, col, scale);
-    // Third index 0..3 within the cell, on each axis.
-    let tcol = (((px - cx) / w) * 3.0).floor().clamp(0.0, 2.0) as i32;
-    let trow = (((py - cy) / h) * 3.0).floor().clamp(0.0, 2.0) as i32;
-    if trow == 1 && tcol == 1 {
-        return Some((row, col, CellZone::Center));
-    }
-    // A non-centre third maps to a unit (drow, dcol) step.
-    let dir = Direction::from_delta(trow - 1, tcol - 1)?;
-    Some((row, col, CellZone::Send(dir)))
 }
 
 /// One draggable edge of the loop-region rectangle.
@@ -328,58 +304,10 @@ pub fn cells_between(a: (usize, usize), b: (usize, usize)) -> Vec<(usize, usize)
     out
 }
 
-/// Apply a click on cell `(row, col)`'s `zone` to the grid. A left click
-/// (`right == false`) toggles a send direction (octant) or the `enabled`
-/// flag (centre); a right click toggles the `is_start` flag (centre only)
-/// and does nothing on an octant.
-pub fn apply_grid_click(grid: &mut Grid, row: usize, col: usize, zone: CellZone, right: bool) {
+/// Toggle the `enabled` flag of the cell at `(row, col)`.
+pub fn apply_grid_click(grid: &mut Grid, row: usize, col: usize) {
     let cell = grid.cell_mut(row, col);
-    match (zone, right) {
-        (CellZone::Send(dir), false) => cell.toggle_send(dir),
-        (CellZone::Center, false) => cell.enabled = !cell.enabled,
-        (CellZone::Center, true) => cell.is_start = !cell.is_start,
-        (CellZone::Send(_), true) => {} // right-click on an octant: ignored
-    }
-}
-
-/// Logical pixels the arrowhead tip is held in from the cell edge / corner.
-const ARROW_INSET: f32 = 1.5;
-/// Arrowhead length along the send direction, as a fraction of the cell side.
-const ARROW_LEN_FRAC: f32 = 0.22;
-/// Arrowhead half-width perpendicular to the direction, fraction of the side.
-const ARROW_HALFWIDTH_FRAC: f32 = 0.13;
-
-/// The three triangle vertices of the send-direction arrowhead for a cell
-/// centred at `(cx, cy)` with side `w`. Vertex 0 is the outward-pointing tip:
-/// at the edge midpoint for a cardinal direction, at the cell corner for a
-/// diagonal — held `ARROW_INSET` logical px inside the cell so nothing
-/// overhangs into the inter-cell gap.
-pub fn arrowhead_vertices(cx: f32, cy: f32, w: f32, dir: Direction, scale: f32) -> [(f32, f32); 3] {
-    let (dr, dc) = dir.delta();
-    // Unit vector along the send direction (x = dc, y = dr).
-    let (fx, fy) = (dc as f32, dr as f32);
-    let len = (fx * fx + fy * fy).sqrt();
-    let (ux, uy) = (fx / len, fy / len);
-    // Unit perpendicular.
-    let (perp_x, perp_y) = (-uy, ux);
-    // Distance from the centre to the boundary along `dir`: half a side for a
-    // cardinal, half the diagonal for a diagonal.
-    let diagonal = dr != 0 && dc != 0;
-    let boundary = if diagonal {
-        0.5 * w * std::f32::consts::SQRT_2
-    } else {
-        0.5 * w
-    };
-    let tip_dist = boundary - ARROW_INSET * scale;
-    let tip = (cx + ux * tip_dist, cy + uy * tip_dist);
-    let head_len = ARROW_LEN_FRAC * w;
-    let half_w = ARROW_HALFWIDTH_FRAC * w;
-    let base = (tip.0 - ux * head_len, tip.1 - uy * head_len);
-    [
-        tip,
-        (base.0 + perp_x * half_w, base.1 + perp_y * half_w),
-        (base.0 - perp_x * half_w, base.1 - perp_y * half_w),
-    ]
+    cell.enabled = !cell.enabled;
 }
 
 /// Cell background when the cell is enabled.
@@ -390,42 +318,12 @@ fn color_cell_enabled() -> tiny_skia::Color {
 fn color_cell_disabled() -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(0x20, 0x22, 0x29, 0xFF)
 }
-/// A lit send-direction arrowhead.
-fn color_send() -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba8(0x86, 0xa6, 0xe8, 0xFF)
-}
-/// A start-cell marker.
-fn color_start() -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba8(0x5f, 0xd0, 0x9a, 0xFF)
-}
 /// The loop-region outline.
 fn color_loop() -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(0x4f, 0xc3, 0xf7, 0xFF)
 }
 
-/// Fill a triangle with `color`, anti-aliased, via tiny-skia.
-fn fill_triangle(pixmap: &mut Pixmap, verts: [(f32, f32); 3], color: tiny_skia::Color) {
-    let mut pb = tiny_skia::PathBuilder::new();
-    pb.move_to(verts[0].0, verts[0].1);
-    pb.line_to(verts[1].0, verts[1].1);
-    pb.line_to(verts[2].0, verts[2].1);
-    pb.close();
-    let Some(path) = pb.finish() else {
-        return;
-    };
-    let mut paint = tiny_skia::Paint::default();
-    paint.set_color(color);
-    paint.anti_alias = true;
-    pixmap.fill_path(
-        &path,
-        &paint,
-        tiny_skia::FillRule::Winding,
-        tiny_skia::Transform::identity(),
-        None,
-    );
-}
-
-/// Draw one cell's background, send pips, and start marker.
+/// Draw one cell's background. The cell shade reflects `enabled` only.
 fn draw_cell(pixmap: &mut Pixmap, row: usize, col: usize, cell: &crate::grid::Cell, scale: f32) {
     let (x, y, w, h) = cell_rect(row, col, scale);
     let gap = 1.0 * scale;
@@ -436,30 +334,6 @@ fn draw_cell(pixmap: &mut Pixmap, row: usize, col: usize, cell: &crate::grid::Ce
         color_cell_disabled()
     };
     widgets::draw_rect(pixmap, x + gap, y + gap, w - 2.0 * gap, h - 2.0 * gap, bg);
-
-    // Send arrowheads: a triangle pointing the way each trigger flows.
-    let cx = x + w / 2.0;
-    let cy = y + h / 2.0;
-    for dir in Direction::ALL {
-        if !cell.sends_to(dir) {
-            continue;
-        }
-        let verts = arrowhead_vertices(cx, cy, w, dir, scale);
-        fill_triangle(pixmap, verts, color_send());
-    }
-
-    // Start marker: a thin inset outline.
-    if cell.is_start {
-        widgets::draw_rect_outline(
-            pixmap,
-            x + gap,
-            y + gap,
-            w - 2.0 * gap,
-            h - 2.0 * gap,
-            color_start(),
-            1.5 * scale,
-        );
-    }
 }
 
 /// Draw every grid cell into `pixmap` (the cacheable part of the grid — no
@@ -645,6 +519,16 @@ pub fn draw_status(pixmap: &mut Pixmap, tr: &mut widgets::TextRenderer, scale: f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_grid_click_toggles_the_whole_cell() {
+        let mut g = Grid::default_routing();
+        assert!(g.cell(4, 9).enabled);
+        apply_grid_click(&mut g, 4, 9); // any point on the cell
+        assert!(!g.cell(4, 9).enabled, "first click turns the cell off");
+        apply_grid_click(&mut g, 4, 9);
+        assert!(g.cell(4, 9).enabled, "second click turns it back on");
+    }
 
     #[test]
     fn grid_cache_matches_an_uncached_cell_render() {
@@ -926,78 +810,6 @@ mod tests {
         assert_eq!(cell_at(10.0, 5.0, 1.0), None);
         // A point past the grid is not a cell.
         assert_eq!(cell_at(100_000.0, 100_000.0, 1.0), None);
-    }
-
-    #[test]
-    fn cell_zone_centre_third_is_center() {
-        // The middle of cell (4, 6) resolves to that cell's Center zone.
-        let (x, y, w, h) = cell_rect(4, 6, 1.0);
-        let z = cell_zone(x + w / 2.0, y + h / 2.0, 1.0);
-        assert_eq!(z, Some((4, 6, CellZone::Center)));
-    }
-
-    #[test]
-    fn cell_zone_edges_map_to_directions() {
-        let (x, y, w, h) = cell_rect(4, 6, 1.0);
-        // Top-centre third -> North.
-        let top = cell_zone(x + w / 2.0, y + h / 6.0, 1.0);
-        assert_eq!(top, Some((4, 6, CellZone::Send(Direction::N))));
-        // Right-centre third -> East.
-        let right = cell_zone(x + w * 5.0 / 6.0, y + h / 2.0, 1.0);
-        assert_eq!(right, Some((4, 6, CellZone::Send(Direction::E))));
-        // Bottom-right third -> South-East.
-        let se = cell_zone(x + w * 5.0 / 6.0, y + h * 5.0 / 6.0, 1.0);
-        assert_eq!(se, Some((4, 6, CellZone::Send(Direction::SE))));
-    }
-
-    #[test]
-    fn cell_zone_outside_the_grid_is_none() {
-        assert_eq!(cell_zone(10.0, 5.0, 1.0), None); // status strip
-        assert_eq!(cell_zone(-5.0, 200.0, 1.0), None); // left of grid
-    }
-
-    #[test]
-    fn left_click_octant_toggles_a_send() {
-        let mut g = Grid::default_routing(); // every cell sends E only
-        apply_grid_click(&mut g, 2, 3, CellZone::Send(Direction::S), false);
-        assert!(g.cell(2, 3).sends_to(Direction::S));
-        // A second left click on the same octant toggles it back off.
-        apply_grid_click(&mut g, 2, 3, CellZone::Send(Direction::S), false);
-        assert!(!g.cell(2, 3).sends_to(Direction::S));
-        // The pre-existing East send is untouched.
-        assert!(g.cell(2, 3).sends_to(Direction::E));
-    }
-
-    #[test]
-    fn left_click_centre_toggles_enabled() {
-        let mut g = Grid::default_routing(); // every cell enabled
-        apply_grid_click(&mut g, 5, 5, CellZone::Center, false);
-        assert!(!g.cell(5, 5).enabled);
-        apply_grid_click(&mut g, 5, 5, CellZone::Center, false);
-        assert!(g.cell(5, 5).enabled);
-    }
-
-    #[test]
-    fn right_click_centre_toggles_start() {
-        let mut g = Grid::default_routing();
-        // Column 7 is not a start cell by default.
-        assert!(!g.cell(1, 7).is_start);
-        apply_grid_click(&mut g, 1, 7, CellZone::Center, true);
-        assert!(g.cell(1, 7).is_start);
-        apply_grid_click(&mut g, 1, 7, CellZone::Center, true);
-        assert!(!g.cell(1, 7).is_start);
-    }
-
-    #[test]
-    fn right_click_octant_is_ignored() {
-        let mut g = Grid::default_routing();
-        let before = *g.cell(3, 3);
-        apply_grid_click(&mut g, 3, 3, CellZone::Send(Direction::W), true);
-        assert_eq!(
-            *g.cell(3, 3),
-            before,
-            "right-click on an octant does nothing"
-        );
     }
 
     #[test]
@@ -1361,64 +1173,6 @@ mod tests {
             let dc = (pair[0].1 as i32 - pair[1].1 as i32).abs();
             assert!(dr <= 1 && dc <= 1 && (dr + dc) > 0, "gap between {pair:?}");
         }
-    }
-
-    #[test]
-    fn arrowhead_vertices_stay_within_the_cell() {
-        let (cx, cy, w) = (100.0_f32, 100.0_f32, 33.0_f32);
-        let (left, right) = (cx - w / 2.0, cx + w / 2.0);
-        let (top, bottom) = (cy - w / 2.0, cy + w / 2.0);
-        for dir in Direction::ALL {
-            for (vx, vy) in arrowhead_vertices(cx, cy, w, dir, 1.0) {
-                assert!(
-                    vx >= left && vx <= right && vy >= top && vy <= bottom,
-                    "{dir:?} vertex ({vx}, {vy}) outside cell [{left}..{right}, {top}..{bottom}]"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn arrowhead_tip_points_outward() {
-        let (cx, cy, w) = (100.0_f32, 100.0_f32, 33.0_f32);
-        for dir in Direction::ALL {
-            let verts = arrowhead_vertices(cx, cy, w, dir, 1.0);
-            let (dr, dc) = dir.delta();
-            let (fx, fy) = (dc as f32, dr as f32);
-            let len = (fx * fx + fy * fy).sqrt();
-            let (ux, uy) = (fx / len, fy / len);
-            // Project each vertex onto the send direction; vertex 0 (the tip)
-            // must be the furthest out.
-            let proj = |(vx, vy): (f32, f32)| (vx - cx) * ux + (vy - cy) * uy;
-            let tip = proj(verts[0]);
-            assert!(tip > proj(verts[1]), "{dir:?}: tip not outermost vs v1");
-            assert!(tip > proj(verts[2]), "{dir:?}: tip not outermost vs v2");
-        }
-    }
-
-    #[test]
-    fn arrowhead_cardinal_tip_on_edge_midline() {
-        let (cx, cy, w) = (100.0_f32, 100.0_f32, 33.0_f32);
-        // East tip: on the horizontal centreline, to the right of centre.
-        let e = arrowhead_vertices(cx, cy, w, Direction::E, 1.0)[0];
-        assert!((e.1 - cy).abs() < 0.01, "E tip off the midline: {e:?}");
-        assert!(e.0 > cx, "E tip not to the right: {e:?}");
-        // North tip: on the vertical centreline, above centre.
-        let n = arrowhead_vertices(cx, cy, w, Direction::N, 1.0)[0];
-        assert!((n.0 - cx).abs() < 0.01, "N tip off the midline: {n:?}");
-        assert!(n.1 < cy, "N tip not above centre: {n:?}");
-    }
-
-    #[test]
-    fn arrowhead_diagonal_tip_near_corner() {
-        let (cx, cy, w) = (100.0_f32, 100.0_f32, 33.0_f32);
-        let ne = arrowhead_vertices(cx, cy, w, Direction::NE, 1.0)[0];
-        let corner = (cx + w / 2.0, cy - w / 2.0);
-        let dist = ((ne.0 - corner.0).powi(2) + (ne.1 - corner.1).powi(2)).sqrt();
-        assert!(
-            dist < 3.0,
-            "NE tip {ne:?} not near corner {corner:?} (dist {dist})"
-        );
     }
 
     #[test]
