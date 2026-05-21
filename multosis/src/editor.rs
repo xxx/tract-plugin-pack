@@ -675,8 +675,14 @@ impl MultosisWindow {
                     .position(|k| *k == self.selected_track_effect().kind)
                     .unwrap_or(0);
                 let win = (self.physical_width as f32, self.physical_height as f32);
-                self.effect_dropdown
-                    .open(EffectAction::Kind, lay.kind, &items, current, false, win);
+                self.effect_dropdown.open(
+                    EffectAction::Kind,
+                    lay.kind,
+                    &items,
+                    current,
+                    false,
+                    win,
+                );
             }
             EffectHit::Dial(i) => {
                 if self.effect_click.check_and_update(EffectHit::Dial(i)) {
@@ -1161,7 +1167,8 @@ impl MultosisWindow {
         // the items list depends on which one is open.
         if self.view == View::Effect && self.effect_dropdown.is_open() {
             let kind = self.selected_track_effect().kind;
-            let items: Vec<&'static str> = if self.effect_dropdown.is_open_for(EffectAction::Target) {
+            let items: Vec<&'static str> = if self.effect_dropdown.is_open_for(EffectAction::Target)
+            {
                 effect_editor::target_items(kind)
             } else if self.effect_dropdown.is_open_for(EffectAction::Trigger) {
                 effect_editor::trigger_items().to_vec()
