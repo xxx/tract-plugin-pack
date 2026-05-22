@@ -33,11 +33,6 @@ pub struct AudioEngine {
     /// The most recent process block's active-row bitmask (bit `r` = row `r`
     /// had an enabled cell at the playhead column). Published to the editor.
     last_active: u16,
-    /// Per-row "had a new lit-and-enabled cell light up at a step-boundary
-    /// tick this block" mask. Accumulated within `process()` as each tick's
-    /// post-tick set is diffed against its pre-tick set, then consumed by the
-    /// next block's `Modulation::update_block` for the `CellLight` trigger.
-    pending_cell_lights: u16,
     /// Wet-bus compressor (soft-knee peak) — tames the +N×dry peak that the
     /// per-row effect sum produces when many rows are active simultaneously.
     /// Inserted between the per-sample wet sum and the dry/wet mix.
@@ -63,7 +58,6 @@ impl AudioEngine {
             track_effects: std::array::from_fn(TrackEffect::default_for_row),
             modulation: Modulation::new(),
             last_active: 0,
-            pending_cell_lights: 0,
             compressor: Compressor::new(),
             sample_rate: 48_000.0,
         }
@@ -75,9 +69,8 @@ impl AudioEngine {
         &mut self.effects[row]
     }
 
-    /// Test-only: the per-row mask of modulation triggers that fired on the
-    /// most recent `update_block` (the previous process block's accumulated
-    /// cell-light events).
+    /// Test-only: the per-row mask of modulation triggers that fired in the
+    /// most recent process block.
     #[cfg(test)]
     pub fn modulation_fires_for_test(&self) -> u16 {
         self.modulation.fires_last_block()
@@ -134,7 +127,6 @@ impl AudioEngine {
         self.modulation.reset();
         self.compressor.reset();
         self.last_active = 0;
-        self.pending_cell_lights = 0;
     }
 
     /// Steps since the last reset — exposed for the editor's status readout.
@@ -189,10 +181,14 @@ impl AudioEngine {
     /// Process one stereo block in place. `left`/`right` carry the dry input
     /// on entry and the mixed `dry + (wet - dry) * mix` output on return.
     ///
-    /// While `playing`, the clock advances and the playhead advances at
-    /// each step boundary; while stopped, the playhead is frozen and the
-    /// block is processed at the current column. `samples_per_step` comes
-    /// from `clock::samples_per_step`.
+    /// While `playing`, the clock advances and the playhead advances at each
+    /// step boundary; while stopped, the playhead is frozen and the block is
+    /// processed at the current column. `samples_per_step` comes from
+    /// `clock::samples_per_step`.
+    ///
+    /// The modulation is driven from the per-segment loop: `begin_block` once,
+    /// `advance_segment` per segment, and `fire` at each step boundary — so a
+    /// `CellLight` edge resets the row at the exact boundary sample.
     #[allow(clippy::too_many_arguments)]
     pub fn process(
         &mut self,
@@ -205,18 +201,11 @@ impl AudioEngine {
         grid: &Grid,
     ) {
         let n = left.len().min(right.len());
+        let sr = self.sample_rate as f64;
 
-        // Hand the modulation engine LAST block's accumulated cell-light
-        // events; clear the buffer so we start fresh for THIS block's ticks.
-        let cell_light_events = std::mem::take(&mut self.pending_cell_lights);
-        self.modulation.update_block(
-            n,
-            bpm,
-            self.sample_rate as f64,
-            cell_light_events,
-            &mut self.effects,
-            &self.track_effects,
-        );
+        // Block-rate modulation setup: FreeHz fires, and zero the fire mask.
+        self.modulation
+            .begin_block(n, sr, &mut self.effects, &self.track_effects);
 
         // Gather this block's step-boundary offsets (only while playing).
         let mut boundaries = [0usize; MAX_BOUNDARIES];
@@ -230,8 +219,10 @@ impl AudioEngine {
             });
         }
 
-        // Walk the block in segments split at each boundary; the playhead's
-        // column is constant within a segment.
+        // Walk the block in segments split at each boundary. Per segment:
+        // advance the per-MSEG-clock modulation, then render the audio. At a
+        // boundary, fire any newly-lit CellLight rows so the phase reset lands
+        // on the very next segment — sample-accurate, no cross-block delay.
         let mut active = active_rows(grid, &grid.loop_region, self.playhead.column());
         let mut cursor = 0usize;
         let mut bi = 0usize;
@@ -241,6 +232,13 @@ impl AudioEngine {
             } else {
                 n
             };
+            self.modulation.advance_segment(
+                seg_end - cursor,
+                bpm,
+                sr,
+                &mut self.effects,
+                &self.track_effects,
+            );
             for i in cursor..seg_end {
                 let (dry_l, dry_r) = (left[i], right[i]);
                 let (wet_l, wet_r) = self.process_sample(dry_l, dry_r, active);
@@ -252,8 +250,7 @@ impl AudioEngine {
             cursor = seg_end;
             if bi < n_boundaries {
                 // Snapshot the active-row mask BEFORE and AFTER the tick;
-                // rows that became active get a bit set in
-                // `pending_cell_lights` for the NEXT block's CellLight trigger.
+                // rows that became active fire their CellLight trigger now.
                 // Before the first tick the playhead has not started — nothing
                 // was playing, so the pre-tick set is empty. Without this gate
                 // an unstarted playhead reports column 0 and `tick()` snaps it
@@ -268,7 +265,7 @@ impl AudioEngine {
                 self.step += 1;
                 let after = active_rows(grid, &grid.loop_region, self.playhead.column());
                 let newly = after & !before;
-                self.pending_cell_lights |= newly;
+                self.modulation.fire(newly);
                 active = after;
                 bi += 1;
             }
@@ -439,37 +436,59 @@ mod tests {
 
     #[test]
     fn cell_light_trigger_fires_on_the_sequences_first_step() {
-        // Regression: the cell-light edge detector diffs the active-row mask
-        // before/after each playhead tick. On the FIRST tick the unstarted
-        // playhead reports column 0 and `tick()` snaps it to `col0`; for a
-        // `col0 == 0` loop zone `before` and `after` would both sample column
-        // 0 and `before == after` would suppress the opening step's CellLight
-        // event. The `Playhead::started()` gate makes the pre-start `before`
-        // set empty, so the first step fires.
+        // The cell-light edge detector diffs the active-row mask before/after
+        // each playhead tick. On the FIRST tick the unstarted playhead reports
+        // column 0 and `tick()` snaps it to `col0`; the `Playhead::started()`
+        // gate makes the pre-start `before` set empty so the opening step's
+        // CellLight event is not suppressed. With per-segment firing the
+        // trigger fires in the SAME block the cell lights — no one-block lag.
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
-        // Row 5 retriggers on a cell light; the rest stay Free.
         let mut mod_cfg: [crate::modulation::TrackModulation; ROWS] =
             std::array::from_fn(crate::modulation::TrackModulation::default_for_row);
         mod_cfg[5].trigger = crate::modulation::TriggerSource::CellLight;
         engine.set_modulation(&mod_cfg);
         // The default grid has every cell enabled and a full loop region, so
-        // row 5's cell at the playhead's first column (col0 == 0) is enabled.
+        // row 5's cell at the opening column (col0 == 0) is lit.
         let grid = Grid::default();
-        // Block 1: crosses the sample-0 step boundary — the playhead starts,
-        // row 5's cell lights, and the engine accumulates the event into
-        // `pending_cell_lights`.
+        // One block: the playhead starts, row 5's cell lights on the opening
+        // step, and its CellLight trigger fires within this same block.
         let mut l1 = [0.0_f32; 64];
         let mut r1 = [0.0_f32; 64];
         engine.process(&mut l1, &mut r1, true, 1000.0, 120.0, 1.0, &grid);
-        // Block 2: `update_block` consumes block 1's accumulated cell-light
-        // events; row 5's CellLight trigger fires for the opening step.
-        let mut l2 = [0.0_f32; 64];
-        let mut r2 = [0.0_f32; 64];
-        engine.process(&mut l2, &mut r2, true, 1000.0, 120.0, 1.0, &grid);
         assert!(
             engine.modulation_fires_for_test() & (1 << 5) != 0,
-            "row 5's CellLight trigger should fire on the sequence's first step"
+            "row 5's CellLight trigger should fire in the same block the cell lights"
+        );
+    }
+
+    #[test]
+    fn cell_light_fires_same_block_for_a_mid_block_step() {
+        // A row that only becomes active several columns in still fires in the
+        // block whose segment loop crosses that step boundary — not a block
+        // later. A small samples_per_step makes one block sweep several
+        // columns.
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let mut mod_cfg: [crate::modulation::TrackModulation; ROWS] =
+            std::array::from_fn(crate::modulation::TrackModulation::default_for_row);
+        mod_cfg[8].trigger = crate::modulation::TriggerSource::CellLight;
+        engine.set_modulation(&mod_cfg);
+        // Row 8 is disabled for columns 0..3 and enabled (the default) from
+        // column 3 on — so it goes newly-active partway through the block,
+        // not on the opening step.
+        let mut grid = Grid::default();
+        grid.cell_mut(8, 0).enabled = false;
+        grid.cell_mut(8, 1).enabled = false;
+        grid.cell_mut(8, 2).enabled = false;
+        // samples_per_step 10 over a 128-sample block crosses ~12 boundaries,
+        // so the playhead reaches column 3 well inside the block.
+        let mut l = [0.0_f32; 128];
+        let mut r = [0.0_f32; 128];
+        engine.process(&mut l, &mut r, true, 10.0, 120.0, 1.0, &grid);
+        assert!(
+            engine.modulation_fires_for_test() & (1 << 8) != 0,
+            "row 8's CellLight trigger fires in the same block its cell first lights"
         );
     }
 
@@ -581,7 +600,7 @@ mod tests {
         // of 0.5 must land exactly halfway between the dry (mix 0) and fully
         // wet (mix 1) lanes. `process_sample` is called directly so the
         // assertion isolates the lane blend — a fresh engine has amplitude
-        // 1.0 for every row (no `update_block`) and only row 0 is active, so
+        // 1.0 for every row (begin_block not yet called) and only row 0 is active, so
         // the result is exactly that one lane: no compressor, no global mix.
         use crate::effects::{EffectKind, TrackEffect};
 

@@ -190,11 +190,12 @@ pub struct Modulation {
     config: [TrackModulation; ROWS],
     /// Free-running phase per `[row][mseg]`.
     phases: [[f32; 3]; ROWS],
-    /// Latest per-row amplitude gain, set by `update_block`.
+    /// Latest per-row amplitude gain, set by `begin_block` / `advance_segment`.
     amplitudes: [f32; ROWS],
     /// Free-Hz oscillator phase per row, advances 0..1 and wraps modulo 1.
     hz_phases: [f32; ROWS],
-    /// The rows that fired this block (bit `r` set). Set by `update_block`.
+    /// The rows that fired this block (bit `r` set). Zeroed by `begin_block`,
+    /// then accumulated by the FreeHz path and by `fire`.
     fires: u16,
 }
 
@@ -228,7 +229,7 @@ impl Modulation {
         self.fires = 0;
     }
 
-    /// The latest amplitude gain for `row` (set by the previous `update_block`).
+    /// The latest amplitude gain for `row` (set by the modulation update).
     pub fn amplitude(&self, row: usize) -> f32 {
         self.amplitudes[row]
     }
@@ -354,30 +355,13 @@ impl Modulation {
         }
     }
 
-    /// Advance every MSEG one process block and apply. Thin wrapper over
-    /// `begin_block` + `fire` + `advance_segment`, kept while the engine
-    /// migrates to driving the modulation per-segment.
-    pub fn update_block(
-        &mut self,
-        block_len: usize,
-        bpm: f64,
-        sample_rate: f64,
-        cell_light_events: u16,
-        effects: &mut [EffectInstance; ROWS],
-        track_effects: &[TrackEffect; ROWS],
-    ) {
-        self.begin_block(block_len, sample_rate, effects, track_effects);
-        self.fire(cell_light_events);
-        self.advance_segment(block_len, bpm, sample_rate, effects, track_effects);
-    }
-
     /// Test helper: true when every MSEG phase is 0.
     #[cfg(test)]
     pub fn phases_all_zero(&self) -> bool {
         self.phases.iter().flatten().all(|&p| p == 0.0)
     }
 
-    /// Test helper: the rows that fired this block (set by `update_block`).
+    /// Test helper: the rows that fired this block.
     #[cfg(test)]
     pub fn fires_last_block(&self) -> u16 {
         self.fires
@@ -607,7 +591,8 @@ mod tests {
         let mut effects: [EffectInstance; ROWS] =
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
-        m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         // The default amplitude MSEG is flat at 1.0.
         for r in 0..ROWS {
             assert!(
@@ -633,7 +618,8 @@ mod tests {
         let mut effects: [EffectInstance; ROWS] =
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
-        m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         for r in 0..ROWS {
             assert_eq!(m.amplitude(r), 0.0, "row {r}");
         }
@@ -649,13 +635,15 @@ mod tests {
         }
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Run a block, then drive the effects with a signal and capture output.
-        m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         let after_first: Vec<f32> = (0..200)
             .map(|_| effects[0].process_sample(1.0, -1.0).0)
             .collect();
         // Advance many blocks so the cyclic MSEG has moved, re-apply.
         for _ in 0..400 {
-            m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+            m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+            m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         }
         let after_later: Vec<f32> = (0..200)
             .map(|_| effects[0].process_sample(1.0, -1.0).0)
@@ -674,7 +662,8 @@ mod tests {
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         for _ in 0..100 {
-            m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+            m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+            m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         }
         m.reset();
         // After reset, every phase is back at 0.
@@ -759,14 +748,21 @@ mod tests {
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Each block that signals a cell-light event for row 3 fires the
         // trigger; blocks with no event don't.
-        m.update_block(64, 120.0, 48_000.0, 1 << 3, &mut effects, &track_effects);
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        m.fire(1 << 3);
+        m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         assert_eq!(m.fires_last_block(), 1 << 3);
-        m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         assert_eq!(m.fires_last_block(), 0);
-        m.update_block(64, 120.0, 48_000.0, 1 << 3, &mut effects, &track_effects);
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        m.fire(1 << 3);
+        m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         assert_eq!(m.fires_last_block(), 1 << 3);
-        // A row that didn't get an event doesn't fire even if another row did.
-        m.update_block(64, 120.0, 48_000.0, 1 << 7, &mut effects, &track_effects);
+        // A row that didn't get an event doesn't fire even if another did.
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        m.fire(1 << 7);
+        m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         assert_eq!(m.fires_last_block(), 0);
     }
 
@@ -783,7 +779,8 @@ mod tests {
         // Run 100 blocks; expect ~100 fires (allow ±1 for the boundary).
         let mut fires = 0usize;
         for _ in 0..100 {
-            m.update_block(4800, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+            m.begin_block(4800, 48_000.0, &mut effects, &track_effects);
+            m.advance_segment(4800, 120.0, 48_000.0, &mut effects, &track_effects);
             if m.fires_last_block() & (1 << 5) != 0 {
                 fires += 1;
             }
@@ -805,7 +802,8 @@ mod tests {
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         for _ in 0..50 {
-            m.update_block(480, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+            m.begin_block(480, 48_000.0, &mut effects, &track_effects);
+            m.advance_segment(480, 120.0, 48_000.0, &mut effects, &track_effects);
             assert_eq!(m.fires_last_block() & 0b11, 0);
         }
     }
@@ -823,13 +821,16 @@ mod tests {
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Advance many blocks with no fires -> phases drift away from 0.
         for _ in 0..50 {
-            m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+            m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+            m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         }
         // At least one of row 2's three phases should be non-zero now.
         let any_nonzero = (0..3).any(|k| m.phase_for_test(2, k) > 1e-6);
         assert!(any_nonzero, "phases should have drifted with no fires");
         // Now fire row 2 (inactive->active edge).
-        m.update_block(64, 120.0, 48_000.0, 1 << 2, &mut effects, &track_effects);
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        m.fire(1 << 2);
+        m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         // After a fire, the row's three phases are reset to 0 (the per-MSEG
         // advance then re-runs from 0; the post-advance phase equals the
         // block's first dt, not 0). So the right test is: less than they
@@ -908,7 +909,9 @@ mod tests {
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         for _ in 0..20 {
-            m.update_block(64, 120.0, 48_000.0, 0xFFFF, &mut effects, &track_effects);
+            m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+            m.fire(0xFFFF);
+            m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
             assert_eq!(m.fires_last_block(), 0);
         }
     }
@@ -923,7 +926,8 @@ mod tests {
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Run a block so hz_phases advances above 0.
-        m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         m.reset();
         assert!(m.hz_phases_all_zero());
     }
