@@ -955,6 +955,26 @@ impl baseview::WindowHandler for MiffWindow {
                 }
                 return baseview::EventStatus::Captured;
             }
+            baseview::Event::Keyboard(ev) => {
+                if ev.state != keyboard_types::KeyState::Down {
+                    return baseview::EventStatus::Ignored;
+                }
+                match &ev.key {
+                    keyboard_types::Key::Delete | keyboard_types::Key::Backspace => {
+                        let changed = if let Ok(mut curve) = self.params.curve.lock() {
+                            self.mseg_state.delete_selection(&mut curve)
+                        } else {
+                            None
+                        };
+                        if changed == Some(MsegEdit::Changed) {
+                            self.rebake();
+                            return baseview::EventStatus::Captured;
+                        }
+                        return baseview::EventStatus::Ignored;
+                    }
+                    _ => return baseview::EventStatus::Ignored,
+                }
+            }
 
             _ => {}
         }

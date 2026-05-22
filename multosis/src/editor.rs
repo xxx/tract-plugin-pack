@@ -1580,6 +1580,32 @@ impl baseview::WindowHandler for MultosisWindow {
                 }
                 return baseview::EventStatus::Captured;
             }
+            baseview::Event::Keyboard(ev) => {
+                if ev.state != keyboard_types::KeyState::Down {
+                    return baseview::EventStatus::Ignored;
+                }
+                if self.view == View::Effect {
+                    match &ev.key {
+                        keyboard_types::Key::Delete | keyboard_types::Key::Backspace => {
+                            let sel = self.selected_mseg.min(2);
+                            let changed = if let Ok(mut modu) =
+                                self.params.track_modulation.lock()
+                            {
+                                let row = self.selected_track;
+                                self.mseg_edit.delete_selection(&mut modu[row].msegs[sel])
+                            } else {
+                                None
+                            };
+                            if changed == Some(widgets::mseg::MsegEdit::Changed) {
+                                self.mark_config_dirty();
+                                return baseview::EventStatus::Captured;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                return baseview::EventStatus::Ignored;
+            }
             _ => {}
         }
         baseview::EventStatus::Captured

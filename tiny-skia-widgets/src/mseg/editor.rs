@@ -746,6 +746,32 @@ impl MsegEditState {
         data.debug_assert_valid();
     }
 
+    /// Delete every selected node. Pinned endpoints (node 0 and the last
+    /// node) are skipped — they cannot be removed. Returns `Changed` if any
+    /// node was removed. Clears the selection.
+    pub fn delete_selection(&mut self, data: &mut MsegData) -> Option<MsegEdit> {
+        // Collect selected interior indices, then remove from the highest
+        // index down so earlier indices stay valid as the array shifts.
+        let mut idxs: Vec<usize> = (0..data.node_count)
+            .filter(|&i| self.is_node_selected(i) && i != 0 && i + 1 != data.node_count)
+            .collect();
+        idxs.sort_unstable();
+        let mut removed = false;
+        for &i in idxs.iter().rev() {
+            if data.remove_node(i) {
+                removed = true;
+            }
+        }
+        self.clear_selection();
+        self.drag = None;
+        self.hover = None;
+        if removed {
+            Some(MsegEdit::Changed)
+        } else {
+            None
+        }
+    }
+
     /// Insert a node snapped to the current time-grid cell's left edge and
     /// mark both it and its predecessor `stepped`, if the pointer has entered
     /// a new cell since the last paint. Used by stepped-draw.
@@ -1599,6 +1625,48 @@ mod tests {
         assert!(state.is_node_selected(1));
         assert!(state.is_node_selected(2));
         assert!(!state.is_node_selected(3));
+    }
+
+    // --- Task 4: delete_selection tests ---
+
+    #[test]
+    fn delete_selection_removes_selected_interior_nodes() {
+        let mut data = MsegData::default();
+        data.insert_node(0.25, 0.5); // node 1
+        data.insert_node(0.5, 0.5);  // node 2
+        data.insert_node(0.75, 0.5); // node 3
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        select_nodes(&mut state, &mut data, &l, &[1, 3]);
+        let ev = state.delete_selection(&mut data);
+        assert_eq!(ev, Some(MsegEdit::Changed));
+        // Started with 5 nodes (2 endpoints + 3 inserted); removed 2.
+        assert_eq!(data.node_count, 3);
+        assert_eq!(state.selection_count(), 0);
+    }
+
+    #[test]
+    fn delete_selection_skips_endpoints() {
+        let mut data = MsegData::default();
+        data.insert_node(0.5, 0.5); // node 1
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        // Select node 0 (endpoint) and node 1 (interior).
+        select_nodes(&mut state, &mut data, &l, &[1, 0]);
+        let ev = state.delete_selection(&mut data);
+        assert_eq!(ev, Some(MsegEdit::Changed));
+        // Node 1 removed; the two endpoints survive.
+        assert_eq!(data.node_count, 2);
+    }
+
+    #[test]
+    fn delete_selection_with_nothing_selected_is_a_noop() {
+        let mut data = MsegData::default();
+        data.insert_node(0.5, 0.5);
+        let mut state = MsegEditState::new();
+        let ev = state.delete_selection(&mut data);
+        assert_eq!(ev, None);
+        assert_eq!(data.node_count, 3);
     }
 
     #[test]
