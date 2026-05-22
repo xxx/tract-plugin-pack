@@ -696,6 +696,8 @@ impl MultosisWindow {
             EffectHit::MsegSelector(seg) => {
                 let old = self.selected_mseg;
                 self.selected_mseg = seg.min(2);
+                // Only clear when the selection actually changed; re-clicking
+                // the active MSEG must not discard the node selection.
                 if self.selected_mseg != old {
                     self.mseg_edit.clear_selection();
                 }
