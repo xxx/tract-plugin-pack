@@ -14,14 +14,15 @@ use tiny_skia_widgets::{advance, value_at_phase, MsegData, PlayMode, Polarity, S
 const ROWS: usize = 16;
 
 /// The event that causes a track's three MSEG phases to reset to 0.
-/// Per Phase 3 design — Free is the Phase 2b free-running default; CellLight
-/// fires on the row's inactive→active edge at the playhead; FreeHz fires
-/// every `1.0/hz` seconds independently of any sync.
+/// `Free` is the free-running default; `CellLight` fires on the row's
+/// inactive→active edge at the playhead; `CellStep` fires on every step the
+/// row is lit; `FreeHz` fires every `1.0/hz` seconds independently of sync.
 #[derive(Clone, Copy, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum TriggerSource {
     #[default]
     Free,
     CellLight,
+    CellStep,
     FreeHz {
         hz: f32,
     },
@@ -243,9 +244,9 @@ impl Modulation {
     /// Block-rate modulation setup, run once at the top of a process block.
     /// Zeroes `fires`, then for every `FreeHz` row advances its oscillator by
     /// the whole block, decides its fire, and evaluates and applies its three
-    /// MSEGs at the oscillator phase. `Free` and `CellLight` rows use the
-    /// per-MSEG `phases` clocks and are advanced by `advance_segment`; this
-    /// method does not touch them.
+    /// MSEGs at the oscillator phase. `Free`, `CellLight`, and `CellStep` rows
+    /// use the per-MSEG `phases` clocks and are advanced by `advance_segment`;
+    /// this method does not touch them.
     pub fn begin_block(
         &mut self,
         block_len: usize,
@@ -278,11 +279,11 @@ impl Modulation {
         }
     }
 
-    /// Advance every `Free` and `CellLight` row's three MSEGs by one segment
-    /// of `seg_len` samples, then evaluate and apply them. Called once per
-    /// segment from the engine's step-boundary segment loop. `FreeHz` rows are
-    /// handled by `begin_block` and skipped here. A zero-length segment is a
-    /// no-op.
+    /// Advance every `Free`, `CellLight`, and `CellStep` row's three MSEGs by
+    /// one segment of `seg_len` samples, then evaluate and apply them. Called
+    /// once per segment from the engine's step-boundary segment loop. `FreeHz`
+    /// rows are handled by `begin_block` and skipped here. A zero-length
+    /// segment is a no-op.
     ///
     /// Splitting a block into per-segment advances yields the same end-of-block
     /// phase as one whole-block advance only because every multosis MSEG is
@@ -314,16 +315,22 @@ impl Modulation {
         }
     }
 
-    /// Fire the `CellLight` trigger for the rows flagged in `newly_rows` (bit
-    /// `r` set = row `r` had a lit, enabled cell first appear under the
-    /// playhead). A firing row's three MSEG phases reset to 0 and its `fires`
-    /// bit is set. Rows whose trigger is not `CellLight` are ignored. Called
-    /// at a step boundary, so the reset takes effect on the very next segment.
-    pub fn fire(&mut self, newly_rows: u16) {
+    /// Fire the per-step modulation triggers at a step boundary. `newly_rows`
+    /// is the inactive→active edge mask (bit `r` = row `r` first lit this
+    /// step); `active_rows` is the post-tick active mask (bit `r` = row `r`
+    /// has a lit, enabled cell under the playhead now). A `CellLight` row
+    /// fires if it is in `newly_rows`; a `CellStep` row fires if it is in
+    /// `active_rows`; `Free` and `FreeHz` rows never fire. A firing row's
+    /// three MSEG phases reset to 0 and its `fires` bit is set. Called at a
+    /// step boundary, so the reset takes effect on the very next segment.
+    pub fn fire(&mut self, newly_rows: u16, active_rows: u16) {
         for row in 0..ROWS {
-            if newly_rows & (1 << row) != 0
-                && matches!(self.config[row].trigger, TriggerSource::CellLight)
-            {
+            let reset = match self.config[row].trigger {
+                TriggerSource::CellLight => newly_rows & (1 << row) != 0,
+                TriggerSource::CellStep => active_rows & (1 << row) != 0,
+                TriggerSource::Free | TriggerSource::FreeHz { .. } => false,
+            };
+            if reset {
                 self.phases[row] = [0.0; 3];
                 self.fires |= 1 << row;
             }
@@ -699,6 +706,7 @@ mod tests {
         for src in [
             TriggerSource::Free,
             TriggerSource::CellLight,
+            TriggerSource::CellStep,
             TriggerSource::FreeHz { hz: 2.5 },
         ] {
             let json = serde_json::to_string(&src).unwrap();
@@ -755,19 +763,19 @@ mod tests {
         // Each block that signals a cell-light event for row 3 fires the
         // trigger; blocks with no event don't.
         m.begin_block(64, 48_000.0, &mut effects, &track_effects);
-        m.fire(1 << 3);
+        m.fire(1 << 3, 1 << 3);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         assert_eq!(m.fires_last_block(), 1 << 3);
         m.begin_block(64, 48_000.0, &mut effects, &track_effects);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         assert_eq!(m.fires_last_block(), 0);
         m.begin_block(64, 48_000.0, &mut effects, &track_effects);
-        m.fire(1 << 3);
+        m.fire(1 << 3, 1 << 3);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         assert_eq!(m.fires_last_block(), 1 << 3);
         // A row that didn't get an event doesn't fire even if another did.
         m.begin_block(64, 48_000.0, &mut effects, &track_effects);
-        m.fire(1 << 7);
+        m.fire(1 << 7, 1 << 7);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         assert_eq!(m.fires_last_block(), 0);
     }
@@ -835,7 +843,7 @@ mod tests {
         assert!(any_nonzero, "phases should have drifted with no fires");
         // Now fire row 2 (inactive->active edge).
         m.begin_block(64, 48_000.0, &mut effects, &track_effects);
-        m.fire(1 << 2);
+        m.fire(1 << 2, 1 << 2);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         // After a fire, the row's three phases are reset to 0 (the per-MSEG
         // advance then re-runs from 0; the post-advance phase equals the
@@ -916,7 +924,7 @@ mod tests {
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         for _ in 0..20 {
             m.begin_block(64, 48_000.0, &mut effects, &track_effects);
-            m.fire(0xFFFF);
+            m.fire(0xFFFF, 0xFFFF);
             m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
             assert_eq!(m.fires_last_block(), 0);
         }
@@ -974,7 +982,10 @@ mod tests {
         assert!(m.phase_for_test(3, 0) > 1e-6, "Free row drifted");
         // Fire rows 2, 3, 4 — only the CellLight row (2) resets and reports.
         m.begin_block(64, 48_000.0, &mut effects, &track_effects);
-        m.fire((1 << 2) | (1 << 3) | (1 << 4));
+        m.fire(
+            (1 << 2) | (1 << 3) | (1 << 4),
+            (1 << 2) | (1 << 3) | (1 << 4),
+        );
         assert_eq!(
             m.fires_last_block() & (1 << 2),
             1 << 2,
@@ -1026,6 +1037,60 @@ mod tests {
     }
 
     #[test]
+    fn fire_resets_cell_step_rows_on_every_active_step() {
+        let mut m = Modulation::new();
+        let mut cfg = std::array::from_fn(TrackModulation::default_for_row);
+        cfg[6].trigger = TriggerSource::CellStep;
+        m.set_config(&cfg);
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        // Drift row 6's phases away from 0.
+        for _ in 0..50 {
+            m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+            m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        }
+        assert!(m.phase_for_test(6, 0) > 1e-6, "row 6 drifted");
+        // A step where row 6 is active (in `active_rows`) but NOT newly-lit
+        // (absent from `newly_rows`) still fires CellStep — the case CellLight
+        // skips.
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        m.fire(0, 1 << 6);
+        assert_eq!(
+            m.phase_for_test(6, 0),
+            0.0,
+            "CellStep fires on an active, non-newly step"
+        );
+        assert_eq!(
+            m.fires_last_block() & (1 << 6),
+            1 << 6,
+            "CellStep sets its fires bit"
+        );
+        // It advances after the reset, then fires again on the next active step.
+        m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        assert!(
+            m.phase_for_test(6, 0) > 1e-6,
+            "row 6 advanced after the reset"
+        );
+        m.fire(0, 1 << 6);
+        assert_eq!(
+            m.phase_for_test(6, 0),
+            0.0,
+            "CellStep fires again on the next consecutive active step"
+        );
+        // A step where row 6 is NOT active does not fire.
+        m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        let drifted = m.phase_for_test(6, 0);
+        assert!(drifted > 1e-6);
+        m.fire(0, 0);
+        assert_eq!(
+            m.phase_for_test(6, 0),
+            drifted,
+            "no fire on a step where the row is inactive"
+        );
+    }
+
+    #[test]
     fn advance_segment_in_two_halves_around_a_fire_resets_at_the_split() {
         // After a `fire`, the next `advance_segment` advances from the reset
         // phase 0 — so splitting a 256-sample block as [100][fire][156] leaves
@@ -1047,7 +1112,7 @@ mod tests {
         // The block: a 100-sample segment, fire row 1, then a 156-sample segment.
         m.begin_block(256, 48_000.0, &mut effects, &track_effects);
         m.advance_segment(100, 120.0, 48_000.0, &mut effects, &track_effects);
-        m.fire(1 << 1);
+        m.fire(1 << 1, 1 << 1);
         m.advance_segment(156, 120.0, 48_000.0, &mut effects, &track_effects);
         let after_fire = m.phase_for_test(1, 1);
         // Expected: a from-0 advance over just the 156-sample tail.

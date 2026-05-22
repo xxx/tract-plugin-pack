@@ -188,7 +188,8 @@ impl AudioEngine {
     ///
     /// The modulation is driven from the per-segment loop: `begin_block` once,
     /// `advance_segment` per segment, and `fire` at each step boundary — so a
-    /// `CellLight` edge resets the row at the exact boundary sample.
+    /// `CellLight` edge or a `CellStep` active step resets its row at the
+    /// exact boundary sample.
     #[allow(clippy::too_many_arguments)]
     pub fn process(
         &mut self,
@@ -221,8 +222,8 @@ impl AudioEngine {
 
         // Walk the block in segments split at each boundary. Per segment:
         // advance the per-MSEG-clock modulation, then render the audio. At a
-        // boundary, fire any newly-lit CellLight rows so the phase reset lands
-        // on the very next segment — sample-accurate, no cross-block delay.
+        // boundary, fire the CellLight and CellStep rows so the phase reset
+        // lands on the very next segment — sample-accurate, no cross-block delay.
         let mut active = active_rows(grid, &grid.loop_region, self.playhead.column());
         let mut cursor = 0usize;
         let mut bi = 0usize;
@@ -249,8 +250,9 @@ impl AudioEngine {
             }
             cursor = seg_end;
             if bi < n_boundaries {
-                // Snapshot the active-row mask BEFORE and AFTER the tick;
-                // rows that became active fire their CellLight trigger now.
+                // Snapshot the active-row mask BEFORE and AFTER the tick.
+                // `newly` (became-active) fires CellLight; the post-tick
+                // `after` mask fires CellStep.
                 // Before the first tick the playhead has not started — nothing
                 // was playing, so the pre-tick set is empty. Without this gate
                 // an unstarted playhead reports column 0 and `tick()` snaps it
@@ -265,7 +267,7 @@ impl AudioEngine {
                 self.step += 1;
                 let after = active_rows(grid, &grid.loop_region, self.playhead.column());
                 let newly = after & !before;
-                self.modulation.fire(newly);
+                self.modulation.fire(newly, after);
                 active = after;
                 bi += 1;
             }
@@ -664,6 +666,47 @@ mod tests {
         assert_eq!(
             engine.effects_mut_for_test(0).kind(),
             crate::effects::EffectKind::Bitcrush
+        );
+    }
+
+    #[test]
+    fn cell_step_trigger_fires_on_every_step_not_just_the_edge() {
+        // The default grid enables every cell, so every row is active at
+        // every column. After the opening step a row stays continuously
+        // active — no inactive->active edge — so CellLight fires only once
+        // (block 1) while CellStep fires on every step (both blocks).
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let mut mod_cfg: [crate::modulation::TrackModulation; ROWS] =
+            std::array::from_fn(crate::modulation::TrackModulation::default_for_row);
+        mod_cfg[4].trigger = crate::modulation::TriggerSource::CellLight;
+        mod_cfg[9].trigger = crate::modulation::TriggerSource::CellStep;
+        engine.set_modulation(&mod_cfg);
+        let grid = Grid::default();
+        // Block 1: the playhead starts; both rows fire on the opening step.
+        let mut l1 = [0.0_f32; 64];
+        let mut r1 = [0.0_f32; 64];
+        engine.process(&mut l1, &mut r1, true, 10.0, 120.0, 1.0, &grid);
+        assert!(
+            engine.modulation_fires_for_test() & (1 << 4) != 0,
+            "CellLight fires on the opening step"
+        );
+        assert!(
+            engine.modulation_fires_for_test() & (1 << 9) != 0,
+            "CellStep fires on the opening step"
+        );
+        // Block 2: both rows stay continuously active (no new edge).
+        let mut l2 = [0.0_f32; 64];
+        let mut r2 = [0.0_f32; 64];
+        engine.process(&mut l2, &mut r2, true, 10.0, 120.0, 1.0, &grid);
+        assert_eq!(
+            engine.modulation_fires_for_test() & (1 << 4),
+            0,
+            "CellLight does not fire on a non-edge step"
+        );
+        assert!(
+            engine.modulation_fires_for_test() & (1 << 9) != 0,
+            "CellStep fires on every step, including non-edge steps"
         );
     }
 

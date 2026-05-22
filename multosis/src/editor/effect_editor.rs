@@ -362,8 +362,8 @@ pub fn target_to_item(target: Option<usize>) -> usize {
 }
 
 /// The trigger-source dropdown items, in `TriggerSource` discriminant order.
-pub fn trigger_items() -> [&'static str; 3] {
-    ["Free run", "Cell light", "Free Hz"]
+pub fn trigger_items() -> [&'static str; 4] {
+    ["Free run", "Cell light", "Cell step", "Free Hz"]
 }
 
 /// Build a `TriggerSource` from a dropdown item index. `carried_hz` is the
@@ -372,6 +372,7 @@ pub fn trigger_from_item(item: usize, carried_hz: f32) -> TriggerSource {
     match item {
         0 => TriggerSource::Free,
         1 => TriggerSource::CellLight,
+        2 => TriggerSource::CellStep,
         _ => TriggerSource::FreeHz { hz: carried_hz },
     }
 }
@@ -381,7 +382,8 @@ pub fn trigger_to_item(src: TriggerSource) -> usize {
     match src {
         TriggerSource::Free => 0,
         TriggerSource::CellLight => 1,
-        TriggerSource::FreeHz { .. } => 2,
+        TriggerSource::CellStep => 2,
+        TriggerSource::FreeHz { .. } => 3,
     }
 }
 
@@ -549,6 +551,7 @@ pub fn draw_trigger_controls(
     let label = match trigger {
         TriggerSource::Free => "Free run",
         TriggerSource::CellLight => "Cell light",
+        TriggerSource::CellStep => "Cell step",
         TriggerSource::FreeHz { .. } => "Free Hz",
     };
     widgets::dropdown::draw_dropdown_trigger(pixmap, tr, lay.trigger, label, trigger_dropdown_open);
@@ -751,20 +754,22 @@ mod tests {
     }
 
     #[test]
-    fn trigger_items_lists_three_sources() {
+    fn trigger_items_lists_the_four_sources() {
         let items = trigger_items();
-        assert_eq!(items, ["Free run", "Cell light", "Free Hz"]);
+        assert_eq!(items, ["Free run", "Cell light", "Cell step", "Free Hz"]);
     }
 
     #[test]
     fn trigger_from_and_to_item_round_trip() {
-        // 0 -> Free, 1 -> CellLight, 2 -> FreeHz{<carried hz>}.
+        // 0 -> Free, 1 -> CellLight, 2 -> CellStep, 3 -> FreeHz{<carried hz>}.
         assert_eq!(trigger_from_item(0, 1.0), TriggerSource::Free);
         assert_eq!(trigger_from_item(1, 1.0), TriggerSource::CellLight);
-        assert_eq!(trigger_from_item(2, 3.5), TriggerSource::FreeHz { hz: 3.5 });
+        assert_eq!(trigger_from_item(2, 1.0), TriggerSource::CellStep);
+        assert_eq!(trigger_from_item(3, 3.5), TriggerSource::FreeHz { hz: 3.5 });
         assert_eq!(trigger_to_item(TriggerSource::Free), 0);
         assert_eq!(trigger_to_item(TriggerSource::CellLight), 1);
-        assert_eq!(trigger_to_item(TriggerSource::FreeHz { hz: 99.0 }), 2);
+        assert_eq!(trigger_to_item(TriggerSource::CellStep), 2);
+        assert_eq!(trigger_to_item(TriggerSource::FreeHz { hz: 99.0 }), 3);
     }
 
     #[test]
