@@ -6,15 +6,30 @@ use multosis::engine::AudioEngine;
 use multosis::grid::Grid;
 use multosis::modulation::TrackModulation;
 
-fn bench_process_full_grid_mixed_effects(c: &mut Criterion) {
-    // Worst-case-ish baseline: every cell enabled (every row active each
-    // step), each row running a real effect with continuous modulation.
-    // 512-sample blocks at 48 kHz — a typical DAW buffer.
+/// Build an engine with the default modulation on every row and `kind`
+/// installed on every row (or `None` for the all-silence baseline).
+fn engine_uniform(kind: Option<EffectKind>) -> AudioEngine {
     let mut engine = AudioEngine::new();
     engine.set_sample_rate(48_000.0);
+    let mut effects: [TrackEffect; 16] = std::array::from_fn(TrackEffect::default_for_row);
+    if let Some(k) = kind {
+        for te in effects.iter_mut() {
+            te.kind = k;
+            te.params = default_params_for_kind(k);
+            te.mix = 1.0;
+        }
+    }
+    engine.set_effects(&effects);
+    let modulation: [TrackModulation; 16] = std::array::from_fn(TrackModulation::default_for_row);
+    engine.set_modulation(&modulation);
+    engine
+}
 
-    // Half Lowpass, half Bitcrush — covers two distinct DSP shapes so the
-    // bench doesn't accidentally measure only one effect kind.
+/// Engine with half Lowpass / half Bitcrush — the "loaded" workload that
+/// covers two distinct DSP shapes in one bench.
+fn engine_mixed() -> AudioEngine {
+    let mut engine = AudioEngine::new();
+    engine.set_sample_rate(48_000.0);
     let mut effects: [TrackEffect; 16] = std::array::from_fn(TrackEffect::default_for_row);
     for (i, te) in effects.iter_mut().enumerate() {
         te.kind = if i % 2 == 0 {
@@ -26,43 +41,114 @@ fn bench_process_full_grid_mixed_effects(c: &mut Criterion) {
         te.mix = 1.0;
     }
     engine.set_effects(&effects);
-
-    // Default modulation: every row has a cyclic triangle on assignable
-    // MSEG 1, sweeping the effect's parameter 0 each block.
     let modulation: [TrackModulation; 16] = std::array::from_fn(TrackModulation::default_for_row);
     engine.set_modulation(&modulation);
+    engine
+}
 
+/// One `process` iteration: refill the buffers (so feedback/filtering
+/// doesn't accumulate across iterations) then call `process`.
+fn run_process(
+    engine: &mut AudioEngine,
+    left: &mut [f32],
+    right: &mut [f32],
+    playing: bool,
+    samples_per_step: f64,
+    grid: &Grid,
+) {
+    left.fill(0.3);
+    right.fill(0.3);
+    engine.process(
+        black_box(left),
+        black_box(right),
+        black_box(playing),
+        black_box(samples_per_step),
+        black_box(120.0),
+        black_box(1.0),
+        black_box(grid),
+    );
+}
+
+fn bench_process(c: &mut Criterion) {
     let grid = Grid::default();
-
-    let mut left = vec![0.3_f32; 512];
-    let mut right = vec![0.3_f32; 512];
-
     let mut group = c.benchmark_group("audio_engine");
-    group.throughput(Throughput::Elements(left.len() as u64));
-    group.bench_function("process_512samp_16rows_mixed", |b| {
-        b.iter(|| {
-            // Refill the buffers each iter so the input is the same every time
-            // (effects with feedback would otherwise diverge as iterations
-            // mutated the buffer in place).
-            for x in left.iter_mut() {
-                *x = 0.3;
-            }
-            for x in right.iter_mut() {
-                *x = 0.3;
-            }
-            engine.process(
-                black_box(&mut left),
-                black_box(&mut right),
-                black_box(true),
-                black_box(1000.0),
-                black_box(120.0),
-                black_box(1.0),
-                black_box(&grid),
-            );
+
+    // Headline workload: every row active, half Lowpass / half Bitcrush,
+    // modulation running, transport playing, 512-sample block.
+    {
+        let mut engine = engine_mixed();
+        let mut left = vec![0.3_f32; 512];
+        let mut right = vec![0.3_f32; 512];
+        group.throughput(Throughput::Elements(left.len() as u64));
+        group.bench_function("process_512samp_mixed", |b| {
+            b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid));
         });
-    });
+    }
+
+    // Structural baseline: every row's effect is `None` (silence). The
+    // delta from `_mixed` is the actual Lowpass+Bitcrush DSP cost; what
+    // remains is the per-row infrastructure (active loop, modulation,
+    // compressor, dry/wet mix).
+    {
+        let mut engine = engine_uniform(None);
+        let mut left = vec![0.3_f32; 512];
+        let mut right = vec![0.3_f32; 512];
+        group.throughput(Throughput::Elements(left.len() as u64));
+        group.bench_function("process_512samp_silence", |b| {
+            b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid));
+        });
+    }
+
+    // Idle: loaded with effects but transport stopped — measures the
+    // "plugin sitting in the chain doing nothing visible" cost.
+    {
+        let mut engine = engine_mixed();
+        let mut left = vec![0.3_f32; 512];
+        let mut right = vec![0.3_f32; 512];
+        group.throughput(Throughput::Elements(left.len() as u64));
+        group.bench_function("process_512samp_idle", |b| {
+            b.iter(|| run_process(&mut engine, &mut left, &mut right, false, 1000.0, &grid));
+        });
+    }
+
+    // Many step boundaries per block: small `samples_per_step` → ~50 ticks
+    // in a 512-sample block, exercising the per-segment modulation update
+    // and the cell-light fire path.
+    {
+        let mut engine = engine_mixed();
+        let mut left = vec![0.3_f32; 512];
+        let mut right = vec![0.3_f32; 512];
+        group.throughput(Throughput::Elements(left.len() as u64));
+        group.bench_function("process_512samp_many_boundaries", |b| {
+            b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 10.0, &grid));
+        });
+    }
+
+    // Small buffer — low-latency hosts. Per-block overhead amortizes over
+    // fewer samples so the per-sample cost is highest here.
+    {
+        let mut engine = engine_mixed();
+        let mut left = vec![0.3_f32; 64];
+        let mut right = vec![0.3_f32; 64];
+        group.throughput(Throughput::Elements(left.len() as u64));
+        group.bench_function("process_64samp_mixed", |b| {
+            b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid));
+        });
+    }
+
+    // Large buffer — common modern DAW setting.
+    {
+        let mut engine = engine_mixed();
+        let mut left = vec![0.3_f32; 1024];
+        let mut right = vec![0.3_f32; 1024];
+        group.throughput(Throughput::Elements(left.len() as u64));
+        group.bench_function("process_1024samp_mixed", |b| {
+            b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid));
+        });
+    }
+
     group.finish();
 }
 
-criterion_group!(benches, bench_process_full_grid_mixed_effects);
+criterion_group!(benches, bench_process);
 criterion_main!(benches);
