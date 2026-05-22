@@ -464,8 +464,9 @@ In `multosis/src/engine.rs`:
         let sr = self.sample_rate as f64;
 
         // Block-rate modulation setup: FreeHz fires, and zero the fire mask.
+        // `begin_block` takes no `bpm` — FreeHz advancing is sample-rate-only.
         self.modulation
-            .begin_block(n, bpm, sr, &mut self.effects, &self.track_effects);
+            .begin_block(n, sr, &mut self.effects, &self.track_effects);
 
         // Gather this block's step-boundary offsets (only while playing).
         let mut boundaries = [0usize; MAX_BOUNDARIES];
@@ -696,4 +697,4 @@ EOF
 
 **Placeholder scan:** No TBD/TODO. Every code step shows complete code. Every test migration in Task 2 Step 5c is spelled out per test, no "similar to".
 
-**Type consistency:** `begin_block(block_len: usize, bpm: f64, sample_rate: f64, effects: &mut [EffectInstance; ROWS], track_effects: &[TrackEffect; ROWS])`, `advance_segment(seg_len: usize, …)`, `fire(newly_rows: u16)`, private `apply_mseg(row: usize, k: usize, …)` — used consistently in Task 1's wrapper, Task 2's `process`, and every test. `mseg_phase_delta` / `advance` / `value_at_phase` / `assignable_value` are existing items reused unchanged. `modulation_fires_for_test()` (engine) and `fires_last_block()` / `phase_for_test()` (modulation) are existing `#[cfg(test)]` helpers, kept.
+**Type consistency:** `begin_block(block_len: usize, sample_rate: f64, effects: &mut [EffectInstance; ROWS], track_effects: &[TrackEffect; ROWS])` (no `bpm` — FreeHz advancing is sample-rate-only), `advance_segment(seg_len: usize, bpm: f64, sample_rate: f64, …)`, `fire(newly_rows: u16)`, private `apply_mseg(row: usize, k: usize, …)` — used consistently in Task 1's wrapper, Task 2's `process`, and every test. `mseg_phase_delta` / `advance` / `value_at_phase` / `assignable_value` are existing items reused unchanged. `modulation_fires_for_test()` (engine) and `fires_last_block()` / `phase_for_test()` (modulation) are existing `#[cfg(test)]` helpers, kept.
