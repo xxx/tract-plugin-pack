@@ -1426,7 +1426,13 @@ impl baseview::WindowHandler for MultosisWindow {
                         None => {
                             // The effect editor owns its own main-area hits;
                             // they take priority over re-selecting a track.
-                            if self.view == View::Effect && self.on_effect_press(px, py, modifiers.contains(keyboard_types::Modifiers::CONTROL)) {
+                            if self.view == View::Effect
+                                && self.on_effect_press(
+                                    px,
+                                    py,
+                                    modifiers.contains(keyboard_types::Modifiers::CONTROL),
+                                )
+                            {
                                 return baseview::EventStatus::Captured;
                             }
                             // Track listing — both views.
@@ -1592,8 +1598,7 @@ impl baseview::WindowHandler for MultosisWindow {
                     match &ev.key {
                         keyboard_types::Key::Delete | keyboard_types::Key::Backspace => {
                             let sel = self.selected_mseg.min(2);
-                            let changed = if let Ok(mut modu) =
-                                self.params.track_modulation.lock()
+                            let changed = if let Ok(mut modu) = self.params.track_modulation.lock()
                             {
                                 let row = self.selected_track;
                                 self.mseg_edit.delete_selection(&mut modu[row].msegs[sel])
