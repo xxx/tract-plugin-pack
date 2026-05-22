@@ -622,6 +622,7 @@ mod tests {
                 &params,
                 &seq,
                 scale,
+                false,
             );
         }
 
@@ -681,6 +682,7 @@ mod tests {
                 &params,
                 &seq,
                 scale,
+                false,
             );
             toolbar_samples.push(tt.elapsed().as_nanos() as f64 / 1_000.0);
 

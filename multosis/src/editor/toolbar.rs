@@ -167,6 +167,7 @@ pub fn draw_toolbar(
     params: &MultosisParams,
     seq_status: &crate::seq_status::SeqStatusDisplay,
     scale: f32,
+    speed_dropdown_open: bool,
 ) {
     // The whole two-row strip background.
     let strip_h = crate::editor::grid_view::STATUS_H * scale;
@@ -184,7 +185,13 @@ pub fn draw_toolbar(
         match ctrl {
             ToolbarControl::Speed => {
                 let label = format!("Speed: {}", speed_label(params.speed.value()));
-                widgets::draw_button(pixmap, tr, x, y, w, h, &label, false, false);
+                widgets::dropdown::draw_dropdown_trigger(
+                    pixmap,
+                    tr,
+                    (x, y, w, h),
+                    &label,
+                    speed_dropdown_open,
+                );
             }
             ToolbarControl::Mix => {
                 let v = params.mix.value();
@@ -286,6 +293,12 @@ fn speed_label(s: crate::clock::Speed) -> &'static str {
         Speed::Div2 => "1/2",
         Speed::Div1 => "1/1",
     }
+}
+
+/// The Speed dropdown items, in `Speed::ALL` order. Item index `i` maps
+/// to `Speed::ALL[i]`.
+pub fn speed_items() -> [&'static str; 6] {
+    crate::clock::Speed::ALL.map(speed_label)
 }
 
 #[cfg(test)]
@@ -460,6 +473,15 @@ mod tests {
         for op in ToolbarOp::ALL {
             let (x, y, w, h) = op_rect(op, 1.4);
             assert_eq!(op_hit(x + w / 2.0, y + h / 2.0, 1.4), Some(op));
+        }
+    }
+
+    #[test]
+    fn speed_items_match_speed_all_order() {
+        let items = speed_items();
+        assert_eq!(items.len(), crate::clock::Speed::ALL.len());
+        for (i, &s) in crate::clock::Speed::ALL.iter().enumerate() {
+            assert_eq!(items[i], speed_label(s));
         }
     }
 }

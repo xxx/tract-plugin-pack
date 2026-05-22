@@ -153,6 +153,8 @@ struct MultosisWindow {
     selected_mseg: usize,
     /// The effect editor's shared dropdown state — owns the open Kind / Target / Trigger popup.
     effect_dropdown: widgets::dropdown::DropdownState<EffectAction>,
+    /// The toolbar Speed selector's dropdown state. Visible in both views.
+    speed_dropdown: widgets::dropdown::DropdownState<()>,
     /// The effect editor's parameter-dial drag state — one in-flight dial drag
     /// at a time, tagged with the slot index via `EffectHit::Dial(i)` or by
     /// `EffectHit::Depth` for the modulation depth dial.
@@ -231,6 +233,7 @@ impl MultosisWindow {
             selected_track: 0,
             selected_mseg: 0,
             effect_dropdown: widgets::dropdown::DropdownState::new(),
+            speed_dropdown: widgets::dropdown::DropdownState::new(),
             effect_dial_drag: widgets::DragState::new(),
             text_edit: widgets::TextEditState::new(),
             mseg_edit: widgets::mseg::MsegEditState::new(),
@@ -341,28 +344,43 @@ impl MultosisWindow {
 
     /// Handle a left click on a non-slider toolbar control.
     fn handle_toolbar_button(&mut self, ctrl: ToolbarControl) {
-        let setter = ParamSetter::new(self.gui_context.as_ref());
         match ctrl {
-            ToolbarControl::Speed => {
-                // Cycle to the next speed division.
-                let all = crate::clock::Speed::ALL;
-                let cur = self.params.speed.value();
-                let idx = all.iter().position(|&s| s == cur).unwrap_or(0);
-                let next = all[(idx + 1) % all.len()];
-                setter.begin_set_parameter(&self.params.speed);
-                setter.set_parameter(&self.params.speed, next);
-                setter.end_set_parameter(&self.params.speed);
-            }
             ToolbarControl::Reset => {
                 self.reset_request
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            // Slider drags are begun in on_event's ButtonPressed arm.
-            ToolbarControl::Mix
+            // Speed opens a dropdown in on_event's ButtonPressed arm; slider
+            // drags are begun there too. Neither lands here.
+            ToolbarControl::Speed
+            | ToolbarControl::Mix
             | ToolbarControl::Output
             | ToolbarControl::CompThreshold
             | ToolbarControl::CompRatio => {}
         }
+    }
+
+    /// Open the toolbar Speed dropdown anchored to its control rect.
+    fn open_speed_dropdown(&mut self) {
+        let rect = toolbar::control_rect(ToolbarControl::Speed, self.scale_factor);
+        let items = toolbar::speed_items();
+        let current = crate::clock::Speed::ALL
+            .iter()
+            .position(|&s| s == self.params.speed.value())
+            .unwrap_or(0);
+        let win = (self.physical_width as f32, self.physical_height as f32);
+        self.speed_dropdown
+            .open((), rect, &items, current, false, win);
+    }
+
+    /// Apply a Speed dropdown selection by writing `params.speed` via
+    /// `ParamSetter`.
+    fn apply_speed_selection(&mut self, idx: usize) {
+        let all = crate::clock::Speed::ALL;
+        let speed = all[idx.min(all.len() - 1)];
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        setter.begin_set_parameter(&self.params.speed);
+        setter.set_parameter(&self.params.speed, speed);
+        setter.end_set_parameter(&self.params.speed);
     }
 
     /// Handle a left click on a lower-row operation button.
@@ -1282,9 +1300,21 @@ impl MultosisWindow {
             &self.params,
             &self.seq_status,
             self.scale_factor,
+            self.speed_dropdown.is_open(),
         );
-        // Drop popups draw last so they overlay every other control. One
-        // shared `effect_dropdown` state handles Kind, Target, and Trigger;
+        // Drop popups draw last so they overlay every other control.
+        if self.speed_dropdown.is_open() {
+            let items = toolbar::speed_items();
+            let win = (self.physical_width as f32, self.physical_height as f32);
+            widgets::dropdown::draw_dropdown_popup(
+                &mut self.surface.pixmap,
+                &mut self.text_renderer,
+                &self.speed_dropdown,
+                &items,
+                win,
+            );
+        }
+        // One shared `effect_dropdown` state handles Kind, Target, and Trigger;
         // the items list depends on which one is open.
         if self.view == View::Effect && self.effect_dropdown.is_open() {
             let kind = self.selected_track_effect().kind;
@@ -1406,8 +1436,12 @@ impl baseview::WindowHandler for MultosisWindow {
                     }
                     _ => {}
                 }
-                // Dropdown popup hover — pick the items list matching the open
-                // dropdown so highlight indices map to the right labels.
+                // Dropdown popup hover.
+                if self.speed_dropdown.is_open() {
+                    let items = toolbar::speed_items();
+                    let win = (self.physical_width as f32, self.physical_height as f32);
+                    self.speed_dropdown.on_mouse_move(px, py, &items, win);
+                }
                 if self.effect_dropdown.is_open() {
                     let kind = self.selected_track_effect().kind;
                     let items: Vec<&'static str> =
@@ -1498,6 +1532,16 @@ impl baseview::WindowHandler for MultosisWindow {
                 // it, clicking outside closes. Route this BEFORE checking any
                 // other control so a click on the popup never hits the
                 // control behind it.
+                if self.speed_dropdown.is_open() {
+                    let items = toolbar::speed_items();
+                    let win = (self.physical_width as f32, self.physical_height as f32);
+                    if let Some(widgets::dropdown::DropdownEvent::Selected((), idx)) =
+                        self.speed_dropdown.on_mouse_down(px, py, &items, win)
+                    {
+                        self.apply_speed_selection(idx);
+                    }
+                    return baseview::EventStatus::Captured;
+                }
                 if self.effect_dropdown.is_open() {
                     let kind = self.selected_track_effect().kind;
                     let items: Vec<&'static str> =
@@ -1540,6 +1584,7 @@ impl baseview::WindowHandler for MultosisWindow {
                             self.begin_slider(ctrl);
                         }
                     }
+                    Some(ToolbarControl::Speed) => self.open_speed_dropdown(),
                     Some(ctrl) => self.handle_toolbar_button(ctrl),
                     None => match toolbar::op_hit(px, py, self.scale_factor) {
                         Some(op) => self.handle_toolbar_op(op),
@@ -1604,6 +1649,7 @@ impl baseview::WindowHandler for MultosisWindow {
                 }
                 let _ = self.effect_dial_drag.end_drag();
                 self.effect_dropdown.on_mouse_up();
+                self.speed_dropdown.on_mouse_up();
                 // A release always terminates any in-flight MSEG node drag,
                 // regardless of where the cursor is.
                 if self.view == View::Effect {
