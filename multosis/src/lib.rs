@@ -80,7 +80,7 @@ impl Default for MultosisParams {
             track_modulation: Arc::new(Mutex::new(std::array::from_fn(
                 crate::modulation::TrackModulation::default_for_row,
             ))),
-            speed: EnumParam::new("Speed", Speed::Div16),
+            speed: EnumParam::new("Speed", Speed::Div4),
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit("%")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
