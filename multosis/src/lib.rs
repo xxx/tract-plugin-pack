@@ -17,6 +17,7 @@ pub mod propagation;
 pub mod randomize;
 pub mod region;
 pub mod seq_status;
+pub mod undo;
 
 use crate::clock::Speed;
 use crate::engine::AudioEngine;
