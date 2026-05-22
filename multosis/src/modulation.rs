@@ -283,6 +283,12 @@ impl Modulation {
     /// segment from the engine's step-boundary segment loop. `FreeHz` rows are
     /// handled by `begin_block` and skipped here. A zero-length segment is a
     /// no-op.
+    ///
+    /// Splitting a block into per-segment advances yields the same end-of-block
+    /// phase as one whole-block advance only because every multosis MSEG is
+    /// `PlayMode::Cyclic` — its phase wrap is additively decomposable. A
+    /// `Triggered`-mode MSEG clamps non-linearly and could land differently
+    /// across segments; revisit this if a `play_mode` control is ever exposed.
     pub fn advance_segment(
         &mut self,
         seg_len: usize,
