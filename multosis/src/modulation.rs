@@ -239,9 +239,124 @@ impl Modulation {
         self.phases[row][k]
     }
 
-    /// Advance every MSEG one process block, evaluate it, and apply: the
-    /// amplitude MSEG sets `amplitudes[row]`; each assigned assignable MSEG
-    /// writes its target effect parameter via `set_param`. Allocation-free.
+    /// Block-rate modulation setup, run once at the top of a process block.
+    /// Zeroes `fires`, then for every `FreeHz` row advances its oscillator by
+    /// the whole block, decides its fire, and evaluates and applies its three
+    /// MSEGs at the oscillator phase. `Free` and `CellLight` rows use the
+    /// per-MSEG `phases` clocks and are advanced by `advance_segment`; this
+    /// method does not touch them.
+    pub fn begin_block(
+        &mut self,
+        block_len: usize,
+        sample_rate: f64,
+        effects: &mut [EffectInstance; ROWS],
+        track_effects: &[TrackEffect; ROWS],
+    ) {
+        self.fires = 0;
+        for row in 0..ROWS {
+            let TriggerSource::FreeHz { hz } = self.config[row].trigger else {
+                continue;
+            };
+            // Advance the free oscillator by the whole block; a wrap past 1.0
+            // fires the row. The fractional remainder is retained, so multiple
+            // wraps in one block still count as a single fire.
+            if hz > 0.0 {
+                self.hz_phases[row] += (block_len as f32 * hz) / sample_rate as f32;
+                if self.hz_phases[row] >= 1.0 {
+                    self.hz_phases[row] -= self.hz_phases[row].floor();
+                    self.fires |= 1 << row;
+                }
+            }
+            // FreeHz tracks sweep all three MSEGs in lockstep at the
+            // oscillator phase, ignoring each MSEG's own sync/length.
+            let phase = self.hz_phases[row];
+            for k in 0..3 {
+                self.phases[row][k] = phase;
+                self.apply_mseg(row, k, effects, track_effects);
+            }
+        }
+    }
+
+    /// Advance every `Free` and `CellLight` row's three MSEGs by one segment
+    /// of `seg_len` samples, then evaluate and apply them. Called once per
+    /// segment from the engine's step-boundary segment loop. `FreeHz` rows are
+    /// handled by `begin_block` and skipped here. A zero-length segment is a
+    /// no-op.
+    pub fn advance_segment(
+        &mut self,
+        seg_len: usize,
+        bpm: f64,
+        sample_rate: f64,
+        effects: &mut [EffectInstance; ROWS],
+        track_effects: &[TrackEffect; ROWS],
+    ) {
+        if seg_len == 0 {
+            return;
+        }
+        for row in 0..ROWS {
+            if matches!(self.config[row].trigger, TriggerSource::FreeHz { .. }) {
+                continue;
+            }
+            for k in 0..3 {
+                let mseg = self.config[row].msegs[k];
+                let dt = mseg_phase_delta(&mseg, seg_len, bpm, sample_rate);
+                let (next, _finished) = advance(&mseg, self.phases[row][k], dt, false);
+                self.phases[row][k] = next;
+                self.apply_mseg(row, k, effects, track_effects);
+            }
+        }
+    }
+
+    /// Fire the `CellLight` trigger for the rows flagged in `newly_rows` (bit
+    /// `r` set = row `r` had a lit, enabled cell first appear under the
+    /// playhead). A firing row's three MSEG phases reset to 0 and its `fires`
+    /// bit is set. Rows whose trigger is not `CellLight` are ignored. Called
+    /// at a step boundary, so the reset takes effect on the very next segment.
+    pub fn fire(&mut self, newly_rows: u16) {
+        for row in 0..ROWS {
+            if newly_rows & (1 << row) != 0
+                && matches!(self.config[row].trigger, TriggerSource::CellLight)
+            {
+                self.phases[row] = [0.0; 3];
+                self.fires |= 1 << row;
+            }
+        }
+    }
+
+    /// Evaluate MSEG `k` on `row` at its current phase and apply it: the
+    /// amplitude MSEG (`k == 0`) sets `amplitudes[row]`; an assignable MSEG
+    /// with a target writes that effect parameter via `set_param`.
+    fn apply_mseg(
+        &mut self,
+        row: usize,
+        k: usize,
+        effects: &mut [EffectInstance; ROWS],
+        track_effects: &[TrackEffect; ROWS],
+    ) {
+        // `MsegData` is `Copy`; copy what we need so the immutable
+        // `self.config` borrow does not span the `self.amplitudes` / `effects`
+        // writes below.
+        let mseg = self.config[row].msegs[k];
+        let value = value_at_phase(&mseg, self.phases[row][k]);
+        if k == 0 {
+            // Amplitude MSEG.
+            self.amplitudes[row] = value;
+        } else if let Some(target) = self.config[row].targets[k - 1] {
+            // Assignable MSEG -> a target effect parameter.
+            if let Some(&spec) = effects[row].parameters().get(target) {
+                let base = track_effects[row].params[target];
+                let depth = self.config[row].depths[k - 1];
+                effects[row].set_param(
+                    target,
+                    assignable_value(value, base, depth, spec, mseg.polarity),
+                );
+            }
+        }
+    }
+
+    /// Advance every MSEG one process block and apply. Thin wrapper over
+    /// `begin_block` + `fire` + `advance_segment`, kept while the engine
+    /// migrates to driving the modulation per-segment.
     pub fn update_block(
         &mut self,
         block_len: usize,
@@ -251,83 +366,9 @@ impl Modulation {
         effects: &mut [EffectInstance; ROWS],
         track_effects: &[TrackEffect; ROWS],
     ) {
-        // Phase 3: decide which rows fire this block, then reset their phases.
-        // `cell_light_events` is the per-row "had a new lit-and-enabled cell
-        // at a step-boundary tick this block" mask the engine accumulates.
-        let mut fires: u16 = 0;
-        for row in 0..ROWS {
-            let cell_event = (cell_light_events & (1 << row)) != 0;
-            let fire = match self.config[row].trigger {
-                TriggerSource::Free => false,
-                TriggerSource::CellLight => cell_event,
-                TriggerSource::FreeHz { hz } => {
-                    if hz <= 0.0 {
-                        false
-                    } else {
-                        self.hz_phases[row] += (block_len as f32 * hz) / sample_rate as f32;
-                        if self.hz_phases[row] >= 1.0 {
-                            // Retain fractional remainder; multiple wraps in
-                            // one block still count as one fire (spec §7).
-                            self.hz_phases[row] -= self.hz_phases[row].floor();
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                }
-            };
-            if fire {
-                fires |= 1 << row;
-            }
-        }
-        // Reset phases for firing rows — all three MSEGs in lockstep.
-        for row in 0..ROWS {
-            if fires & (1 << row) != 0 {
-                self.phases[row] = [0.0; 3];
-            }
-        }
-        self.fires = fires;
-
-        for row in 0..ROWS {
-            // For `FreeHz` tracks the trigger rate IS the modulation rate —
-            // all three MSEGs sweep in lockstep at the dial's Hz, ignoring
-            // each MSEG's own sync/length. Free and CellLight tracks keep
-            // their per-MSEG clocks.
-            let free_hz_phase = match self.config[row].trigger {
-                TriggerSource::FreeHz { .. } => Some(self.hz_phases[row]),
-                _ => None,
-            };
-            for k in 0..3 {
-                // `MsegData` is `Copy`; copy the needed config out so the
-                // immutable `self.config` borrow does not span the
-                // `self.phases` / `self.amplitudes` writes below.
-                let mseg = self.config[row].msegs[k];
-                let phase = match free_hz_phase {
-                    Some(p) => p,
-                    None => {
-                        let dt = mseg_phase_delta(&mseg, block_len, bpm, sample_rate);
-                        let (next, _finished) = advance(&mseg, self.phases[row][k], dt, false);
-                        next
-                    }
-                };
-                self.phases[row][k] = phase;
-                let value = value_at_phase(&mseg, phase);
-                if k == 0 {
-                    // Amplitude MSEG.
-                    self.amplitudes[row] = value;
-                } else if let Some(target) = self.config[row].targets[k - 1] {
-                    // Assignable MSEG -> a target effect parameter.
-                    if let Some(&spec) = effects[row].parameters().get(target) {
-                        let base = track_effects[row].params[target];
-                        let depth = self.config[row].depths[k - 1];
-                        effects[row].set_param(
-                            target,
-                            assignable_value(value, base, depth, spec, mseg.polarity),
-                        );
-                    }
-                }
-            }
-        }
+        self.begin_block(block_len, sample_rate, effects, track_effects);
+        self.fire(cell_light_events);
+        self.advance_segment(block_len, bpm, sample_rate, effects, track_effects);
     }
 
     /// Test helper: true when every MSEG phase is 0.
@@ -885,5 +926,127 @@ mod tests {
         m.update_block(64, 120.0, 48_000.0, 0, &mut effects, &track_effects);
         m.reset();
         assert!(m.hz_phases_all_zero());
+    }
+
+    #[test]
+    fn begin_block_zeroes_fires_and_decides_free_hz() {
+        let mut m = Modulation::new();
+        let mut cfg = std::array::from_fn(TrackModulation::default_for_row);
+        cfg[5].trigger = TriggerSource::FreeHz { hz: 10.0 };
+        m.set_config(&cfg);
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        // 10 Hz, 48 kHz, a 4800-sample block = exactly one cycle → one fire.
+        m.begin_block(4800, 48_000.0, &mut effects, &track_effects);
+        assert_eq!(m.fires_last_block(), 1 << 5);
+        // begin_block zeroes `fires` each call: a block with no wrap clears it.
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        assert_eq!(m.fires_last_block(), 0);
+    }
+
+    #[test]
+    fn fire_resets_cell_light_rows_and_ignores_other_triggers() {
+        let mut m = Modulation::new();
+        let mut cfg = std::array::from_fn(TrackModulation::default_for_row);
+        cfg[2].trigger = TriggerSource::CellLight;
+        cfg[3].trigger = TriggerSource::Free;
+        cfg[4].trigger = TriggerSource::FreeHz { hz: 1.0 };
+        m.set_config(&cfg);
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        // Drift the per-MSEG-clock rows' phases away from 0.
+        for _ in 0..50 {
+            m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+            m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        }
+        assert!(m.phase_for_test(3, 0) > 1e-6, "Free row drifted");
+        // Fire rows 2, 3, 4 — only the CellLight row (2) resets and reports.
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        m.fire((1 << 2) | (1 << 3) | (1 << 4));
+        assert_eq!(
+            m.fires_last_block() & (1 << 2),
+            1 << 2,
+            "CellLight row fired"
+        );
+        assert_eq!(m.fires_last_block() & (1 << 3), 0, "Free row did not fire");
+        assert_eq!(m.phase_for_test(2, 0), 0.0, "CellLight row phases reset");
+        assert!(
+            m.phase_for_test(3, 0) > 1e-6,
+            "fire must not touch a Free row's phase"
+        );
+    }
+
+    #[test]
+    fn advance_segment_skips_free_hz_rows() {
+        // FreeHz rows are advanced by begin_block; advance_segment leaves them.
+        let mut m = Modulation::new();
+        let mut cfg = std::array::from_fn(TrackModulation::default_for_row);
+        cfg[0].trigger = TriggerSource::FreeHz { hz: 5.0 };
+        m.set_config(&cfg);
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        let after_begin = m.phase_for_test(0, 0);
+        m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        assert_eq!(
+            m.phase_for_test(0, 0),
+            after_begin,
+            "advance_segment must leave a FreeHz row's phase as begin_block set it"
+        );
+    }
+
+    #[test]
+    fn advance_segment_zero_length_is_a_noop() {
+        let mut m = Modulation::new();
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        m.begin_block(64, 48_000.0, &mut effects, &track_effects);
+        m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
+        let phase = m.phase_for_test(3, 1);
+        m.advance_segment(0, 120.0, 48_000.0, &mut effects, &track_effects);
+        assert_eq!(
+            m.phase_for_test(3, 1),
+            phase,
+            "a zero-length segment must not advance phases"
+        );
+    }
+
+    #[test]
+    fn advance_segment_in_two_halves_around_a_fire_resets_at_the_split() {
+        // After a `fire`, the next `advance_segment` advances from the reset
+        // phase 0 — so splitting a 256-sample block as [100][fire][156] leaves
+        // a CellLight row's phase equal to a from-0 advance over only the
+        // 156-sample tail. This is what lets the engine (Task 2) place a reset
+        // at an exact step boundary.
+        let mut m = Modulation::new();
+        let mut cfg = std::array::from_fn(TrackModulation::default_for_row);
+        cfg[1].trigger = TriggerSource::CellLight;
+        m.set_config(&cfg);
+        let mut effects: [EffectInstance; ROWS] =
+            std::array::from_fn(|_| EffectInstance::new(EffectKind::Lowpass));
+        let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
+        // Drift row 1's phases well away from 0.
+        for _ in 0..30 {
+            m.begin_block(256, 48_000.0, &mut effects, &track_effects);
+            m.advance_segment(256, 120.0, 48_000.0, &mut effects, &track_effects);
+        }
+        // The block: a 100-sample segment, fire row 1, then a 156-sample segment.
+        m.begin_block(256, 48_000.0, &mut effects, &track_effects);
+        m.advance_segment(100, 120.0, 48_000.0, &mut effects, &track_effects);
+        m.fire(1 << 1);
+        m.advance_segment(156, 120.0, 48_000.0, &mut effects, &track_effects);
+        let after_fire = m.phase_for_test(1, 1);
+        // Expected: a from-0 advance over just the 156-sample tail.
+        let mseg = cfg[1].msegs[1];
+        let dt = mseg_phase_delta(&mseg, 156, 120.0, 48_000.0);
+        let (expected, _) = advance(&mseg, 0.0, dt, false);
+        assert!(
+            (after_fire - expected).abs() < 1e-6,
+            "post-fire phase {after_fire} should equal a from-0 tail advance {expected}"
+        );
     }
 }
