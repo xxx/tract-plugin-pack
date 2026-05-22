@@ -31,6 +31,10 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 name = "dsp"
 harness = false
 
+[[bench]]
+name = "effects"
+harness = false
+
 [package.metadata.bundler]
 name = "Multosis"
 company = "mpd"
