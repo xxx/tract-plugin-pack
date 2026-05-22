@@ -694,7 +694,11 @@ impl MultosisWindow {
                 }
             }
             EffectHit::MsegSelector(seg) => {
+                let old = self.selected_mseg;
                 self.selected_mseg = seg.min(2);
+                if self.selected_mseg != old {
+                    self.mseg_edit.clear_selection();
+                }
             }
             EffectHit::Target => {
                 let kind = self.selected_track_effect().kind;
