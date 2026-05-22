@@ -1439,7 +1439,14 @@ impl baseview::WindowHandler for MultosisWindow {
                             }
                             // Track listing — both views.
                             if let Some(row) = track_list::track_at(px, py, self.scale_factor) {
-                                self.selected_track = clamp_track(row);
+                                let new_track = clamp_track(row);
+                                // Switching tracks changes which MSEG the shared
+                                // editor operates on; clear the node selection so
+                                // stale indices can't act on another track's MSEG.
+                                if new_track != self.selected_track {
+                                    self.mseg_edit.clear_selection();
+                                }
+                                self.selected_track = new_track;
                                 self.view = View::Effect;
                             } else if self.view == View::Grid {
                                 // Grid: region handle / region move / cell pending.
