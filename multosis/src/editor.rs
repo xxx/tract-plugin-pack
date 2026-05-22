@@ -17,6 +17,7 @@ use crate::modulation::TriggerSource;
 use crate::playhead_display::PlayheadDisplay;
 use crate::region::RegionSnapshot;
 use crate::seq_status::SeqStatusDisplay;
+use crate::undo::{ConfigSnapshot, UndoHistory};
 use crate::MultosisParams;
 use tiny_skia_widgets as widgets;
 
@@ -164,6 +165,9 @@ struct MultosisWindow {
     /// Full-editor mode: the strip (sync/length/play-mode/randomize/style) is
     /// drawn inside the MSEG pane and routed through the widget's own handlers.
     mseg_edit: widgets::mseg::MsegEditState,
+    /// Undo/redo history for the DAW-opaque config. Window-scoped — created
+    /// fresh on window open, dropped on close.
+    undo: UndoHistory<ConfigSnapshot>,
     /// Timestamp of the last left press on the MSEG pane, for double-click
     /// detection (~400 ms / ~8 px).
     mseg_last_click_time: std::time::Instant,
@@ -230,6 +234,7 @@ impl MultosisWindow {
             effect_dial_drag: widgets::DragState::new(),
             text_edit: widgets::TextEditState::new(),
             mseg_edit: widgets::mseg::MsegEditState::new(),
+            undo: UndoHistory::new(),
             mseg_last_click_time: std::time::Instant::now(),
             mseg_last_click_pos: (-999.0, -999.0),
             config_dirty,
@@ -486,6 +491,117 @@ impl MultosisWindow {
     /// re-bridges it on the next process block.
     fn mark_config_dirty(&self) {
         self.config_dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Snapshot the current DAW-opaque config (grid, effects, modulation).
+    fn snapshot(&self) -> ConfigSnapshot {
+        ConfigSnapshot::capture(&self.params)
+    }
+
+    /// Undo the last captured edit, if any: restore the config, drop the now
+    /// stale MSEG node selection, and mark the config dirty for the audio
+    /// thread to re-bridge.
+    fn do_undo(&mut self) {
+        // A mouse gesture is mid-flight — its capture window is open. Leave
+        // the in-progress edit atomic; ignore the undo until the gesture ends.
+        if self.undo.is_capturing() {
+            return;
+        }
+        let current = self.snapshot();
+        if let Some(snap) = self.undo.undo(current) {
+            snap.restore(&self.params);
+            self.mseg_edit.clear_selection();
+            self.mark_config_dirty();
+        }
+    }
+
+    /// Redo the last undone edit, if any.
+    fn do_redo(&mut self) {
+        // A mouse gesture is mid-flight — its capture window is open. Leave
+        // the in-progress edit atomic; ignore the undo until the gesture ends.
+        if self.undo.is_capturing() {
+            return;
+        }
+        let current = self.snapshot();
+        if let Some(snap) = self.undo.redo(current) {
+            snap.restore(&self.params);
+            self.mseg_edit.clear_selection();
+            self.mark_config_dirty();
+        }
+    }
+
+    /// Handle a right-button press in the effect view. Returns the event
+    /// status. Extracted from `on_event` so the undo-capture bracket has a
+    /// single exit point.
+    fn on_right_press(&mut self) -> baseview::EventStatus {
+        let (px, py) = self.mouse_pos;
+        if self.effect_dial_drag.active_action().is_some() {
+            return baseview::EventStatus::Captured;
+        }
+        // First, hit-test for a param dial — only `EffectHit::Dial(i)`
+        // gets text entry. Depth, trigger, and trigger-rate stay
+        // drag-only.
+        let param_count = self.selected_track_param_count();
+        let trigger = self.selected_track_modulation().trigger;
+        let is_free_hz = matches!(trigger, TriggerSource::FreeHz { .. });
+        let hit = effect_editor::effect_hit(
+            px,
+            py,
+            self.scale_factor,
+            param_count,
+            self.selected_mseg,
+            is_free_hz,
+        );
+        if let Some(EffectHit::Dial(i)) = hit {
+            // Right-clicking a *different* dial while one is already
+            // being edited would silently discard the prior edit if we
+            // jumped straight to `begin` (which clears the buffer).
+            // Commit-and-apply the prior edit first.
+            match self.text_edit.commit() {
+                Some((EffectHit::Dial(prev), text)) => self.commit_dial_text_edit(prev, &text),
+                Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
+                _ => {}
+            }
+            if let Some(spec) = self.param_spec(i) {
+                let value = self.selected_track_effect().params[i];
+                self.text_edit.begin(
+                    EffectHit::Dial(i),
+                    &effects::format_value_bare(value, spec.format),
+                );
+            }
+            return baseview::EventStatus::Captured;
+        }
+        if let Some(EffectHit::Mix) = hit {
+            // Commit any prior edit before seeding a new one.
+            match self.text_edit.commit() {
+                Some((EffectHit::Dial(prev), text)) => self.commit_dial_text_edit(prev, &text),
+                Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
+                _ => {}
+            }
+            let pct = (self.selected_track_effect().mix * 100.0).round() as i32;
+            self.text_edit.begin(EffectHit::Mix, &format!("{pct}"));
+            return baseview::EventStatus::Captured;
+        }
+        let lay = effect_editor::effect_layout(self.scale_factor);
+        if effect_editor::in_rect(lay.mseg_pane, px, py) {
+            let sel = self.selected_mseg.min(2);
+            let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
+                let row = self.selected_track;
+                self.mseg_edit.on_right_click(
+                    px,
+                    py,
+                    &mut modu[row].msegs[sel],
+                    lay.mseg_pane,
+                    self.scale_factor,
+                )
+            } else {
+                None
+            };
+            if changed == Some(widgets::mseg::MsegEdit::Changed) {
+                self.mark_config_dirty();
+            }
+        }
+        baseview::EventStatus::Captured
     }
 
     /// The persisted `TrackEffect` for the currently selected track, or its
@@ -1370,6 +1486,8 @@ impl baseview::WindowHandler for MultosisWindow {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
+                let snap = self.snapshot();
+                self.undo.begin_capture(snap);
                 let (px, py) = self.mouse_pos;
                 // Auto-commit/cancel any in-flight dial text edit BEFORE any
                 // other press routing. A press on the editing dial cancels (so
@@ -1468,80 +1586,14 @@ impl baseview::WindowHandler for MultosisWindow {
                 button: baseview::MouseButton::Right,
                 ..
             }) if self.view == View::Effect => {
-                // Right-click on a param dial opens a text-entry edit; on the
-                // MSEG pane it toggles the segment-stepped flag
-                // (see `MsegEditState::on_right_click`). Ignored elsewhere.
-                let (px, py) = self.mouse_pos;
-                if self.effect_dial_drag.active_action().is_some() {
-                    return baseview::EventStatus::Captured;
+                let snap = self.snapshot();
+                let opened = self.undo.begin_capture(snap);
+                let status = self.on_right_press();
+                if opened {
+                    let after = self.snapshot();
+                    self.undo.commit_capture(&after);
                 }
-                // First, hit-test for a param dial — only `EffectHit::Dial(i)`
-                // gets text entry. Depth, trigger, and trigger-rate stay
-                // drag-only.
-                let param_count = self.selected_track_param_count();
-                let trigger = self.selected_track_modulation().trigger;
-                let is_free_hz = matches!(trigger, TriggerSource::FreeHz { .. });
-                let hit = effect_editor::effect_hit(
-                    px,
-                    py,
-                    self.scale_factor,
-                    param_count,
-                    self.selected_mseg,
-                    is_free_hz,
-                );
-                if let Some(EffectHit::Dial(i)) = hit {
-                    // Right-clicking a *different* dial while one is already
-                    // being edited would silently discard the prior edit if we
-                    // jumped straight to `begin` (which clears the buffer).
-                    // Commit-and-apply the prior edit first.
-                    match self.text_edit.commit() {
-                        Some((EffectHit::Dial(prev), text)) => {
-                            self.commit_dial_text_edit(prev, &text)
-                        }
-                        Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
-                        _ => {}
-                    }
-                    if let Some(spec) = self.param_spec(i) {
-                        let value = self.selected_track_effect().params[i];
-                        self.text_edit.begin(
-                            EffectHit::Dial(i),
-                            &effects::format_value_bare(value, spec.format),
-                        );
-                    }
-                    return baseview::EventStatus::Captured;
-                }
-                if let Some(EffectHit::Mix) = hit {
-                    // Commit any prior edit before seeding a new one.
-                    match self.text_edit.commit() {
-                        Some((EffectHit::Dial(prev), text)) => {
-                            self.commit_dial_text_edit(prev, &text)
-                        }
-                        Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
-                        _ => {}
-                    }
-                    let pct = (self.selected_track_effect().mix * 100.0).round() as i32;
-                    self.text_edit.begin(EffectHit::Mix, &format!("{pct}"));
-                    return baseview::EventStatus::Captured;
-                }
-                let lay = effect_editor::effect_layout(self.scale_factor);
-                if effect_editor::in_rect(lay.mseg_pane, px, py) {
-                    let sel = self.selected_mseg.min(2);
-                    let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
-                        let row = self.selected_track;
-                        self.mseg_edit.on_right_click(
-                            px,
-                            py,
-                            &mut modu[row].msegs[sel],
-                            lay.mseg_pane,
-                            self.scale_factor,
-                        )
-                    } else {
-                        None
-                    };
-                    if changed == Some(widgets::mseg::MsegEdit::Changed) {
-                        self.mark_config_dirty();
-                    }
-                }
+                return status;
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
                 button: baseview::MouseButton::Left,
@@ -1575,6 +1627,8 @@ impl baseview::WindowHandler for MultosisWindow {
                     self.commit_click(row, col);
                 }
                 self.left_gesture = None;
+                let after = self.snapshot();
+                self.undo.commit_capture(&after);
             }
             baseview::Event::Keyboard(ev) if self.text_edit.is_active() => {
                 // Swallow key-ups while editing so the host DAW doesn't
@@ -1590,11 +1644,21 @@ impl baseview::WindowHandler for MultosisWindow {
                     }
                     keyboard_types::Key::Backspace => self.text_edit.backspace(),
                     keyboard_types::Key::Escape => self.text_edit.cancel(),
-                    keyboard_types::Key::Enter => match self.text_edit.commit() {
-                        Some((EffectHit::Dial(i), text)) => self.commit_dial_text_edit(i, &text),
-                        Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
-                        _ => {}
-                    },
+                    keyboard_types::Key::Enter => {
+                        let snap = self.snapshot();
+                        let opened = self.undo.begin_capture(snap);
+                        match self.text_edit.commit() {
+                            Some((EffectHit::Dial(i), text)) => {
+                                self.commit_dial_text_edit(i, &text)
+                            }
+                            Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
+                            _ => {}
+                        }
+                        if opened {
+                            let after = self.snapshot();
+                            self.undo.commit_capture(&after);
+                        }
+                    }
                     _ => return baseview::EventStatus::Ignored,
                 }
                 return baseview::EventStatus::Captured;
@@ -1603,9 +1667,33 @@ impl baseview::WindowHandler for MultosisWindow {
                 if ev.state != keyboard_types::KeyState::Down {
                     return baseview::EventStatus::Ignored;
                 }
+                // Undo / redo — handled before any capture so the keystroke
+                // itself is never recorded as an editing gesture. Active in
+                // both views.
+                if ev.modifiers.contains(keyboard_types::Modifiers::CONTROL) {
+                    let is_z = matches!(
+                        &ev.key,
+                        keyboard_types::Key::Character(s) if s.eq_ignore_ascii_case("z")
+                    );
+                    let is_y = matches!(
+                        &ev.key,
+                        keyboard_types::Key::Character(s) if s.eq_ignore_ascii_case("y")
+                    );
+                    let shift = ev.modifiers.contains(keyboard_types::Modifiers::SHIFT);
+                    if (is_z && shift) || is_y {
+                        self.do_redo();
+                        return baseview::EventStatus::Captured;
+                    }
+                    if is_z {
+                        self.do_undo();
+                        return baseview::EventStatus::Captured;
+                    }
+                }
                 if self.view == View::Effect {
                     match &ev.key {
                         keyboard_types::Key::Delete | keyboard_types::Key::Backspace => {
+                            let snap = self.snapshot();
+                            let opened = self.undo.begin_capture(snap);
                             let sel = self.selected_mseg.min(2);
                             let changed = if let Ok(mut modu) = self.params.track_modulation.lock()
                             {
@@ -1616,6 +1704,12 @@ impl baseview::WindowHandler for MultosisWindow {
                             };
                             if changed == Some(widgets::mseg::MsegEdit::Changed) {
                                 self.mark_config_dirty();
+                            }
+                            if opened {
+                                let after = self.snapshot();
+                                self.undo.commit_capture(&after);
+                            }
+                            if changed == Some(widgets::mseg::MsegEdit::Changed) {
                                 return baseview::EventStatus::Captured;
                             }
                         }

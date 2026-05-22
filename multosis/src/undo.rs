@@ -35,12 +35,17 @@ impl<S: PartialEq> UndoHistory<S> {
         }
     }
 
-    /// Open a capture window holding the pre-edit snapshot `before`. A no-op
-    /// if a capture is already open, so the earliest pre-state is the one
-    /// kept.
-    pub fn begin_capture(&mut self, before: S) {
+    /// Open a capture window holding the pre-edit snapshot `before`, returning
+    /// `true`. If a capture is already open this is a no-op returning `false`
+    /// — so a subordinate bracket (a keyboard or right-click handler firing
+    /// inside a longer mouse gesture) can tell it did not open the window and
+    /// must not close it.
+    pub fn begin_capture(&mut self, before: S) -> bool {
         if self.pending.is_none() {
             self.pending = Some(before);
+            true
+        } else {
+            false
         }
     }
 
@@ -80,6 +85,12 @@ impl<S: PartialEq> UndoHistory<S> {
     /// Whether a redo is available.
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
+    }
+
+    /// Whether a capture window is currently open — a `begin_capture` not yet
+    /// matched by `commit_capture`.
+    pub fn is_capturing(&self) -> bool {
+        self.pending.is_some()
     }
 
     /// Push onto the undo stack, dropping the oldest entry past `UNDO_DEPTH`.
@@ -192,10 +203,20 @@ mod tests {
     #[test]
     fn begin_capture_keeps_the_first_pre_state() {
         let mut h: UndoHistory<i32> = UndoHistory::new();
-        h.begin_capture(10);
-        h.begin_capture(20); // ignored — a capture is already open
+        assert!(h.begin_capture(10), "first begin_capture opens the window");
+        assert!(!h.begin_capture(20), "a second begin_capture does not open");
         h.commit_capture(&30);
         assert_eq!(h.undo(30), Some(10));
+    }
+
+    #[test]
+    fn is_capturing_tracks_the_open_window() {
+        let mut h: UndoHistory<i32> = UndoHistory::new();
+        assert!(!h.is_capturing());
+        h.begin_capture(1);
+        assert!(h.is_capturing());
+        h.commit_capture(&2);
+        assert!(!h.is_capturing());
     }
 
     #[test]
