@@ -534,13 +534,13 @@ impl FmEffect {
     const PARAMS: [ParamSpec; 5] = [
         ParamSpec {
             name: "Freq",
-            min: 0.1,
+            min: 20.0,
             max: 20_000.0,
-            default: 5.0,
-            // Log-scaled dial: equal angular movement = equal multiplicative
-            // ratio. The 0.1 → 20 kHz span spans LFO-rate vibrato (Carrier
-            // mode) through full audio-range FM carrier pitches (Modulator
-            // mode) without making either end feel useless.
+            default: 100.0,
+            // Log-scaled dial across exactly the audio band — three even
+            // decades from 20 Hz to 20 kHz, so each decade takes one-third
+            // of the arc. Sub-audio vibrato is reachable by modulating
+            // Freq via an MSEG rather than dialing it in directly.
             scaling: ParamScaling::Log,
             format: ParamFormat::Hertz,
         },
@@ -1752,7 +1752,7 @@ mod tests {
         assert_eq!(EffectKind::Fm.name(), "FM");
         assert_eq!(param_count(EffectKind::Fm), 5);
         let defaults = default_params_for_kind(EffectKind::Fm);
-        assert_eq!(defaults[0], 5.0); // Freq: 5 Hz
+        assert_eq!(defaults[0], 100.0); // Freq: 100 Hz
         assert_eq!(defaults[3], 0.0); // Mode: Carrier
         assert_eq!(defaults[4], 0.0); // Topology: PM
     }
