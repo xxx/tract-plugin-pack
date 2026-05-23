@@ -294,7 +294,9 @@ fn draw_canvas(
 
 /// Render a small floating tooltip above (or below, when the node is near
 /// the top of the canvas) node `idx`, showing `text`. Used by `draw_mseg`
-/// when the hover-target is a node.
+/// when the hover-target is a node. `text` may contain '\n' separators —
+/// each line is drawn on its own row, and the box is sized to the widest
+/// line × number of lines.
 fn draw_node_tooltip(
     pixmap: &mut Pixmap,
     text_renderer: &mut TextRenderer,
@@ -312,11 +314,17 @@ fn draw_node_tooltip(
     let cx = px_ + n.time * pw;
     let cy = py_ + (1.0 - n.value) * ph;
     let text_size = (10.0 * scale).max(10.0);
-    let tw = text_renderer.text_width(text, text_size);
+    let line_gap = 2.0 * scale;
     let pad_x = 6.0 * scale;
     let pad_y = 3.0 * scale;
-    let box_w = tw + 2.0 * pad_x;
-    let box_h = text_size + 2.0 * pad_y;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let max_tw = lines
+        .iter()
+        .map(|l| text_renderer.text_width(l, text_size))
+        .fold(0.0_f32, f32::max);
+    let n_lines = lines.len().max(1) as f32;
+    let box_w = max_tw + 2.0 * pad_x;
+    let box_h = n_lines * text_size + (n_lines - 1.0).max(0.0) * line_gap + 2.0 * pad_y;
     let gap = 10.0 * scale; // distance from node centre to tooltip edge
                             // Default above; flip below when the node is in the top quarter.
     let above = n.value < 0.75;
@@ -331,14 +339,10 @@ fn draw_node_tooltip(
     }
     draw_rect(pixmap, box_x, box_y, box_w, box_h, color_control_bg());
     draw_rect_outline(pixmap, box_x, box_y, box_w, box_h, color_border(), 1.0);
-    text_renderer.draw_text(
-        pixmap,
-        box_x + pad_x,
-        box_y + pad_y + text_size,
-        text,
-        text_size,
-        color_text(),
-    );
+    for (i, line) in lines.iter().enumerate() {
+        let row_y = box_y + pad_y + text_size + i as f32 * (text_size + line_gap);
+        text_renderer.draw_text(pixmap, box_x + pad_x, row_y, line, text_size, color_text());
+    }
 }
 
 /// Draw only `data`'s curve polyline — faint, no nodes/markers/strip — inside

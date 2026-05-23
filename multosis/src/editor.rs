@@ -2327,11 +2327,16 @@ impl Editor for MultosisEditor {
 
 /// Format the tooltip text shown when a node is hovered on the MSEG editor.
 ///
-/// Slot `0` is the Amp MSEG — returns a dB readout. Slots `1`/`2` are
-/// assignable MSEGs: when a `spec` is `Some` and `depth_polarity` is `Some`,
-/// the value is mapped through the target's `ParamSpec` using
-/// `assignable_value` + `format_value`; otherwise the raw `0..1` node level
-/// is rendered as a two-decimal number.
+/// The tooltip is rendered as two lines:
+///
+/// 1. **Position** — `X N%  Y …` where N is the node's time as a percentage
+///    and the Y readout reflects the MSEG's polarity: unipolar prints the
+///    raw `0..1` value, bipolar maps `0..1` to `-1..+1` (so the midline
+///    `0.5` is `0.00`).
+/// 2. **Dial value** — for slot `0` (Amp), the dB equivalent of the node's
+///    linear-gain value; for slots `1`/`2` with a target set, the mapped
+///    parameter value via `assignable_value` + `format_value`. Omitted
+///    when the assignable MSEG has no target.
 ///
 /// Returns an empty string if `node_idx` is out of range.
 pub fn mseg_node_tooltip_text(
@@ -2346,20 +2351,39 @@ pub fn mseg_node_tooltip_text(
         return String::new();
     }
     let value = data.nodes[node_idx].value;
-    if slot == 0 {
+    let time = data.nodes[node_idx].time;
+
+    // Position line — Y display flips polarity-aware: bipolar shows
+    // `(value - 0.5) * 2` so the midline reads `0.00` and the extremes
+    // read `±1.00`; unipolar prints the raw `0..1` value.
+    let y_str = match data.polarity {
+        widgets::Polarity::Unipolar => format!("{value:.2}"),
+        widgets::Polarity::Bipolar => format!("{:+.2}", (value - 0.5) * 2.0),
+    };
+    let pos_line = format!("X {:.0}%  Y {}", time * 100.0, y_str);
+
+    // Dial-value line — slot-dependent.
+    let dial_line: Option<String> = if slot == 0 {
         const FLOOR_DB: f32 = -80.0;
         if value <= 1e-4 {
-            return "-\u{221e} dB".to_string();
+            Some("-\u{221e} dB".to_string())
+        } else {
+            let db = (20.0 * value.log10()).max(FLOOR_DB);
+            Some(format!("{db:.1} dB"))
         }
-        let db = (20.0 * value.log10()).max(FLOOR_DB);
-        return format!("{db:.1} dB");
-    }
-    match (spec, depth_polarity) {
-        (Some(spec), Some((depth, polarity))) => {
-            let v = crate::modulation::assignable_value(value, base, depth, spec, polarity);
-            crate::effects::format_value(v, spec.format)
+    } else {
+        match (spec, depth_polarity) {
+            (Some(spec), Some((depth, polarity))) => {
+                let v = crate::modulation::assignable_value(value, base, depth, spec, polarity);
+                Some(crate::effects::format_value(v, spec.format))
+            }
+            _ => None,
         }
-        _ => format!("{value:.2}"),
+    };
+
+    match dial_line {
+        Some(d) => format!("{pos_line}\n{d}"),
+        None => pos_line,
     }
 }
 
@@ -2402,31 +2426,84 @@ mod tests {
     }
 
     #[test]
-    fn node_tooltip_text_for_amp_returns_db_readout() {
+    fn node_tooltip_text_for_amp_has_position_line_and_db_readout() {
         let mut data = widgets::MsegData::default();
-        // node 1 exists in a default (2-node) MSEG.
+        // node 1 sits at time = 1.0, value = 1.0 by default.
         data.nodes[1].value = 1.0;
-        // Slot 0 = Amp. value 1.0 → 0.0 dB.
         let text = mseg_node_tooltip_text(0, &data, 1, None, 0.0, None);
-        assert_eq!(text, "0.0 dB");
+        // Two lines: position then dial.
+        assert_eq!(text, "X 100%  Y 1.00\n0.0 dB");
 
         data.nodes[1].value = 0.5;
         let text = mseg_node_tooltip_text(0, &data, 1, None, 0.0, None);
-        // 20·log10(0.5) ≈ -6.02 dB.
-        assert!(text.starts_with("-6.0"), "expected ~-6.0 dB, got {text}");
+        // Position: X = 100% (default last-node time); Y = 0.50 (unipolar).
+        // Dial: 20·log10(0.5) ≈ -6.02 dB.
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(lines[0], "X 100%  Y 0.50");
+        assert!(
+            lines[1].starts_with("-6.0"),
+            "expected ~-6.0 dB on the dial line, got {}",
+            lines[1]
+        );
 
         data.nodes[1].value = 0.00001;
         let text = mseg_node_tooltip_text(0, &data, 1, None, 0.0, None);
-        assert_eq!(text, "-\u{221e} dB", "below floor should render as -∞ dB");
+        // The floor case keeps the position line and emits -∞ dB on the dial line.
+        assert_eq!(text, "X 100%  Y 0.00\n-\u{221e} dB");
     }
 
     #[test]
-    fn node_tooltip_text_for_assignable_no_target_returns_raw_level() {
+    fn node_tooltip_text_bipolar_y_maps_value_to_minus_one_plus_one() {
+        let mut data = widgets::MsegData::default();
+        data.polarity = widgets::Polarity::Bipolar;
+        data.nodes[1].value = 0.5; // midline → 0.00
+        let text = mseg_node_tooltip_text(0, &data, 1, None, 0.0, None);
+        let pos_line = text.split('\n').next().unwrap();
+        assert!(
+            pos_line.contains("Y +0.00"),
+            "midline should display as +0.00 in bipolar, got {pos_line}"
+        );
+
+        data.nodes[1].value = 0.0; // bottom → -1.00
+        let text = mseg_node_tooltip_text(0, &data, 1, None, 0.0, None);
+        assert!(
+            text.split('\n').next().unwrap().contains("Y -1.00"),
+            "value 0 should display as -1.00 in bipolar, got {text}"
+        );
+
+        data.nodes[1].value = 1.0; // top → +1.00
+        let text = mseg_node_tooltip_text(0, &data, 1, None, 0.0, None);
+        assert!(
+            text.split('\n').next().unwrap().contains("Y +1.00"),
+            "value 1 should display as +1.00 in bipolar, got {text}"
+        );
+    }
+
+    #[test]
+    fn node_tooltip_text_x_reflects_node_time() {
+        let mut data = widgets::MsegData::default();
+        // Insert a middle node at time 0.42; it lands at active-array index 1
+        // and pushes the original endpoint to index 2.
+        let i = data.insert_node(0.42, 0.5).unwrap();
+        let text = mseg_node_tooltip_text(0, &data, i, None, 0.0, None);
+        let pos_line = text.split('\n').next().unwrap();
+        assert!(
+            pos_line.starts_with("X 42%"),
+            "X should reflect the node's time, got {pos_line}"
+        );
+    }
+
+    #[test]
+    fn node_tooltip_text_assignable_no_target_omits_the_dial_line() {
         let mut data = widgets::MsegData::default();
         data.nodes[1].value = 0.742;
-        // Slot 1, no spec → raw two-decimal format.
+        // Slot 1, no spec → position line only, no second line.
         let text = mseg_node_tooltip_text(1, &data, 1, None, 0.0, None);
-        assert_eq!(text, "0.74");
+        assert!(
+            !text.contains('\n'),
+            "no-target tooltip should be a single position line, got {text}"
+        );
+        assert_eq!(text, "X 100%  Y 0.74");
     }
 
     #[test]
