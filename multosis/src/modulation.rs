@@ -13,10 +13,114 @@ use tiny_skia_widgets::{advance, value_at_phase, MsegData, PlayMode, Polarity, S
 /// The number of track rows. Matches `crate::grid::ROWS`.
 const ROWS: usize = 16;
 
+/// Default threshold for a fresh `TriggerSource::Transient` (≈ +3.5 dB on the
+/// fast/slow envelope ratio — fires on clear percussive onsets without
+/// over-triggering on sustained material).
+pub const TRANSIENT_THRESHOLD_DEFAULT: f32 = 1.5;
+/// Threshold knob range (linear ratio). `1.05` ≈ +0.4 dB on the envelope
+/// ratio (very sensitive); `6.0` ≈ +15.6 dB (only firm onsets fire).
+pub const TRANSIENT_THRESHOLD_MIN: f32 = 1.05;
+pub const TRANSIENT_THRESHOLD_MAX: f32 = 6.0;
+/// Default refractory after a fire (milliseconds) — enough to swallow a
+/// snare's body without missing 16ths at 200 bpm (≈ 75 ms).
+pub const TRANSIENT_HOLD_MS_DEFAULT: f32 = 50.0;
+pub const TRANSIENT_HOLD_MS_MIN: f32 = 5.0;
+pub const TRANSIENT_HOLD_MS_MAX: f32 = 500.0;
+
+/// Internal envelope-follower time constants for the transient detector.
+/// Fast envelope rises quickly to track the peak; slow envelope rises slowly
+/// so it doesn't catch up to a transient before the ratio test fires.
+const TRANSIENT_FAST_ATTACK_MS: f32 = 0.5;
+const TRANSIENT_FAST_RELEASE_MS: f32 = 5.0;
+const TRANSIENT_SLOW_ATTACK_MS: f32 = 30.0;
+const TRANSIENT_SLOW_RELEASE_MS: f32 = 200.0;
+/// Below this slow-envelope floor, the ratio test is inhibited — otherwise
+/// digital noise floors produce huge ratios on near-silence. ≈ −60 dBFS.
+const TRANSIENT_NOISE_FLOOR: f32 = 1e-3;
+
+/// Per-row dual-envelope onset detector backing `TriggerSource::Transient`.
+/// State is preserved across config changes (matches FreeHz's `hz_phases`)
+/// and zeroed by `Modulation::reset`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TransientDetector {
+    fast_env: f32,
+    slow_env: f32,
+    /// Samples remaining until the detector is re-armed after a fire.
+    refractory: u32,
+}
+
+impl TransientDetector {
+    /// Process one mono input sample. Returns `true` exactly on the sample a
+    /// transient is detected — fast envelope exceeds slow envelope by
+    /// `threshold`, the slow envelope is above the inhibit floor, and the
+    /// detector is not in its refractory window. After a fire the detector
+    /// is gated for `hold_ms` regardless of the signal.
+    pub fn process_sample(
+        &mut self,
+        input: f32,
+        threshold: f32,
+        hold_ms: f32,
+        sample_rate: f32,
+    ) -> bool {
+        let target = input.abs();
+        let fast_a = one_pole_coef(TRANSIENT_FAST_ATTACK_MS, sample_rate);
+        let fast_r = one_pole_coef(TRANSIENT_FAST_RELEASE_MS, sample_rate);
+        let slow_a = one_pole_coef(TRANSIENT_SLOW_ATTACK_MS, sample_rate);
+        let slow_r = one_pole_coef(TRANSIENT_SLOW_RELEASE_MS, sample_rate);
+        let fast_coef = if target > self.fast_env {
+            fast_a
+        } else {
+            fast_r
+        };
+        let slow_coef = if target > self.slow_env {
+            slow_a
+        } else {
+            slow_r
+        };
+        self.fast_env = target + (self.fast_env - target) * fast_coef;
+        self.slow_env = target + (self.slow_env - target) * slow_coef;
+        if self.refractory > 0 {
+            self.refractory -= 1;
+            return false;
+        }
+        if self.slow_env < TRANSIENT_NOISE_FLOOR {
+            return false;
+        }
+        if self.fast_env > self.slow_env * threshold {
+            let hold = (hold_ms.max(0.0) * 0.001 * sample_rate) as u32;
+            self.refractory = hold.max(1);
+            return true;
+        }
+        false
+    }
+
+    /// Zero the detector — both envelopes back to silence, refractory cleared.
+    pub fn reset(&mut self) {
+        self.fast_env = 0.0;
+        self.slow_env = 0.0;
+        self.refractory = 0;
+    }
+}
+
+/// One-pole envelope-follower coefficient for the given time constant. Larger
+/// `time_ms` → coefficient closer to 1 → smoother follower.
+fn one_pole_coef(time_ms: f32, sample_rate: f32) -> f32 {
+    if time_ms <= 0.0 || sample_rate <= 0.0 {
+        return 0.0;
+    }
+    (-1.0 / (time_ms * 0.001 * sample_rate)).exp()
+}
+
 /// The event that causes a track's three MSEG phases to reset to 0.
-/// `Free` is the free-running default; `CellLight` fires on the row's
-/// inactive→active edge at the playhead; `CellStep` fires on every step the
-/// row is lit; `FreeHz` fires every `1.0/hz` seconds independently of sync.
+///
+/// * `Free` — free-running default, never resets.
+/// * `CellLight` — fires on the row's inactive→active edge at the playhead.
+/// * `CellStep` — fires on every step the row is lit.
+/// * `FreeHz { hz }` — fires every `1.0/hz` seconds, independent of sync.
+/// * `Transient { threshold, hold_ms }` — dual-envelope ratio onset detector
+///   on the plugin's input. Fires when the fast envelope exceeds the slow
+///   envelope by `threshold`; the `hold_ms` refractory window suppresses
+///   re-fires while the transient's tail decays.
 #[derive(Clone, Copy, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum TriggerSource {
     #[default]
@@ -25,6 +129,12 @@ pub enum TriggerSource {
     CellStep,
     FreeHz {
         hz: f32,
+    },
+    Transient {
+        /// Fast / slow envelope ratio required to fire (e.g. 1.5 = +3.5 dB).
+        threshold: f32,
+        /// Refractory period in milliseconds.
+        hold_ms: f32,
     },
 }
 
@@ -195,8 +305,10 @@ pub struct Modulation {
     amplitudes: [f32; ROWS],
     /// Free-Hz oscillator phase per row, advances 0..1 and wraps modulo 1.
     hz_phases: [f32; ROWS],
+    /// Onset detectors backing `TriggerSource::Transient` per row.
+    transient_state: [TransientDetector; ROWS],
     /// The rows that fired this block (bit `r` set). Zeroed by `begin_block`,
-    /// then accumulated by the FreeHz path and by `fire`.
+    /// then accumulated by the FreeHz / Transient paths and by `fire`.
     fires: u16,
 }
 
@@ -208,6 +320,7 @@ impl Modulation {
             phases: [[0.0; 3]; ROWS],
             amplitudes: [1.0; ROWS],
             hz_phases: [0.0; ROWS],
+            transient_state: [TransientDetector::default(); ROWS],
             fires: 0,
         }
     }
@@ -236,6 +349,7 @@ impl Modulation {
         self.phases.swap(a, b);
         self.amplitudes.swap(a, b);
         self.hz_phases.swap(a, b);
+        self.transient_state.swap(a, b);
         // `fires` is a u16 bitmask — swap the two bits in place. `fires` is
         // also zeroed at the start of every block, so this only matters if
         // the swap lands mid-block (it shouldn't with the current handoff,
@@ -250,6 +364,9 @@ impl Modulation {
     pub fn reset(&mut self) {
         self.phases = [[0.0; 3]; ROWS];
         self.hz_phases = [0.0; ROWS];
+        for det in &mut self.transient_state {
+            det.reset();
+        }
         self.fires = 0;
     }
 
@@ -265,26 +382,53 @@ impl Modulation {
     }
 
     /// Block-rate modulation setup, run once at the top of a process block.
-    /// Zeroes `fires`, then for every `FreeHz` row advances its oscillator by
-    /// the whole block — on a wrap, the row fires (its three MSEG phases
-    /// reset to 0), matching how `CellLight` and `CellStep` are wired. The
-    /// fractional remainder of the oscillator is retained, so multiple wraps
-    /// in one block still count as a single fire. Between fires, the row's
-    /// MSEGs are advanced by `advance_segment` at each MSEG's own
-    /// sync/length — `FreeHz` is a trigger source, not a clock override.
-    pub fn begin_block(&mut self, block_len: usize, sample_rate: f64) {
+    /// Zeroes `fires`, then handles the per-block trigger sources:
+    ///
+    /// * `FreeHz` — advance the oscillator by the whole block; on a wrap, fire
+    ///   (resetting the row's three MSEG phases). Multiple wraps count as one
+    ///   fire (the fractional remainder is kept for the next block).
+    /// * `Transient` — run the row's dual-envelope detector across every input
+    ///   sample. The first detection in the block fires the row; the detector
+    ///   keeps running for the rest of the block so its envelope state is
+    ///   correct for the next call.
+    ///
+    /// Block-aligned: a `Transient` row that detects an onset at sample N in
+    /// this block fires at the START of the next-to-be-processed block range
+    /// (i.e. the whole block sees the reset phase). Trade-off accepted in
+    /// exchange for keeping the audio engine's per-segment loop simple — the
+    /// 10 ms jitter at 512 / 48k is sub-perceptual for envelope retriggers.
+    ///
+    /// Between fires, every row's MSEGs are advanced by `advance_segment` at
+    /// each MSEG's own sync/length — `FreeHz` / `Transient` are trigger
+    /// sources, not clock overrides.
+    pub fn begin_block(&mut self, left: &[f32], right: &[f32], sample_rate: f64) {
+        let block_len = left.len().min(right.len());
         self.fires = 0;
+        let sr_f32 = sample_rate as f32;
         for row in 0..ROWS {
-            let TriggerSource::FreeHz { hz } = self.config[row].trigger else {
-                continue;
-            };
-            if hz > 0.0 {
-                self.hz_phases[row] += (block_len as f32 * hz) / sample_rate as f32;
-                if self.hz_phases[row] >= 1.0 {
-                    self.hz_phases[row] -= self.hz_phases[row].floor();
-                    self.fires |= 1 << row;
-                    self.phases[row] = [0.0; 3];
+            match self.config[row].trigger {
+                TriggerSource::FreeHz { hz } if hz > 0.0 => {
+                    self.hz_phases[row] += (block_len as f32 * hz) / sr_f32;
+                    if self.hz_phases[row] >= 1.0 {
+                        self.hz_phases[row] -= self.hz_phases[row].floor();
+                        self.fires |= 1 << row;
+                        self.phases[row] = [0.0; 3];
+                    }
                 }
+                TriggerSource::Transient { threshold, hold_ms } => {
+                    let det = &mut self.transient_state[row];
+                    let mut fired = false;
+                    for i in 0..block_len {
+                        let mono = (left[i] + right[i]) * 0.5;
+                        let trip = det.process_sample(mono, threshold, hold_ms, sr_f32);
+                        if trip && !fired {
+                            self.fires |= 1 << row;
+                            self.phases[row] = [0.0; 3];
+                            fired = true;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -325,15 +469,19 @@ impl Modulation {
     /// step); `active_rows` is the post-tick active mask (bit `r` = row `r`
     /// has a lit, enabled cell under the playhead now). A `CellLight` row
     /// fires if it is in `newly_rows`; a `CellStep` row fires if it is in
-    /// `active_rows`; `Free` and `FreeHz` rows never fire. A firing row's
-    /// three MSEG phases reset to 0 and its `fires` bit is set. Called at a
-    /// step boundary, so the reset takes effect on the very next segment.
+    /// `active_rows`; `Free`, `FreeHz`, and `Transient` rows never fire from
+    /// a step boundary (the latter two fire from `begin_block` instead). A
+    /// firing row's three MSEG phases reset to 0 and its `fires` bit is set.
+    /// Called at a step boundary, so the reset takes effect on the very next
+    /// segment.
     pub fn fire(&mut self, newly_rows: u16, active_rows: u16) {
         for row in 0..ROWS {
             let reset = match self.config[row].trigger {
                 TriggerSource::CellLight => newly_rows & (1 << row) != 0,
                 TriggerSource::CellStep => active_rows & (1 << row) != 0,
-                TriggerSource::Free | TriggerSource::FreeHz { .. } => false,
+                TriggerSource::Free
+                | TriggerSource::FreeHz { .. }
+                | TriggerSource::Transient { .. } => false,
             };
             if reset {
                 self.phases[row] = [0.0; 3];
@@ -409,10 +557,25 @@ impl Modulation {
         &self.config[row]
     }
 
+    /// Test helper: shared access to row `row`'s transient detector.
+    #[cfg(test)]
+    pub fn transient_detector_for_test(&self, row: usize) -> &TransientDetector {
+        &self.transient_state[row]
+    }
+
     /// Test helper: the cached amplitude gain for `row`.
     #[cfg(test)]
     pub fn amplitude_for_test(&self, row: usize) -> f32 {
         self.amplitudes[row]
+    }
+
+    /// Test helper: drive `begin_block` with a silent input buffer of length
+    /// `block_len`. Lets tests that exercise `FreeHz`/`CellLight`/`CellStep`
+    /// state machines stay agnostic about the new audio-input argument.
+    #[cfg(test)]
+    pub fn begin_block_silent(&mut self, block_len: usize, sample_rate: f64) {
+        let silence = vec![0.0_f32; block_len];
+        self.begin_block(&silence, &silence, sample_rate);
     }
 
     /// Test helper: write directly into the runtime state for `row`. Lets
@@ -435,6 +598,15 @@ impl Modulation {
         } else {
             self.fires &= !(1u16 << row);
         }
+    }
+}
+
+#[cfg(test)]
+impl TransientDetector {
+    /// Test helper: the detector's fast envelope, slow envelope, and
+    /// refractory-sample counter, in that order.
+    pub fn state_for_test(&self) -> (f32, f32, u32) {
+        (self.fast_env, self.slow_env, self.refractory)
     }
 }
 
@@ -649,7 +821,7 @@ mod tests {
         let mut effects: [EffectInstance; ROWS] =
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         // The default amplitude MSEG is flat at 1.0.
         for r in 0..ROWS {
@@ -676,7 +848,7 @@ mod tests {
         let mut effects: [EffectInstance; ROWS] =
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         for r in 0..ROWS {
             assert_eq!(m.amplitude(r), 0.0, "row {r}");
@@ -693,14 +865,14 @@ mod tests {
         }
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Run a block, then drive the effects with a signal and capture output.
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         let after_first: Vec<f32> = (0..200)
             .map(|_| effects[0].process_sample(1.0, -1.0).0)
             .collect();
         // Advance many blocks so the cyclic MSEG has moved, re-apply.
         for _ in 0..400 {
-            m.begin_block(64, 48_000.0);
+            m.begin_block_silent(64, 48_000.0);
             m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         }
         let after_later: Vec<f32> = (0..200)
@@ -720,7 +892,7 @@ mod tests {
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         for _ in 0..100 {
-            m.begin_block(64, 48_000.0);
+            m.begin_block_silent(64, 48_000.0);
             m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         }
         m.reset();
@@ -807,19 +979,19 @@ mod tests {
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Each block that signals a cell-light event for row 3 fires the
         // trigger; blocks with no event don't.
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         m.fire(1 << 3, 1 << 3);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         assert_eq!(m.fires_last_block(), 1 << 3);
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         assert_eq!(m.fires_last_block(), 0);
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         m.fire(1 << 3, 1 << 3);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         assert_eq!(m.fires_last_block(), 1 << 3);
         // A row that didn't get an event doesn't fire even if another did.
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         m.fire(1 << 7, 1 << 7);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         assert_eq!(m.fires_last_block(), 0);
@@ -838,7 +1010,7 @@ mod tests {
         // Run 100 blocks; expect ~100 fires (allow ±1 for the boundary).
         let mut fires = 0usize;
         for _ in 0..100 {
-            m.begin_block(4800, 48_000.0);
+            m.begin_block_silent(4800, 48_000.0);
             m.advance_segment(4800, 120.0, 48_000.0, &mut effects, &track_effects);
             if m.fires_last_block() & (1 << 5) != 0 {
                 fires += 1;
@@ -861,7 +1033,7 @@ mod tests {
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         for _ in 0..50 {
-            m.begin_block(480, 48_000.0);
+            m.begin_block_silent(480, 48_000.0);
             m.advance_segment(480, 120.0, 48_000.0, &mut effects, &track_effects);
             assert_eq!(m.fires_last_block() & 0b11, 0);
         }
@@ -880,14 +1052,14 @@ mod tests {
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Advance many blocks with no fires -> phases drift away from 0.
         for _ in 0..50 {
-            m.begin_block(64, 48_000.0);
+            m.begin_block_silent(64, 48_000.0);
             m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         }
         // At least one of row 2's three phases should be non-zero now.
         let any_nonzero = (0..3).any(|k| m.phase_for_test(2, k) > 1e-6);
         assert!(any_nonzero, "phases should have drifted with no fires");
         // Now fire row 2 (inactive->active edge).
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         m.fire(1 << 2, 1 << 2);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         // After a fire, the row's three phases are reset to 0 (the per-MSEG
@@ -968,7 +1140,7 @@ mod tests {
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         for _ in 0..20 {
-            m.begin_block(64, 48_000.0);
+            m.begin_block_silent(64, 48_000.0);
             m.fire(0xFFFF, 0xFFFF);
             m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
             assert_eq!(m.fires_last_block(), 0);
@@ -985,7 +1157,7 @@ mod tests {
             std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Run a block so hz_phases advances above 0.
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         m.reset();
         assert!(m.hz_phases_all_zero());
@@ -998,10 +1170,10 @@ mod tests {
         cfg[5].trigger = TriggerSource::FreeHz { hz: 10.0 };
         m.set_config(&cfg);
         // 10 Hz, 48 kHz, a 4800-sample block = exactly one cycle → one fire.
-        m.begin_block(4800, 48_000.0);
+        m.begin_block_silent(4800, 48_000.0);
         assert_eq!(m.fires_last_block(), 1 << 5);
         // begin_block zeroes `fires` each call: a block with no wrap clears it.
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         assert_eq!(m.fires_last_block(), 0);
     }
 
@@ -1018,12 +1190,12 @@ mod tests {
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Drift the per-MSEG-clock rows' phases away from 0.
         for _ in 0..50 {
-            m.begin_block(64, 48_000.0);
+            m.begin_block_silent(64, 48_000.0);
             m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         }
         assert!(m.phase_for_test(3, 0) > 1e-6, "Free row drifted");
         // Fire rows 2, 3, 4 — only the CellLight row (2) resets and reports.
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         m.fire(
             (1 << 2) | (1 << 3) | (1 << 4),
             (1 << 2) | (1 << 3) | (1 << 4),
@@ -1057,7 +1229,7 @@ mod tests {
         // 64-sample block at 5 Hz / 48 kHz → hz_phase += 64*5/48000 ≈ 0.0067,
         // no wrap → no fire, no phase reset; the MSEG should advance per its
         // own clock during advance_segment.
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         let before = m.phase_for_test(0, 0);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         assert!(
@@ -1079,12 +1251,12 @@ mod tests {
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Drift phase well away from 0 over many no-wrap blocks.
         for _ in 0..30 {
-            m.begin_block(64, 48_000.0);
+            m.begin_block_silent(64, 48_000.0);
             m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         }
         assert!(m.phase_for_test(3, 0) > 1e-6, "row 3 drifted");
         // 10 Hz, 4800-sample block @ 48 kHz = exactly one cycle → one wrap.
-        m.begin_block(4800, 48_000.0);
+        m.begin_block_silent(4800, 48_000.0);
         assert_eq!(m.fires_last_block() & (1 << 3), 1 << 3, "wrap fires");
         assert_eq!(m.phase_for_test(3, 0), 0.0, "wrap resets the row's phases");
     }
@@ -1095,7 +1267,7 @@ mod tests {
         let mut effects: [EffectInstance; ROWS] =
             std::array::from_fn(|_| EffectInstance::new(EffectKind::Lowpass));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         let phase = m.phase_for_test(3, 1);
         m.advance_segment(0, 120.0, 48_000.0, &mut effects, &track_effects);
@@ -1117,14 +1289,14 @@ mod tests {
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Drift row 6's phases away from 0.
         for _ in 0..50 {
-            m.begin_block(64, 48_000.0);
+            m.begin_block_silent(64, 48_000.0);
             m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
         }
         assert!(m.phase_for_test(6, 0) > 1e-6, "row 6 drifted");
         // A step where row 6 is active (in `active_rows`) but NOT newly-lit
         // (absent from `newly_rows`) still fires CellStep — the case CellLight
         // skips.
-        m.begin_block(64, 48_000.0);
+        m.begin_block_silent(64, 48_000.0);
         m.fire(0, 1 << 6);
         assert_eq!(
             m.phase_for_test(6, 0),
@@ -1176,11 +1348,11 @@ mod tests {
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Drift row 1's phases well away from 0.
         for _ in 0..30 {
-            m.begin_block(256, 48_000.0);
+            m.begin_block_silent(256, 48_000.0);
             m.advance_segment(256, 120.0, 48_000.0, &mut effects, &track_effects);
         }
         // The block: a 100-sample segment, fire row 1, then a 156-sample segment.
-        m.begin_block(256, 48_000.0);
+        m.begin_block_silent(256, 48_000.0);
         m.advance_segment(100, 120.0, 48_000.0, &mut effects, &track_effects);
         m.fire(1 << 1, 1 << 1);
         m.advance_segment(156, 120.0, 48_000.0, &mut effects, &track_effects);
@@ -1226,6 +1398,148 @@ mod tests {
         // The `fires` bit followed the row.
         assert_eq!(m.fires_last_block() & (1 << 3), 0);
         assert_ne!(m.fires_last_block() & (1 << 7), 0);
+    }
+
+    #[test]
+    fn transient_detector_fires_on_a_step_input_after_a_steady_warmup() {
+        // The warmup tone is long enough (≥ slow envelope settling time + one
+        // refractory window) that any rising-edge fire from silence-→-tone
+        // has expired before the step. Then the step up to 0.9 produces a
+        // fast/slow ratio well above the 1.5 threshold.
+        let mut det = TransientDetector::default();
+        let sr = 48_000.0_f32;
+        for _ in 0..20_000 {
+            det.process_sample(0.05, 1.5, 50.0, sr);
+        }
+        let mut fired = false;
+        for _ in 0..1024 {
+            if det.process_sample(0.9, 1.5, 50.0, sr) {
+                fired = true;
+                break;
+            }
+        }
+        assert!(fired, "step input above the noise floor must trigger");
+    }
+
+    #[test]
+    fn transient_detector_holds_off_during_refractory_window() {
+        // After firing once, the detector must not fire again until the
+        // refractory window (50 ms) elapses, even while the input stays high.
+        let mut det = TransientDetector::default();
+        let sr = 48_000.0_f32;
+        for _ in 0..20_000 {
+            det.process_sample(0.05, 1.5, 50.0, sr);
+        }
+        let mut first = None;
+        for i in 0..2048 {
+            if det.process_sample(0.9, 1.5, 50.0, sr) {
+                first = Some(i);
+                break;
+            }
+        }
+        assert!(first.is_some(), "the first transient must fire");
+        // Within the hold window (50 ms ≈ 2400 samples), no further fires.
+        let mut re_fired = false;
+        for _ in 0..2000 {
+            if det.process_sample(0.9, 1.5, 50.0, sr) {
+                re_fired = true;
+                break;
+            }
+        }
+        assert!(
+            !re_fired,
+            "refractory window must swallow a sustained high signal"
+        );
+    }
+
+    #[test]
+    fn transient_detector_does_not_fire_on_steady_dc_or_silence() {
+        let mut det = TransientDetector::default();
+        let sr = 48_000.0_f32;
+        // Silence: no envelope motion at all.
+        for _ in 0..2400 {
+            assert!(!det.process_sample(0.0, 1.5, 50.0, sr));
+        }
+        // Steady DC: the fast and slow envelopes track each other; ratio ≈ 1.
+        let mut det = TransientDetector::default();
+        for _ in 0..2400 {
+            det.process_sample(0.5, 1.5, 50.0, sr);
+        }
+        let mut fired = false;
+        for _ in 0..2400 {
+            if det.process_sample(0.5, 1.5, 50.0, sr) {
+                fired = true;
+                break;
+            }
+        }
+        assert!(!fired, "steady-state DC must not produce a transient fire");
+    }
+
+    #[test]
+    fn modulation_transient_trigger_fires_and_resets_phases_on_a_block() {
+        // A row configured for `Transient`: a long warm-up settles the
+        // envelopes and lets the rising-edge refractory from silence-→-tone
+        // expire, then a block containing a clear click fires the row and
+        // zeros its three MSEG phases.
+        let mut m = Modulation::new();
+        let mut cfg: [TrackModulation; ROWS] =
+            std::array::from_fn(TrackModulation::default_for_row);
+        cfg[2].trigger = TriggerSource::Transient {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        };
+        m.set_config(&cfg);
+        let sr = 48_000.0_f64;
+        // 4 warm-up blocks of 5120 samples each (~425 ms) — past the slow
+        // envelope's settling time and the refractory window.
+        let warm = vec![0.05_f32; 5120];
+        for _ in 0..4 {
+            m.begin_block(&warm, &warm, sr);
+        }
+        // Force non-zero phases so the fire-reset is observable.
+        m.force_runtime_state_for_test(2, [0.4, 0.5, 0.6], 0.9, 0.0, false);
+        // Hit block: a sharp click in the middle.
+        let mut left = vec![0.05_f32; 1024];
+        let mut right = vec![0.05_f32; 1024];
+        for i in 500..510 {
+            left[i] = 0.95;
+            right[i] = 0.95;
+        }
+        m.begin_block(&left, &right, sr);
+        assert_ne!(
+            m.fires_last_block() & (1 << 2),
+            0,
+            "Transient row must fire on a clear onset"
+        );
+        // Phases reset to 0 on fire.
+        assert_eq!(m.phase_for_test(2, 0), 0.0);
+        assert_eq!(m.phase_for_test(2, 1), 0.0);
+        assert_eq!(m.phase_for_test(2, 2), 0.0);
+    }
+
+    #[test]
+    fn modulation_reset_zeroes_transient_detector_state() {
+        let mut m = Modulation::new();
+        let mut cfg: [TrackModulation; ROWS] =
+            std::array::from_fn(TrackModulation::default_for_row);
+        cfg[0].trigger = TriggerSource::Transient {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        };
+        m.set_config(&cfg);
+        // Run a hot block to charge the detector envelopes + refractory.
+        let hot = vec![0.9_f32; 1024];
+        m.begin_block(&hot, &hot, 48_000.0);
+        let (fast, slow, refr) = m.transient_detector_for_test(0).state_for_test();
+        assert!(
+            fast > 0.0 || slow > 0.0 || refr > 0,
+            "the hot block must have left state on the detector"
+        );
+        m.reset();
+        let (fast, slow, refr) = m.transient_detector_for_test(0).state_for_test();
+        assert_eq!(fast, 0.0, "reset must clear the fast envelope");
+        assert_eq!(slow, 0.0, "reset must clear the slow envelope");
+        assert_eq!(refr, 0, "reset must clear the refractory counter");
     }
 
     #[test]

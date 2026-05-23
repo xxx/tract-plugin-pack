@@ -43,8 +43,13 @@ pub struct EffectLayout {
     pub mseg_pane: (f32, f32, f32, f32),
     /// Trigger-source dropdown trigger.
     pub trigger: (f32, f32, f32, f32),
-    /// Trigger-rate dial — only hot when the source is `FreeHz`.
+    /// Trigger-rate dial — only hot when the source is `FreeHz` (the slot also
+    /// hosts the `Sens` dial when the source is `Transient`).
     pub trigger_rate: (f32, f32, f32, f32),
+    /// Secondary trigger dial — only hot when the source is `Transient`
+    /// (hosts the `Hold` refractory dial). Sits to the right of `trigger_rate`
+    /// at the same vertical position.
+    pub trigger_aux: (f32, f32, f32, f32),
     /// Active-MSEG sync-mode selector (Time / Beat).
     pub mseg_sync: (f32, f32, f32, f32),
     /// Active-MSEG length slider (beats or seconds, depending on sync mode).
@@ -77,13 +82,17 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
     // Same size + raised-y as the depth dial so its label/value text reads at
     // the same scale as the rest of the modulation-row dials.
     let trigger_rate = l(ox + 146.0, oy + 172.0, 64.0, 64.0);
-    let mseg_selector = l(ox + 222.0, oy + 200.0, 240.0, 34.0);
-    let target = l(ox + 478.0, oy + 200.0, 170.0, 34.0);
+    // The aux trigger dial sits flush to the right of trigger_rate. Together
+    // they occupy ox+146..ox+216; the rest of the modulation row is shifted
+    // 74 px right to clear them.
+    let trigger_aux = l(ox + 216.0, oy + 172.0, 64.0, 64.0);
+    let mseg_selector = l(ox + 296.0, oy + 200.0, 240.0, 34.0);
+    let target = l(ox + 552.0, oy + 200.0, 170.0, 34.0);
     // Depth dial: raised so its value text doesn't fall into the MSEG pane below.
-    let depth = l(ox + 664.0, oy + 172.0, 64.0, 64.0);
+    let depth = l(ox + 738.0, oy + 172.0, 64.0, 64.0);
     // Active-MSEG sync + length, on the modulation row to the right of depth.
-    let mseg_sync = l(ox + 740.0, oy + 200.0, 110.0, 34.0);
-    let mseg_length = l(ox + 860.0, oy + 200.0, 140.0, 34.0);
+    let mseg_sync = l(ox + 814.0, oy + 200.0, 110.0, 34.0);
+    let mseg_length = l(ox + 934.0, oy + 200.0, 140.0, 34.0);
     let mseg_pane = l(ox, oy + 240.0, mw - inset, 390.0);
     EffectLayout {
         back,
@@ -98,6 +107,7 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
         mseg_pane,
         trigger,
         trigger_rate,
+        trigger_aux,
         mseg_sync,
         mseg_length,
     }
@@ -121,8 +131,11 @@ pub enum EffectHit {
     MsegPane,
     /// The per-track trigger-source dropdown.
     Trigger,
-    /// The per-track trigger-rate dial (only hot when the source is FreeHz).
+    /// The trigger-rate dial. Hot when the source is `FreeHz` (`Rate`) or
+    /// `Transient` (`Sens`).
     TriggerRate,
+    /// The trigger aux dial. Hot only when the source is `Transient` (`Hold`).
+    TriggerAux,
     /// Active-MSEG sync-mode selector segment (0 = Time, 1 = Beat).
     MsegSync(usize),
     /// Active-MSEG length slider (its scale depends on the sync mode).
@@ -141,7 +154,7 @@ pub fn effect_hit(
     scale: f32,
     param_count: usize,
     selected_mseg: usize,
-    is_free_hz: bool,
+    trigger: TriggerSource,
 ) -> Option<EffectHit> {
     let lay = effect_layout(scale);
     if in_rect(lay.back, px, py) {
@@ -162,8 +175,16 @@ pub fn effect_hit(
     if in_rect(lay.trigger, px, py) {
         return Some(EffectHit::Trigger);
     }
-    if is_free_hz && in_rect(lay.trigger_rate, px, py) {
+    let trigger_has_rate = matches!(
+        trigger,
+        TriggerSource::FreeHz { .. } | TriggerSource::Transient { .. }
+    );
+    let trigger_has_aux = matches!(trigger, TriggerSource::Transient { .. });
+    if trigger_has_rate && in_rect(lay.trigger_rate, px, py) {
         return Some(EffectHit::TriggerRate);
+    }
+    if trigger_has_aux && in_rect(lay.trigger_aux, px, py) {
+        return Some(EffectHit::TriggerAux);
     }
     // MSEG selector — three equal segments.
     let (sx, sy, sw, sh) = lay.mseg_selector;
@@ -364,18 +385,35 @@ pub fn target_to_item(target: Option<usize>) -> usize {
 }
 
 /// The trigger-source dropdown items, in `TriggerSource` discriminant order.
-pub fn trigger_items() -> [&'static str; 4] {
-    ["Free run", "Cell light", "Cell step", "Free Hz"]
+pub fn trigger_items() -> [&'static str; 5] {
+    [
+        "Free run",
+        "Cell light",
+        "Cell step",
+        "Free Hz",
+        "Transient",
+    ]
 }
 
-/// Build a `TriggerSource` from a dropdown item index. `carried_hz` is the
-/// `hz` to seed `FreeHz` with (the dial's current value, or a default).
-pub fn trigger_from_item(item: usize, carried_hz: f32) -> TriggerSource {
+/// Build a `TriggerSource` from a dropdown item index. `carried_hz` seeds a
+/// fresh `FreeHz` with the last-used rate dial value; `carried_threshold`
+/// and `carried_hold_ms` seed a fresh `Transient` from the last-used
+/// sensitivity / hold dials.
+pub fn trigger_from_item(
+    item: usize,
+    carried_hz: f32,
+    carried_threshold: f32,
+    carried_hold_ms: f32,
+) -> TriggerSource {
     match item {
         0 => TriggerSource::Free,
         1 => TriggerSource::CellLight,
         2 => TriggerSource::CellStep,
-        _ => TriggerSource::FreeHz { hz: carried_hz },
+        3 => TriggerSource::FreeHz { hz: carried_hz },
+        _ => TriggerSource::Transient {
+            threshold: carried_threshold,
+            hold_ms: carried_hold_ms,
+        },
     }
 }
 
@@ -386,12 +424,19 @@ pub fn trigger_to_item(src: TriggerSource) -> usize {
         TriggerSource::CellLight => 1,
         TriggerSource::CellStep => 2,
         TriggerSource::FreeHz { .. } => 3,
+        TriggerSource::Transient { .. } => 4,
     }
 }
 
 /// The trigger-rate dial range (Hz).
 pub const TRIGGER_RATE_MIN_HZ: f32 = 0.05;
 pub const TRIGGER_RATE_MAX_HZ: f32 = 20.0;
+
+/// User-facing labels for the Transient trigger's two dials. The threshold
+/// dial reads as "Sensitivity" because users think in terms of "how easy is
+/// it to trigger" — sensitivity is the inverse of the underlying ratio.
+pub const TRIGGER_TRANSIENT_SENS_LABEL: &str = "Sens";
+pub const TRIGGER_TRANSIENT_HOLD_LABEL: &str = "Hold";
 
 /// Length slider range when the active MSEG is Time-synced (seconds per cycle).
 pub const MSEG_LENGTH_TIME_MIN: f32 = 0.05;
@@ -540,8 +585,9 @@ pub fn draw_mseg_playhead(
     widgets::draw_rect(pixmap, x, py_, line_w, ph_, color);
 }
 
-/// Draw the per-track trigger dropdown trigger and (when the source is
-/// `FreeHz`) the rate dial. Called as part of the MODULATION section draw.
+/// Draw the per-track trigger dropdown trigger and the trigger-source-specific
+/// dials: a `Rate` dial for `FreeHz`; a `Sens` + `Hold` pair for `Transient`.
+/// `Free`/`CellLight`/`CellStep` leave the dial slots empty.
 pub fn draw_trigger_controls(
     pixmap: &mut Pixmap,
     tr: &mut widgets::TextRenderer,
@@ -555,25 +601,67 @@ pub fn draw_trigger_controls(
         TriggerSource::CellLight => "Cell light",
         TriggerSource::CellStep => "Cell step",
         TriggerSource::FreeHz { .. } => "Free Hz",
+        TriggerSource::Transient { .. } => "Transient",
     };
     widgets::dropdown::draw_dropdown_trigger(pixmap, tr, lay.trigger, label, trigger_dropdown_open);
-    if let TriggerSource::FreeHz { hz } = trigger {
-        let (rx, ry, rw, rh) = lay.trigger_rate;
-        widgets::param_dial::draw_dial(
-            pixmap,
-            tr,
-            rx + rw / 2.0,
-            ry + rh / 2.0,
-            (rw.min(rh) / 2.0) - 6.0 * scale,
-            "Rate",
-            &crate::effects::format_value(hz, crate::effects::ParamFormat::Hertz),
-            crate::effects::value_to_norm(
-                hz,
-                TRIGGER_RATE_MIN_HZ,
-                TRIGGER_RATE_MAX_HZ,
-                crate::effects::ParamScaling::Log,
-            ),
-        );
+    match trigger {
+        TriggerSource::FreeHz { hz } => {
+            let (rx, ry, rw, rh) = lay.trigger_rate;
+            widgets::param_dial::draw_dial(
+                pixmap,
+                tr,
+                rx + rw / 2.0,
+                ry + rh / 2.0,
+                (rw.min(rh) / 2.0) - 6.0 * scale,
+                "Rate",
+                &crate::effects::format_value(hz, crate::effects::ParamFormat::Hertz),
+                crate::effects::value_to_norm(
+                    hz,
+                    TRIGGER_RATE_MIN_HZ,
+                    TRIGGER_RATE_MAX_HZ,
+                    crate::effects::ParamScaling::Log,
+                ),
+            );
+        }
+        TriggerSource::Transient { threshold, hold_ms } => {
+            let (rx, ry, rw, rh) = lay.trigger_rate;
+            // Sensitivity is the inverse of the stored threshold ratio, so
+            // the dial sweep reads as "more triggers" → right.
+            let sens_norm = 1.0
+                - crate::effects::value_to_norm(
+                    threshold,
+                    crate::modulation::TRANSIENT_THRESHOLD_MIN,
+                    crate::modulation::TRANSIENT_THRESHOLD_MAX,
+                    crate::effects::ParamScaling::Log,
+                );
+            widgets::param_dial::draw_dial(
+                pixmap,
+                tr,
+                rx + rw / 2.0,
+                ry + rh / 2.0,
+                (rw.min(rh) / 2.0) - 6.0 * scale,
+                TRIGGER_TRANSIENT_SENS_LABEL,
+                &format!("{:.0}%", sens_norm * 100.0),
+                sens_norm,
+            );
+            let (ax, ay, aw, ah) = lay.trigger_aux;
+            widgets::param_dial::draw_dial(
+                pixmap,
+                tr,
+                ax + aw / 2.0,
+                ay + ah / 2.0,
+                (aw.min(ah) / 2.0) - 6.0 * scale,
+                TRIGGER_TRANSIENT_HOLD_LABEL,
+                &format!("{hold_ms:.0} ms"),
+                crate::effects::value_to_norm(
+                    hold_ms,
+                    crate::modulation::TRANSIENT_HOLD_MS_MIN,
+                    crate::modulation::TRANSIENT_HOLD_MS_MAX,
+                    crate::effects::ParamScaling::Log,
+                ),
+            );
+        }
+        _ => {}
     }
 }
 
@@ -756,22 +844,54 @@ mod tests {
     }
 
     #[test]
-    fn trigger_items_lists_the_four_sources() {
+    fn trigger_items_lists_the_five_sources() {
         let items = trigger_items();
-        assert_eq!(items, ["Free run", "Cell light", "Cell step", "Free Hz"]);
+        assert_eq!(
+            items,
+            [
+                "Free run",
+                "Cell light",
+                "Cell step",
+                "Free Hz",
+                "Transient"
+            ]
+        );
     }
 
     #[test]
     fn trigger_from_and_to_item_round_trip() {
-        // 0 -> Free, 1 -> CellLight, 2 -> CellStep, 3 -> FreeHz{<carried hz>}.
-        assert_eq!(trigger_from_item(0, 1.0), TriggerSource::Free);
-        assert_eq!(trigger_from_item(1, 1.0), TriggerSource::CellLight);
-        assert_eq!(trigger_from_item(2, 1.0), TriggerSource::CellStep);
-        assert_eq!(trigger_from_item(3, 3.5), TriggerSource::FreeHz { hz: 3.5 });
+        // 0 -> Free, 1 -> CellLight, 2 -> CellStep, 3 -> FreeHz, 4 -> Transient.
+        assert_eq!(trigger_from_item(0, 1.0, 1.5, 50.0), TriggerSource::Free);
+        assert_eq!(
+            trigger_from_item(1, 1.0, 1.5, 50.0),
+            TriggerSource::CellLight
+        );
+        assert_eq!(
+            trigger_from_item(2, 1.0, 1.5, 50.0),
+            TriggerSource::CellStep
+        );
+        assert_eq!(
+            trigger_from_item(3, 3.5, 1.5, 50.0),
+            TriggerSource::FreeHz { hz: 3.5 }
+        );
+        assert_eq!(
+            trigger_from_item(4, 1.0, 2.0, 75.0),
+            TriggerSource::Transient {
+                threshold: 2.0,
+                hold_ms: 75.0,
+            }
+        );
         assert_eq!(trigger_to_item(TriggerSource::Free), 0);
         assert_eq!(trigger_to_item(TriggerSource::CellLight), 1);
         assert_eq!(trigger_to_item(TriggerSource::CellStep), 2);
         assert_eq!(trigger_to_item(TriggerSource::FreeHz { hz: 99.0 }), 3);
+        assert_eq!(
+            trigger_to_item(TriggerSource::Transient {
+                threshold: 2.0,
+                hold_ms: 75.0,
+            }),
+            4
+        );
     }
 
     #[test]
@@ -792,11 +912,11 @@ mod tests {
         let (tx, ty, tw, th) = lay.trigger;
         // Trigger hit fires regardless of selected_mseg.
         assert_eq!(
-            effect_hit(tx + tw / 2.0, ty + th / 2.0, 1.0, 2, 0, false),
+            effect_hit(tx + tw / 2.0, ty + th / 2.0, 1.0, 2, 0, TriggerSource::Free),
             Some(EffectHit::Trigger)
         );
         assert_eq!(
-            effect_hit(tx + tw / 2.0, ty + th / 2.0, 1.0, 2, 1, false),
+            effect_hit(tx + tw / 2.0, ty + th / 2.0, 1.0, 2, 1, TriggerSource::Free),
             Some(EffectHit::Trigger)
         );
     }
@@ -809,23 +929,80 @@ mod tests {
             assert!(!rects_overlap(lay.mix, d));
         }
         let (mx, my, mw, mh) = lay.mix;
-        let hit = effect_hit(mx + mw / 2.0, my + mh / 2.0, 1.0, 2, 0, false);
+        let hit = effect_hit(mx + mw / 2.0, my + mh / 2.0, 1.0, 2, 0, TriggerSource::Free);
         assert_eq!(hit, Some(EffectHit::Mix));
     }
 
     #[test]
-    fn effect_hit_returns_trigger_rate_only_when_free_hz() {
+    fn effect_hit_returns_trigger_rate_for_free_hz_and_transient() {
         let lay = effect_layout(1.0);
         let (rx, ry, rw, rh) = lay.trigger_rate;
         // FreeHz: rate dial is hot.
         assert_eq!(
-            effect_hit(rx + rw / 2.0, ry + rh / 2.0, 1.0, 2, 0, true),
+            effect_hit(
+                rx + rw / 2.0,
+                ry + rh / 2.0,
+                1.0,
+                2,
+                0,
+                TriggerSource::FreeHz { hz: 1.0 },
+            ),
             Some(EffectHit::TriggerRate)
         );
-        // Not FreeHz: rate dial is not returned (falls through).
-        let other = effect_hit(rx + rw / 2.0, ry + rh / 2.0, 1.0, 2, 0, false);
-        // The fall-through may resolve to MsegPane or None depending on
-        // layout; the important check is that it is NOT TriggerRate.
+        // Transient: rate-dial slot hosts Sens — also hot.
+        assert_eq!(
+            effect_hit(
+                rx + rw / 2.0,
+                ry + rh / 2.0,
+                1.0,
+                2,
+                0,
+                TriggerSource::Transient {
+                    threshold: 1.5,
+                    hold_ms: 50.0,
+                },
+            ),
+            Some(EffectHit::TriggerRate)
+        );
+        // Not FreeHz nor Transient: rate dial falls through (not TriggerRate).
+        let other = effect_hit(rx + rw / 2.0, ry + rh / 2.0, 1.0, 2, 0, TriggerSource::Free);
         assert_ne!(other, Some(EffectHit::TriggerRate));
+    }
+
+    #[test]
+    fn effect_hit_returns_trigger_aux_only_for_transient() {
+        let lay = effect_layout(1.0);
+        let (ax, ay, aw, ah) = lay.trigger_aux;
+        let cx = ax + aw / 2.0;
+        let cy = ay + ah / 2.0;
+        // Transient: aux dial (Hold) is hot.
+        assert_eq!(
+            effect_hit(
+                cx,
+                cy,
+                1.0,
+                2,
+                0,
+                TriggerSource::Transient {
+                    threshold: 1.5,
+                    hold_ms: 50.0,
+                },
+            ),
+            Some(EffectHit::TriggerAux)
+        );
+        // FreeHz: aux dial NOT hot (only Transient uses it).
+        let free_hz_hit = effect_hit(cx, cy, 1.0, 2, 0, TriggerSource::FreeHz { hz: 1.0 });
+        assert_ne!(free_hz_hit, Some(EffectHit::TriggerAux));
+    }
+
+    #[test]
+    fn layout_trigger_aux_sits_disjoint_from_trigger_rate_and_mseg_controls() {
+        let lay = effect_layout(1.0);
+        assert!(!rects_overlap(lay.trigger_rate, lay.trigger_aux));
+        assert!(!rects_overlap(lay.trigger_aux, lay.mseg_selector));
+        assert!(!rects_overlap(lay.trigger_aux, lay.target));
+        assert!(!rects_overlap(lay.trigger_aux, lay.depth));
+        // Aux sits to the RIGHT of the rate dial.
+        assert!(lay.trigger_rate.0 < lay.trigger_aux.0);
     }
 }

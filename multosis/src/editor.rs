@@ -607,14 +607,13 @@ impl MultosisWindow {
         // drag-only.
         let param_count = self.selected_track_param_count();
         let trigger = self.selected_track_modulation().trigger;
-        let is_free_hz = matches!(trigger, TriggerSource::FreeHz { .. });
         let hit = effect_editor::effect_hit(
             px,
             py,
             self.scale_factor,
             param_count,
             self.selected_mseg,
-            is_free_hz,
+            trigger,
         );
         if let Some(EffectHit::Dial(i)) = hit {
             // Right-clicking a *different* dial while one is already
@@ -831,14 +830,13 @@ impl MultosisWindow {
     fn on_effect_press(&mut self, px: f32, py: f32, ctrl: bool) -> bool {
         let params = self.selected_track_param_count();
         let trigger = self.selected_track_modulation().trigger;
-        let is_free_hz = matches!(trigger, TriggerSource::FreeHz { .. });
         let Some(hit) = effect_editor::effect_hit(
             px,
             py,
             self.scale_factor,
             params,
             self.selected_mseg,
-            is_free_hz,
+            trigger,
         ) else {
             return false;
         };
@@ -960,24 +958,47 @@ impl MultosisWindow {
             }
             EffectHit::TriggerRate => {
                 let trigger = self.selected_track_modulation().trigger;
-                if let TriggerSource::FreeHz { hz } = trigger {
-                    if self.effect_click.check_and_update(EffectHit::TriggerRate) {
-                        self.reset_trigger_rate_to_default();
-                    } else {
-                        let current_norm = effects::value_to_norm(
-                            hz,
-                            effect_editor::TRIGGER_RATE_MIN_HZ,
-                            effect_editor::TRIGGER_RATE_MAX_HZ,
+                let current_norm = match trigger {
+                    TriggerSource::FreeHz { hz } => effects::value_to_norm(
+                        hz,
+                        effect_editor::TRIGGER_RATE_MIN_HZ,
+                        effect_editor::TRIGGER_RATE_MAX_HZ,
+                        effects::ParamScaling::Log,
+                    ),
+                    TriggerSource::Transient { threshold, .. } => {
+                        // Sensitivity = 1 − normalised threshold.
+                        1.0 - effects::value_to_norm(
+                            threshold,
+                            crate::modulation::TRANSIENT_THRESHOLD_MIN,
+                            crate::modulation::TRANSIENT_THRESHOLD_MAX,
                             effects::ParamScaling::Log,
-                        );
-                        self.effect_dial_drag.begin_drag(
-                            EffectHit::TriggerRate,
-                            current_norm,
-                            false,
-                        );
+                        )
                     }
+                    _ => return false,
+                };
+                if self.effect_click.check_and_update(EffectHit::TriggerRate) {
+                    self.reset_trigger_rate_to_default();
                 } else {
+                    self.effect_dial_drag
+                        .begin_drag(EffectHit::TriggerRate, current_norm, false);
+                }
+            }
+            EffectHit::TriggerAux => {
+                let trigger = self.selected_track_modulation().trigger;
+                let TriggerSource::Transient { hold_ms, .. } = trigger else {
                     return false;
+                };
+                if self.effect_click.check_and_update(EffectHit::TriggerAux) {
+                    self.reset_trigger_aux_to_default();
+                } else {
+                    let current_norm = effects::value_to_norm(
+                        hold_ms,
+                        crate::modulation::TRANSIENT_HOLD_MS_MIN,
+                        crate::modulation::TRANSIENT_HOLD_MS_MAX,
+                        effects::ParamScaling::Log,
+                    );
+                    self.effect_dial_drag
+                        .begin_drag(EffectHit::TriggerAux, current_norm, false);
                 }
             }
             EffectHit::MsegSync(seg) => {
@@ -1113,7 +1134,6 @@ impl MultosisWindow {
         };
         // Resolve the press to an effect-editor hit, if any.
         let trigger = self.selected_track_modulation().trigger;
-        let is_free_hz = matches!(trigger, TriggerSource::FreeHz { .. });
         let param_count = self.selected_track_param_count();
         let hit = effect_editor::effect_hit(
             px,
@@ -1121,7 +1141,7 @@ impl MultosisWindow {
             self.scale_factor,
             param_count,
             self.selected_mseg,
-            is_free_hz,
+            trigger,
         );
         if hit == Some(active) {
             // Click on the active dial → cancel; the normal effect-press path
@@ -1239,41 +1259,101 @@ impl MultosisWindow {
         self.mark_config_dirty();
     }
 
-    /// Reset the per-track FreeHz trigger rate to 1.0 Hz. Marks dirty.
-    /// No-op when the active trigger source is not `FreeHz`.
+    /// Reset the primary trigger dial: `FreeHz` rate → 1.0 Hz; `Transient`
+    /// threshold → its default. No-op for trigger sources without a primary
+    /// dial. Marks dirty.
     fn reset_trigger_rate_to_default(&mut self) {
         if let Ok(mut cfg) = self.params.track_modulation.lock() {
-            if let TriggerSource::FreeHz { hz } = &mut cfg[self.selected_track].trigger {
-                *hz = 1.0;
+            match &mut cfg[self.selected_track].trigger {
+                TriggerSource::FreeHz { hz } => *hz = 1.0,
+                TriggerSource::Transient { threshold, .. } => {
+                    *threshold = crate::modulation::TRANSIENT_THRESHOLD_DEFAULT;
+                }
+                _ => return,
+            }
+            self.mark_config_dirty();
+        }
+    }
+
+    /// Update the primary trigger dial from the rate-dial drag's normalised
+    /// value: writes to `FreeHz.hz` (log-mapped through the Hz range) or
+    /// `Transient.threshold` (log-mapped through the threshold range,
+    /// inverted so dial-right = more sensitive). No-op otherwise.
+    fn apply_trigger_rate_drag(&mut self, norm: f32) {
+        if let Ok(mut cfg) = self.params.track_modulation.lock() {
+            match &mut cfg[self.selected_track].trigger {
+                TriggerSource::FreeHz { hz } => {
+                    *hz = effects::norm_to_value(
+                        norm,
+                        effect_editor::TRIGGER_RATE_MIN_HZ,
+                        effect_editor::TRIGGER_RATE_MAX_HZ,
+                        effects::ParamScaling::Log,
+                    );
+                }
+                TriggerSource::Transient { threshold, .. } => {
+                    *threshold = effects::norm_to_value(
+                        1.0 - norm,
+                        crate::modulation::TRANSIENT_THRESHOLD_MIN,
+                        crate::modulation::TRANSIENT_THRESHOLD_MAX,
+                        effects::ParamScaling::Log,
+                    );
+                }
+                _ => return,
+            }
+            self.mark_config_dirty();
+        }
+    }
+
+    /// Reset the `Transient` Hold dial to its default. No-op when the active
+    /// trigger source is not `Transient`. Marks dirty.
+    fn reset_trigger_aux_to_default(&mut self) {
+        if let Ok(mut cfg) = self.params.track_modulation.lock() {
+            if let TriggerSource::Transient { hold_ms, .. } = &mut cfg[self.selected_track].trigger
+            {
+                *hold_ms = crate::modulation::TRANSIENT_HOLD_MS_DEFAULT;
                 self.mark_config_dirty();
             }
         }
     }
 
-    /// Update the trigger rate from the rate-dial drag's normalised value.
-    fn apply_trigger_rate_drag(&mut self, norm: f32) {
-        let new_hz = effects::norm_to_value(
+    /// Update `Transient.hold_ms` from the aux-dial drag's normalised value.
+    fn apply_trigger_aux_drag(&mut self, norm: f32) {
+        let new_hold_ms = effects::norm_to_value(
             norm,
-            effect_editor::TRIGGER_RATE_MIN_HZ,
-            effect_editor::TRIGGER_RATE_MAX_HZ,
+            crate::modulation::TRANSIENT_HOLD_MS_MIN,
+            crate::modulation::TRANSIENT_HOLD_MS_MAX,
             effects::ParamScaling::Log,
         );
         if let Ok(mut cfg) = self.params.track_modulation.lock() {
-            if let TriggerSource::FreeHz { hz } = &mut cfg[self.selected_track].trigger {
-                *hz = new_hz;
+            if let TriggerSource::Transient { hold_ms, .. } = &mut cfg[self.selected_track].trigger
+            {
+                *hold_ms = new_hold_ms;
                 self.mark_config_dirty();
             }
         }
     }
 
     /// Apply a trigger-dropdown selection: convert the item index to a
-    /// `TriggerSource` (carrying the current Hz if any), write it, mark dirty.
+    /// `TriggerSource` (carrying the current Hz / threshold / hold so a
+    /// quick toggle through trigger sources keeps the dials' last position),
+    /// write it, mark dirty.
     fn apply_trigger_selection(&mut self, idx: usize) {
-        let carried_hz = match self.selected_track_modulation().trigger {
-            TriggerSource::FreeHz { hz } => hz,
-            _ => 1.0,
-        };
-        let new_trigger = effect_editor::trigger_from_item(idx, carried_hz);
+        let (carried_hz, carried_threshold, carried_hold_ms) =
+            match self.selected_track_modulation().trigger {
+                TriggerSource::FreeHz { hz } => (
+                    hz,
+                    crate::modulation::TRANSIENT_THRESHOLD_DEFAULT,
+                    crate::modulation::TRANSIENT_HOLD_MS_DEFAULT,
+                ),
+                TriggerSource::Transient { threshold, hold_ms } => (1.0, threshold, hold_ms),
+                _ => (
+                    1.0,
+                    crate::modulation::TRANSIENT_THRESHOLD_DEFAULT,
+                    crate::modulation::TRANSIENT_HOLD_MS_DEFAULT,
+                ),
+            };
+        let new_trigger =
+            effect_editor::trigger_from_item(idx, carried_hz, carried_threshold, carried_hold_ms);
         if let Ok(mut cfg) = self.params.track_modulation.lock() {
             cfg[self.selected_track].trigger = new_trigger;
             self.mark_config_dirty();
@@ -1469,17 +1549,39 @@ impl baseview::WindowHandler for MultosisWindow {
                         }
                     }
                     Some(EffectHit::TriggerRate) => {
-                        let current = effects::value_to_norm(
-                            match self.selected_track_modulation().trigger {
-                                TriggerSource::FreeHz { hz } => hz,
-                                _ => 1.0,
-                            },
-                            effect_editor::TRIGGER_RATE_MIN_HZ,
-                            effect_editor::TRIGGER_RATE_MAX_HZ,
-                            effects::ParamScaling::Log,
-                        );
+                        let current = match self.selected_track_modulation().trigger {
+                            TriggerSource::FreeHz { hz } => effects::value_to_norm(
+                                hz,
+                                effect_editor::TRIGGER_RATE_MIN_HZ,
+                                effect_editor::TRIGGER_RATE_MAX_HZ,
+                                effects::ParamScaling::Log,
+                            ),
+                            TriggerSource::Transient { threshold, .. } => {
+                                1.0 - effects::value_to_norm(
+                                    threshold,
+                                    crate::modulation::TRANSIENT_THRESHOLD_MIN,
+                                    crate::modulation::TRANSIENT_THRESHOLD_MAX,
+                                    effects::ParamScaling::Log,
+                                )
+                            }
+                            _ => 0.5,
+                        };
                         if let Some(norm) = self.effect_dial_drag.update_drag(shift, current) {
                             self.apply_trigger_rate_drag(norm);
+                        }
+                    }
+                    Some(EffectHit::TriggerAux) => {
+                        let current = match self.selected_track_modulation().trigger {
+                            TriggerSource::Transient { hold_ms, .. } => effects::value_to_norm(
+                                hold_ms,
+                                crate::modulation::TRANSIENT_HOLD_MS_MIN,
+                                crate::modulation::TRANSIENT_HOLD_MS_MAX,
+                                effects::ParamScaling::Log,
+                            ),
+                            _ => 0.5,
+                        };
+                        if let Some(norm) = self.effect_dial_drag.update_drag(shift, current) {
+                            self.apply_trigger_aux_drag(norm);
                         }
                     }
                     Some(EffectHit::MsegLength) => {

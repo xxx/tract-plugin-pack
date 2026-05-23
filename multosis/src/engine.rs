@@ -235,8 +235,11 @@ impl AudioEngine {
         let n = left.len().min(right.len());
         let sr = self.sample_rate as f64;
 
-        // Block-rate modulation setup: FreeHz fires, and zero the fire mask.
-        self.modulation.begin_block(n, sr);
+        // Block-rate modulation setup: FreeHz + Transient fires, zero the
+        // fire mask. The transient detector reads the dry input before the
+        // series chain mutates the buffer — feeding the chain output back
+        // through the detector would tail-chase its own modulation.
+        self.modulation.begin_block(&left[..n], &right[..n], sr);
 
         // Gather this block's step-boundary offsets (only while playing).
         let mut boundaries = [0usize; MAX_BOUNDARIES];
