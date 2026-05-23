@@ -33,7 +33,7 @@ fn engine_mixed() -> AudioEngine {
     let mut effects: [TrackEffect; 16] = std::array::from_fn(TrackEffect::default_for_row);
     for (i, te) in effects.iter_mut().enumerate() {
         te.kind = if i % 2 == 0 {
-            EffectKind::Lowpass
+            EffectKind::Svf
         } else {
             EffectKind::Bitcrush
         };

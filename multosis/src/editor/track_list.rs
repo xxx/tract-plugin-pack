@@ -205,8 +205,8 @@ mod tests {
         }
         let mut effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         effects[2] = TrackEffect {
-            kind: EffectKind::Lowpass,
-            params: default_params_for_kind(EffectKind::Lowpass),
+            kind: EffectKind::Svf,
+            params: default_params_for_kind(EffectKind::Svf),
             mix: 0.42,
         };
         effects[9] = TrackEffect {
@@ -229,7 +229,7 @@ mod tests {
         // Effects swapped.
         assert_eq!(effects[2].kind, EffectKind::Bitcrush);
         assert!((effects[2].mix - 0.81).abs() < 1e-6);
-        assert_eq!(effects[9].kind, EffectKind::Lowpass);
+        assert_eq!(effects[9].kind, EffectKind::Svf);
         assert!((effects[9].mix - 0.42).abs() < 1e-6);
         // Modulation swapped.
         assert_eq!(modu[2].trigger, TriggerSource::CellStep);

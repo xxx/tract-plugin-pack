@@ -410,8 +410,8 @@ mod tests {
         engine.set_sample_rate(48_000.0);
         let mut effects = [TrackEffect::default_for_row(0); ROWS];
         effects[0] = TrackEffect {
-            kind: crate::effects::EffectKind::Lowpass,
-            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Lowpass),
+            kind: crate::effects::EffectKind::Svf,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Svf),
             mix: 1.0,
         };
         engine.set_effects(&effects);
@@ -435,8 +435,8 @@ mod tests {
         let grid = Grid::default();
         let mut lp_first = [TrackEffect::default_for_row(0); ROWS];
         lp_first[0] = TrackEffect {
-            kind: crate::effects::EffectKind::Lowpass,
-            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Lowpass),
+            kind: crate::effects::EffectKind::Svf,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Svf),
             mix: 1.0,
         };
         lp_first[1] = TrackEffect {
@@ -486,8 +486,8 @@ mod tests {
         let grid = Grid::default();
         let mut sparse = [TrackEffect::default_for_row(0); ROWS];
         sparse[5] = TrackEffect {
-            kind: crate::effects::EffectKind::Lowpass,
-            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Lowpass),
+            kind: crate::effects::EffectKind::Svf,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Svf),
             mix: 1.0,
         };
 
@@ -624,8 +624,8 @@ mod tests {
         let mut config: [crate::effects::TrackEffect; 16] =
             std::array::from_fn(crate::effects::TrackEffect::default_for_row);
         config[0] = crate::effects::TrackEffect {
-            kind: crate::effects::EffectKind::Lowpass,
-            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Lowpass),
+            kind: crate::effects::EffectKind::Svf,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Svf),
             mix: 1.0,
         };
         let mut engine = AudioEngine::new();
@@ -649,8 +649,8 @@ mod tests {
         let mut cfg: [crate::effects::TrackEffect; ROWS] =
             std::array::from_fn(crate::effects::TrackEffect::default_for_row);
         cfg[3] = crate::effects::TrackEffect {
-            kind: crate::effects::EffectKind::Lowpass,
-            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Lowpass),
+            kind: crate::effects::EffectKind::Svf,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Svf),
             mix: 0.7,
         };
         cfg[7] = crate::effects::TrackEffect {
@@ -663,7 +663,7 @@ mod tests {
         let cached = engine.track_effects_for_test();
         assert_eq!(cached[3].kind, crate::effects::EffectKind::Bitcrush);
         assert!((cached[3].mix - 0.4).abs() < 1e-6);
-        assert_eq!(cached[7].kind, crate::effects::EffectKind::Lowpass);
+        assert_eq!(cached[7].kind, crate::effects::EffectKind::Svf);
         assert!((cached[7].mix - 0.7).abs() < 1e-6);
         assert_eq!(
             engine.effects_mut_for_test(3).kind(),
@@ -671,7 +671,7 @@ mod tests {
         );
         assert_eq!(
             engine.effects_mut_for_test(7).kind(),
-            crate::effects::EffectKind::Lowpass
+            crate::effects::EffectKind::Svf
         );
     }
 
@@ -686,7 +686,7 @@ mod tests {
         engine.set_sample_rate(48_000.0);
         let cfg: [crate::effects::TrackEffect; ROWS] =
             std::array::from_fn(|_| crate::effects::TrackEffect {
-                kind: crate::effects::EffectKind::Lowpass,
+                kind: crate::effects::EffectKind::Svf,
                 params: [800.0, 0.2, 0.0, 0.0, 0.0],
                 mix: 1.0,
             });
@@ -732,7 +732,7 @@ mod tests {
         engine.set_sample_rate(48_000.0);
         let mut cfg: [crate::effects::TrackEffect; ROWS] =
             std::array::from_fn(|_| crate::effects::TrackEffect {
-                kind: crate::effects::EffectKind::Lowpass,
+                kind: crate::effects::EffectKind::Svf,
                 params: [800.0, 0.2, 0.0, 0.0, 0.0],
                 mix: 1.0,
             });
@@ -864,14 +864,14 @@ mod tests {
         let mut cfg: [crate::effects::TrackEffect; ROWS] =
             std::array::from_fn(crate::effects::TrackEffect::default_for_row);
         cfg[0] = crate::effects::TrackEffect {
-            kind: crate::effects::EffectKind::Lowpass,
+            kind: crate::effects::EffectKind::Svf,
             params: [2000.0, 0.1, 0.0, 0.0, 0.0],
             mix: 1.0,
         };
         engine.set_effects(&cfg);
         assert_eq!(
             engine.effects_mut_for_test(0).kind(),
-            crate::effects::EffectKind::Lowpass
+            crate::effects::EffectKind::Svf
         );
         cfg[0].kind = crate::effects::EffectKind::Bitcrush;
         engine.set_effects(&cfg);
@@ -930,7 +930,7 @@ mod tests {
         // Lowpass so the modulation has an audible parameter to sweep.
         let effect_cfg: [crate::effects::TrackEffect; ROWS] =
             std::array::from_fn(|_| crate::effects::TrackEffect {
-                kind: crate::effects::EffectKind::Lowpass,
+                kind: crate::effects::EffectKind::Svf,
                 params: [2_000.0, 0.15, 0.0, 0.0, 0.0],
                 mix: 1.0,
             });

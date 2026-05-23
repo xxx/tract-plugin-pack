@@ -128,6 +128,40 @@ pub fn in_rect((rx, ry, rw, rh): (f32, f32, f32, f32), px: f32, py: f32) -> bool
     px >= rx && px < rx + rw && py >= ry && py < ry + rh
 }
 
+/// Width of an Enum-format dropdown trigger sized to fit its longest label
+/// without truncation. Falls back to the dial-slot width `dw` when that's
+/// already enough, and overflows the slot only when the longest label
+/// genuinely needs more room. Returned width never exceeds
+/// `dw + 12 * scale` — the historical maximum overflow that comfortably
+/// fits inside the 8 px inter-slot gap.
+///
+/// Sizing per label rather than slapping a fixed overflow on every Enum
+/// trigger means single-character dropdowns (e.g. SVF's "Poles" — "2"/"4"/
+/// "6"/"8") stay slot-narrow and don't visually collide with their
+/// Enum-format neighbours' overflows.
+pub fn enum_trigger_width_for(
+    tr: &mut widgets::TextRenderer,
+    format: crate::effects::ParamFormat,
+    trigger_h: f32,
+    dw: f32,
+    scale: f32,
+) -> f32 {
+    let crate::effects::ParamFormat::Enum { labels } = format else {
+        return dw;
+    };
+    let text_size = (trigger_h * 0.5).max(10.0);
+    // Trigger's own padding (6 px each side) + chevron region (h*0.6) =
+    // overhead carved out of the trigger width before the label fits.
+    let overhead = 12.0 + trigger_h * 0.6 + 2.0 * scale;
+    let widest = labels
+        .iter()
+        .map(|&s| tr.text_width(s, text_size))
+        .fold(0.0_f32, f32::max);
+    let needed = widest + overhead;
+    let max_w = dw + 12.0 * scale;
+    needed.clamp(dw.min(max_w), max_w)
+}
+
 /// A control the user pressed in the effect editor. `Dial`/`Depth` carry the
 /// slot index; `MsegPane` carries nothing (handled by the MSEG widget).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -323,11 +357,7 @@ pub fn draw_effect_section(
                 widgets::color_text(),
             );
             let trigger_h = (dh * 0.32).max(22.0 * scale);
-            // Overflow the dial slot by 6 px on each side so longer labels
-            // (e.g. "Modulator") fit without truncation. The horizontal gap
-            // between adjacent dials is 8 px at scale 1, so a 6 px overflow
-            // leaves a comfortable margin to the neighbouring slot.
-            let trigger_w = dw + 12.0 * scale;
+            let trigger_w = enum_trigger_width_for(tr, spec.format, trigger_h, dw, scale);
             let trigger_x = dx + (dw - trigger_w) * 0.5;
             let trigger_y = dy + dh * 0.46;
             let is_open = open_param_dropdown == Some(i);
@@ -870,12 +900,13 @@ mod tests {
 
     #[test]
     fn target_items_lists_none_then_each_parameter() {
-        let items = target_items(crate::effects::EffectKind::Lowpass);
+        let items = target_items(crate::effects::EffectKind::Svf);
         assert_eq!(items[0], "(none)");
         assert_eq!(items[1], "Cutoff");
         assert_eq!(items[2], "Resonance");
-        assert_eq!(items[3], "Poles");
-        assert_eq!(items.len(), 4);
+        assert_eq!(items[3], "Type");
+        assert_eq!(items[4], "Poles");
+        assert_eq!(items.len(), 5);
     }
 
     #[test]

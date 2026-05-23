@@ -884,9 +884,16 @@ impl MultosisWindow {
                 if let Some(labels) = self.param_enum_labels(i) {
                     let (dx, dy, dw, dh) = lay.dials[i];
                     let trigger_h = (dh * 0.32).max(22.0 * self.scale_factor);
-                    // Matches the renderer in `draw_effect_section`: overflow
-                    // the dial slot by 6 px each side so "Modulator" fits.
-                    let trigger_w = dw + 12.0 * self.scale_factor;
+                    // Match the renderer's per-label width so the popup
+                    // anchors flush under the visible trigger rect.
+                    let spec_format = self.selected_track_effect_param_format(i);
+                    let trigger_w = effect_editor::enum_trigger_width_for(
+                        &mut self.text_renderer,
+                        spec_format,
+                        trigger_h,
+                        dw,
+                        self.scale_factor,
+                    );
                     let trigger_x = dx + (dw - trigger_w) * 0.5;
                     let trigger_y = dy + dh * 0.46;
                     let current = self.selected_track_effect().params[i].round() as usize;
@@ -1259,6 +1266,22 @@ impl MultosisWindow {
             crate::effects::ParamFormat::Enum { labels } => Some(labels),
             _ => None,
         }
+    }
+
+    /// `ParamFormat` of the selected track's parameter `i` — used by the
+    /// dropdown press handler to size the popup-anchor trigger rect the
+    /// same way the renderer does.
+    fn selected_track_effect_param_format(&self, i: usize) -> crate::effects::ParamFormat {
+        use crate::effects::Effect;
+        let kind = self.selected_track_effect().kind;
+        let specs = crate::effects::EffectInstance::new(kind).parameters();
+        specs
+            .get(i)
+            .map(|s| s.format)
+            .unwrap_or(crate::effects::ParamFormat::Number {
+                decimals: 0,
+                unit: "",
+            })
     }
 
     /// Apply a per-param Enum dropdown selection: write the label's index

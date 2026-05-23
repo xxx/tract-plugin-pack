@@ -1,6 +1,6 @@
 //! The effect abstraction — Phase 2 Milestone 2a. A standardized `Effect`
 //! trait, the `EffectKind` registry, enum-dispatch `EffectInstance`, two
-//! effects (`LowpassEffect`, `BitcrushEffect`), and the persisted per-track
+//! effects (`SvfEffect`, `BitcrushEffect`), and the persisted per-track
 //! `TrackEffect` config. Each track row carries its own effect instance.
 //!
 //! See `docs/superpowers/specs/2026-05-18-multosis-phase-2a-design.md`.
@@ -226,52 +226,60 @@ pub trait Effect {
     fn set_param(&mut self, index: usize, value: f32);
 }
 
-/// A resonant lowpass — `n` cascaded TPT state-variable filter stages, each
+/// A multimode state-variable filter — `n` cascaded TPT-SVF stages, each
 /// contributing 2 poles (12 dB/oct). The `Poles` param picks the cascade
-/// length from {2, 4, 6, 8} poles, giving 12 / 24 / 36 / 48 dB/oct slopes.
+/// length from {2, 4, 6, 8} poles (12 / 24 / 36 / 48 dB/oct slopes). The
+/// `Type` param selects which SVF output tap each stage emits: lowpass
+/// (LP), bandpass (BP), or highpass (HP).
 ///
 /// Resonance is applied to the **last** stage only; earlier stages run
 /// Butterworth (Q = 0.707, no peak). If every stage shared the user's Q
 /// the resonance peak at cutoff would compound by `Q^stages` — at 8
-/// poles even Q = 2 produces a 16× peak, audibly screeching with a tiny
-/// resonance setting. Keeping the cascade Butterworth except for the
-/// final stage makes the Resonance knob mean roughly the same peak
-/// height across pole counts.
-pub struct LowpassEffect {
+/// poles even Q = 2 produces a 16× peak. Keeping the cascade
+/// Butterworth except for the final stage makes the Resonance knob
+/// mean roughly the same peak height across pole counts.
+///
+/// Stage state is per-cascade-position; only the first `stages_count()`
+/// stages are touched on the audio thread. State is preserved across
+/// param changes so a cutoff or resonance sweep doesn't click.
+pub struct SvfEffect {
     cutoff: f32,
     resonance: f32,
     /// 0..3 selector index into [2, 4, 6, 8] poles. Stored as f32 so the
     /// existing Enum-format dropdown machinery handles it identically to
     /// FM Mode / FM Topology.
     poles_idx: f32,
+    /// 0..2 selector index into [LP, BP, HP]. Stored as f32 like the
+    /// other Enum-format params.
+    type_idx: f32,
     sample_rate: f32,
     /// Butterworth (Q = 0.707, no peak) coefficients — used by every
-    /// stage except the last.
-    a1_butter: f32,
-    a2_butter: f32,
-    a3_butter: f32,
+    /// stage except the last. Tuple order is `(a1, a2, a3, k)` where
+    /// `k = 1/Q` (needed for the HP tap `v3 − k · v1`).
+    butter: (f32, f32, f32, f32),
     /// User-resonance coefficients — used by the LAST cascade stage only.
-    /// At pole count = 2 (one stage), this is also the only set in play,
-    /// so single-stage behaviour matches the original 2-pole filter.
-    a1_res: f32,
-    a2_res: f32,
-    a3_res: f32,
-    /// Per-stage integrator state, four stages × two channels. Only the
-    /// first `stages_count()` stages are touched on the audio thread;
-    /// the rest stay zero. State is preserved across param changes so a
-    /// cutoff or resonance sweep doesn't click.
+    /// At pole count = 2 (one stage), this is also the only set in play.
+    res: (f32, f32, f32, f32),
     stages_ic1: [[f32; 2]; Self::MAX_STAGES],
     stages_ic2: [[f32; 2]; Self::MAX_STAGES],
 }
 
 /// Poles-dropdown label list. Order matters: `value.round() as usize`
 /// indexes it (0 → "2", 1 → "4", 2 → "6", 3 → "8" poles).
-const LP_POLES_LABELS: &[&str] = &["2", "4", "6", "8"];
+const SVF_POLES_LABELS: &[&str] = &["2", "4", "6", "8"];
 
-impl LowpassEffect {
+/// Type-dropdown label list. Order matters: 0 → LP, 1 → BP, 2 → HP.
+const SVF_TYPE_LABELS: &[&str] = &["Lowpass", "Bandpass", "Highpass"];
+
+const SVF_TYPE_LP: usize = 0;
+const SVF_TYPE_BP: usize = 1;
+// Highpass uses the `_` arm in `svf_step` — `set_param` clamps the index
+// to `0..=2`, so the only remaining case after LP and BP is HP.
+
+impl SvfEffect {
     const MAX_STAGES: usize = 4;
 
-    const PARAMS: [ParamSpec; 3] = [
+    const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Cutoff",
             min: 20.0,
@@ -292,37 +300,45 @@ impl LowpassEffect {
             },
         },
         ParamSpec {
+            name: "Type",
+            min: 0.0,
+            max: (SVF_TYPE_LABELS.len() - 1) as f32,
+            // Index 0 → Lowpass.
+            default: 0.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: SVF_TYPE_LABELS,
+            },
+        },
+        ParamSpec {
             name: "Poles",
             min: 0.0,
-            max: (LP_POLES_LABELS.len() - 1) as f32,
+            max: (SVF_POLES_LABELS.len() - 1) as f32,
             // Index 0 → 2 poles (12 dB/oct) — the original behaviour.
             default: 0.0,
             scaling: ParamScaling::Linear,
             format: ParamFormat::Enum {
-                labels: LP_POLES_LABELS,
+                labels: SVF_POLES_LABELS,
             },
         },
     ];
 
-    /// A `LowpassEffect` at its default parameters; call `set_sample_rate`
+    /// An `SvfEffect` at its default parameters; call `set_sample_rate`
     /// before processing.
     pub fn new() -> Self {
-        let mut lp = Self {
+        let mut svf = Self {
             cutoff: Self::PARAMS[0].default,
             resonance: Self::PARAMS[1].default,
-            poles_idx: Self::PARAMS[2].default,
+            type_idx: Self::PARAMS[2].default,
+            poles_idx: Self::PARAMS[3].default,
             sample_rate: 48_000.0,
-            a1_butter: 0.0,
-            a2_butter: 0.0,
-            a3_butter: 0.0,
-            a1_res: 0.0,
-            a2_res: 0.0,
-            a3_res: 0.0,
+            butter: (0.0, 0.0, 0.0, 0.0),
+            res: (0.0, 0.0, 0.0, 0.0),
             stages_ic1: [[0.0; 2]; Self::MAX_STAGES],
             stages_ic2: [[0.0; 2]; Self::MAX_STAGES],
         };
-        lp.recompute();
-        lp
+        svf.recompute();
+        svf
     }
 
     /// Number of cascaded SVF stages: index 0 → 1 stage (2 poles), …,
@@ -331,44 +347,48 @@ impl LowpassEffect {
         (self.poles_idx.round() as usize + 1).min(Self::MAX_STAGES)
     }
 
-    /// Build a `(a1, a2, a3)` TPT-SVF coefficient triplet for the given
+    /// Build a `(a1, a2, a3, k)` TPT-SVF coefficient tuple for the given
     /// Q. Q < 0.5 critically damps; Q = 0.707 is Butterworth (flat,
-    /// 3 dB at cutoff); higher Q peaks the response at cutoff.
-    fn svf_coefs(g: f32, q: f32) -> (f32, f32, f32) {
+    /// 3 dB at cutoff); higher Q peaks the response at cutoff. `k = 1/Q`
+    /// is needed for the HP output tap (`v3 − k · v1`).
+    fn svf_coefs(g: f32, q: f32) -> (f32, f32, f32, f32) {
         let k = 1.0 / q.max(0.0001);
         let a1 = 1.0 / (1.0 + g * (g + k));
         let a2 = g * a1;
         let a3 = g * a2;
-        (a1, a2, a3)
+        (a1, a2, a3, k)
     }
 
     /// Recompute both coefficient sets from cutoff / resonance / SR.
-    /// The Butterworth set is fixed at Q = 1/√2; the resonance set
-    /// follows the user's Q. Cascade stages 0..n-1 use the Butterworth
-    /// set, stage n-1 uses the resonance set.
     fn recompute(&mut self) {
         let sr = self.sample_rate.max(1.0);
         let fc = self.cutoff.clamp(20.0, sr * 0.49);
         let g = (std::f32::consts::PI * fc / sr).tan();
         let q_res = 0.5 + self.resonance.clamp(0.0, 1.0) * 9.5;
         let q_butter = std::f32::consts::FRAC_1_SQRT_2;
-        let (a1b, a2b, a3b) = Self::svf_coefs(g, q_butter);
-        let (a1r, a2r, a3r) = Self::svf_coefs(g, q_res);
-        self.a1_butter = a1b;
-        self.a2_butter = a2b;
-        self.a3_butter = a3b;
-        self.a1_res = a1r;
-        self.a2_res = a2r;
-        self.a3_res = a3r;
+        self.butter = Self::svf_coefs(g, q_butter);
+        self.res = Self::svf_coefs(g, q_res);
     }
 
-    /// One TPT-SVF integrator step for one (stage, channel) using the
-    /// caller-supplied coefficient triplet. The triplet picks between
-    /// the Butterworth and resonance sets so the cascade can apply
-    /// resonance to the final stage only.
+    /// One TPT-SVF integrator step for one (stage, channel). Returns the
+    /// output of the tap chosen by `type_idx`:
+    ///
+    /// * `0` (LP): `v2` — lowpass output.
+    /// * `1` (BP): `v1` — bandpass output.
+    /// * `2` (HP): `v3 − k · v1` — highpass output.
+    ///
+    /// `coefs` is the precomputed `(a1, a2, a3, k)` tuple — picks
+    /// Butterworth or resonance per stage.
     #[inline]
-    fn svf_step(&mut self, x: f32, stage: usize, ch: usize, coefs: (f32, f32, f32)) -> f32 {
-        let (a1, a2, a3) = coefs;
+    fn svf_step(
+        &mut self,
+        x: f32,
+        stage: usize,
+        ch: usize,
+        coefs: (f32, f32, f32, f32),
+        type_idx: usize,
+    ) -> f32 {
+        let (a1, a2, a3, k) = coefs;
         let ic1 = self.stages_ic1[stage][ch];
         let ic2 = self.stages_ic2[stage][ch];
         let v3 = x - ic2;
@@ -376,29 +396,36 @@ impl LowpassEffect {
         let v2 = ic2 + a2 * ic1 + a3 * v3;
         self.stages_ic1[stage][ch] = 2.0 * v1 - ic1;
         self.stages_ic2[stage][ch] = 2.0 * v2 - ic2;
-        v2
+        match type_idx {
+            SVF_TYPE_LP => v2,
+            SVF_TYPE_BP => v1,
+            _ => v3 - k * v1, // HP
+        }
     }
 }
 
-impl Default for LowpassEffect {
+impl Default for SvfEffect {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Effect for LowpassEffect {
+impl Effect for SvfEffect {
     fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
         let stages = self.stages_count();
-        let butter = (self.a1_butter, self.a2_butter, self.a3_butter);
-        let res = (self.a1_res, self.a2_res, self.a3_res);
+        let type_idx = self.type_idx.round() as usize;
         let mut l = left;
         let mut r = right;
         for stage in 0..stages {
             // Last stage carries the resonance peak; earlier stages run
             // Butterworth so the peak doesn't compound across the cascade.
-            let coefs = if stage + 1 == stages { res } else { butter };
-            l = self.svf_step(l, stage, 0, coefs);
-            r = self.svf_step(r, stage, 1, coefs);
+            let coefs = if stage + 1 == stages {
+                self.res
+            } else {
+                self.butter
+            };
+            l = self.svf_step(l, stage, 0, coefs, type_idx);
+            r = self.svf_step(r, stage, 1, coefs, type_idx);
         }
         (l, r)
     }
@@ -421,11 +448,17 @@ impl Effect for LowpassEffect {
         match index {
             0 => self.cutoff = value.clamp(Self::PARAMS[0].min, Self::PARAMS[0].max),
             1 => self.resonance = value.clamp(Self::PARAMS[1].min, Self::PARAMS[1].max),
-            // Poles: round to the nearest enum index, clamped to the
-            // labels' length. Doesn't change coefficients (all stages
-            // share `a1..a3`); only the cascade depth changes.
+            // Type: round to the nearest enum index. Selects which SVF
+            // output tap (LP / BP / HP) each stage emits.
             2 => {
-                let max_idx = (LP_POLES_LABELS.len() - 1) as f32;
+                let max_idx = (SVF_TYPE_LABELS.len() - 1) as f32;
+                self.type_idx = value.round().clamp(0.0, max_idx);
+                return;
+            }
+            // Poles: round to the nearest enum index. Doesn't change
+            // coefficients — only the cascade depth.
+            3 => {
+                let max_idx = (SVF_POLES_LABELS.len() - 1) as f32;
                 self.poles_idx = value.round().clamp(0.0, max_idx);
                 return;
             }
@@ -907,7 +940,9 @@ impl Effect for NoneEffect {
 pub enum EffectKind {
     /// No effect — audio passes through this track unchanged.
     None,
-    Lowpass,
+    /// Multimode state-variable filter — cascadable 2/4/6/8-pole with
+    /// LP / BP / HP output taps.
+    Svf,
     Bitcrush,
     Fm,
 }
@@ -916,7 +951,7 @@ impl EffectKind {
     /// Every effect kind, in display / registry order.
     pub const ALL: [EffectKind; 4] = [
         EffectKind::None,
-        EffectKind::Lowpass,
+        EffectKind::Svf,
         EffectKind::Bitcrush,
         EffectKind::Fm,
     ];
@@ -925,7 +960,7 @@ impl EffectKind {
     pub fn name(self) -> &'static str {
         match self {
             EffectKind::None => "None",
-            EffectKind::Lowpass => "Lowpass",
+            EffectKind::Svf => "SVF",
             EffectKind::Bitcrush => "Bitcrush",
             EffectKind::Fm => "FM",
         }
@@ -954,7 +989,7 @@ pub fn default_params_for_kind(kind: EffectKind) -> [f32; MAX_EFFECT_PARAMS] {
 /// audio engine holds `[EffectInstance; 16]` with no heap and no `dyn`.
 pub enum EffectInstance {
     None(NoneEffect),
-    Lowpass(LowpassEffect),
+    Svf(SvfEffect),
     Bitcrush(BitcrushEffect),
     Fm(FmEffect),
 }
@@ -964,7 +999,7 @@ impl EffectInstance {
     pub fn new(kind: EffectKind) -> Self {
         match kind {
             EffectKind::None => EffectInstance::None(NoneEffect::new()),
-            EffectKind::Lowpass => EffectInstance::Lowpass(LowpassEffect::new()),
+            EffectKind::Svf => EffectInstance::Svf(SvfEffect::new()),
             EffectKind::Bitcrush => EffectInstance::Bitcrush(BitcrushEffect::new()),
             EffectKind::Fm => EffectInstance::Fm(FmEffect::new()),
         }
@@ -974,7 +1009,7 @@ impl EffectInstance {
     pub fn kind(&self) -> EffectKind {
         match self {
             EffectInstance::None(_) => EffectKind::None,
-            EffectInstance::Lowpass(_) => EffectKind::Lowpass,
+            EffectInstance::Svf(_) => EffectKind::Svf,
             EffectInstance::Bitcrush(_) => EffectKind::Bitcrush,
             EffectInstance::Fm(_) => EffectKind::Fm,
         }
@@ -985,7 +1020,7 @@ impl Effect for EffectInstance {
     fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
         match self {
             EffectInstance::None(e) => e.process_sample(left, right),
-            EffectInstance::Lowpass(e) => e.process_sample(left, right),
+            EffectInstance::Svf(e) => e.process_sample(left, right),
             EffectInstance::Bitcrush(e) => e.process_sample(left, right),
             EffectInstance::Fm(e) => e.process_sample(left, right),
         }
@@ -994,7 +1029,7 @@ impl Effect for EffectInstance {
     fn set_sample_rate(&mut self, sample_rate: f32) {
         match self {
             EffectInstance::None(e) => e.set_sample_rate(sample_rate),
-            EffectInstance::Lowpass(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Svf(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Bitcrush(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Fm(e) => e.set_sample_rate(sample_rate),
         }
@@ -1003,7 +1038,7 @@ impl Effect for EffectInstance {
     fn reset(&mut self) {
         match self {
             EffectInstance::None(e) => e.reset(),
-            EffectInstance::Lowpass(e) => e.reset(),
+            EffectInstance::Svf(e) => e.reset(),
             EffectInstance::Bitcrush(e) => e.reset(),
             EffectInstance::Fm(e) => e.reset(),
         }
@@ -1012,7 +1047,7 @@ impl Effect for EffectInstance {
     fn parameters(&self) -> &'static [ParamSpec] {
         match self {
             EffectInstance::None(e) => e.parameters(),
-            EffectInstance::Lowpass(e) => e.parameters(),
+            EffectInstance::Svf(e) => e.parameters(),
             EffectInstance::Bitcrush(e) => e.parameters(),
             EffectInstance::Fm(e) => e.parameters(),
         }
@@ -1021,7 +1056,7 @@ impl Effect for EffectInstance {
     fn set_param(&mut self, index: usize, value: f32) {
         match self {
             EffectInstance::None(e) => e.set_param(index, value),
-            EffectInstance::Lowpass(e) => e.set_param(index, value),
+            EffectInstance::Svf(e) => e.set_param(index, value),
             EffectInstance::Bitcrush(e) => e.set_param(index, value),
             EffectInstance::Fm(e) => e.set_param(index, value),
         }
@@ -1077,19 +1112,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lowpass_effect_parameters_are_declared() {
-        let lp = LowpassEffect::new();
-        let specs = lp.parameters();
-        assert_eq!(specs.len(), 3);
+    fn svf_effect_parameters_are_declared() {
+        let svf = SvfEffect::new();
+        let specs = svf.parameters();
+        assert_eq!(specs.len(), 4);
         assert_eq!(specs[0].name, "Cutoff");
         assert_eq!(specs[1].name, "Resonance");
-        assert_eq!(specs[2].name, "Poles");
+        assert_eq!(specs[2].name, "Type");
+        assert_eq!(specs[3].name, "Poles");
         assert!(specs[0].min < specs[0].max);
     }
 
     #[test]
     fn lowpass_effect_dark_cutoff_attenuates_highs() {
-        let mut lp = LowpassEffect::new();
+        let mut lp = SvfEffect::new();
         lp.set_sample_rate(48_000.0);
         lp.set_param(0, 200.0);
         lp.set_param(1, 0.0);
@@ -1109,7 +1145,7 @@ mod tests {
 
     #[test]
     fn lowpass_effect_open_cutoff_passes_a_constant() {
-        let mut lp = LowpassEffect::new();
+        let mut lp = SvfEffect::new();
         lp.set_sample_rate(48_000.0);
         lp.set_param(0, 18_000.0);
         lp.set_param(1, 0.0);
@@ -1122,7 +1158,7 @@ mod tests {
 
     #[test]
     fn lowpass_effect_reset_clears_state() {
-        let mut lp = LowpassEffect::new();
+        let mut lp = SvfEffect::new();
         lp.set_sample_rate(48_000.0);
         lp.set_param(0, 300.0);
         for _ in 0..512 {
@@ -1135,7 +1171,7 @@ mod tests {
 
     #[test]
     fn lowpass_effect_set_param_out_of_range_is_ignored() {
-        let mut lp = LowpassEffect::new();
+        let mut lp = SvfEffect::new();
         lp.set_sample_rate(48_000.0);
         lp.set_param(99, 1.0);
         let y = lp.process_sample(0.25, 0.25);
@@ -1209,7 +1245,7 @@ mod tests {
     fn effect_kind_registry() {
         assert_eq!(EffectKind::ALL.len(), 4);
         assert_eq!(EffectKind::None.name(), "None");
-        assert_eq!(EffectKind::Lowpass.name(), "Lowpass");
+        assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
         assert_eq!(EffectKind::Fm.name(), "FM");
     }
@@ -1238,9 +1274,9 @@ mod tests {
 
     #[test]
     fn effect_instance_dispatches_to_the_right_effect() {
-        let mut lp = EffectInstance::new(EffectKind::Lowpass);
-        assert_eq!(lp.kind(), EffectKind::Lowpass);
-        assert_eq!(lp.parameters().len(), 3);
+        let mut lp = EffectInstance::new(EffectKind::Svf);
+        assert_eq!(lp.kind(), EffectKind::Svf);
+        assert_eq!(lp.parameters().len(), 4);
         let mut bc = EffectInstance::new(EffectKind::Bitcrush);
         assert_eq!(bc.kind(), EffectKind::Bitcrush);
         lp.set_sample_rate(48_000.0);
@@ -1253,7 +1289,7 @@ mod tests {
 
     #[test]
     fn effect_instance_set_param_changes_behaviour() {
-        let mut e = EffectInstance::new(EffectKind::Lowpass);
+        let mut e = EffectInstance::new(EffectKind::Svf);
         e.set_sample_rate(48_000.0);
         e.set_param(0, 200.0);
         e.set_param(1, 0.0);
@@ -1303,7 +1339,7 @@ mod tests {
     #[test]
     fn track_effect_legacy_blob_without_mix_loads_fully_wet() {
         // A TrackEffect JSON saved before the `mix` field existed.
-        let legacy = r#"{"kind":"Lowpass","params":[0.0,0.0,0.0,0.0,0.0]}"#;
+        let legacy = r#"{"kind":"Svf","params":[0.0,0.0,0.0,0.0,0.0]}"#;
         let te: TrackEffect = serde_json::from_str(legacy).expect("legacy blob must load");
         assert_eq!(te.mix, 1.0);
     }
@@ -1327,9 +1363,9 @@ mod tests {
 
     #[test]
     fn default_params_for_kind_matches_the_kinds_specs() {
-        let lp = default_params_for_kind(EffectKind::Lowpass);
-        assert_eq!(lp[0], LowpassEffect::new().parameters()[0].default);
-        assert_eq!(lp[1], LowpassEffect::new().parameters()[1].default);
+        let lp = default_params_for_kind(EffectKind::Svf);
+        assert_eq!(lp[0], SvfEffect::new().parameters()[0].default);
+        assert_eq!(lp[1], SvfEffect::new().parameters()[1].default);
         // Slots past the kind's parameter count are zero.
         assert_eq!(lp[2], 0.0);
         assert_eq!(lp[3], 0.0);
@@ -1339,7 +1375,7 @@ mod tests {
 
     #[test]
     fn param_count_reports_each_kinds_arity() {
-        assert_eq!(param_count(EffectKind::Lowpass), 3);
+        assert_eq!(param_count(EffectKind::Svf), 4);
         assert_eq!(param_count(EffectKind::Bitcrush), 2);
     }
 
@@ -1523,20 +1559,78 @@ mod tests {
     }
 
     #[test]
-    fn lowpass_cutoff_is_log_hertz_and_resonance_is_linear_number() {
-        let specs = LowpassEffect::new().parameters();
+    fn svf_param_formats_match_spec() {
+        let specs = SvfEffect::new().parameters();
         assert!(matches!(specs[0].scaling, ParamScaling::Log));
         assert!(matches!(specs[0].format, ParamFormat::Hertz));
         assert!(matches!(specs[1].scaling, ParamScaling::Linear));
         assert!(matches!(specs[1].format, ParamFormat::Number { .. }));
-        // Poles is an Enum-format dropdown listing the four valid cascade
-        // lengths (2 / 4 / 6 / 8 poles).
-        assert_eq!(specs[2].name, "Poles");
+        // Type at slot 2: Enum-format dropdown over LP / BP / HP.
+        assert_eq!(specs[2].name, "Type");
         if let ParamFormat::Enum { labels } = specs[2].format {
+            assert_eq!(labels, &["Lowpass", "Bandpass", "Highpass"]);
+        } else {
+            panic!("Type spec should use ParamFormat::Enum");
+        }
+        // Poles at slot 3: Enum-format dropdown over the four cascade
+        // lengths (2 / 4 / 6 / 8 poles).
+        assert_eq!(specs[3].name, "Poles");
+        if let ParamFormat::Enum { labels } = specs[3].format {
             assert_eq!(labels, &["2", "4", "6", "8"]);
         } else {
             panic!("Poles spec should use ParamFormat::Enum");
         }
+    }
+
+    #[test]
+    fn svf_type_changes_which_band_passes() {
+        // LP attenuates ABOVE cutoff; HP attenuates BELOW; BP attenuates
+        // BOTH sides. Drive each Type at a 1 kHz cutoff with a sine at
+        // 250 Hz (well below cutoff) and at 4 kHz (well above), and
+        // check the RMS ratios match each filter's identity.
+        let measure = |type_idx: f32, freq_hz: f32| -> f32 {
+            let mut svf = SvfEffect::new();
+            svf.set_sample_rate(48_000.0);
+            svf.set_param(0, 1_000.0); // Cutoff = 1 kHz
+            svf.set_param(1, 0.0); // No resonance
+            svf.set_param(2, type_idx); // Type
+            svf.set_param(3, 0.0); // 2 poles
+            for i in 0..2048 {
+                let s = (std::f32::consts::TAU * freq_hz * i as f32 / 48_000.0).sin();
+                svf.process_sample(s, s);
+            }
+            let mut sum_sq = 0.0_f32;
+            for i in 2048..(2048 + 4096) {
+                let s = (std::f32::consts::TAU * freq_hz * i as f32 / 48_000.0).sin();
+                let (l, _r) = svf.process_sample(s, s);
+                sum_sq += l * l;
+            }
+            (sum_sq / 4096.0).sqrt()
+        };
+        // LP: 250 Hz passes (≈ unity input RMS ≈ 0.707), 4 kHz attenuated.
+        let lp_low = measure(0.0, 250.0);
+        let lp_high = measure(0.0, 4_000.0);
+        assert!(
+            lp_low > 0.5 && lp_high < 0.2,
+            "LP should pass 250 Hz and attenuate 4 kHz (low={lp_low}, high={lp_high})"
+        );
+        // HP: opposite — low attenuated, high passes.
+        let hp_low = measure(2.0, 250.0);
+        let hp_high = measure(2.0, 4_000.0);
+        assert!(
+            hp_low < 0.2 && hp_high > 0.5,
+            "HP should attenuate 250 Hz and pass 4 kHz (low={hp_low}, high={hp_high})"
+        );
+        // BP: both bands attenuated relative to LP-passing or HP-passing
+        // levels; the 1 kHz cutoff itself is the peak (we don't measure
+        // it here, just confirm the off-band attenuation).
+        let bp_low = measure(1.0, 250.0);
+        let bp_high = measure(1.0, 4_000.0);
+        assert!(
+            bp_low < lp_low && bp_high < hp_high,
+            "BP should attenuate both bands relative to their passing types \
+             (bp_low={bp_low} vs lp_low={lp_low}, bp_high={bp_high} vs hp_high={hp_high})"
+        );
     }
 
     #[test]
@@ -1546,11 +1640,11 @@ mod tests {
         // so the RMS at 10× the cutoff is monotonically smaller as the
         // pole count rises 2 → 8.
         let measure_rms_decade_above = |poles_idx: f32| -> f32 {
-            let mut lp = LowpassEffect::new();
+            let mut lp = SvfEffect::new();
             lp.set_sample_rate(48_000.0);
             lp.set_param(0, 1_000.0); // Cutoff = 1 kHz
             lp.set_param(1, 0.0); // Resonance = 0 (no peaking)
-            lp.set_param(2, poles_idx); // Poles index
+            lp.set_param(3, poles_idx); // Poles index (slot 3)
             let sr = 48_000.0_f32;
             let f_test = 10_000.0_f32; // one decade above cutoff
                                        // Warm up the cascade, then measure 4096 samples of the

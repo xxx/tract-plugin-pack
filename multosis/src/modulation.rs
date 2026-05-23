@@ -819,7 +819,7 @@ mod tests {
     fn modulation_amplitude_reflects_the_amplitude_mseg() {
         let mut m = Modulation::new();
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         m.begin_block_silent(64, 48_000.0);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
@@ -846,7 +846,7 @@ mod tests {
         let mut m = Modulation::new();
         m.set_config(&config);
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         m.begin_block_silent(64, 48_000.0);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
@@ -859,7 +859,7 @@ mod tests {
     fn modulation_applies_an_assignable_mseg_to_its_effect() {
         let mut m = Modulation::new();
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Svf));
         for e in &mut effects {
             e.set_sample_rate(48_000.0);
         }
@@ -889,7 +889,7 @@ mod tests {
     fn modulation_reset_zeroes_phases() {
         let mut m = Modulation::new();
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         for _ in 0..100 {
             m.begin_block_silent(64, 48_000.0);
@@ -975,7 +975,7 @@ mod tests {
         cfg[3].trigger = TriggerSource::CellLight;
         m.set_config(&cfg);
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Each block that signals a cell-light event for row 3 fires the
         // trigger; blocks with no event don't.
@@ -1004,7 +1004,7 @@ mod tests {
         cfg[5].trigger = TriggerSource::FreeHz { hz: 10.0 };
         m.set_config(&cfg);
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // 10 Hz, 48 kHz, 4800-sample blocks -> exactly 1 fire per block, on average.
         // Run 100 blocks; expect ~100 fires (allow ±1 for the boundary).
@@ -1030,7 +1030,7 @@ mod tests {
         cfg[1].trigger = TriggerSource::FreeHz { hz: -2.0 };
         m.set_config(&cfg);
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         for _ in 0..50 {
             m.begin_block_silent(480, 48_000.0);
@@ -1048,7 +1048,7 @@ mod tests {
         cfg[2].trigger = TriggerSource::CellLight;
         m.set_config(&cfg);
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Advance many blocks with no fires -> phases drift away from 0.
         for _ in 0..50 {
@@ -1113,8 +1113,8 @@ mod tests {
 
         // Switching between two kinds that both have parameter index 0.
         let mut effect = TrackEffect {
-            kind: EffectKind::Lowpass,
-            params: crate::effects::default_params_for_kind(EffectKind::Lowpass),
+            kind: EffectKind::Svf,
+            params: crate::effects::default_params_for_kind(EffectKind::Svf),
             mix: 1.0,
         };
         let mut modulation = TrackModulation::default_for_row(0);
@@ -1137,7 +1137,7 @@ mod tests {
         // default_for_row's trigger is Free.
         m.set_config(&cfg);
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         for _ in 0..20 {
             m.begin_block_silent(64, 48_000.0);
@@ -1154,7 +1154,7 @@ mod tests {
         cfg[0].trigger = TriggerSource::FreeHz { hz: 1.0 };
         m.set_config(&cfg);
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(crate::effects::EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Run a block so hz_phases advances above 0.
         m.begin_block_silent(64, 48_000.0);
@@ -1186,7 +1186,7 @@ mod tests {
         cfg[4].trigger = TriggerSource::FreeHz { hz: 1.0 };
         m.set_config(&cfg);
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Drift the per-MSEG-clock rows' phases away from 0.
         for _ in 0..50 {
@@ -1224,7 +1224,7 @@ mod tests {
         cfg[0].trigger = TriggerSource::FreeHz { hz: 5.0 };
         m.set_config(&cfg);
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // 64-sample block at 5 Hz / 48 kHz → hz_phase += 64*5/48000 ≈ 0.0067,
         // no wrap → no fire, no phase reset; the MSEG should advance per its
@@ -1247,7 +1247,7 @@ mod tests {
         cfg[3].trigger = TriggerSource::FreeHz { hz: 10.0 };
         m.set_config(&cfg);
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Drift phase well away from 0 over many no-wrap blocks.
         for _ in 0..30 {
@@ -1265,7 +1265,7 @@ mod tests {
     fn advance_segment_zero_length_is_a_noop() {
         let mut m = Modulation::new();
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         m.begin_block_silent(64, 48_000.0);
         m.advance_segment(64, 120.0, 48_000.0, &mut effects, &track_effects);
@@ -1285,7 +1285,7 @@ mod tests {
         cfg[6].trigger = TriggerSource::CellStep;
         m.set_config(&cfg);
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Drift row 6's phases away from 0.
         for _ in 0..50 {
@@ -1344,7 +1344,7 @@ mod tests {
         cfg[1].trigger = TriggerSource::CellLight;
         m.set_config(&cfg);
         let mut effects: [EffectInstance; ROWS] =
-            std::array::from_fn(|_| EffectInstance::new(EffectKind::Lowpass));
+            std::array::from_fn(|_| EffectInstance::new(EffectKind::Svf));
         let track_effects: [TrackEffect; ROWS] = std::array::from_fn(TrackEffect::default_for_row);
         // Drift row 1's phases well away from 0.
         for _ in 0..30 {
