@@ -7,8 +7,7 @@ use crate::dropdown::draw_dropdown_trigger;
 use crate::mseg::editor::{style_items, MsegEditState, StripId};
 use crate::mseg::{value_at_phase, HoldMode, MsegData};
 use crate::primitives::{
-    color_accent, color_bg, color_border, color_control_bg, color_muted, color_text, draw_rect,
-    draw_rect_outline,
+    color_bg, color_border, color_control_bg, color_muted, color_text, draw_rect, draw_rect_outline,
 };
 use crate::text::TextRenderer;
 use tiny_skia::Pixmap;
@@ -96,6 +95,17 @@ pub fn y_to_value(layout: &MsegLayout, y: f32) -> f32 {
 /// Draw the whole MSEG widget into `rect`. Composes the marker lane (full
 /// mode only), the canvas (grid + curve + nodes), the control strip, and any
 /// open dropdown popup (drawn last so it overlays everything else).
+///
+/// `value_color` is used for the curve stroke, node fills, the marquee
+/// outline, hold-mode markers, and the selected-node outline. Callers
+/// pass the slot's identity colour so the visual matches the MSEG
+/// selector tab.
+///
+/// `node_tooltip`, when `Some`, is the (node_index, formatted_text) pair
+/// to render as a small floating tooltip above the indicated node — the
+/// caller computes the text since the parameter-mapped value formatting
+/// depends on multosis-level state the widget crate doesn't see.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_mseg(
     pixmap: &mut Pixmap,
     text_renderer: &mut TextRenderer,
@@ -103,13 +113,19 @@ pub fn draw_mseg(
     data: &MsegData,
     state: &MsegEditState,
     scale: f32,
+    value_color: tiny_skia::Color,
+    node_tooltip: Option<(usize, &str)>,
 ) {
     let layout = mseg_layout(rect, state.is_curve_only(), scale);
     // The three sub-rects (marker lane / canvas / strip) are non-overlapping,
     // so draw order is immaterial — each paints only its own region.
-    draw_canvas(pixmap, &layout, data, state, scale);
-    draw_marker_lane(pixmap, &layout, data, state, scale);
+    draw_canvas(pixmap, &layout, data, state, scale, value_color);
+    draw_marker_lane(pixmap, &layout, data, state, scale, value_color);
     draw_strip(pixmap, text_renderer, &layout, data, state, scale);
+
+    if let Some((idx, text)) = node_tooltip {
+        draw_node_tooltip(pixmap, text_renderer, &layout, data, idx, text, scale);
+    }
 
     // Dropdown popup — MUST be drawn last so it overlays everything else.
     // `window_size` is the far corner of the widget rect, keeping the popup
@@ -145,6 +161,7 @@ fn draw_marker_lane(
     data: &MsegData,
     state: &MsegEditState,
     scale: f32,
+    value_color: tiny_skia::Color,
 ) {
     if state.is_curve_only() || layout.marker_lane.3 <= 0.0 {
         return;
@@ -167,7 +184,7 @@ fn draw_marker_lane(
     };
     match data.hold {
         HoldMode::None => {}
-        HoldMode::Sustain(i) => mark(pixmap, i, color_accent()),
+        HoldMode::Sustain(i) => mark(pixmap, i, value_color),
         HoldMode::Loop { start, end } => {
             mark(pixmap, start, color_border());
             mark(pixmap, end, color_border());
@@ -182,6 +199,7 @@ fn draw_canvas(
     data: &MsegData,
     state: &MsegEditState,
     scale: f32,
+    value_color: tiny_skia::Color,
 ) {
     let (cx, cy, cw, ch) = layout.canvas;
     if cw <= 0.0 || ch <= 0.0 {
@@ -228,23 +246,78 @@ fn draw_canvas(
         let x = phase_to_x(layout, phase);
         let y = value_to_y(layout, value_at_phase(data, phase));
         if let Some((px, py)) = prev {
-            draw_line(pixmap, px, py, x, y, color_accent());
+            draw_line(pixmap, px, py, x, y, value_color);
         }
         prev = Some((x, y));
     }
 
-    draw_nodes(pixmap, layout, data, state, scale);
+    draw_nodes(pixmap, layout, data, state, scale, value_color);
 
     // Marquee selection rectangle (drawn over the curve and nodes).
     if let Some((mx, my, mw, mh)) = state.marquee_rect() {
         if mw > 0.0 && mh > 0.0 {
-            let fill = tiny_skia::Color::from_rgba8(0x4f, 0xc3, 0xf7, 0x30);
+            let fill = tiny_skia::Color::from_rgba(
+                value_color.red(),
+                value_color.green(),
+                value_color.blue(),
+                0x30 as f32 / 255.0,
+            )
+            .unwrap_or(tiny_skia::Color::from_rgba8(0x4f, 0xc3, 0xf7, 0x30));
             draw_rect(pixmap, mx, my, mw, mh, fill);
-            draw_rect_outline(pixmap, mx, my, mw, mh, color_accent(), 1.0);
+            draw_rect_outline(pixmap, mx, my, mw, mh, value_color, 1.0);
         }
     }
 
     draw_rect_outline(pixmap, cx, cy, cw, ch, color_border(), 1.0);
+}
+
+/// Render a small floating tooltip above (or below, when the node is near
+/// the top of the canvas) node `idx`, showing `text`. Used by `draw_mseg`
+/// when the hover-target is a node.
+fn draw_node_tooltip(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    layout: &MsegLayout,
+    data: &MsegData,
+    idx: usize,
+    text: &str,
+    scale: f32,
+) {
+    if idx >= data.node_count {
+        return;
+    }
+    let n = data.active()[idx];
+    let (px_, py_, pw, ph) = layout.plot;
+    let cx = px_ + n.time * pw;
+    let cy = py_ + (1.0 - n.value) * ph;
+    let text_size = (10.0 * scale).max(10.0);
+    let tw = text_renderer.text_width(text, text_size);
+    let pad_x = 6.0 * scale;
+    let pad_y = 3.0 * scale;
+    let box_w = tw + 2.0 * pad_x;
+    let box_h = text_size + 2.0 * pad_y;
+    let gap = 10.0 * scale; // distance from node centre to tooltip edge
+                            // Default above; flip below when the node is in the top quarter.
+    let above = n.value < 0.75;
+    let box_y = if above { cy - gap - box_h } else { cy + gap };
+    let mut box_x = cx - box_w * 0.5;
+    // Keep the tooltip inside the canvas horizontally.
+    if box_x < px_ {
+        box_x = px_;
+    }
+    if box_x + box_w > px_ + pw {
+        box_x = px_ + pw - box_w;
+    }
+    draw_rect(pixmap, box_x, box_y, box_w, box_h, color_control_bg());
+    draw_rect_outline(pixmap, box_x, box_y, box_w, box_h, color_border(), 1.0);
+    text_renderer.draw_text(
+        pixmap,
+        box_x + pad_x,
+        box_y + pad_y + text_size,
+        text,
+        text_size,
+        color_text(),
+    );
 }
 
 /// Draw only `data`'s curve polyline — faint, no nodes/markers/strip — inside
@@ -307,6 +380,7 @@ fn draw_nodes(
     data: &MsegData,
     state: &MsegEditState,
     scale: f32,
+    value_color: tiny_skia::Color,
 ) {
     let a = data.active();
     // Tension handles: midpoint of each non-stepped segment.
@@ -331,7 +405,7 @@ fn draw_nodes(
         let color = if state.is_node_selected(i) {
             color_text()
         } else {
-            color_accent()
+            value_color
         };
         draw_dot(pixmap, nx, ny, r, color);
     }
@@ -626,6 +700,7 @@ fn draw_line(pixmap: &mut Pixmap, x0: f32, y0: f32, x1: f32, y1: f32, color: tin
 mod tests {
     use super::*;
     use crate::mseg::MsegData;
+    use crate::primitives::color_accent;
     use crate::test_font::test_font_data;
     use crate::text::TextRenderer;
     use tiny_skia::Pixmap;
@@ -642,7 +717,16 @@ mod tests {
         let mut tr = TextRenderer::new(&test_font_data());
         let data = MsegData::default();
         let state = MsegEditState::new();
-        draw_mseg(&mut pm, &mut tr, RECT, &data, &state, 1.0);
+        draw_mseg(
+            &mut pm,
+            &mut tr,
+            RECT,
+            &data,
+            &state,
+            1.0,
+            color_accent(),
+            None,
+        );
         // The canvas interior is filled — sample a pixel well inside it.
         let l = mseg_layout(RECT, false, 1.0);
         let cx = (l.canvas.0 + l.canvas.2 * 0.5) as u32;
@@ -719,7 +803,16 @@ mod tests {
         let mut data = MsegData::default(); // nodes at (0,0) and (1,1)
         data.insert_node(0.5, 0.5);
         let state = MsegEditState::new();
-        draw_mseg(&mut pm, &mut tr, RECT, &data, &state, 1.0);
+        draw_mseg(
+            &mut pm,
+            &mut tr,
+            RECT,
+            &data,
+            &state,
+            1.0,
+            color_accent(),
+            None,
+        );
         // The interior node at (0.5, 0.5) maps to a dot near canvas centre.
         let l = mseg_layout(RECT, false, 1.0);
         let nx = phase_to_x(&l, 0.5) as u32;
@@ -736,7 +829,16 @@ mod tests {
         data.insert_node(0.5, 0.5);
         data.hold = HoldMode::Sustain(1);
         let state = MsegEditState::new();
-        draw_mseg(&mut pm, &mut tr, RECT, &data, &state, 1.0);
+        draw_mseg(
+            &mut pm,
+            &mut tr,
+            RECT,
+            &data,
+            &state,
+            1.0,
+            color_accent(),
+            None,
+        );
         // A sustain marker sits in the marker lane above node 1's x.
         let l = mseg_layout(RECT, false, 1.0);
         let mx = phase_to_x(&l, 0.5) as u32;
@@ -751,7 +853,16 @@ mod tests {
         let data = MsegData::default();
         let state = MsegEditState::new_curve_only();
         // Must not panic; the marker lane has zero height.
-        draw_mseg(&mut pm, &mut tr, RECT, &data, &state, 1.0);
+        draw_mseg(
+            &mut pm,
+            &mut tr,
+            RECT,
+            &data,
+            &state,
+            1.0,
+            color_accent(),
+            None,
+        );
         assert_eq!(mseg_layout(RECT, true, 1.0).marker_lane.3, 0.0);
     }
 
@@ -761,7 +872,16 @@ mod tests {
         let mut tr = TextRenderer::new(&test_font_data());
         let data = MsegData::default();
         let state = MsegEditState::new();
-        draw_mseg(&mut pm, &mut tr, RECT, &data, &state, 1.0);
+        draw_mseg(
+            &mut pm,
+            &mut tr,
+            RECT,
+            &data,
+            &state,
+            1.0,
+            color_accent(),
+            None,
+        );
         let l = mseg_layout(RECT, false, 1.0);
         let sx = (l.strip.0 + 10.0) as u32;
         let sy = (l.strip.1 + l.strip.3 * 0.5) as u32;
@@ -819,6 +939,46 @@ mod tests {
         assert_eq!(
             mseg_hit_test(&l, &data, false, 1.0, -10.0, -10.0),
             MsegHit::None
+        );
+    }
+
+    #[test]
+    fn draw_mseg_paints_value_color_on_the_curve() {
+        use tiny_skia::Color;
+        let mut pm = Pixmap::new(400, 200).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        let data = MsegData::default();
+        let state = MsegEditState::new();
+        // Magenta value colour — probe a known canvas pixel.
+        draw_mseg(
+            &mut pm,
+            &mut tr,
+            (0.0, 0.0, 400.0, 200.0),
+            &data,
+            &state,
+            1.0,
+            Color::from_rgba8(0xff, 0x00, 0xff, 0xff),
+            None,
+        );
+        // Probe a pixel on the polyline. For a default 2-node 0→1 ramp the
+        // tension handle sits at x=50%; probe at x=25% where only the curve
+        // passes. The linear ramp at phase=0.25 has value=0.25, so the curve
+        // pixel sits at approximately y = cy + 0.75*ch (inverted axis).
+        let layout = mseg_layout((0.0, 0.0, 400.0, 200.0), state.is_curve_only(), 1.0);
+        let (cx, cy, cw, ch) = layout.plot;
+        let probe_x = (cx + cw * 0.25) as u32;
+        let probe_y_range = (cy as u32)..((cy + ch) as u32);
+        let mut hit_magenta = false;
+        for py in probe_y_range {
+            let p = pm.pixels()[(py * pm.width() + probe_x) as usize];
+            if p.red() > 180 && p.blue() > 180 && p.green() < 80 {
+                hit_magenta = true;
+                break;
+            }
+        }
+        assert!(
+            hit_magenta,
+            "expected at least one magenta pixel on the active curve"
         );
     }
 

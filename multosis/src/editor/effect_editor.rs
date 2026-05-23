@@ -796,7 +796,7 @@ pub fn draw_modulation_controls(
         lay.mseg_selector.3,
         &["Amp", "MSEG 1", "MSEG 2"],
         selected_mseg.min(2),
-        None,
+        Some(crate::editor::mseg_color(selected_mseg.min(2))),
     );
     if selected_mseg != 0 {
         let label = match target {

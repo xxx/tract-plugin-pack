@@ -257,6 +257,8 @@ impl MiffWindow {
             &curve,
             &self.mseg_state,
             s,
+            widgets::color_accent(),
+            None,
         );
 
         // ── Response region (middle ~29%) — frequency-response view ────────
@@ -1190,7 +1192,17 @@ mod tests {
         let curve = crate::kernel::default_flat_curve();
         let state = MsegEditState::new_curve_only();
 
-        draw_mseg(&mut pm, &mut text_renderer, mseg_rect, &curve, &state, 1.0);
+        use tiny_skia_widgets::color_accent;
+        draw_mseg(
+            &mut pm,
+            &mut text_renderer,
+            mseg_rect,
+            &curve,
+            &state,
+            1.0,
+            color_accent(),
+            None,
+        );
 
         // Sample a pixel well inside the MSEG canvas (quarter-width, half-height).
         let sample_x = (mseg_rect.0 + mseg_rect.2 * 0.25) as u32;

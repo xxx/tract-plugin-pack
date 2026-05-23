@@ -794,16 +794,24 @@ impl MultosisWindow {
             &modu.msegs[sel],
             &self.mseg_edit,
             self.scale_factor,
+            mseg_color(sel),
+            None,
         );
         for m in 0..3 {
             if m != sel {
+                let c = mseg_color(m);
+                // Pack the slot colour with ghost alpha (~0x60).
+                let r = (c.red() * 255.0).round() as u32;
+                let g = (c.green() * 255.0).round() as u32;
+                let b = (c.blue() * 255.0).round() as u32;
+                let packed = (r << 24) | (g << 16) | (b << 8) | 0x60;
                 widgets::mseg::draw_mseg_ghost(
                     &mut self.surface.pixmap,
                     lay.mseg_pane,
                     &modu.msegs[m],
                     &self.mseg_edit,
                     self.scale_factor,
-                    0x5A504060,
+                    packed,
                 );
             }
         }
