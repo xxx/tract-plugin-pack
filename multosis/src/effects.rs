@@ -445,31 +445,46 @@ impl Effect for BitcrushEffect {
 ///   (through-zero phase modulation). Each channel runs its own carrier so
 ///   stereo input produces stereo output.
 ///
-/// `Feedback` mixes the previous output sample back into the effect's
-/// state — chorus-style (delay-tap → write head) in Carrier mode, which
-/// adds resonant density to the vibrato without disturbing the LFO
-/// modulation; DX7-style operator self-PM in Modulator mode, which
-/// produces sawtooth-like harmonic richness on the carrier sine.
+/// `Feedback` is DX7-style operator self-modulation in both modes: the
+/// previous output sample mixes back into the rotation phase, enriching
+/// the timbre (sine → sawtooth-ish at high settings).
 ///
 /// **Modulator-mode input gating**: the internal carrier sine plays only
 /// when there's input to modulate. An envelope follower tracks the input
 /// level (fast attack, slow release) and scales the carrier's amplitude,
 /// so a silent input — including the host having stopped the transport —
 /// yields a silent output instead of a continuously-ringing bare carrier.
-/// Carrier mode is intrinsically input-driven (a silent delay line is
-/// silent), so no gate is needed there.
+/// Carrier mode is intrinsically input-driven (the analytic signal of
+/// silence is silent), so no gate is needed there.
+///
+/// **Unified architecture**: both modes go through the same PM/FM rotation
+/// math; only the role assignment differs:
+///
+/// * **Modulator**: the carrier is an internal sine whose phase is rotated
+///   by the input (modulator) plus self-feedback.
+/// * **Carrier**: the carrier is the **input audio**, converted to an
+///   analytic signal via a Hilbert FIR (so its phase is well-defined),
+///   then rotated by the internal sine modulator plus self-feedback. The
+///   Hilbert filter adds ≈ 32 samples (~0.7 ms at 48 kHz) of latency only
+///   while this mode is selected.
 pub struct FmEffect {
     // Stored parameters.
     mode: f32, // 0 = Carrier, 1 = Modulator (rounded on set_param).
     freq_hz: f32,
     depth_pct: f32,    // 0..100, divided by 100 inside `process_sample`.
     feedback_pct: f32, // 0..100, divided by 100 inside `process_sample`.
+    /// 0 = PM (phase offset at output), 1 = true FM (added to increment).
+    topology: f32,
     sample_rate: f32,
 
     // Internal oscillator phases (0..1).
     carrier_phase_l: f32,
     carrier_phase_r: f32,
     mod_phase: f32,
+
+    /// FM-topology theta accumulator for Carrier mode (in cycles, wraps
+    /// modulo 1 every sample). PM mode doesn't use this.
+    fm_theta_accum: f32,
 
     // One-sample feedback memory.
     prev_out_l: f32,
@@ -482,24 +497,30 @@ pub struct FmEffect {
     env_attack_coef: f32,
     env_release_coef: f32,
 
-    // Carrier-mode delay lines (one per channel). Sized once in `new`; reads
-    // and writes are wrap-around. 4096 samples is ample headroom for the
-    // 5 ms centre delay + ±~5 ms swing at every supported sample rate
-    // (≈ 21 ms at 192 kHz, ≈ 85 ms at 48 kHz).
-    delay_l: Vec<f32>,
-    delay_r: Vec<f32>,
-    write_idx: usize,
+    /// Carrier-mode analytic-signal extractors (Hilbert FIR + delay-matched
+    /// real branch). Each channel runs its own — together they convert the
+    /// raw input into a `(real, imag)` pair that the rotation math operates
+    /// on. Allocated once in `new`; allocation-free thereafter.
+    analytic_l: tract_dsp::hilbert::AnalyticSignal,
+    analytic_r: tract_dsp::hilbert::AnalyticSignal,
 }
 
 /// Mode-dial label list. Order matters: `value.round() as usize` indexes it.
 const FM_MODE_LABELS: &[&str] = &["Carrier", "Modulator"];
 
+/// Topology-dial label list (Modulator-mode operator topology). PM uses the
+/// previous output as a phase OFFSET at output time (no integration → no
+/// drift, sounds like a DX7 operator). True FM adds it to the phase
+/// INCREMENT — input still bends the carrier's pitch (which PM only does at
+/// audio rates), but self-feedback integrates and can wander at high
+/// feedback settings.
+const FM_TOPOLOGY_LABELS: &[&str] = &["PM", "FM"];
+
 impl FmEffect {
-    const DELAY_LEN: usize = 4096;
-    /// Centre delay for Carrier mode — both the read-point default and the
-    /// reference around which the modulator swings. 5 ms is short enough
-    /// that pitch shifts are perceived as FM/vibrato rather than chorus.
-    const CENTER_DELAY_MS: f32 = 5.0;
+    /// Hilbert FIR length for the Carrier-mode analytic-signal extractor.
+    /// 65 gives ~32 samples (~0.7 ms at 48 kHz) of group delay and a clean
+    /// passband above ~1 kHz.
+    const HILBERT_LEN: usize = 65;
     /// Modulator-mode input-gate time constants. Fast attack catches
     /// transients without clipping the carrier's onset; slow release lets
     /// the carrier ring out smoothly across short silences.
@@ -508,14 +529,18 @@ impl FmEffect {
 
     // Order matters: `targets[0]` (the assignable-MSEG-1 default) is `Some(0)`,
     // so the first param is what fresh tracks modulate. Freq is the natural
-    // first audible-modulation target; Mode is an Enum-format selector that
-    // the editor renders as a dropdown rather than a dial.
-    const PARAMS: [ParamSpec; 4] = [
+    // first audible-modulation target; Mode and Topology are Enum-format
+    // selectors the editor renders as dropdowns rather than dials.
+    const PARAMS: [ParamSpec; 5] = [
         ParamSpec {
             name: "Freq",
             min: 0.1,
-            max: 2_000.0,
+            max: 20_000.0,
             default: 5.0,
+            // Log-scaled dial: equal angular movement = equal multiplicative
+            // ratio. The 0.1 → 20 kHz span spans LFO-rate vibrato (Carrier
+            // mode) through full audio-range FM carrier pitches (Modulator
+            // mode) without making either end feel useless.
             scaling: ParamScaling::Log,
             format: ParamFormat::Hertz,
         },
@@ -551,6 +576,16 @@ impl FmEffect {
                 labels: FM_MODE_LABELS,
             },
         },
+        ParamSpec {
+            name: "Topology",
+            min: 0.0,
+            max: 1.0,
+            default: 0.0, // PM by default — drift-free; DX7-style.
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: FM_TOPOLOGY_LABELS,
+            },
+        },
     ];
 
     /// An `FmEffect` at its default parameters; call `set_sample_rate`
@@ -561,18 +596,19 @@ impl FmEffect {
             depth_pct: Self::PARAMS[1].default,
             feedback_pct: Self::PARAMS[2].default,
             mode: Self::PARAMS[3].default,
+            topology: Self::PARAMS[4].default,
             sample_rate: 48_000.0,
             carrier_phase_l: 0.0,
             carrier_phase_r: 0.0,
             mod_phase: 0.0,
+            fm_theta_accum: 0.0,
             prev_out_l: 0.0,
             prev_out_r: 0.0,
             input_env: 0.0,
             env_attack_coef: 0.0,
             env_release_coef: 0.0,
-            delay_l: vec![0.0; Self::DELAY_LEN],
-            delay_r: vec![0.0; Self::DELAY_LEN],
-            write_idx: 0,
+            analytic_l: tract_dsp::hilbert::AnalyticSignal::new(Self::HILBERT_LEN),
+            analytic_r: tract_dsp::hilbert::AnalyticSignal::new(Self::HILBERT_LEN),
         };
         fm.recompute_env_coefs();
         fm
@@ -586,17 +622,6 @@ impl FmEffect {
         self.env_attack_coef = (-1.0 / (Self::ENV_ATTACK_MS * 0.001 * sr)).exp();
         self.env_release_coef = (-1.0 / (Self::ENV_RELEASE_MS * 0.001 * sr)).exp();
     }
-
-    /// Read one channel's delay buffer at a fractional sample distance
-    /// behind the current write head (linear interpolation).
-    fn read_delay(buf: &[f32], write_idx: usize, delay_samples: f32) -> f32 {
-        let n = buf.len();
-        let read = (write_idx as f32 + n as f32 - delay_samples).rem_euclid(n as f32);
-        let i0 = (read.floor() as usize) % n;
-        let i1 = (i0 + 1) % n;
-        let frac = read - read.floor();
-        buf[i0] * (1.0 - frac) + buf[i1] * frac
-    }
 }
 
 impl Default for FmEffect {
@@ -607,6 +632,8 @@ impl Default for FmEffect {
 
 impl Effect for FmEffect {
     fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
+        // ±π rad at feedback = 1 — DX7-style operator self-modulation cap.
+        const FB_PHASE_SCALE: f32 = 0.5;
         let two_pi = std::f32::consts::TAU;
         let sr = self.sample_rate.max(1.0);
         let phase_inc = self.freq_hz / sr;
@@ -614,55 +641,55 @@ impl Effect for FmEffect {
         let feedback = self.feedback_pct * 0.01;
 
         if self.mode < 0.5 {
-            // Carrier mode: input is the audio. A sine at `freq_hz` modulates
-            // the delay length around a 5 ms centre, so the output is the
-            // input frequency-shifted by `-d(delay)/dt`. Per-channel buffers,
-            // shared modulator. Feedback is chorus-style — the delay tap's
-            // previous output mixes back into the write head, adding
-            // resonance/density to the chorus without affecting the LFO
-            // modulation pattern. Capped at 0.95 to keep the ~5 ms loop
-            // from running away.
-            let sr_ms = sr * 0.001;
-            let center = Self::CENTER_DELAY_MS * sr_ms;
-            let swing = depth * center * 0.95;
+            // Carrier mode: the INPUT plays the role of the carrier. Convert
+            // it to its analytic signal `(real, imag)` via a Hilbert FIR so
+            // we can phase-rotate it the same way Modulator mode rotates its
+            // internal sine. The internal sine LFO acts as the modulator.
+            //
+            // PM: θ(t) = depth · sin(mod_phase) — instantaneous phase
+            //     offset; the input's spectrum is rotated by ±depth cycles.
+            // FM: θ(t) = ∫ depth · sin(mod_phase) dτ — accumulated; the
+            //     input's instantaneous frequency is shifted by
+            //     depth · sin(mod_phase) · sr Hz.
+            //
+            // Feedback adds the previous output back into θ (DX7-style
+            // self-modulation), enriching the timbre.
+            //
+            // No input gate needed — the analytic signal of silence is
+            // silence, so a silent input naturally yields a silent output.
             let mod_sine = (self.mod_phase * two_pi).sin();
             self.mod_phase = (self.mod_phase + phase_inc).rem_euclid(1.0);
-            let delay = (center + swing * mod_sine).max(0.5);
-
-            let fb = feedback.clamp(0.0, 0.95);
-            self.delay_l[self.write_idx] = left + fb * self.prev_out_l;
-            self.delay_r[self.write_idx] = right + fb * self.prev_out_r;
-            let out_l = Self::read_delay(&self.delay_l, self.write_idx, delay);
-            let out_r = Self::read_delay(&self.delay_r, self.write_idx, delay);
-            self.write_idx = (self.write_idx + 1) % self.delay_l.len();
+            let theta_mod = if self.topology < 0.5 {
+                // PM: instantaneous rotation = depth · modulator.
+                depth * mod_sine
+            } else {
+                // FM: accumulate depth · modulator into the rotation phase.
+                self.fm_theta_accum = (self.fm_theta_accum + depth * mod_sine).rem_euclid(1.0);
+                self.fm_theta_accum
+            };
+            let theta_l = theta_mod + feedback * FB_PHASE_SCALE * self.prev_out_l;
+            let theta_r = theta_mod + feedback * FB_PHASE_SCALE * self.prev_out_r;
+            let (real_l, imag_l) = self.analytic_l.process(left);
+            let (real_r, imag_r) = self.analytic_r.process(right);
+            let (cos_l, sin_l) = {
+                let a = theta_l * two_pi;
+                (a.cos(), a.sin())
+            };
+            let (cos_r, sin_r) = {
+                let a = theta_r * two_pi;
+                (a.cos(), a.sin())
+            };
+            let out_l = real_l * cos_l - imag_l * sin_l;
+            let out_r = real_r * cos_r - imag_r * sin_r;
             self.prev_out_l = out_l;
             self.prev_out_r = out_r;
             (out_l, out_r)
         } else {
-            // Modulator mode: input modulates an internal sine carrier
-            // (per-channel) via phase modulation — the way DX7-style
-            // "FM synthesis" actually works under the hood. The base
-            // phase advances at `phase_inc` regardless of input or
-            // feedback; both `depth · input` and `feedback · FB · prev`
-            // apply only as per-sample phase OFFSETS at output time:
-            //
-            //   out = gate · sin(2π · (phase + depth · input + feedback · FB · prev))
-            //
-            // Input and feedback take the SAME modulation path — both
-            // PM — keeping the operator topology consistent with the
-            // textbook definition of "feedback" (operator output routed
-            // back through the same modulation input as the external
-            // signal). For audio-rate modulators PM and FM produce
-            // identical sideband spectra (same Bessel coefficients);
-            // the only audible difference is at sub-audio rates, where
-            // PM reads as phase wobble rather than pitch bend.
-            //
-            // The `gate` factor is an input-envelope follower, so the
-            // carrier sine only sounds when there's input to modulate —
-            // silent input (including a stopped host transport) yields
-            // silent output instead of a continuously-ringing bare
-            // carrier.
-            const FB_PHASE_SCALE: f32 = 0.5; // ±π rad at feedback = 1 — DX7-style.
+            // Modulator mode: the internal sine is the carrier; the input
+            // is the modulator. Topology picks PM vs FM; the input-gate
+            // envelope follower scales the output so silent input → silent
+            // output (avoids the bare carrier ringing when the transport
+            // is stopped).
             let target_env = (left.abs() + right.abs()) * 0.5;
             let env_coef = if target_env > self.input_env {
                 self.env_attack_coef
@@ -672,12 +699,29 @@ impl Effect for FmEffect {
             self.input_env = target_env + (self.input_env - target_env) * env_coef;
             let gate = self.input_env.min(1.0);
 
-            self.carrier_phase_l = (self.carrier_phase_l + phase_inc).rem_euclid(1.0);
-            self.carrier_phase_r = (self.carrier_phase_r + phase_inc).rem_euclid(1.0);
-            let pm_l = depth * left + feedback * FB_PHASE_SCALE * self.prev_out_l;
-            let pm_r = depth * right + feedback * FB_PHASE_SCALE * self.prev_out_r;
-            let sin_l = ((self.carrier_phase_l + pm_l) * two_pi).sin();
-            let sin_r = ((self.carrier_phase_r + pm_r) * two_pi).sin();
+            let (sin_l, sin_r) = if self.topology < 0.5 {
+                // PM: input + feedback applied as a phase OFFSET at output.
+                self.carrier_phase_l = (self.carrier_phase_l + phase_inc).rem_euclid(1.0);
+                self.carrier_phase_r = (self.carrier_phase_r + phase_inc).rem_euclid(1.0);
+                let pm_l = depth * left + feedback * FB_PHASE_SCALE * self.prev_out_l;
+                let pm_r = depth * right + feedback * FB_PHASE_SCALE * self.prev_out_r;
+                (
+                    ((self.carrier_phase_l + pm_l) * two_pi).sin(),
+                    ((self.carrier_phase_r + pm_r) * two_pi).sin(),
+                )
+            } else {
+                // FM: input + feedback applied as a phase INCREMENT —
+                // the carrier's instantaneous frequency tracks the
+                // modulator in cycles/sample.
+                let inc_l = phase_inc + depth * left + feedback * FB_PHASE_SCALE * self.prev_out_l;
+                let inc_r = phase_inc + depth * right + feedback * FB_PHASE_SCALE * self.prev_out_r;
+                self.carrier_phase_l = (self.carrier_phase_l + inc_l).rem_euclid(1.0);
+                self.carrier_phase_r = (self.carrier_phase_r + inc_r).rem_euclid(1.0);
+                (
+                    (self.carrier_phase_l * two_pi).sin(),
+                    (self.carrier_phase_r * two_pi).sin(),
+                )
+            };
             let out_l = gate * sin_l;
             let out_r = gate * sin_r;
             self.prev_out_l = out_l;
@@ -695,16 +739,12 @@ impl Effect for FmEffect {
         self.carrier_phase_l = 0.0;
         self.carrier_phase_r = 0.0;
         self.mod_phase = 0.0;
+        self.fm_theta_accum = 0.0;
         self.prev_out_l = 0.0;
         self.prev_out_r = 0.0;
         self.input_env = 0.0;
-        for s in self.delay_l.iter_mut() {
-            *s = 0.0;
-        }
-        for s in self.delay_r.iter_mut() {
-            *s = 0.0;
-        }
-        self.write_idx = 0;
+        self.analytic_l.reset();
+        self.analytic_r.reset();
     }
 
     fn parameters(&self) -> &'static [ParamSpec] {
@@ -719,6 +759,10 @@ impl Effect for FmEffect {
             // Mode: round to the nearest enum index (0 = Carrier, 1 = Modulator).
             3 => {
                 self.mode = if value >= 0.5 { 1.0 } else { 0.0 };
+            }
+            // Topology: round to the nearest enum index (0 = PM, 1 = FM).
+            4 => {
+                self.topology = if value >= 0.5 { 1.0 } else { 0.0 };
             }
             _ => {}
         }
@@ -888,7 +932,7 @@ impl Effect for EffectInstance {
 /// Maximum modulatable parameters any effect declares — fixes the
 /// `TrackEffect::params` array length so the persisted config is stable as
 /// effects are added (current max is 2; 4 leaves headroom).
-pub const MAX_EFFECT_PARAMS: usize = 4;
+pub const MAX_EFFECT_PARAMS: usize = 5;
 
 /// One track row's persisted effect configuration: which effect, its
 /// parameter values, and its dry/wet mix. `params[i]` is the value for the
@@ -1131,13 +1175,13 @@ mod tests {
     fn track_effect_serde_round_trips() {
         let te = TrackEffect {
             kind: EffectKind::Bitcrush,
-            params: [3.0, 8.0, 0.0, 0.0],
+            params: [3.0, 8.0, 0.0, 0.0, 0.0],
             mix: 1.0,
         };
         let json = serde_json::to_string(&te).unwrap();
         let back: TrackEffect = serde_json::from_str(&json).unwrap();
         assert_eq!(back.kind, EffectKind::Bitcrush);
-        assert_eq!(back.params, [3.0, 8.0, 0.0, 0.0]);
+        assert_eq!(back.params, [3.0, 8.0, 0.0, 0.0, 0.0]);
         assert_eq!(back.mix, 1.0);
     }
 
@@ -1159,7 +1203,7 @@ mod tests {
     #[test]
     fn track_effect_legacy_blob_without_mix_loads_fully_wet() {
         // A TrackEffect JSON saved before the `mix` field existed.
-        let legacy = r#"{"kind":"Lowpass","params":[0.0,0.0,0.0,0.0]}"#;
+        let legacy = r#"{"kind":"Lowpass","params":[0.0,0.0,0.0,0.0,0.0]}"#;
         let te: TrackEffect = serde_json::from_str(legacy).expect("legacy blob must load");
         assert_eq!(te.mix, 1.0);
     }
@@ -1430,10 +1474,10 @@ mod tests {
     }
 
     #[test]
-    fn fm_effect_lists_four_parameters_with_the_expected_specs() {
+    fn fm_effect_lists_five_parameters_with_the_expected_specs() {
         let fm = FmEffect::new();
         let specs = fm.parameters();
-        assert_eq!(specs.len(), 4);
+        assert_eq!(specs.len(), 5);
         // Freq is param 0 so the default `targets[0] = Some(0)` modulation
         // assignment naturally points at the most useful audible parameter.
         assert_eq!(specs[0].name, "Freq");
@@ -1441,10 +1485,12 @@ mod tests {
         assert!(matches!(specs[0].format, ParamFormat::Hertz));
         assert_eq!(specs[1].name, "Depth");
         assert_eq!(specs[2].name, "Feedback");
-        // Mode lives at the last slot; its Enum format causes the editor
-        // to render a dropdown instead of a dial.
+        // Mode and Topology are Enum-format — the editor renders dropdowns
+        // for both, not dials.
         assert_eq!(specs[3].name, "Mode");
         assert!(matches!(specs[3].format, ParamFormat::Enum { .. }));
+        assert_eq!(specs[4].name, "Topology");
+        assert!(matches!(specs[4].format, ParamFormat::Enum { .. }));
     }
 
     #[test]
@@ -1485,24 +1531,25 @@ mod tests {
     }
 
     #[test]
-    fn fm_carrier_mode_with_depth_zero_passes_the_input_through_the_centre_delay() {
-        // Carrier mode at depth=0 holds the delay line at its fixed 5 ms
-        // centre — the output is the input delayed by ~240 samples at
-        // 48 kHz. After the warm-up, the output level matches the input.
+    fn fm_carrier_mode_with_depth_zero_passes_the_input_through_unchanged() {
+        // Carrier mode at depth = 0 means the rotation angle θ stays at 0,
+        // so the analytic signal is rotated by 0 cycles — i.e. the output
+        // equals the (delay-matched real branch of the) input. After the
+        // Hilbert FIR's warm-up, constant 0.5 input gives constant 0.5
+        // output on both channels.
         let mut fm = FmEffect::new();
         fm.set_sample_rate(48_000.0);
         fm.set_param(3, 0.0); // Mode → Carrier
         fm.set_param(0, 5.0); // Freq
-        fm.set_param(1, 0.0); // Depth = 0 — no modulation, fixed-tap delay
+        fm.set_param(1, 0.0); // Depth = 0 — no modulation, identity rotation
         fm.set_param(2, 0.0); // Feedback
-                              // Drive a constant 0.5 input.
         let mut last = (0.0_f32, 0.0_f32);
         for _ in 0..1024 {
             last = fm.process_sample(0.5, 0.5);
         }
         assert!(
             (last.0 - 0.5).abs() < 1e-3,
-            "after the delay-line warm-up, output L should match input ({:?})",
+            "after warm-up, output L should match input ({:?})",
             last
         );
         assert!((last.1 - 0.5).abs() < 1e-3);
@@ -1645,65 +1692,162 @@ mod tests {
     }
 
     #[test]
-    fn fm_carrier_mode_feedback_is_audible_across_the_full_range() {
-        // Regression: an earlier formulation routed feedback into the
-        // modulation signal, which past ~15 % clamped the delay to its
-        // minimum sample and collapsed the output to dry. With chorus-style
-        // feedback (delay output → write head), every feedback step from
-        // 0 % to 95 % produces a distinct decay character — easiest to
-        // verify on an impulse input where each feedback level rings for
-        // a different number of taps before falling silent.
-        let render_impulse_tail = |fb_pct: f32| -> f32 {
+    fn fm_carrier_mode_feedback_changes_timbre_audibly() {
+        // Carrier mode now routes the input through an analytic-signal
+        // rotation, with feedback adding the previous output back into the
+        // rotation phase (DX7-style operator self-modulation). Different
+        // feedback settings should produce audibly different output
+        // sequences on the same input. The output stays bounded at the
+        // upper end — no runaway.
+        let render = |fb_pct: f32, topology: f32| -> (Vec<f32>, f32) {
             let mut fm = FmEffect::new();
             fm.set_sample_rate(48_000.0);
             fm.set_param(3, 0.0); // Carrier
-            fm.set_param(0, 5.0); // Freq
-            fm.set_param(1, 0.0); // Depth = 0: pure delay-line, no LFO swing
+            fm.set_param(4, topology); // Topology
+            fm.set_param(0, 5.0); // Freq (LFO rate)
+            fm.set_param(1, 50.0); // Depth = 50%
             fm.set_param(2, fb_pct);
-            // Impulse at sample 0; then 4000 zero samples (~83 ms — long
-            // enough for the 5 ms-loop to ring out at any feedback level).
-            let mut energy = 0.0_f32;
-            let (l, r) = fm.process_sample(1.0, 1.0);
-            energy += l.abs() + r.abs();
-            for _ in 0..4000 {
-                let (l, r) = fm.process_sample(0.0, 0.0);
-                energy += l.abs() + r.abs();
+            let two_pi = std::f32::consts::TAU;
+            let input = |i: usize| (two_pi * 1000.0 * i as f32 / 48_000.0).sin() * 0.5;
+            // Warm up the Hilbert FIR plus the LFO.
+            for i in 0..1024 {
+                fm.process_sample(input(i), input(i));
             }
-            energy
+            let mut out = Vec::with_capacity(2048);
+            let mut peak = 0.0_f32;
+            for i in 1024..(1024 + 2048) {
+                let (l, _r) = fm.process_sample(input(i), input(i));
+                out.push(l);
+                peak = peak.max(l.abs());
+            }
+            (out, peak)
         };
-        // 0 % feedback: a single echo at +5 ms, then silence — minimum energy.
-        let e0 = render_impulse_tail(0.0);
-        // 50 % feedback: each echo is half the previous, decaying for many
-        // round-trips. More total energy than 0 %.
-        let e50 = render_impulse_tail(50.0);
-        // 90 % feedback: long, slow decay, still bounded. Strictly more
-        // energy than 50 %.
-        let e90 = render_impulse_tail(90.0);
-        assert!(
-            e50 > e0 * 1.3,
-            "50 % feedback must produce noticeably more tail energy than 0 % \
-             (got {e50} vs {e0})"
-        );
-        assert!(
-            e90 > e50 * 1.3,
-            "90 % feedback must produce noticeably more tail energy than 50 % \
-             (got {e90} vs {e50})"
-        );
-        // Sanity: feedback must not run away to infinity at the 95 % cap.
-        let e95 = render_impulse_tail(95.0);
-        assert!(
-            e95.is_finite() && e95 < 1e6,
-            "feedback at the cap must produce a bounded tail (got {e95})"
-        );
+        // PM and FM topologies both — feedback should change the output.
+        for &topology in &[0.0_f32, 1.0_f32] {
+            let (out_0, peak_0) = render(0.0, topology);
+            let (out_50, peak_50) = render(50.0, topology);
+            let (_out_90, peak_90) = render(90.0, topology);
+            let mean_abs_diff = out_0
+                .iter()
+                .zip(&out_50)
+                .map(|(a, b)| (a - b).abs())
+                .sum::<f32>()
+                / out_0.len() as f32;
+            assert!(
+                mean_abs_diff > 0.01,
+                "topology {topology}: feedback must change the output (mean diff {mean_abs_diff})"
+            );
+            // Bounded: no setting drives the output above a safety ceiling.
+            assert!(
+                peak_0 < 2.0 && peak_50 < 2.0 && peak_90 < 2.0,
+                "topology {topology}: outputs must stay bounded \
+                 (peaks {peak_0}, {peak_50}, {peak_90})"
+            );
+        }
     }
 
     #[test]
     fn effect_kind_all_includes_fm() {
         assert!(EffectKind::ALL.iter().any(|&k| k == EffectKind::Fm));
         assert_eq!(EffectKind::Fm.name(), "FM");
-        assert_eq!(param_count(EffectKind::Fm), 4);
+        assert_eq!(param_count(EffectKind::Fm), 5);
         let defaults = default_params_for_kind(EffectKind::Fm);
         assert_eq!(defaults[0], 5.0); // Freq: 5 Hz
         assert_eq!(defaults[3], 0.0); // Mode: Carrier
+        assert_eq!(defaults[4], 0.0); // Topology: PM
+    }
+
+    #[test]
+    fn fm_modulator_topology_changes_spectral_content_with_audio_rate_modulator() {
+        // For the same depth knob value, FM's effective modulation index at
+        // modulator frequency `f_m` is `depth · sr / (2π · f_m)` while PM's
+        // is `depth · 2π`. At depth = 0.5 with `f_m` = 200 Hz / sr = 48 kHz,
+        // β_FM ≈ 19 and β_PM ≈ 3.14 — FM has ~6× the modulation index and
+        // its output is dramatically richer in upper harmonics. The
+        // sum-of-absolute-differences between consecutive samples is a
+        // crude but effective proxy for that high-frequency content.
+        let measure = |topology: f32| -> f32 {
+            let mut fm = FmEffect::new();
+            fm.set_sample_rate(48_000.0);
+            fm.set_param(3, 1.0); // Mode → Modulator
+            fm.set_param(4, topology); // Topology
+            fm.set_param(0, 1000.0); // Freq: 1 kHz carrier
+            fm.set_param(1, 50.0); // Depth = 50 %
+            fm.set_param(2, 0.0); // Feedback = 0
+            let two_pi = std::f32::consts::TAU;
+            let m = |i: usize| (two_pi * 200.0 * i as f32 / 48_000.0).sin() * 0.5;
+            // Warm up the input-gate envelope follower.
+            for i in 0..2048 {
+                fm.process_sample(m(i), m(i));
+            }
+            let mut prev = 0.0_f32;
+            let mut sum_abs_diff = 0.0_f32;
+            for i in 2048..(2048 + 4096) {
+                let (l, _r) = fm.process_sample(m(i), m(i));
+                sum_abs_diff += (l - prev).abs();
+                prev = l;
+            }
+            sum_abs_diff
+        };
+        let pm_swing = measure(0.0);
+        let fm_swing = measure(1.0);
+        // FM with ~6× the modulation index should have substantially more
+        // high-frequency content than PM at the same depth.
+        assert!(
+            fm_swing > pm_swing * 1.5,
+            "FM topology should produce more spectral content than PM at \
+             the same depth knob (PM swing = {pm_swing}, FM swing = {fm_swing})"
+        );
+    }
+
+    #[test]
+    fn fm_modulator_mode_with_topology_fm_lets_input_bend_carrier_pitch() {
+        // True FM (Topology = 1) adds `depth · input` to the phase
+        // INCREMENT, so a constant positive input bias permanently raises
+        // the carrier's instantaneous pitch. The same setup under PM
+        // (Topology = 0) keeps the base pitch fixed and just adds a
+        // constant phase offset. Detect the difference by counting
+        // zero-crossings over a fixed window with a positive DC bias.
+        let count_pos_zcs = |topology: f32| -> i32 {
+            let mut fm = FmEffect::new();
+            fm.set_sample_rate(48_000.0);
+            fm.set_param(3, 1.0); // Modulator
+            fm.set_param(4, topology); // Topology
+            fm.set_param(0, 100.0); // Freq
+            fm.set_param(1, 50.0); // Depth = 50 % so the FM contribution is sizeable
+            fm.set_param(2, 0.0); // Feedback = 0
+            for _ in 0..2048 {
+                // Warm up the input-gate envelope follower.
+                fm.process_sample(0.5, 0.5);
+            }
+            let mut zcs = 0;
+            let mut prev = 0.0_f32;
+            for _ in 0..48_000 / 10 {
+                // 0.1 s window.
+                let (l, _r) = fm.process_sample(0.5, 0.5);
+                if prev <= 0.0 && l > 0.0 {
+                    zcs += 1;
+                }
+                prev = l;
+            }
+            zcs
+        };
+        let pm_zcs = count_pos_zcs(0.0);
+        let fm_zcs = count_pos_zcs(1.0);
+        // PM with DC bias only shifts the phase by a constant — the carrier
+        // still runs at exactly 100 Hz, giving ≈ 10 positive zero-crossings.
+        assert!(
+            (8..=12).contains(&pm_zcs),
+            "PM with a constant input bias should run at the carrier rate (~10 ZCs), got {pm_zcs}"
+        );
+        // Under true FM, the +0.5 DC bias adds `depth · 0.5 = 0.25` cycles/
+        // sample to the phase increment, so the instantaneous frequency
+        // jumps by sr · 0.25 — orders of magnitude above 100 Hz. The
+        // crossings count is dramatically higher.
+        assert!(
+            fm_zcs > pm_zcs * 5,
+            "FM topology should bend the carrier pitch noticeably above PM \
+             (PM={pm_zcs}, FM={fm_zcs})"
+        );
     }
 }

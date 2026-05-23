@@ -15,6 +15,7 @@
 pub mod boxcar;
 pub mod db;
 pub mod fir;
+pub mod hilbert;
 pub mod spsc;
 #[cfg(feature = "stft")]
 pub mod stft;

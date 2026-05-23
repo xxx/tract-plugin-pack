@@ -29,7 +29,6 @@
 
 use imagine::bands::{Band, StereoizeMode};
 use imagine::crossover::{CrossoverFir, CrossoverIir};
-use imagine::hilbert::HilbertFir;
 use imagine::midside;
 use imagine::spectrum::{Analyzer, SpectrumDisplay};
 use imagine::vectorscope::{ring_pair, VectorProducer};
@@ -37,6 +36,7 @@ use imagine::{
     Quality, FIR_CROSSFADE_DEFAULT, FIR_CROSSOVER_LENGTH, FIR_HILBERT_LENGTH, HAAS_BUFFER_MAX_MS,
     HAAS_DEFAULT_MS, MAX_SAMPLE_RATE, NUM_BANDS, STZ_SCALE_DEFAULT,
 };
+use tract_dsp::hilbert::HilbertFir;
 
 use std::hint::black_box;
 use std::sync::atomic::{AtomicU32, Ordering};

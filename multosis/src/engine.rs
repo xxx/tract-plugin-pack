@@ -687,7 +687,7 @@ mod tests {
         let cfg: [crate::effects::TrackEffect; ROWS] =
             std::array::from_fn(|_| crate::effects::TrackEffect {
                 kind: crate::effects::EffectKind::Lowpass,
-                params: [800.0, 0.2, 0.0, 0.0],
+                params: [800.0, 0.2, 0.0, 0.0, 0.0],
                 mix: 1.0,
             });
         engine.set_effects(&cfg);
@@ -733,7 +733,7 @@ mod tests {
         let mut cfg: [crate::effects::TrackEffect; ROWS] =
             std::array::from_fn(|_| crate::effects::TrackEffect {
                 kind: crate::effects::EffectKind::Lowpass,
-                params: [800.0, 0.2, 0.0, 0.0],
+                params: [800.0, 0.2, 0.0, 0.0, 0.0],
                 mix: 1.0,
             });
         engine.set_effects(&cfg);
@@ -865,7 +865,7 @@ mod tests {
             std::array::from_fn(crate::effects::TrackEffect::default_for_row);
         cfg[0] = crate::effects::TrackEffect {
             kind: crate::effects::EffectKind::Lowpass,
-            params: [2000.0, 0.1, 0.0, 0.0],
+            params: [2000.0, 0.1, 0.0, 0.0, 0.0],
             mix: 1.0,
         };
         engine.set_effects(&cfg);
@@ -931,7 +931,7 @@ mod tests {
         let effect_cfg: [crate::effects::TrackEffect; ROWS] =
             std::array::from_fn(|_| crate::effects::TrackEffect {
                 kind: crate::effects::EffectKind::Lowpass,
-                params: [2_000.0, 0.15, 0.0, 0.0],
+                params: [2_000.0, 0.15, 0.0, 0.0, 0.0],
                 mix: 1.0,
             });
         engine.set_effects(&effect_cfg);

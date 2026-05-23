@@ -1,17 +1,23 @@
-//! 90° phase rotator (Hilbert transform). Used by Recover Sides only.
+//! 90° phase rotator (Hilbert transform) + analytic-signal helper.
 //!
-//! Linear-phase FIR (Type IV anti-symmetric) — a true Hilbert transform with
-//! `length / 2` samples of group delay. We use this in both Quality modes; the
-//! IIR-mode latency cost is dominated by this filter (~32 samples at length=65,
-//! ~0.7 ms at 48 kHz — negligible).
+//! The FIR Hilbert filter is a Type-IV anti-symmetric linear-phase design —
+//! a true Hilbert transform with `length / 2` samples of group delay. At
+//! length 65 on a 48 kHz signal that's ~0.7 ms of latency, which is
+//! sub-perceptual for almost any musical application.
 //!
-//! An IIR variant was considered (Niemitalo analytic-signal all-pass pair) but
-//! produces a (real, imag) pair where `imag` is 90°-rotated from `real`, not
-//! from the original input. Reproducing a Hilbert-of-input from this design
-//! requires the consumer to use both branches and a delay-matched dry path,
-//! which complicates the call site. The FIR is unambiguously correct and the
-//! latency is small.
+//! An IIR variant (Niemitalo analytic-signal all-pass pair) was considered
+//! but produces a `(real, imag)` pair where `imag` is 90°-rotated from
+//! `real`, not from the original input. Reproducing a Hilbert-of-input from
+//! that design requires the consumer to use both branches plus a
+//! delay-matched dry path — the FIR is unambiguously correct and the
+//! latency is negligible.
+//!
+//! [`AnalyticSignal`] wraps a `HilbertFir` plus a matching delay line for
+//! the real part, returning a paired `(real, imag)` per sample. Most
+//! callers want this — naïve `(input, hilbert(input))` is wrong because
+//! the FIR's group delay shifts `imag` relative to `real`.
 
+/// Type-IV anti-symmetric linear-phase Hilbert FIR.
 pub struct HilbertFir {
     taps: Vec<f32>,
     /// Double-buffered history: `2 * taps.len()` elements. Each sample is
@@ -24,8 +30,9 @@ pub struct HilbertFir {
 }
 
 impl HilbertFir {
-    /// Construct a Type-IV anti-symmetric Hilbert FIR with Hann window.
-    /// Pass an odd length for proper symmetry.
+    /// Construct a Type-IV anti-symmetric Hilbert FIR with a Hann window.
+    /// Pass an odd length for proper symmetry; 65 is a good default for
+    /// audio (~32 samples of group delay).
     pub fn new(length: usize) -> Self {
         debug_assert!(
             length % 2 == 1,
@@ -61,7 +68,7 @@ impl HilbertFir {
         self.write_idx = 0;
     }
 
-    /// Group delay in samples.
+    /// Group delay in samples — equals `length / 2`.
     #[inline]
     pub fn latency_samples(&self) -> usize {
         self.taps.len() / 2
@@ -80,8 +87,9 @@ impl HilbertFir {
         } else {
             self.write_idx + 1
         };
-        // Slice [next .. next + n] holds the last `n` samples in oldest→newest
-        // order; zipping taps with the reversed slice gives sum(taps[k] · x[n−k]).
+        // Slice [next .. next + n] holds the last `n` samples in
+        // oldest→newest order; zipping taps with the reversed slice gives
+        // sum(taps[k] · x[n−k]).
         let hist = &self.history[next..next + n];
         let mut acc = 0.0;
         for (&tap, &h) in self.taps.iter().zip(hist.iter().rev()) {
@@ -89,6 +97,66 @@ impl HilbertFir {
         }
         self.write_idx = next;
         acc
+    }
+}
+
+/// Analytic-signal extractor: returns the input as `(real, imag)` where
+/// `real` is the input delayed by the Hilbert FIR's group delay and `imag`
+/// is the Hilbert transform of the input. Both branches see the same
+/// effective input sample.
+///
+/// Internal state: one `HilbertFir` and a ring-buffer delay line of length
+/// `latency_samples()`.
+pub struct AnalyticSignal {
+    hilbert: HilbertFir,
+    /// Ring-buffer delay matched to the Hilbert FIR's group delay; the
+    /// `real` output is the input read out from this delay.
+    delay: Vec<f32>,
+    delay_idx: usize,
+}
+
+impl AnalyticSignal {
+    /// Construct an analytic-signal extractor backed by a length-`length`
+    /// Hilbert FIR. Odd `length` only — typical: 65.
+    pub fn new(length: usize) -> Self {
+        let hilbert = HilbertFir::new(length);
+        let delay_len = hilbert.latency_samples();
+        Self {
+            hilbert,
+            delay: vec![0.0; delay_len.max(1)],
+            delay_idx: 0,
+        }
+    }
+
+    /// Total samples of latency introduced — equals the Hilbert FIR's group
+    /// delay.
+    #[inline]
+    pub fn latency_samples(&self) -> usize {
+        self.hilbert.latency_samples()
+    }
+
+    /// Zero every piece of internal state.
+    #[inline]
+    pub fn reset(&mut self) {
+        self.hilbert.reset();
+        self.delay.fill(0.0);
+        self.delay_idx = 0;
+    }
+
+    /// Process one sample, returning the analytic pair `(real, imag)`.
+    ///
+    /// `real` is `x` delayed by `latency_samples()`; `imag` is the Hilbert
+    /// transform of `x` (which carries the same group delay). The two
+    /// branches refer to the SAME effective input sample.
+    #[inline]
+    pub fn process(&mut self, x: f32) -> (f32, f32) {
+        // Read the delayed-real sample BEFORE overwriting this slot, so the
+        // pair we return refers to the input from `latency_samples()` ago.
+        let real = self.delay[self.delay_idx];
+        self.delay[self.delay_idx] = x;
+        self.delay_idx = (self.delay_idx + 1) % self.delay.len();
+        let imag = self.hilbert.process(x);
+        (real, imag)
     }
 }
 
@@ -192,6 +260,54 @@ mod tests {
         for _ in 0..100_000 {
             let y = h.process(1.0);
             assert!(y.abs() < 100.0);
+        }
+    }
+
+    /// Analytic-signal pair delay-matches the Hilbert FIR's group delay.
+    /// Drive an impulse: the `real` output sees it exactly `latency_samples()`
+    /// after it was pushed, with zeros on either side.
+    #[test]
+    fn analytic_signal_pair_has_matching_delay() {
+        let mut a = AnalyticSignal::new(65);
+        let latency = a.latency_samples();
+        for _ in 0..latency {
+            let (r, _i) = a.process(0.0);
+            assert_eq!(r, 0.0);
+        }
+        let (r, _) = a.process(1.0);
+        assert_eq!(r, 0.0, "impulse hasn't reached the delay tap yet");
+        for i in 0..latency * 2 {
+            let (r, _i) = a.process(0.0);
+            if i == latency - 1 {
+                assert!((r - 1.0).abs() < 1e-6, "delay tap should be 1.0 here");
+            } else {
+                assert!(r.abs() < 1e-6, "delay tap should be 0.0 here, got {r}");
+            }
+        }
+    }
+
+    /// In the FIR's passband, the analytic-signal magnitude
+    /// `sqrt(real² + imag²)` equals the steady-sine amplitude — that's the
+    /// defining property: `real` and `imag` are 90° apart with matched
+    /// magnitude. Tested at 2–10 kHz to stay clear of the sub-1-kHz
+    /// roll-off (same band as `fir_magnitude_near_unity_midband`).
+    #[test]
+    fn analytic_signal_passband_magnitude_is_near_unity() {
+        let sr = 48000.0;
+        for &f in &[2000.0, 5000.0, 10000.0] {
+            let mut a = AnalyticSignal::new(65);
+            let lat = a.latency_samples();
+            for i in 0..lat * 8 {
+                a.process((std::f32::consts::TAU * f * i as f32 / sr).sin());
+            }
+            let mut max_err = 0.0_f32;
+            for i in 0..1024 {
+                let phase = std::f32::consts::TAU * f * (i + lat * 8) as f32 / sr;
+                let (r, im) = a.process(phase.sin());
+                let mag = (r * r + im * im).sqrt();
+                max_err = max_err.max((mag - 1.0).abs());
+            }
+            assert!(max_err < 0.05, "f={f}: |analytic| - 1 max error {max_err}");
         }
     }
 

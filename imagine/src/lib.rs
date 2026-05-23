@@ -19,7 +19,6 @@ pub mod bands;
 pub mod crossover;
 pub mod decorrelator;
 pub mod editor;
-pub mod hilbert;
 pub mod midside;
 pub mod polar_rays;
 pub mod spectrum;
@@ -28,10 +27,10 @@ pub mod vectorscope;
 
 use crate::bands::{Band, StereoizeMode};
 use crate::crossover::{CrossoverFir, CrossoverIir};
-use crate::hilbert::HilbertFir;
 use crate::polar_rays::{PolarRayConsumer, PolarRayProducer};
 use crate::spectrum::{Analyzer, SpectrumDisplay};
 use crate::vectorscope::{ring_pair, VectorConsumer, VectorProducer};
+use tract_dsp::hilbert::HilbertFir;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 

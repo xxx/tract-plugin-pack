@@ -71,10 +71,20 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
     // EFFECT section — a header band, then the controls shifted down to clear it.
     let effect_header = l(ox, oy + 36.0, mw - inset, 16.0);
     let kind = l(ox, oy + 66.0, 150.0, 34.0);
-    let dials = std::array::from_fn(|i| l(ox + 180.0 + i as f32 * 96.0, oy + 60.0, 88.0, 88.0));
-    // Per-track Mix dial: a fixed slot to the right of the four param-dial
-    // slots (which end at ox+556), clearly set apart from them.
-    let mix = l(ox + 580.0, oy + 60.0, 88.0, 88.0);
+    let dials = std::array::from_fn(|i| {
+        // Slots 0..3 sit in the standard 96-px-spaced dial row; slot 4 sits
+        // in the dial column immediately to its right at ox+580.
+        if i < 4 {
+            l(ox + 180.0 + i as f32 * 96.0, oy + 60.0, 88.0, 88.0)
+        } else {
+            l(ox + 580.0, oy + 60.0, 88.0, 88.0)
+        }
+    });
+    // Per-track Mix dial: anchored at the right end of the dial row across
+    // every effect, regardless of how many params the effect declares. Sits
+    // 16 px past slot 4 so its column stays put whether or not slot 4 is in
+    // use.
+    let mix = l(ox + 684.0, oy + 60.0, 88.0, 88.0);
     // MODULATION section — its own header band, then the controls. The trigger
     // and rate are PER-TRACK (govern all 3 MSEGs).
     let modulation_header = l(ox, oy + 152.0, mw - inset, 16.0);
