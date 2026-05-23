@@ -33,9 +33,10 @@ pub struct AudioEngine {
     /// The most recent process block's active-row bitmask (bit `r` = row `r`
     /// had an enabled cell at the playhead column). Published to the editor.
     last_active: u16,
-    /// Wet-bus compressor (soft-knee peak) — tames the +N×dry peak that the
-    /// per-row effect sum produces when many rows are active simultaneously.
-    /// Inserted between the per-sample wet sum and the dry/wet mix.
+    /// Wet-bus compressor (soft-knee peak) — limits the series chain's
+    /// output before the dry/wet mix. Useful when a row's amplitude MSEG
+    /// or saturating effect pushes the chain hot; the compressor catches
+    /// the peak without the user having to ride a master gain.
     compressor: Compressor,
     sample_rate: f32,
 }
@@ -153,29 +154,38 @@ impl AudioEngine {
         self.modulation.phase(row, k)
     }
 
-    /// Apply the active rows' effects to one dry stereo sample and sum them.
-    /// Each active row's effect output is first blended with the dry input by
-    /// that row's per-track `mix` (`lane = dry + (effect − dry)·mix`), then
-    /// scaled by the row's amplitude MSEG. The sum is deliberately
-    /// un-normalised — the wet-bus compressor and the global mix manage the
-    /// parallel-row peak.
+    /// Run the active rows' effects as a series chain on one stereo sample.
+    /// Rows are walked top-to-bottom (row 0 → row 15); each active row sees
+    /// the previous active row's output, and the first active row sees the
+    /// dry input. Per row:
+    ///
+    /// * `eff = effect.process_sample(input)`
+    /// * `lane = input + (eff − input) · mix`   — per-row dry/wet blend
+    /// * `next_input = amp · lane`              — amplitude MSEG as a VCA
+    ///
+    /// Rows whose `EffectKind` is `None` are skipped so an unconfigured slot
+    /// is transparent (rather than zeroing the chain — `NoneEffect` outputs
+    /// silence). Inactive rows (cell off at the playhead column or outside
+    /// the loop zone) are likewise skipped.
     fn process_sample(&mut self, dry_l: f32, dry_r: f32, active: u16) -> (f32, f32) {
-        let mut wet_l = 0.0;
-        let mut wet_r = 0.0;
+        let mut cur_l = dry_l;
+        let mut cur_r = dry_r;
         for r in 0..ROWS {
             if active & (1 << r) == 0 {
                 continue;
             }
-            let (eff_l, eff_r) = self.effects[r].process_sample(dry_l, dry_r);
-            // Per-track dry/wet blend, before the amplitude MSEG.
+            if self.track_effects[r].kind == crate::effects::EffectKind::None {
+                continue;
+            }
+            let (eff_l, eff_r) = self.effects[r].process_sample(cur_l, cur_r);
             let mix = self.track_effects[r].mix;
-            let lane_l = dry_l + (eff_l - dry_l) * mix;
-            let lane_r = dry_r + (eff_r - dry_r) * mix;
+            let lane_l = cur_l + (eff_l - cur_l) * mix;
+            let lane_r = cur_r + (eff_r - cur_r) * mix;
             let amp = self.modulation.amplitude(r);
-            wet_l += amp * lane_l;
-            wet_r += amp * lane_r;
+            cur_l = amp * lane_l;
+            cur_r = amp * lane_r;
         }
-        (wet_l, wet_r)
+        (cur_l, cur_r)
     }
 
     /// Process one stereo block in place. `left`/`right` carry the dry input
@@ -242,7 +252,7 @@ impl AudioEngine {
             for i in cursor..seg_end {
                 let (dry_l, dry_r) = (left[i], right[i]);
                 let (wet_l, wet_r) = self.process_sample(dry_l, dry_r, active);
-                // Tame the parallel-row sum on the wet bus, then mix dry/wet.
+                // Limit the chain output on the wet bus, then mix dry/wet.
                 let (cw_l, cw_r) = self.compressor.process_sample(wet_l, wet_r);
                 left[i] = dry_l + (cw_l - dry_l) * mix;
                 right[i] = dry_r + (cw_r - dry_r) * mix;
@@ -349,18 +359,19 @@ mod tests {
     }
 
     #[test]
-    fn process_default_effects_full_wet_is_silent() {
-        // Not playing, fresh engine: every row's default effect is
-        // `EffectKind::None` (an unassigned lane outputs silence), so the
-        // fully-wet output is silence.
+    fn process_with_default_none_effects_is_dry_passthrough() {
+        // Fresh engine, default config: every row's effect is `EffectKind::None`,
+        // which the series chain skips. With no chain stages and a sub-threshold
+        // input the compressor stays unity, so a fully-wet block equals dry.
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
         let grid = Grid::default();
-        let mut left = [0.5_f32; 64];
-        let mut right = [0.5_f32; 64];
+        // 0.05 is well below the compressor's −6 dB threshold (≈ 0.5 linear).
+        let mut left = [0.05_f32; 64];
+        let mut right = [0.05_f32; 64];
         engine.process(&mut left, &mut right, false, 10.0, 120.0, 1.0, &grid);
-        assert!(left.iter().all(|&s| s == 0.0));
-        assert!(right.iter().all(|&s| s == 0.0));
+        assert!(left.iter().all(|&s| (s - 0.05).abs() < 1e-6));
+        assert!(right.iter().all(|&s| (s - 0.05).abs() < 1e-6));
     }
 
     #[test]
@@ -391,7 +402,96 @@ mod tests {
     }
 
     #[test]
-    fn process_reset_returns_to_silence() {
+    fn series_chain_orders_effects_so_row_swap_changes_output() {
+        // The series chain runs row 0 → row 15. Swap an order-sensitive pair
+        // (Lowpass and Bitcrush — bit-reducing a band-limited signal vs.
+        // band-limiting a bit-reduced one produces different output) and
+        // verify the resulting buffer differs. If the engine were still
+        // parallel, swapping row 0 ↔ row 1 would leave the sum unchanged.
+        let grid = Grid::default();
+        let mut lp_first = [TrackEffect::default_for_row(0); ROWS];
+        lp_first[0] = TrackEffect {
+            kind: crate::effects::EffectKind::Lowpass,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Lowpass),
+            mix: 1.0,
+        };
+        lp_first[1] = TrackEffect {
+            kind: crate::effects::EffectKind::Bitcrush,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Bitcrush),
+            mix: 1.0,
+        };
+        let mut bc_first = lp_first;
+        bc_first.swap(0, 1);
+
+        // Drive a small sine through each ordering and compare.
+        let sr = 48_000.0_f32;
+        let n = 128;
+        let mut dry = vec![0.0_f32; n];
+        for (i, s) in dry.iter_mut().enumerate() {
+            *s = 0.1 * (2.0 * std::f32::consts::PI * 1_000.0 * (i as f32) / sr).sin();
+        }
+
+        let render = |effects: &[TrackEffect; ROWS]| -> Vec<f32> {
+            let mut e = AudioEngine::new();
+            e.set_sample_rate(sr);
+            e.set_effects(effects);
+            let mut l = dry.clone();
+            let mut r = dry.clone();
+            e.process(&mut l, &mut r, true, 10.0, 120.0, 1.0, &grid);
+            l
+        };
+        let a = render(&lp_first);
+        let b = render(&bc_first);
+        let max_diff = a
+            .iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_diff > 1e-4,
+            "expected Lowpass→Bitcrush to differ from Bitcrush→Lowpass; max diff = {max_diff}"
+        );
+    }
+
+    #[test]
+    fn series_chain_skips_none_rows_so_they_are_transparent() {
+        // A row whose effect is `None` must not break the chain. Place a
+        // Lowpass on row 5 with every other row defaulting to None; the
+        // output should match running with just row 5 active (None rows
+        // are transparent under the series chain).
+        let grid = Grid::default();
+        let mut sparse = [TrackEffect::default_for_row(0); ROWS];
+        sparse[5] = TrackEffect {
+            kind: crate::effects::EffectKind::Lowpass,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Lowpass),
+            mix: 1.0,
+        };
+
+        let sr = 48_000.0_f32;
+        let n = 64;
+        let dry = vec![0.05_f32; n];
+
+        let mut e = AudioEngine::new();
+        e.set_sample_rate(sr);
+        e.set_effects(&sparse);
+        let mut l = dry.clone();
+        let mut r = dry.clone();
+        e.process(&mut l, &mut r, true, 10.0, 120.0, 1.0, &grid);
+        // The 16 None rows around row 5 must not zero the chain — the
+        // tail of the buffer is the Lowpass settled response, not silence.
+        assert!(
+            l[n - 1].abs() > 1e-3,
+            "None rows should be transparent; got near-silence ({})",
+            l[n - 1]
+        );
+    }
+
+    #[test]
+    fn process_after_reset_with_default_effects_is_dry_passthrough() {
+        // Run a block to populate compressor/modulation state, then reset and
+        // run a sub-threshold block. With every row's default `EffectKind::None`
+        // the series chain has no stages, the compressor sits below its knee,
+        // and a fully-wet block must equal the dry input.
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
         let grid = Grid::default();
@@ -399,12 +499,11 @@ mod tests {
         let mut buf2 = [0.3_f32; 128];
         engine.process(&mut buf, &mut buf2, true, 10.0, 120.0, 1.0, &grid);
         engine.reset();
-        // After reset, not playing: default `None` effects -> silent at full wet.
-        let mut left = [0.4_f32; 64];
-        let mut right = [0.4_f32; 64];
+        let mut left = [0.05_f32; 64];
+        let mut right = [0.05_f32; 64];
         engine.process(&mut left, &mut right, false, 10.0, 120.0, 1.0, &grid);
-        assert!(left.iter().all(|&s| s == 0.0));
-        assert!(right.iter().all(|&s| s == 0.0));
+        assert!(left.iter().all(|&s| (s - 0.05).abs() < 1e-6));
+        assert!(right.iter().all(|&s| (s - 0.05).abs() < 1e-6));
     }
 
     #[test]
@@ -495,8 +594,16 @@ mod tests {
 
     #[test]
     fn engine_runs_per_track_effects() {
-        let config: [crate::effects::TrackEffect; 16] =
+        // Install a real effect on at least one row — under the series chain a
+        // row with `EffectKind::None` is transparent, so an all-None config
+        // would pass through dry and not exercise the effect path.
+        let mut config: [crate::effects::TrackEffect; 16] =
             std::array::from_fn(crate::effects::TrackEffect::default_for_row);
+        config[0] = crate::effects::TrackEffect {
+            kind: crate::effects::EffectKind::Lowpass,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Lowpass),
+            mix: 1.0,
+        };
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
         engine.set_effects(&config);

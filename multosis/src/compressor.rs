@@ -1,9 +1,11 @@
 //! Soft-knee peak compressor on the wet bus.
 //!
-//! Tames the +N×dry peak the per-row effect sum produces when many rows are
-//! active simultaneously. Sidechain peak detector → one-pole envelope (attack
-//! / release) → soft-knee gain computer. Stereo-linked: one detector reads
-//! `max(|L|, |R|)` and one gain applies to both channels.
+//! Limits the series chain's output before the dry/wet mix — when a row's
+//! amplitude MSEG or saturating effect pushes the chain hot, this catches
+//! the peak so the user doesn't have to ride a master gain. Sidechain peak
+//! detector → one-pole envelope (attack / release) → soft-knee gain
+//! computer. Stereo-linked: one detector reads `max(|L|, |R|)` and one
+//! gain applies to both channels.
 
 /// Internal fixed timings — exposing them in the UI is YAGNI.
 const ATTACK_MS: f32 = 5.0;
