@@ -152,6 +152,37 @@ pub fn draw_dial(
     );
 }
 
+/// Draw a dimmed (grey) version of [`draw_dial`] — same geometry, but the
+/// value arc and indicator dot are rendered in the muted theme colour
+/// instead of the accent blue. Use this when a parameter is currently
+/// inactive but still meant to be visible and interactive (e.g. the Free
+/// dial on a tempo-synced delay).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_dial_dimmed(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    label: &str,
+    value_text: &str,
+    normalized: f32,
+) {
+    draw_dial_dimmed_ex(
+        pixmap,
+        text_renderer,
+        cx,
+        cy,
+        radius,
+        label,
+        value_text,
+        normalized,
+        None,
+        None,
+        false,
+    );
+}
+
 /// Draw an arc-based rotary dial with optional modulation indicator.
 ///
 /// Same as [`draw_dial`] but accepts `modulated_normalized` to show a
@@ -170,6 +201,72 @@ pub fn draw_dial_ex(
     modulated_normalized: Option<f32>,
     editing_text: Option<&str>,
     caret_on: bool,
+) {
+    draw_dial_inner(
+        pixmap,
+        text_renderer,
+        cx,
+        cy,
+        radius,
+        label,
+        value_text,
+        normalized,
+        modulated_normalized,
+        editing_text,
+        caret_on,
+        color_accent(),
+    );
+}
+
+/// Dimmed sibling of [`draw_dial_ex`] — value arc + indicator dot use the
+/// muted theme colour. Modulation arc, label, value text, and the text-
+/// entry overlay all render normally so the dial stays controllable.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_dial_dimmed_ex(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    label: &str,
+    value_text: &str,
+    normalized: f32,
+    modulated_normalized: Option<f32>,
+    editing_text: Option<&str>,
+    caret_on: bool,
+) {
+    draw_dial_inner(
+        pixmap,
+        text_renderer,
+        cx,
+        cy,
+        radius,
+        label,
+        value_text,
+        normalized,
+        modulated_normalized,
+        editing_text,
+        caret_on,
+        color_muted(),
+    );
+}
+
+/// Shared implementation for the accent and dimmed dial variants. `value_color`
+/// is used for the value arc and indicator dot; everything else is identical.
+#[allow(clippy::too_many_arguments)]
+fn draw_dial_inner(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    label: &str,
+    value_text: &str,
+    normalized: f32,
+    modulated_normalized: Option<f32>,
+    editing_text: Option<&str>,
+    caret_on: bool,
+    value_color: tiny_skia::Color,
 ) {
     let n = normalized.clamp(0.0, 1.0);
     let stroke_width = (radius * 0.1).max(2.0);
@@ -191,7 +288,7 @@ pub fn draw_dial_ex(
     let value_angle = value_to_angle(n);
     if let Some(value_path) = build_arc_path(cx, cy, radius, START_ANGLE, value_angle) {
         let mut paint = Paint::default();
-        paint.set_color(color_accent());
+        paint.set_color(value_color);
         paint.anti_alias = true;
         let stroke = Stroke {
             width: stroke_width,
@@ -204,7 +301,7 @@ pub fn draw_dial_ex(
     // --- Indicator dot at current value position ---
     let dot_radius = stroke_width * 0.75;
     let (dot_x, dot_y) = arc_point(cx, cy, radius, value_angle);
-    draw_filled_circle(pixmap, dot_x, dot_y, dot_radius, color_accent());
+    draw_filled_circle(pixmap, dot_x, dot_y, dot_radius, value_color);
 
     // --- Modulation indicator (arc from unmodulated to modulated) ---
     if let Some(mod_val) = modulated_normalized {
@@ -572,6 +669,57 @@ mod tests {
                 || plain_px.blue() != edit_px.blue()
                 || plain_px.alpha() != edit_px.alpha(),
             "editing overlay must paint a highlight that differs from background"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // draw_dial_dimmed
+    // -----------------------------------------------------------------------
+
+    /// The dimmed variant must not panic for any normalized value, and it
+    /// must paint a *different* value-arc colour from the accent variant
+    /// — that's the entire point of the API.
+    #[test]
+    fn test_draw_dial_dimmed_renders_different_value_arc_color() {
+        let mut pm_accent = test_pixmap();
+        let mut pm_dimmed = test_pixmap();
+        let mut tr = test_renderer();
+        // Same dial geometry + value on both, so any pixel that differs has
+        // to come from the value arc / indicator dot colour swap.
+        draw_dial(&mut pm_accent, &mut tr, 100.0, 100.0, 40.0, "G", "v", 0.5);
+        draw_dial_dimmed(&mut pm_dimmed, &mut tr, 100.0, 100.0, 40.0, "G", "v", 0.5);
+        // Probe a pixel on the value arc. At 0.5 the arc sweeps from
+        // START_ANGLE through 270°: 270° in tiny-skia screen coords is
+        // straight up, i.e. (cx, cy − radius). A pixel just inside that
+        // point lands on the arc itself.
+        let probe_x = 100u32;
+        let probe_y = (100.0 - 40.0) as u32;
+        let a = pm_accent.pixels()[(probe_y * pm_accent.width() + probe_x) as usize];
+        let d = pm_dimmed.pixels()[(probe_y * pm_dimmed.width() + probe_x) as usize];
+        assert!(
+            a.red() != d.red() || a.green() != d.green() || a.blue() != d.blue(),
+            "dimmed dial must paint a different value-arc colour than the accent variant"
+        );
+    }
+
+    #[test]
+    fn test_draw_dial_dimmed_ex_smoke() {
+        let mut pm = test_pixmap();
+        let mut tr = test_renderer();
+        // Editing overlay + modulation arc still render on the dimmed dial
+        // so it stays fully interactive.
+        draw_dial_dimmed_ex(
+            &mut pm,
+            &mut tr,
+            100.0,
+            100.0,
+            40.0,
+            "Free",
+            "250 ms",
+            0.5,
+            Some(0.7),
+            Some("250"),
+            true,
         );
     }
 

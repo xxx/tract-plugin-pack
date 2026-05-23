@@ -342,8 +342,16 @@ pub fn draw_effect_section(
     // Parameter dials. An `Enum`-format param replaces its dial with a
     // dropdown trigger — uniform widget for any N-option discrete selector,
     // whatever the option count.
-    let instance = crate::effects::EffectInstance::new(track.kind);
+    //
+    // The instance is constructed at the track's CURRENT param values (not
+    // defaults) so `param_dimmed(i)` reflects the live state — e.g. Delay
+    // dims its Free dial only when Time is on a sync subdivision, which the
+    // default instance (Time = Free) would never report.
+    let mut instance = crate::effects::EffectInstance::new(track.kind);
     let specs = instance.parameters();
+    for (i, _) in specs.iter().enumerate() {
+        instance.set_param(i, track.params[i]);
+    }
     for (i, spec) in specs.iter().enumerate() {
         let (dx, dy, dw, dh) = lay.dials[i];
         let value = track.params[i];
@@ -377,9 +385,20 @@ pub fn draw_effect_section(
         }
         let norm = crate::effects::value_to_norm(value, spec.min, spec.max, spec.scaling);
         let mod_arc = modulated_norms.get(i).copied().flatten();
+        // Effects flag inactive-but-controllable params as "dimmed" (e.g.
+        // Delay's Free dial when Time is a sync subdivision). The dimmed
+        // entry point swaps the accent-blue value arc for muted grey;
+        // everything else (modulation arc, text-edit overlay, hit-testing)
+        // is identical.
+        let dimmed = instance.param_dimmed(i);
+        let draw_dial = if dimmed {
+            widgets::param_dial::draw_dial_dimmed_ex
+        } else {
+            widgets::param_dial::draw_dial_ex
+        };
         match editing_dial {
             Some((idx, buf, caret_on)) if idx == i => {
-                widgets::param_dial::draw_dial_ex(
+                draw_dial(
                     pixmap,
                     tr,
                     dx + dw / 2.0,
@@ -394,7 +413,7 @@ pub fn draw_effect_section(
                 );
             }
             _ => {
-                widgets::param_dial::draw_dial_ex(
+                draw_dial(
                     pixmap,
                     tr,
                     dx + dw / 2.0,

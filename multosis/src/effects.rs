@@ -230,6 +230,15 @@ pub trait Effect {
     /// future LFO-style effects) override this to cache the BPM for use
     /// during `process_sample`. The default implementation ignores it.
     fn set_bpm(&mut self, _bpm: f32) {}
+
+    /// `true` when parameter `index` is currently inactive — the editor
+    /// renders its dial dimmed (muted colour) instead of accented, but
+    /// it stays controllable. Used e.g. by Delay to grey out the Free
+    /// dial when a tempo-synced subdivision is selected from the Time
+    /// dropdown. The default returns `false` for every index.
+    fn param_dimmed(&self, _index: usize) -> bool {
+        false
+    }
 }
 
 /// A multimode state-variable filter — `n` cascaded TPT-SVF stages, each
@@ -1178,6 +1187,19 @@ impl Effect for DelayEffect {
     fn set_bpm(&mut self, bpm: f32) {
         self.bpm = bpm.max(1.0);
     }
+
+    /// The Free dial (slot 0) is dimmed whenever the Time dropdown points
+    /// at a tempo-synced subdivision — Time then drives `delay_samples()`
+    /// directly and the Free value is unused. The Free slot itself (the
+    /// last `time_idx` value) re-enables it. Every other slot is always
+    /// active.
+    fn param_dimmed(&self, index: usize) -> bool {
+        if index != 0 {
+            return false;
+        }
+        let idx = self.time_idx.round() as usize;
+        delay_time_beats(idx).is_some()
+    }
 }
 
 /// A silent "no-effect" — used when a track has no effect assigned. The row
@@ -1360,6 +1382,16 @@ impl Effect for EffectInstance {
             EffectInstance::Bitcrush(e) => e.set_bpm(bpm),
             EffectInstance::Fm(e) => e.set_bpm(bpm),
             EffectInstance::Delay(e) => e.set_bpm(bpm),
+        }
+    }
+
+    fn param_dimmed(&self, index: usize) -> bool {
+        match self {
+            EffectInstance::None(e) => e.param_dimmed(index),
+            EffectInstance::Svf(e) => e.param_dimmed(index),
+            EffectInstance::Bitcrush(e) => e.param_dimmed(index),
+            EffectInstance::Fm(e) => e.param_dimmed(index),
+            EffectInstance::Delay(e) => e.param_dimmed(index),
         }
     }
 }
@@ -2582,5 +2614,51 @@ mod tests {
             (47_990..=48_010).contains(&at_60),
             "1/4 note at 60 BPM should echo at ~48000 samples, got {at_60}"
         );
+    }
+
+    #[test]
+    fn delay_dims_the_free_dial_only_when_time_points_at_a_sync_subdivision() {
+        // Default Time is the trailing "Free" slot → Free is active, no dim.
+        let mut d = DelayEffect::new();
+        assert!(
+            !d.param_dimmed(0),
+            "Free dial active at default (Time → Free)"
+        );
+        // Pick any sync subdivision (e.g. 1/4 note at idx 8) → Free is unused,
+        // so the editor should dim its dial.
+        d.set_param(1, 8.0);
+        assert!(d.param_dimmed(0), "Free dial dimmed when Time = 1/4");
+        // Switch back to the Free slot → un-dim.
+        let free_slot = (DELAY_TIME_LABELS.len() - 1) as f32;
+        d.set_param(1, free_slot);
+        assert!(!d.param_dimmed(0), "Free dial active again at Time → Free");
+        // Other parameter slots are never dimmed.
+        d.set_param(1, 8.0);
+        for i in 1..d.parameters().len() {
+            assert!(!d.param_dimmed(i), "slot {i} should never dim");
+        }
+        // Out-of-range index: harmless.
+        assert!(!d.param_dimmed(99));
+    }
+
+    #[test]
+    fn effect_instance_param_dimmed_dispatches_to_the_inner_effect() {
+        // None / SVF / Bitcrush / FM never dim (default trait impl). Only
+        // Delay's Free slot dims, and only when Time is a sync subdivision.
+        let mut delay = EffectInstance::new(EffectKind::Delay);
+        delay.set_param(1, 8.0); // Time → 1/4 note
+        assert!(delay.param_dimmed(0));
+        assert!(!delay.param_dimmed(1));
+        for kind in [
+            EffectKind::None,
+            EffectKind::Svf,
+            EffectKind::Bitcrush,
+            EffectKind::Fm,
+        ] {
+            let e = EffectInstance::new(kind);
+            for i in 0..MAX_EFFECT_PARAMS {
+                assert!(!e.param_dimmed(i), "{:?} slot {i} should not dim", kind);
+            }
+        }
     }
 }
