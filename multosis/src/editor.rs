@@ -85,6 +85,19 @@ fn clamp_track(row: usize) -> usize {
     row.min(crate::grid::ROWS - 1)
 }
 
+/// The three MSEG slots each get their own colour: Amp = sky blue (the
+/// existing accent), MSEG 1 = amber, MSEG 2 = purple. Used as the value
+/// colour for `draw_mseg`/`draw_mseg_ghost`, the active fill of the MSEG
+/// selector tab, and the modulation arc of any param dial driven by that
+/// MSEG. Slot indices past 2 clamp to 2.
+pub fn mseg_color(slot: usize) -> tiny_skia::Color {
+    match slot.min(2) {
+        0 => tiny_skia::Color::from_rgba8(0x4f, 0xc3, 0xf7, 0xff), // Amp — sky blue
+        1 => tiny_skia::Color::from_rgba8(0xff, 0xc8, 0x58, 0xff), // MSEG 1 — amber
+        _ => tiny_skia::Color::from_rgba8(0xc3, 0x78, 0xff, 0xff), // MSEG 2 — purple
+    }
+}
+
 /// Time window for double-click-to-reset on sliders/dials.
 const DOUBLE_CLICK_MS: u128 = 400;
 
@@ -2279,5 +2292,32 @@ mod tests {
         assert_eq!(clamp_track(0), 0);
         assert_eq!(clamp_track(15), 15);
         assert_eq!(clamp_track(99), 15);
+    }
+
+    #[test]
+    fn mseg_color_returns_the_three_slot_hues_and_clamps_oob() {
+        use tiny_skia::Color;
+        let amp = mseg_color(0);
+        let m1 = mseg_color(1);
+        let m2 = mseg_color(2);
+        // Three distinct colours.
+        assert_ne!(rgb8(amp), rgb8(m1));
+        assert_ne!(rgb8(amp), rgb8(m2));
+        assert_ne!(rgb8(m1), rgb8(m2));
+        // Amp matches the existing accent (sky blue 0x4fc3f7).
+        assert_eq!(rgb8(amp), (0x4f, 0xc3, 0xf7));
+        // MSEG 1 amber.
+        assert_eq!(rgb8(m1), (0xff, 0xc8, 0x58));
+        // MSEG 2 purple.
+        assert_eq!(rgb8(m2), (0xc3, 0x78, 0xff));
+        // OOB clamps to MSEG 2 (the highest valid slot).
+        assert_eq!(rgb8(mseg_color(99)), rgb8(m2));
+
+        fn rgb8(c: Color) -> (u8, u8, u8) {
+            let r = (c.red() * 255.0).round() as u8;
+            let g = (c.green() * 255.0).round() as u8;
+            let b = (c.blue() * 255.0).round() as u8;
+            (r, g, b)
+        }
     }
 }
