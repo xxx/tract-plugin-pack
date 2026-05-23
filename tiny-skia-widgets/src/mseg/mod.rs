@@ -23,7 +23,7 @@ pub const MAX_NODES: usize = 128;
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PlayMode {
     /// Runs once per trigger; honours sustain/loop while held.
-    Triggered,
+    OneShot,
     /// Loops continuously; one MSEG span is one cycle.
     Cyclic,
 }
@@ -56,7 +56,7 @@ pub enum Polarity {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum HoldMode {
     None,
-    /// Triggered playback holds at this node index until released.
+    /// One-shot playback holds at this node index until released.
     Sustain(usize),
     /// Loop the `[start, end]` node-index range.
     Loop {
@@ -115,7 +115,7 @@ pub struct MsegData {
 }
 
 impl Default for MsegData {
-    /// A rising 0→1 ramp: two nodes, `Triggered`, `Time` sync, 1 s long.
+    /// A rising 0→1 ramp: two nodes, `OneShot`, `Time` sync, 1 s long.
     fn default() -> Self {
         let mut nodes = [MsegNode::default(); MAX_NODES];
         nodes[0] = MsegNode {
@@ -133,7 +133,7 @@ impl Default for MsegData {
         Self {
             nodes,
             node_count: 2,
-            play_mode: PlayMode::Triggered,
+            play_mode: PlayMode::OneShot,
             hold: HoldMode::None,
             sync_mode: SyncMode::Time,
             time_seconds: 1.0,
@@ -421,7 +421,7 @@ fn wrap_into(p: f32, lo: f32, hi: f32) -> f32 {
 
 /// Advance the playhead one step, applying the document's playback rules.
 /// Returns `(next_phase, finished)`. `finished` is only ever `true` in
-/// triggered playback once the playhead reaches the end. Pure — the consuming
+/// one-shot playback once the playhead reaches the end. Pure — the consuming
 /// plugin owns the `phase` value and the `released` flag.
 pub fn advance(data: &MsegData, phase: f32, dt: f32, released: bool) -> (f32, bool) {
     let a = data.active();
@@ -433,7 +433,7 @@ pub fn advance(data: &MsegData, phase: f32, dt: f32, released: bool) -> (f32, bo
             };
             (wrap_into(phase + dt, lo, hi), false)
         }
-        PlayMode::Triggered => {
+        PlayMode::OneShot => {
             let mut p = phase + dt;
             if !released {
                 match data.hold {
@@ -658,7 +658,7 @@ mod tests {
 
     #[test]
     fn advance_triggered_runs_to_end_and_finishes() {
-        let d = MsegData::default(); // Triggered, hold None
+        let d = MsegData::default(); // OneShot, hold None
         let (p, finished) = advance(&d, 0.5, 0.25, false);
         assert!((p - 0.75).abs() < 1e-6);
         assert!(!finished);
@@ -907,7 +907,7 @@ mod tests {
                 {"time": 0.0, "value": 0.0, "tension": 0.0, "stepped": false},
                 {"time": 1.0, "value": 1.0, "tension": 0.0, "stepped": false}
             ],
-            "play_mode": "Triggered",
+            "play_mode": "OneShot",
             "hold": "None",
             "sync_mode": "Time",
             "time_seconds": 1.0,

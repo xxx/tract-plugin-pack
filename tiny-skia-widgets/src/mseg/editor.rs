@@ -415,12 +415,12 @@ impl MsegEditState {
                     };
                     Some(MsegEdit::Changed)
                 } else if !self.curve_only && in_rect(b.play_mode, x, y) {
-                    // Cyclic (default) → Triggered (one-shot, holds at the
+                    // Cyclic (default) → OneShot (runs once, holds at the
                     // end until the next trigger). `advance` already honours
                     // both modes; this is just the UI toggle.
                     data.play_mode = match data.play_mode {
-                        crate::mseg::PlayMode::Cyclic => crate::mseg::PlayMode::Triggered,
-                        crate::mseg::PlayMode::Triggered => crate::mseg::PlayMode::Cyclic,
+                        crate::mseg::PlayMode::Cyclic => crate::mseg::PlayMode::OneShot,
+                        crate::mseg::PlayMode::OneShot => crate::mseg::PlayMode::Cyclic,
                     };
                     Some(MsegEdit::Changed)
                 } else if in_rect(b.grid, x, y) {
@@ -1337,7 +1337,7 @@ mod tests {
         let y = b.play_mode.1 + b.play_mode.3 * 0.5;
         let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
         assert_eq!(ev, Some(MsegEdit::Changed));
-        assert_eq!(data.play_mode, PlayMode::Triggered);
+        assert_eq!(data.play_mode, PlayMode::OneShot);
         state.on_mouse_up(&mut data, RECT, 1.0);
         // Click again — back to Cyclic.
         state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);

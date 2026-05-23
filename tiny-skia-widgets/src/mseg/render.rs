@@ -486,14 +486,13 @@ fn draw_strip(
     );
 
     // Play mode: toggle between Cyclic (default — the envelope loops) and
-    // One-shot (PlayMode::Triggered — runs once per trigger, holds at the end).
-    // The button is labelled "One-shot" rather than "Triggered" because every
-    // MSEG is triggered regardless of this setting; the distinction is whether
-    // it loops or plays exactly once. The enum keeps the historical name.
-    // Hidden for `curve_only` consumers (a static curve has no play mode).
+    // OneShot (runs once per trigger, holds at the end). Every MSEG is
+    // triggered regardless of this setting; the distinction is whether it
+    // loops or plays exactly once. Hidden for `curve_only` consumers (a
+    // static curve has no play mode).
     if show_play_mode {
-        let triggered = matches!(data.play_mode, crate::mseg::PlayMode::Triggered);
-        let play_label = if triggered { "One-shot" } else { "Cyclic" };
+        let one_shot = matches!(data.play_mode, crate::mseg::PlayMode::OneShot);
+        let play_label = if one_shot { "One-shot" } else { "Cyclic" };
         draw_button(
             pixmap,
             text_renderer,
@@ -502,7 +501,7 @@ fn draw_strip(
             b.play_mode.2,
             b.play_mode.3,
             play_label,
-            triggered,
+            one_shot,
             false,
         );
     }
