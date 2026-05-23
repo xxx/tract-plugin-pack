@@ -356,11 +356,19 @@ pub(crate) struct StripButtons {
 }
 
 /// Lay out the MSEG control-strip buttons within `strip` (`scale` is the DPI
-/// factor). `randomize` is a fixed width at the right end; the remaining
-/// width is shared equally across the toggles and dropdown triggers. When
-/// `show_play_mode` is false (curve-only consumers like miff), the row is
-/// `snap | grid | polarity | style`; when true (animated consumers like
-/// multosis), `play_mode` is inserted between `polarity` and `style`.
+/// factor). Per-button widths are fixed (sized to each label's longest text
+/// with a little breathing room) and the row is split into three concern
+/// groups separated by a wider gap:
+///
+/// * **gridding** — `snap` toggle + `grid` dropdown, anchored to the left.
+/// * **per-MSEG behaviour** — `polarity` toggle, plus `play_mode` toggle when
+///   `show_play_mode` is true (animated consumers like multosis). Hidden for
+///   curve-only consumers like miff — `play_mode` returns the zero rect.
+/// * **randomizer** — `style` dropdown + `randomize` button, anchored to the
+///   right edge so the action button stays where the eye expects it.
+///
+/// Adjacent buttons within a group are separated by `gap`; between groups,
+/// `group_gap` is wider. The middle of the strip is intentionally empty.
 pub(crate) fn strip_buttons(
     strip: (f32, f32, f32, f32),
     scale: f32,
@@ -369,26 +377,33 @@ pub(crate) fn strip_buttons(
     let (sx, sy, sw, sh) = strip;
     let pad = 6.0 * scale;
     let gap = 4.0 * scale;
+    let group_gap = 16.0 * scale;
     let by = sy + 3.0 * scale;
     let bh = (sh - 6.0 * scale).max(0.0);
+
+    // Per-button widths (pre-scale). Short toggles get narrow rects; dropdown
+    // triggers wider ones to fit their value text plus a chevron.
+    let snap_w = 100.0 * scale;
+    let grid_w = 130.0 * scale;
+    let polarity_w = 100.0 * scale;
+    let play_mode_w = 110.0 * scale;
+    let style_w = 150.0 * scale;
     let rand_w = 130.0 * scale;
-    let randomize = (sx + sw - rand_w - pad, by, rand_w, bh);
-    let left = sx + pad;
-    let avail = (randomize.0 - gap - left).max(0.0);
-    let n_segments: f32 = if show_play_mode { 5.0 } else { 4.0 };
-    let seg_w = ((avail - (n_segments - 1.0) * gap) / n_segments).max(0.0);
-    let stride = seg_w + gap;
-    let snap = (left, by, seg_w, bh);
-    let grid = (left + stride, by, seg_w, bh);
-    let polarity = (left + 2.0 * stride, by, seg_w, bh);
-    let (play_mode, style) = if show_play_mode {
-        (
-            (left + 3.0 * stride, by, seg_w, bh),
-            (left + 4.0 * stride, by, seg_w, bh),
-        )
+
+    // Left cluster, anchored at `sx + pad`.
+    let snap = (sx + pad, by, snap_w, bh);
+    let grid = (snap.0 + snap_w + gap, by, grid_w, bh);
+    let polarity = (grid.0 + grid_w + group_gap, by, polarity_w, bh);
+    let play_mode = if show_play_mode {
+        (polarity.0 + polarity_w + gap, by, play_mode_w, bh)
     } else {
-        ((0.0, 0.0, 0.0, 0.0), (left + 3.0 * stride, by, seg_w, bh))
+        (0.0, 0.0, 0.0, 0.0)
     };
+
+    // Right cluster, anchored at `sx + sw - pad`.
+    let randomize = (sx + sw - rand_w - pad, by, rand_w, bh);
+    let style = (randomize.0 - gap - style_w, by, style_w, bh);
+
     StripButtons {
         snap,
         grid,

@@ -845,7 +845,11 @@ mod tests {
     use crate::mseg::render::{mseg_layout, phase_to_x, value_to_y};
     use crate::mseg::MsegData;
 
-    const RECT: (f32, f32, f32, f32) = (0.0, 0.0, 400.0, 300.0);
+    // Widened from 400 to match a realistic embed: the MSEG strip's fixed
+    // per-button widths + group gap need a strip ~700+ px wide before its
+    // left and right clusters meet in the middle. 1200 mirrors what
+    // multosis/miff actually render.
+    const RECT: (f32, f32, f32, f32) = (0.0, 0.0, 1200.0, 300.0);
 
     #[test]
     fn new_is_full_editor() {
@@ -1286,13 +1290,14 @@ mod tests {
 
     #[test]
     fn snap_toggle_zone_flips_snap() {
+        use crate::mseg::render::strip_buttons;
         let mut data = MsegData::default();
         let was = data.snap;
         let mut state = MsegEditState::new();
         let l = mseg_layout(RECT, false, 1.0);
-        // Left third of the strip = snap toggle.
-        let x = l.strip.0 + l.strip.2 * 0.1;
-        let y = l.strip.1 + l.strip.3 * 0.5;
+        let b = strip_buttons(l.strip, 1.0, true);
+        let x = b.snap.0 + b.snap.2 * 0.5;
+        let y = b.snap.1 + b.snap.3 * 0.5;
         state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
         assert_eq!(data.snap, !was);
         state.on_mouse_up(&mut data, RECT, 1.0);
