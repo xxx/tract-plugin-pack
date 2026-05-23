@@ -25,6 +25,13 @@ pub enum ParamFormat {
     /// Auto Hz/kHz scaling: < 1 → `"0.05 Hz"` (2 dec); 1..1000 → `"80 Hz"`
     /// (0 dec); ≥ 1000 → `"2.0 kHz"` (1 dec).
     Hertz,
+    /// Discrete selector: the value is rounded to an integer index in
+    /// `0..labels.len()` and rendered as the matching label. Lets a continuous
+    /// dial host a finite-option selector (e.g. the FM effect's Mode dial).
+    /// `value_to_norm` / `norm_to_value` still work because the underlying
+    /// spec is a normal `min`/`max`/`Linear` param — `Enum` only affects how
+    /// the stored value renders and how typed text parses back.
+    Enum { labels: &'static [&'static str] },
 }
 
 /// A modulatable parameter of an effect: its name and value range. Static per
@@ -97,6 +104,27 @@ pub fn format_value(value: f32, format: ParamFormat) -> String {
                 format!("{:.1} kHz", v / 1000.0)
             }
         }
+        ParamFormat::Enum { labels } => labels
+            .get(enum_index(value, labels.len()))
+            .copied()
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+/// Round a continuous parameter value to its enum-bucket index, clamped to
+/// `0..labels_len`. Out-of-range or empty `labels_len` yields 0.
+fn enum_index(value: f32, labels_len: usize) -> usize {
+    if labels_len == 0 {
+        return 0;
+    }
+    let rounded = value.round();
+    if rounded < 0.0 {
+        0
+    } else if rounded as usize >= labels_len {
+        labels_len - 1
+    } else {
+        rounded as usize
     }
 }
 
@@ -105,7 +133,8 @@ pub fn format_value(value: f32, format: ParamFormat) -> String {
 /// the user expects to edit a plain number rather than re-type the unit.
 /// Decimal precision matches `format_value` (Number uses its declared
 /// decimals; Hertz uses 2 decimals below 1 Hz and 0 decimals above, but
-/// stays in Hz units regardless of magnitude).
+/// stays in Hz units regardless of magnitude). `Enum` seeds the buffer
+/// with the current label so the user can swap it for another label.
 pub fn format_value_bare(value: f32, format: ParamFormat) -> String {
     match format {
         ParamFormat::Number { decimals, .. } => {
@@ -119,6 +148,11 @@ pub fn format_value_bare(value: f32, format: ParamFormat) -> String {
                 format!("{value:.0}")
             }
         }
+        ParamFormat::Enum { labels } => labels
+            .get(enum_index(value, labels.len()))
+            .copied()
+            .unwrap_or("")
+            .to_string(),
     }
 }
 
@@ -154,6 +188,18 @@ pub fn parse_value(text: &str, format: ParamFormat) -> Option<f32> {
                 (t, 1.0)
             };
             body.trim().parse::<f32>().ok().map(|v| v * mult)
+        }
+        ParamFormat::Enum { labels } => {
+            // First try a case-insensitive label match — the user typed e.g.
+            // "Modulator". Failing that, fall back to a numeric index so a
+            // copy/paste of the raw value still works.
+            let lower = t.to_ascii_lowercase();
+            for (i, label) in labels.iter().enumerate() {
+                if label.to_ascii_lowercase() == lower {
+                    return Some(i as f32);
+                }
+            }
+            t.parse::<f32>().ok()
         }
     }
 }
@@ -383,6 +429,227 @@ impl Effect for BitcrushEffect {
     }
 }
 
+/// Frequency-modulation effect. The input plays one of two roles, chosen by
+/// the `Mode` param:
+///
+/// * **Carrier** — the input is treated as the audio being FMed. An internal
+///   sine at the `Freq` rate modulates a delay line's length around a fixed
+///   5 ms centre; the output is the input read out at that varying delay
+///   (vibrato at slow `Freq`, sideband-rich FM at audio-rate `Freq`). The
+///   delay-line approach is the only practical way to "FM" an arbitrary
+///   input without an analytic-signal Hilbert transform, since instantaneous
+///   frequency is the derivative of phase.
+///
+/// * **Modulator** — the input modulates an internal sine carrier. The
+///   carrier phase advances at `Freq + depth · input_sample` per sample
+///   (through-zero phase modulation). Each channel runs its own carrier so
+///   stereo input produces stereo output.
+///
+/// `Feedback` adds the previous output sample back into the modulation
+/// signal, enriching the harmonic content (brass-like in Modulator mode;
+/// trippy self-reinforcing wobble in Carrier mode).
+pub struct FmEffect {
+    // Stored parameters.
+    mode: f32, // 0 = Carrier, 1 = Modulator (rounded on set_param).
+    freq_hz: f32,
+    depth_pct: f32,    // 0..100, divided by 100 inside `process_sample`.
+    feedback_pct: f32, // 0..100, divided by 100 inside `process_sample`.
+    sample_rate: f32,
+
+    // Internal oscillator phases (0..1).
+    carrier_phase_l: f32,
+    carrier_phase_r: f32,
+    mod_phase: f32,
+
+    // One-sample feedback memory.
+    prev_out_l: f32,
+    prev_out_r: f32,
+
+    // Carrier-mode delay lines (one per channel). Sized once in `new`; reads
+    // and writes are wrap-around. 4096 samples is ample headroom for the
+    // 5 ms centre delay + ±~5 ms swing at every supported sample rate
+    // (≈ 21 ms at 192 kHz, ≈ 85 ms at 48 kHz).
+    delay_l: Vec<f32>,
+    delay_r: Vec<f32>,
+    write_idx: usize,
+}
+
+/// Mode-dial label list. Order matters: `value.round() as usize` indexes it.
+const FM_MODE_LABELS: &[&str] = &["Carrier", "Modulator"];
+
+impl FmEffect {
+    const DELAY_LEN: usize = 4096;
+    /// Centre delay for Carrier mode — both the read-point default and the
+    /// reference around which the modulator swings. 5 ms is short enough
+    /// that pitch shifts are perceived as FM/vibrato rather than chorus.
+    const CENTER_DELAY_MS: f32 = 5.0;
+
+    const PARAMS: [ParamSpec; 4] = [
+        ParamSpec {
+            name: "Mode",
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: FM_MODE_LABELS,
+            },
+        },
+        ParamSpec {
+            name: "Freq",
+            min: 0.1,
+            max: 2_000.0,
+            default: 5.0,
+            scaling: ParamScaling::Log,
+            format: ParamFormat::Hertz,
+        },
+        ParamSpec {
+            name: "Depth",
+            min: 0.0,
+            max: 100.0,
+            default: 25.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "%",
+            },
+        },
+        ParamSpec {
+            name: "Feedback",
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "%",
+            },
+        },
+    ];
+
+    /// An `FmEffect` at its default parameters; call `set_sample_rate`
+    /// before processing.
+    pub fn new() -> Self {
+        Self {
+            mode: Self::PARAMS[0].default,
+            freq_hz: Self::PARAMS[1].default,
+            depth_pct: Self::PARAMS[2].default,
+            feedback_pct: Self::PARAMS[3].default,
+            sample_rate: 48_000.0,
+            carrier_phase_l: 0.0,
+            carrier_phase_r: 0.0,
+            mod_phase: 0.0,
+            prev_out_l: 0.0,
+            prev_out_r: 0.0,
+            delay_l: vec![0.0; Self::DELAY_LEN],
+            delay_r: vec![0.0; Self::DELAY_LEN],
+            write_idx: 0,
+        }
+    }
+
+    /// Read one channel's delay buffer at a fractional sample distance
+    /// behind the current write head (linear interpolation).
+    fn read_delay(buf: &[f32], write_idx: usize, delay_samples: f32) -> f32 {
+        let n = buf.len();
+        let read = (write_idx as f32 + n as f32 - delay_samples).rem_euclid(n as f32);
+        let i0 = (read.floor() as usize) % n;
+        let i1 = (i0 + 1) % n;
+        let frac = read - read.floor();
+        buf[i0] * (1.0 - frac) + buf[i1] * frac
+    }
+}
+
+impl Default for FmEffect {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Effect for FmEffect {
+    fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
+        let two_pi = std::f32::consts::TAU;
+        let sr = self.sample_rate.max(1.0);
+        let phase_inc = self.freq_hz / sr;
+        let depth = self.depth_pct * 0.01;
+        let feedback = self.feedback_pct * 0.01;
+
+        if self.mode < 0.5 {
+            // Carrier mode: input is the audio. A sine at `freq_hz` modulates
+            // the delay length around a 5 ms centre, so the output is the
+            // input frequency-shifted by `-d(delay)/dt`. Per-channel buffers,
+            // shared modulator.
+            let sr_ms = sr * 0.001;
+            let center = Self::CENTER_DELAY_MS * sr_ms;
+            let swing = depth * center * 0.95;
+            let mod_sine = (self.mod_phase * two_pi).sin();
+            self.mod_phase = (self.mod_phase + phase_inc).rem_euclid(1.0);
+            let mod_value = mod_sine + feedback * (self.prev_out_l + self.prev_out_r) * 0.5;
+            let delay = (center + swing * mod_value).max(0.5);
+
+            // Write the new input, then read the modulated delay tap.
+            self.delay_l[self.write_idx] = left;
+            self.delay_r[self.write_idx] = right;
+            let out_l = Self::read_delay(&self.delay_l, self.write_idx, delay);
+            let out_r = Self::read_delay(&self.delay_r, self.write_idx, delay);
+            self.write_idx = (self.write_idx + 1) % self.delay_l.len();
+            self.prev_out_l = out_l;
+            self.prev_out_r = out_r;
+            (out_l, out_r)
+        } else {
+            // Modulator mode: input modulates an internal sine carrier
+            // (per-channel). Through-zero phase modulation: the carrier's
+            // instantaneous frequency is `freq_hz + sr · depth · input`.
+            let mod_l = left + feedback * self.prev_out_l;
+            let mod_r = right + feedback * self.prev_out_r;
+            let inc_l = phase_inc + depth * mod_l;
+            let inc_r = phase_inc + depth * mod_r;
+            self.carrier_phase_l = (self.carrier_phase_l + inc_l).rem_euclid(1.0);
+            self.carrier_phase_r = (self.carrier_phase_r + inc_r).rem_euclid(1.0);
+            let out_l = (self.carrier_phase_l * two_pi).sin();
+            let out_r = (self.carrier_phase_r * two_pi).sin();
+            self.prev_out_l = out_l;
+            self.prev_out_r = out_r;
+            (out_l, out_r)
+        }
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate;
+    }
+
+    fn reset(&mut self) {
+        self.carrier_phase_l = 0.0;
+        self.carrier_phase_r = 0.0;
+        self.mod_phase = 0.0;
+        self.prev_out_l = 0.0;
+        self.prev_out_r = 0.0;
+        for s in self.delay_l.iter_mut() {
+            *s = 0.0;
+        }
+        for s in self.delay_r.iter_mut() {
+            *s = 0.0;
+        }
+        self.write_idx = 0;
+    }
+
+    fn parameters(&self) -> &'static [ParamSpec] {
+        &Self::PARAMS
+    }
+
+    fn set_param(&mut self, index: usize, value: f32) {
+        match index {
+            // Mode: round to the nearest enum index (0 = Carrier, 1 = Modulator).
+            0 => {
+                self.mode = if value >= 0.5 { 1.0 } else { 0.0 };
+            }
+            1 => self.freq_hz = value.clamp(Self::PARAMS[1].min, Self::PARAMS[1].max),
+            2 => self.depth_pct = value.clamp(Self::PARAMS[2].min, Self::PARAMS[2].max),
+            3 => self.feedback_pct = value.clamp(Self::PARAMS[3].min, Self::PARAMS[3].max),
+            _ => {}
+        }
+    }
+}
+
 /// A silent "no-effect" — used when a track has no effect assigned. The row
 /// still occupies a lane and the propagation engine still lights its cells,
 /// but the lane contributes nothing to the wet sum (an unassigned track has
@@ -424,11 +691,17 @@ pub enum EffectKind {
     None,
     Lowpass,
     Bitcrush,
+    Fm,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 3] = [EffectKind::None, EffectKind::Lowpass, EffectKind::Bitcrush];
+    pub const ALL: [EffectKind; 4] = [
+        EffectKind::None,
+        EffectKind::Lowpass,
+        EffectKind::Bitcrush,
+        EffectKind::Fm,
+    ];
 
     /// The kind's display name.
     pub fn name(self) -> &'static str {
@@ -436,6 +709,7 @@ impl EffectKind {
             EffectKind::None => "None",
             EffectKind::Lowpass => "Lowpass",
             EffectKind::Bitcrush => "Bitcrush",
+            EffectKind::Fm => "FM",
         }
     }
 }
@@ -464,6 +738,7 @@ pub enum EffectInstance {
     None(NoneEffect),
     Lowpass(LowpassEffect),
     Bitcrush(BitcrushEffect),
+    Fm(FmEffect),
 }
 
 impl EffectInstance {
@@ -473,6 +748,7 @@ impl EffectInstance {
             EffectKind::None => EffectInstance::None(NoneEffect::new()),
             EffectKind::Lowpass => EffectInstance::Lowpass(LowpassEffect::new()),
             EffectKind::Bitcrush => EffectInstance::Bitcrush(BitcrushEffect::new()),
+            EffectKind::Fm => EffectInstance::Fm(FmEffect::new()),
         }
     }
 
@@ -482,6 +758,7 @@ impl EffectInstance {
             EffectInstance::None(_) => EffectKind::None,
             EffectInstance::Lowpass(_) => EffectKind::Lowpass,
             EffectInstance::Bitcrush(_) => EffectKind::Bitcrush,
+            EffectInstance::Fm(_) => EffectKind::Fm,
         }
     }
 }
@@ -492,6 +769,7 @@ impl Effect for EffectInstance {
             EffectInstance::None(e) => e.process_sample(left, right),
             EffectInstance::Lowpass(e) => e.process_sample(left, right),
             EffectInstance::Bitcrush(e) => e.process_sample(left, right),
+            EffectInstance::Fm(e) => e.process_sample(left, right),
         }
     }
 
@@ -500,6 +778,7 @@ impl Effect for EffectInstance {
             EffectInstance::None(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Lowpass(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Bitcrush(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Fm(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -508,6 +787,7 @@ impl Effect for EffectInstance {
             EffectInstance::None(e) => e.reset(),
             EffectInstance::Lowpass(e) => e.reset(),
             EffectInstance::Bitcrush(e) => e.reset(),
+            EffectInstance::Fm(e) => e.reset(),
         }
     }
 
@@ -516,6 +796,7 @@ impl Effect for EffectInstance {
             EffectInstance::None(e) => e.parameters(),
             EffectInstance::Lowpass(e) => e.parameters(),
             EffectInstance::Bitcrush(e) => e.parameters(),
+            EffectInstance::Fm(e) => e.parameters(),
         }
     }
 
@@ -524,6 +805,7 @@ impl Effect for EffectInstance {
             EffectInstance::None(e) => e.set_param(index, value),
             EffectInstance::Lowpass(e) => e.set_param(index, value),
             EffectInstance::Bitcrush(e) => e.set_param(index, value),
+            EffectInstance::Fm(e) => e.set_param(index, value),
         }
     }
 }
@@ -706,10 +988,11 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 3);
+        assert_eq!(EffectKind::ALL.len(), 4);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Lowpass.name(), "Lowpass");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
+        assert_eq!(EffectKind::Fm.name(), "FM");
     }
 
     #[test]
@@ -1042,5 +1325,175 @@ mod tests {
         } else {
             panic!("rate-reduction format should be Number");
         }
+    }
+
+    #[test]
+    fn enum_format_renders_the_label_at_the_rounded_index() {
+        let labels: &[&str] = &["Carrier", "Modulator"];
+        let format = ParamFormat::Enum { labels };
+        assert_eq!(format_value(0.0, format), "Carrier");
+        assert_eq!(format_value(0.49, format), "Carrier");
+        assert_eq!(format_value(0.5, format), "Modulator");
+        assert_eq!(format_value(1.0, format), "Modulator");
+        // Out-of-range values clamp to the nearest end.
+        assert_eq!(format_value(-1.0, format), "Carrier");
+        assert_eq!(format_value(99.0, format), "Modulator");
+    }
+
+    #[test]
+    fn enum_format_parses_labels_case_insensitively_or_a_numeric_index() {
+        let labels: &[&str] = &["Carrier", "Modulator"];
+        let format = ParamFormat::Enum { labels };
+        assert_eq!(parse_value("Carrier", format), Some(0.0));
+        assert_eq!(parse_value("modulator", format), Some(1.0));
+        assert_eq!(parse_value("CARRIER", format), Some(0.0));
+        // Numeric fallback so a copy-pasted raw value still works.
+        assert_eq!(parse_value("0", format), Some(0.0));
+        assert_eq!(parse_value("1", format), Some(1.0));
+        // Unknown label fails.
+        assert!(parse_value("frobnicate", format).is_none());
+    }
+
+    #[test]
+    fn fm_effect_lists_four_parameters_with_the_expected_specs() {
+        let fm = FmEffect::new();
+        let specs = fm.parameters();
+        assert_eq!(specs.len(), 4);
+        assert_eq!(specs[0].name, "Mode");
+        assert!(matches!(specs[0].format, ParamFormat::Enum { .. }));
+        assert_eq!(specs[1].name, "Freq");
+        assert!(matches!(specs[1].scaling, ParamScaling::Log));
+        assert!(matches!(specs[1].format, ParamFormat::Hertz));
+        assert_eq!(specs[2].name, "Depth");
+        assert_eq!(specs[3].name, "Feedback");
+    }
+
+    #[test]
+    fn fm_mode_set_param_rounds_to_zero_or_one() {
+        let mut fm = FmEffect::new();
+        fm.set_sample_rate(48_000.0);
+        // Any value < 0.5 collapses to Carrier (0); ≥ 0.5 to Modulator (1).
+        fm.set_param(0, 0.3);
+        // Round-trip through the formatter to observe the stored value.
+        assert_eq!(
+            format_value(
+                {
+                    // Drive a single sample so we can read out internal state;
+                    // mode is reachable only through the rendered enum label.
+                    let _ = fm.process_sample(0.0, 0.0);
+                    // The mode value is whatever set_param rounded to.
+                    if fm.process_sample(0.0, 0.0).0.abs() < 1.0 {
+                        // Carrier (delay-line) outputs the previously-written
+                        // input — silence in, silence out — so a tiny output
+                        // implies Carrier mode.
+                        0.0
+                    } else {
+                        1.0
+                    }
+                },
+                ParamFormat::Enum {
+                    labels: FM_MODE_LABELS
+                }
+            ),
+            "Carrier"
+        );
+
+        // Push past the half-way threshold.
+        let mut fm2 = FmEffect::new();
+        fm2.set_sample_rate(48_000.0);
+        fm2.set_param(0, 0.51);
+        fm2.set_param(1, 200.0);
+        fm2.set_param(2, 0.0);
+        fm2.set_param(3, 0.0);
+        // Modulator mode with depth=0 just plays the bare 200 Hz carrier
+        // sine — non-zero output even on silent input.
+        let mut max_abs = 0.0_f32;
+        for _ in 0..1024 {
+            let (l, r) = fm2.process_sample(0.0, 0.0);
+            max_abs = max_abs.max(l.abs().max(r.abs()));
+        }
+        assert!(
+            max_abs > 0.5,
+            "Modulator mode at depth=0 must still produce its carrier sine"
+        );
+    }
+
+    #[test]
+    fn fm_carrier_mode_with_depth_zero_passes_the_input_through_the_centre_delay() {
+        // Carrier mode at depth=0 holds the delay line at its fixed 5 ms
+        // centre — the output is the input delayed by ~240 samples at
+        // 48 kHz. After the warm-up, the output level matches the input.
+        let mut fm = FmEffect::new();
+        fm.set_sample_rate(48_000.0);
+        fm.set_param(0, 0.0); // Carrier
+        fm.set_param(1, 5.0);
+        fm.set_param(2, 0.0); // depth = 0 — no modulation, fixed-tap delay
+        fm.set_param(3, 0.0);
+        // Drive a constant 0.5 input.
+        let mut last = (0.0_f32, 0.0_f32);
+        for _ in 0..1024 {
+            last = fm.process_sample(0.5, 0.5);
+        }
+        assert!(
+            (last.0 - 0.5).abs() < 1e-3,
+            "after the delay-line warm-up, output L should match input ({:?})",
+            last
+        );
+        assert!((last.1 - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn fm_modulator_mode_with_silent_input_produces_a_pure_sine() {
+        // No modulation: just the carrier at `freq_hz`. The output sample
+        // sequence must look like sin(2π·freq·t/sr) within numerical noise.
+        let mut fm = FmEffect::new();
+        fm.set_sample_rate(48_000.0);
+        fm.set_param(0, 1.0); // Modulator
+        fm.set_param(1, 100.0);
+        fm.set_param(2, 0.0);
+        fm.set_param(3, 0.0);
+        let two_pi = std::f32::consts::TAU;
+        for i in 0..512 {
+            let expected = (two_pi * 100.0 * (i as f32 + 1.0) / 48_000.0).sin();
+            let (got_l, got_r) = fm.process_sample(0.0, 0.0);
+            assert!(
+                (got_l - expected).abs() < 1e-3,
+                "sample {i}: expected {expected}, got {got_l}"
+            );
+            assert!((got_l - got_r).abs() < 1e-6, "L/R agree on silent input");
+        }
+    }
+
+    #[test]
+    fn fm_reset_clears_state_and_returns_silence() {
+        let mut fm = FmEffect::new();
+        fm.set_sample_rate(48_000.0);
+        fm.set_param(0, 1.0); // Modulator — visible non-zero output
+        fm.set_param(1, 200.0);
+        // Drive it for a while to fill delay lines and advance phases.
+        for _ in 0..1024 {
+            fm.process_sample(0.4, 0.4);
+        }
+        fm.reset();
+        // After reset, the very first sample in Modulator mode is sin(2π · 200 / 48000)
+        // ≈ 0.026 (carrier phase restarted at 0). Carrier mode at default would
+        // return the freshly-zeroed delay tap — exactly silence.
+        fm.set_param(0, 0.0); // Carrier
+        let (l, r) = fm.process_sample(0.0, 0.0);
+        assert_eq!(
+            l, 0.0,
+            "after reset Carrier mode on silent input is silence"
+        );
+        assert_eq!(r, 0.0);
+    }
+
+    #[test]
+    fn effect_kind_all_includes_fm() {
+        assert!(EffectKind::ALL.iter().any(|&k| k == EffectKind::Fm));
+        assert_eq!(EffectKind::Fm.name(), "FM");
+        assert_eq!(param_count(EffectKind::Fm), 4);
+        let defaults = default_params_for_kind(EffectKind::Fm);
+        assert_eq!(defaults[0], 0.0); // Mode: Carrier
+        assert_eq!(defaults[1], 5.0); // Freq: 5 Hz
     }
 }
