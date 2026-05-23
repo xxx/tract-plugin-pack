@@ -469,10 +469,13 @@ fn draw_strip(
         state.dropdown_is_open_for(StripId::Style),
     );
 
-    // Polarity: toggle between Unipolar (default) and Bipolar view. Active
-    // state highlights when bipolar, mirroring the Snap button's convention.
-    let bipolar = matches!(data.polarity, crate::mseg::Polarity::Bipolar);
-    let polarity_label = if bipolar { "Bipolar" } else { "Unipolar" };
+    // Polarity: cycles between Unipolar (default) and Bipolar view. Neither
+    // value is conceptually "on" — the label tells the user which mode is
+    // current — so this is drawn as a plain (un-highlighted) button.
+    let polarity_label = match data.polarity {
+        crate::mseg::Polarity::Bipolar => "Bipolar",
+        crate::mseg::Polarity::Unipolar => "Unipolar",
+    };
     draw_button(
         pixmap,
         text_renderer,
@@ -481,18 +484,19 @@ fn draw_strip(
         b.polarity.2,
         b.polarity.3,
         polarity_label,
-        bipolar,
+        false,
         false,
     );
 
-    // Play mode: toggle between Cyclic (default — the envelope loops) and
-    // OneShot (runs once per trigger, holds at the end). Every MSEG is
-    // triggered regardless of this setting; the distinction is whether it
-    // loops or plays exactly once. Hidden for `curve_only` consumers (a
-    // static curve has no play mode).
+    // Play mode: cycles between Cyclic (default — the envelope loops) and
+    // OneShot (runs once per trigger, holds at the end). Same rationale as
+    // polarity — neither is "on"/"off", so no highlight. Hidden for
+    // `curve_only` consumers (a static curve has no play mode).
     if show_play_mode {
-        let one_shot = matches!(data.play_mode, crate::mseg::PlayMode::OneShot);
-        let play_label = if one_shot { "One-shot" } else { "Cyclic" };
+        let play_label = match data.play_mode {
+            crate::mseg::PlayMode::OneShot => "One-shot",
+            crate::mseg::PlayMode::Cyclic => "Cyclic",
+        };
         draw_button(
             pixmap,
             text_renderer,
@@ -501,7 +505,7 @@ fn draw_strip(
             b.play_mode.2,
             b.play_mode.3,
             play_label,
-            one_shot,
+            false,
             false,
         );
     }
