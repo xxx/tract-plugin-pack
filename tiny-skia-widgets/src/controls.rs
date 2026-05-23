@@ -80,11 +80,24 @@ pub fn draw_slider(
         draw_rect(pixmap, x + 1.0, y + 1.0, fill_w, h - 2.0, color_accent());
     }
 
-    // Label (left-aligned, vertically centred)
+    // Label and value sit on top of the fill bar — over the filled portion
+    // (bright accent), `color_text` loses contrast. Draw both with a split
+    // so pixels over the fill use `color_bg` (dark) and pixels over the
+    // unfilled track keep `color_text` (light).
     let text_size = (h * 0.5).max(10.0);
     let text_y = y + (h + text_size) * 0.5 - 2.0;
     let pad = 6.0;
-    text_renderer.draw_text(pixmap, x + pad, text_y, label, text_size, color_text());
+    let split_x = x + 1.0 + fill_w;
+    text_renderer.draw_text_split(
+        pixmap,
+        x + pad,
+        text_y,
+        label,
+        text_size,
+        split_x,
+        color_bg(),
+        color_text(),
+    );
 
     // Value readout: buffer + caret when editing, otherwise formatted value
     if let Some(buf) = editing_text {
@@ -108,12 +121,14 @@ pub fn draw_slider(
         }
     } else {
         let vw = text_renderer.text_width(value_text, text_size);
-        text_renderer.draw_text(
+        text_renderer.draw_text_split(
             pixmap,
             x + w - vw - pad,
             text_y,
             value_text,
             text_size,
+            split_x,
+            color_bg(),
             color_text(),
         );
     }

@@ -63,6 +63,75 @@ impl TextRenderer {
     ///
     /// `color` is the foreground colour; alpha compositing uses the glyph
     /// coverage as opacity.
+    /// Like [`draw_text`](Self::draw_text), but pixels left of `split_x`
+    /// (in pixmap coordinates) are drawn with `color_left` and pixels at or
+    /// past `split_x` with `color_right`. Useful when text overlays a
+    /// two-colour background (e.g. a slider's filled / unfilled bar) and a
+    /// single text colour would lose contrast on one half.
+    pub fn draw_text_split(
+        &mut self,
+        pixmap: &mut Pixmap,
+        mut x: f32,
+        y: f32,
+        text: &str,
+        size: f32,
+        split_x: f32,
+        color_left: Color,
+        color_right: Color,
+    ) {
+        let pm_width = pixmap.width() as i32;
+        let pm_height = pixmap.height() as i32;
+        let split = split_x.round() as i32;
+
+        let lr = (color_left.red() * 255.0) as u32;
+        let lg = (color_left.green() * 255.0) as u32;
+        let lb = (color_left.blue() * 255.0) as u32;
+        let rr = (color_right.red() * 255.0) as u32;
+        let rg = (color_right.green() * 255.0) as u32;
+        let rb = (color_right.blue() * 255.0) as u32;
+
+        for ch in text.chars() {
+            let entry = self.rasterise(ch, size);
+            let metrics = entry.metrics;
+            let bitmap = &entry.bitmap;
+
+            let gx = (x + metrics.xmin as f32).round() as i32;
+            let gy = (y - metrics.ymin as f32 - metrics.height as f32 + 1.0).round() as i32;
+
+            for row in 0..metrics.height {
+                for col in 0..metrics.width {
+                    let px = gx + col as i32;
+                    let py = gy + row as i32;
+                    if px < 0 || py < 0 || px >= pm_width || py >= pm_height {
+                        continue;
+                    }
+                    let coverage = bitmap[row * metrics.width + col] as u32;
+                    if coverage == 0 {
+                        continue;
+                    }
+                    let (src_r, src_g, src_b) = if px < split {
+                        (lr, lg, lb)
+                    } else {
+                        (rr, rg, rb)
+                    };
+
+                    let idx = (py as u32 * pixmap.width() + px as u32) as usize;
+                    let dst = pixmap.pixels_mut()[idx];
+                    let sa = coverage;
+                    let inv_sa = 255 - sa;
+                    let out_r = ((src_r * sa + dst.red() as u32 * inv_sa) / 255) as u8;
+                    let out_g = ((src_g * sa + dst.green() as u32 * inv_sa) / 255) as u8;
+                    let out_b = ((src_b * sa + dst.blue() as u32 * inv_sa) / 255) as u8;
+                    let out_a = (sa + (dst.alpha() as u32 * inv_sa) / 255) as u8;
+                    pixmap.pixels_mut()[idx] =
+                        PremultipliedColorU8::from_rgba(out_r, out_g, out_b, out_a).unwrap();
+                }
+            }
+
+            x += metrics.advance_width;
+        }
+    }
+
     pub fn draw_text(
         &mut self,
         pixmap: &mut Pixmap,
