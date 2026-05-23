@@ -401,7 +401,7 @@ impl MsegEditState {
                 // the renderer draws — clicks land exactly on the buttons, and
                 // a click in a gap between buttons is a no-op.
                 use crate::mseg::render::{in_rect, strip_buttons};
-                let b = strip_buttons(layout.strip, scale);
+                let b = strip_buttons(layout.strip, scale, !self.curve_only);
                 let window_size = (rect.0 + rect.2, rect.1 + rect.3);
                 if in_rect(b.snap, x, y) {
                     data.snap = !data.snap;
@@ -412,6 +412,15 @@ impl MsegEditState {
                     data.polarity = match data.polarity {
                         crate::mseg::Polarity::Unipolar => crate::mseg::Polarity::Bipolar,
                         crate::mseg::Polarity::Bipolar => crate::mseg::Polarity::Unipolar,
+                    };
+                    Some(MsegEdit::Changed)
+                } else if !self.curve_only && in_rect(b.play_mode, x, y) {
+                    // Cyclic (default) → Triggered (one-shot, holds at the
+                    // end until the next trigger). `advance` already honours
+                    // both modes; this is just the UI toggle.
+                    data.play_mode = match data.play_mode {
+                        crate::mseg::PlayMode::Cyclic => crate::mseg::PlayMode::Triggered,
+                        crate::mseg::PlayMode::Triggered => crate::mseg::PlayMode::Cyclic,
                     };
                     Some(MsegEdit::Changed)
                 } else if in_rect(b.grid, x, y) {
@@ -1297,7 +1306,7 @@ mod tests {
         assert_eq!(data.polarity, Polarity::Unipolar, "default is unipolar");
         let mut state = MsegEditState::new();
         let l = mseg_layout(RECT, false, 1.0);
-        let b = strip_buttons(l.strip, 1.0);
+        let b = strip_buttons(l.strip, 1.0, true);
         let x = b.polarity.0 + b.polarity.2 * 0.5;
         let y = b.polarity.1 + b.polarity.3 * 0.5;
         let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
@@ -1310,6 +1319,52 @@ mod tests {
         state.on_mouse_up(&mut data, RECT, 1.0);
     }
 
+    #[test]
+    fn play_mode_strip_toggle_flips_cyclic_and_triggered() {
+        use crate::mseg::render::strip_buttons;
+        use crate::mseg::PlayMode;
+        let mut data = MsegData::default();
+        data.play_mode = PlayMode::Cyclic;
+        let mut state = MsegEditState::new();
+        let l = mseg_layout(RECT, false, 1.0);
+        let b = strip_buttons(l.strip, 1.0, true);
+        let x = b.play_mode.0 + b.play_mode.2 * 0.5;
+        let y = b.play_mode.1 + b.play_mode.3 * 0.5;
+        let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        assert_eq!(ev, Some(MsegEdit::Changed));
+        assert_eq!(data.play_mode, PlayMode::Triggered);
+        state.on_mouse_up(&mut data, RECT, 1.0);
+        // Click again — back to Cyclic.
+        state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        assert_eq!(data.play_mode, PlayMode::Cyclic);
+        state.on_mouse_up(&mut data, RECT, 1.0);
+    }
+
+    #[test]
+    fn curve_only_hides_the_play_mode_button() {
+        // miff uses MsegEditState::new_curve_only(); the strip's play_mode
+        // rect collapses to a zero rect so it never hit-tests, and the
+        // remaining four toggles share their original four-segment layout.
+        use crate::mseg::render::strip_buttons;
+        let mut data = MsegData::default();
+        let mut state = MsegEditState::new_curve_only();
+        let l = mseg_layout(RECT, true, 1.0);
+        let b = strip_buttons(l.strip, 1.0, false);
+        assert_eq!(b.play_mode, (0.0, 0.0, 0.0, 0.0));
+        // A click anywhere in the play_mode slot is no-op (the rect is 0×0).
+        let was = data.play_mode;
+        let _ = state.on_mouse_down(
+            b.polarity.0 + b.polarity.2,
+            b.polarity.1,
+            &mut data,
+            RECT,
+            1.0,
+            false,
+        );
+        state.on_mouse_up(&mut data, RECT, 1.0);
+        assert_eq!(data.play_mode, was, "curve_only must not expose play_mode");
+    }
+
     // --- Grid dropdown tests ---
 
     #[test]
@@ -1319,7 +1374,7 @@ mod tests {
         let l = mseg_layout(RECT, false, 1.0);
         // Use strip_buttons to find the grid trigger rect centre.
         use crate::mseg::render::strip_buttons;
-        let b = strip_buttons(l.strip, 1.0);
+        let b = strip_buttons(l.strip, 1.0, true);
         let x = b.grid.0 + b.grid.2 * 0.5;
         let y = b.grid.1 + b.grid.3 * 0.5;
         let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
@@ -1342,7 +1397,7 @@ mod tests {
         let mut state = MsegEditState::new();
         let l = mseg_layout(RECT, false, 1.0);
         use crate::mseg::render::strip_buttons;
-        let b = strip_buttons(l.strip, 1.0);
+        let b = strip_buttons(l.strip, 1.0, true);
         let x = b.grid.0 + b.grid.2 * 0.5;
         let y = b.grid.1 + b.grid.3 * 0.5;
         // Open the grid dropdown.
@@ -1439,7 +1494,7 @@ mod tests {
         state.set_grid_options(&[(2, 2), (64, 64)]);
 
         let l = mseg_layout(RECT, false, 1.0);
-        let b = strip_buttons(l.strip, 1.0);
+        let b = strip_buttons(l.strip, 1.0, true);
         // Open the grid dropdown.
         state.on_mouse_down(
             b.grid.0 + b.grid.2 * 0.5,
@@ -1478,7 +1533,7 @@ mod tests {
         let mut state = MsegEditState::new();
         let l = mseg_layout(RECT, false, 1.0);
         use crate::mseg::render::strip_buttons;
-        let b = strip_buttons(l.strip, 1.0);
+        let b = strip_buttons(l.strip, 1.0, true);
         let x = b.style.0 + b.style.2 * 0.5;
         let y = b.style.1 + b.style.3 * 0.5;
         let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
@@ -1497,7 +1552,7 @@ mod tests {
         let mut state = MsegEditState::new(); // starts at Smooth (index 0)
         let l = mseg_layout(RECT, false, 1.0);
         use crate::mseg::render::strip_buttons;
-        let b = strip_buttons(l.strip, 1.0);
+        let b = strip_buttons(l.strip, 1.0, true);
         let x = b.style.0 + b.style.2 * 0.5;
         let y = b.style.1 + b.style.3 * 0.5;
         // Open the style dropdown.

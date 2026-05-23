@@ -337,24 +337,35 @@ fn draw_nodes(
     }
 }
 
-/// The five interactive controls of the MSEG control strip, each `(x, y, w, h)`.
-/// `snap` and `polarity` are toggle buttons, `grid` and `style` are dropdown
-/// triggers, and `randomize` triggers the randomizer. Shared by `draw_strip`
-/// and hit-testing so the drawn controls and the click zones can never drift
-/// apart.
+/// The interactive controls of the MSEG control strip, each `(x, y, w, h)`.
+/// `snap`, `polarity`, and `play_mode` are toggle buttons, `grid` and `style`
+/// are dropdown triggers, and `randomize` triggers the randomizer. Shared by
+/// `draw_strip` and hit-testing so the drawn controls and the click zones can
+/// never drift apart. When the widget is shown in `curve_only` mode (a static
+/// curve consumer — `play_mode` has no meaning), the `play_mode` rect is the
+/// zero rect `(0,0,0,0)` and the other four toggles share the original
+/// four-segment layout.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StripButtons {
     pub snap: (f32, f32, f32, f32),
     pub grid: (f32, f32, f32, f32),
     pub style: (f32, f32, f32, f32),
     pub polarity: (f32, f32, f32, f32),
+    pub play_mode: (f32, f32, f32, f32),
     pub randomize: (f32, f32, f32, f32),
 }
 
 /// Lay out the MSEG control-strip buttons within `strip` (`scale` is the DPI
-/// factor). `randomize` is a fixed width at the right end; `snap`/`grid`/
-/// `polarity`/`style` share the remaining width in four equal segments.
-pub(crate) fn strip_buttons(strip: (f32, f32, f32, f32), scale: f32) -> StripButtons {
+/// factor). `randomize` is a fixed width at the right end; the remaining
+/// width is shared equally across the toggles and dropdown triggers. When
+/// `show_play_mode` is false (curve-only consumers like miff), the row is
+/// `snap | grid | polarity | style`; when true (animated consumers like
+/// multosis), `play_mode` is inserted between `polarity` and `style`.
+pub(crate) fn strip_buttons(
+    strip: (f32, f32, f32, f32),
+    scale: f32,
+    show_play_mode: bool,
+) -> StripButtons {
     let (sx, sy, sw, sh) = strip;
     let pad = 6.0 * scale;
     let gap = 4.0 * scale;
@@ -364,16 +375,26 @@ pub(crate) fn strip_buttons(strip: (f32, f32, f32, f32), scale: f32) -> StripBut
     let randomize = (sx + sw - rand_w - pad, by, rand_w, bh);
     let left = sx + pad;
     let avail = (randomize.0 - gap - left).max(0.0);
-    let seg_w = ((avail - 3.0 * gap) / 4.0).max(0.0);
+    let n_segments: f32 = if show_play_mode { 5.0 } else { 4.0 };
+    let seg_w = ((avail - (n_segments - 1.0) * gap) / n_segments).max(0.0);
+    let stride = seg_w + gap;
     let snap = (left, by, seg_w, bh);
-    let grid = (left + seg_w + gap, by, seg_w, bh);
-    let polarity = (left + 2.0 * (seg_w + gap), by, seg_w, bh);
-    let style = (left + 3.0 * (seg_w + gap), by, seg_w, bh);
+    let grid = (left + stride, by, seg_w, bh);
+    let polarity = (left + 2.0 * stride, by, seg_w, bh);
+    let (play_mode, style) = if show_play_mode {
+        (
+            (left + 3.0 * stride, by, seg_w, bh),
+            (left + 4.0 * stride, by, seg_w, bh),
+        )
+    } else {
+        ((0.0, 0.0, 0.0, 0.0), (left + 3.0 * stride, by, seg_w, bh))
+    };
     StripButtons {
         snap,
         grid,
         style,
         polarity,
+        play_mode,
         randomize,
     }
 }
@@ -396,7 +417,8 @@ fn draw_strip(
     draw_rect(pixmap, sx, sy, sw, sh, color_bg());
     draw_rect_outline(pixmap, sx, sy, sw, sh, color_border(), 1.0);
 
-    let b = strip_buttons(layout.strip, scale);
+    let show_play_mode = !state.is_curve_only();
+    let b = strip_buttons(layout.strip, scale, show_play_mode);
     // Snap: plain toggle button, Title Case, highlighted when active.
     let snap_label = if data.snap { "Snap On" } else { "Snap Off" };
     use crate::controls::draw_button;
@@ -447,6 +469,25 @@ fn draw_strip(
         bipolar,
         false,
     );
+
+    // Play mode: toggle between Cyclic (default — the envelope loops) and
+    // Triggered (one-shot, runs once on each trigger and holds at the end).
+    // Hidden for `curve_only` consumers (a static curve has no play mode).
+    if show_play_mode {
+        let triggered = matches!(data.play_mode, crate::mseg::PlayMode::Triggered);
+        let play_label = if triggered { "Triggered" } else { "Cyclic" };
+        draw_button(
+            pixmap,
+            text_renderer,
+            b.play_mode.0,
+            b.play_mode.1,
+            b.play_mode.2,
+            b.play_mode.3,
+            play_label,
+            triggered,
+            false,
+        );
+    }
 
     // Randomize: plain button.
     draw_button(
@@ -536,7 +577,11 @@ pub fn mseg_hit_test(
         // The Randomize button is exactly the `strip_buttons` randomize rect.
         // Everything else in the strip is `Strip`, resolved to a specific
         // snap/grid/style button by `on_mouse_down` via the same layout.
-        if in_rect(strip_buttons(layout.strip, scale).randomize, x, y) {
+        if in_rect(
+            strip_buttons(layout.strip, scale, !curve_only).randomize,
+            x,
+            y,
+        ) {
             return MsegHit::Randomize;
         }
         return MsegHit::Strip;
