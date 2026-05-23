@@ -331,6 +331,7 @@ impl WavetableFilterWindow {
             mode_h,
             &segments,
             active_idx,
+            None,
         );
         let seg_w = mode_w / segments.len() as f32;
         for i in 0..segments.len() as u8 {

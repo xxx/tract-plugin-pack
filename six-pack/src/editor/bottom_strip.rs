@@ -214,7 +214,7 @@ fn draw_stepped_with_hit<F: Fn(usize) -> HitAction>(
     active: usize,
     action_for: F,
 ) {
-    widgets::draw_stepped_selector(pixmap, tr, x, y, w, h, options, active);
+    widgets::draw_stepped_selector(pixmap, tr, x, y, w, h, options, active, None);
     let seg_w = w / options.len() as f32;
     for i in 0..options.len() {
         drag.push_region(x + i as f32 * seg_w, y, seg_w, h, action_for(i));

@@ -130,7 +130,10 @@ pub fn draw_slider(
 /// Draw a segmented control (stepped selector).
 ///
 /// Each segment is an equal-width button; the one at `active_index` is
-/// highlighted with the accent colour.
+/// highlighted. When `active_color` is `Some`, that colour overrides the
+/// default accent for the active segment's fill — used to coordinate the
+/// MSEG selector with the active MSEG's identity colour. `None` preserves
+/// the historical accent-blue behaviour.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_stepped_selector(
     pixmap: &mut Pixmap,
@@ -141,6 +144,7 @@ pub fn draw_stepped_selector(
     h: f32,
     options: &[&str],
     active_index: usize,
+    active_color: Option<Color>,
 ) {
     if options.is_empty() {
         return;
@@ -155,7 +159,7 @@ pub fn draw_stepped_selector(
         let is_active = i == active_index;
 
         let bg = if is_active {
-            color_accent()
+            active_color.unwrap_or_else(color_accent)
         } else {
             color_control_bg()
         };
@@ -576,6 +580,7 @@ mod tests {
             28.0,
             &["Stereo", "Left", "Right"],
             1,
+            None,
         );
     }
 
@@ -584,6 +589,54 @@ mod tests {
         let data = test_font_data();
         let mut renderer = TextRenderer::new(&data);
         let mut pm = Pixmap::new(100, 50).unwrap();
-        draw_stepped_selector(&mut pm, &mut renderer, 0.0, 0.0, 100.0, 28.0, &[], 0);
+        draw_stepped_selector(&mut pm, &mut renderer, 0.0, 0.0, 100.0, 28.0, &[], 0, None);
+    }
+
+    #[test]
+    fn stepped_selector_active_colour_override_paints_a_different_active_segment() {
+        use tiny_skia::Color;
+        let mut pm_default = Pixmap::new(120, 30).unwrap();
+        let mut pm_custom = Pixmap::new(120, 30).unwrap();
+        let mut tr = TextRenderer::new(include_bytes!("../test_data/DejaVuSans.ttf"));
+        // Default (None) renders the active segment in accent blue.
+        draw_stepped_selector(
+            &mut pm_default,
+            &mut tr,
+            0.0,
+            0.0,
+            120.0,
+            30.0,
+            &["A", "B"],
+            0,
+            None,
+        );
+        // Magenta override paints a different active fill — probe the centre of
+        // segment 0.
+        draw_stepped_selector(
+            &mut pm_custom,
+            &mut tr,
+            0.0,
+            0.0,
+            120.0,
+            30.0,
+            &["A", "B"],
+            0,
+            Some(Color::from_rgba8(0xff, 0x00, 0xff, 0xff)),
+        );
+        let px = |pm: &Pixmap| pm.pixels()[(15 * pm.width() + 30) as usize];
+        let d = px(&pm_default);
+        let c = px(&pm_custom);
+        assert!(
+            d.red() != c.red() || d.green() != c.green() || d.blue() != c.blue(),
+            "active-colour override must paint a different fill"
+        );
+        // The override actually paints the requested hue.
+        assert!(
+            c.red() > 200 && c.blue() > 200 && c.green() < 100,
+            "magenta probe ({}, {}, {})",
+            c.red(),
+            c.green(),
+            c.blue()
+        );
     }
 }

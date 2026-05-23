@@ -216,6 +216,7 @@ impl GsMeterWindow {
             slider_h,
             &["Stereo", "Left", "Right"],
             mode_idx,
+            None,
         );
         // Register hit regions for each segment
         let seg_w = slider_w / 3.0;
@@ -258,6 +259,7 @@ impl GsMeterWindow {
             slider_h,
             &["dB", "LUFS"],
             meter_mode_idx,
+            None,
         );
         let mode_seg_w = slider_w / 2.0;
         for i in 0..2 {

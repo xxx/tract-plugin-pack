@@ -246,6 +246,7 @@ impl GainBrainWindow {
                 slider_h,
                 &["Abs", "Rel"],
                 link_idx,
+                None,
             );
             let link_seg_w = link_selector_w / 2.0;
             for i in 0..2_i32 {

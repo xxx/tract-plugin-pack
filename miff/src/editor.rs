@@ -440,6 +440,7 @@ impl MiffWindow {
                         rh,
                         &["Raw", "Phaseless"],
                         mode_idx,
+                        None,
                     );
                 }
                 HitAction::MixDial => {

@@ -635,6 +635,7 @@ pub fn draw_mseg_controls(
         lay.mseg_sync.3,
         &["Time", "Beat"],
         active,
+        None,
     );
     let (norm, label) = match mseg.sync_mode {
         tiny_skia_widgets::SyncMode::Time => {
@@ -795,6 +796,7 @@ pub fn draw_modulation_controls(
         lay.mseg_selector.3,
         &["Amp", "MSEG 1", "MSEG 2"],
         selected_mseg.min(2),
+        None,
     );
     if selected_mseg != 0 {
         let label = match target {
