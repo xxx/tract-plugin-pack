@@ -260,6 +260,16 @@ impl MiffWindow {
             widgets::color_accent(),
             None,
         );
+        // Dropdown popup is no longer inline in draw_mseg — paint it
+        // explicitly. miff has no layered ghosts, so the position is
+        // immediately after the curve; the result is identical to the
+        // pre-extract behaviour.
+        widgets::mseg::draw_mseg_dropdown(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            &self.mseg_state,
+            mseg_rect,
+        );
 
         // ── Response region (middle ~29%) — frequency-response view ────────
         {

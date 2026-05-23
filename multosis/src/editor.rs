@@ -840,7 +840,7 @@ impl MultosisWindow {
             }
         }
         // Playhead overlay: a thin vertical line at the active MSEG's current
-        // phase, drawn last so it sits over the curve.
+        // phase, drawn over the active curve + ghosts.
         let phase =
             f32::from_bits(self.mseg_phases[self.selected_track * 3 + sel].load(Ordering::Relaxed));
         effect_editor::draw_mseg_playhead(
@@ -848,6 +848,16 @@ impl MultosisWindow {
             lay.mseg_pane,
             phase,
             self.scale_factor,
+        );
+        // Open MSEG dropdown (Grid / Style / right-click Transform menu) goes
+        // last so it sits above every preceding layer — `draw_mseg` no longer
+        // paints it inline because the ghost loop above would otherwise bury
+        // it.
+        widgets::mseg::draw_mseg_dropdown(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            &self.mseg_edit,
+            lay.mseg_pane,
         );
         // Selector + target + depth (when on an assignable MSEG).
         let (target, depth) = if sel == 0 {

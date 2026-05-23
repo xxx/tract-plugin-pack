@@ -23,6 +23,16 @@ pub fn style_items() -> &'static [&'static str] {
     &STYLE_LABELS
 }
 
+/// Items for the right-click-on-selected-node transform menu.
+pub(crate) fn transform_menu_items() -> &'static [&'static str] {
+    &[
+        "Compress values",
+        "Expand values",
+        "Compress times",
+        "Expand times",
+    ]
+}
+
 /// Snap `(phase, value)` to the document's grid when `data.snap` is on, unless
 /// `fine` (the caller's fine-adjust modifier, e.g. Shift) bypasses it. `phase`
 /// snaps to the `time_divisions` columns, `value` to the `value_steps` rows.
@@ -53,6 +63,8 @@ pub enum StripId {
     Duration,
     TimeGrid,
     ValueGrid,
+    /// The right-click-on-selected-node transform menu.
+    Transform,
 }
 
 /// What the pointer is currently dragging.
@@ -317,6 +329,9 @@ impl MsegEditState {
                 let owned: Vec<String> = self.grid_labels.clone();
                 let grid_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
                 self.dropdown.on_mouse_down(x, y, &grid_refs, window_size)
+            } else if self.dropdown.is_open_for(StripId::Transform) {
+                self.dropdown
+                    .on_mouse_down(x, y, transform_menu_items(), window_size)
             } else {
                 self.dropdown
                     .on_mouse_down(x, y, style_items(), window_size)
@@ -331,6 +346,15 @@ impl MsegEditState {
                 Some(DropdownEvent::Selected(StripId::Style, idx)) => {
                     self.set_style(RandomStyle::from_index(idx));
                     return None;
+                }
+                Some(DropdownEvent::Selected(StripId::Transform, idx)) => {
+                    let edit = match idx {
+                        0 => self.compress_values(data),
+                        1 => self.expand_values(data),
+                        2 => self.compress_times(data),
+                        _ => self.expand_times(data),
+                    };
+                    return edit;
                 }
                 Some(DropdownEvent::Closed(_)) => {
                     // The click landed outside the popup, closing the dropdown.
@@ -489,6 +513,9 @@ impl MsegEditState {
                 let owned: Vec<String> = self.grid_labels.clone();
                 let grid_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
                 self.dropdown.on_mouse_move(x, y, &grid_refs, window_size);
+            } else if self.dropdown.is_open_for(StripId::Transform) {
+                self.dropdown
+                    .on_mouse_move(x, y, transform_menu_items(), window_size);
             } else {
                 self.dropdown
                     .on_mouse_move(x, y, style_items(), window_size);
@@ -626,8 +653,9 @@ impl MsegEditState {
         None
     }
 
-    /// Right-click: toggle the `stepped` flag of the segment under the
-    /// pointer. The segment is the one whose time range contains the click.
+    /// Right-click: if the click lands on a selected node, open the transform
+    /// menu (Compress/Expand × Values/Times). Otherwise toggle the `stepped`
+    /// flag of the segment under the pointer.
     pub fn on_right_click(
         &mut self,
         x: f32,
@@ -636,11 +664,34 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, MsegHit};
+        use crate::mseg::render::{mseg_hit_test_with_selection, mseg_layout, x_to_phase, MsegHit};
         let layout = mseg_layout(rect, self.curve_only, scale);
+        let hit = mseg_hit_test_with_selection(&layout, data, self.curve_only, scale, x, y, self);
+        // A right-click on a selected node opens the transform menu instead of
+        // toggling the segment-stepped flag.
+        if let MsegHit::SelectedNode(_) = hit {
+            let window_size = (rect.0 + rect.2, rect.1 + rect.3);
+            // The dropdown popup widget derives both item height (`ah`) and
+            // popup width (`aw`) from the anchor rect. Use a sensible row
+            // height + a width that fits the longest label ("Compress values")
+            // with chevron + padding; anchor at the click point with the
+            // anchor's height absorbed above so the first item opens *at*
+            // the cursor rather than below it.
+            let item_h = 22.0 * scale;
+            let popup_w = 170.0 * scale;
+            self.dropdown.open(
+                StripId::Transform,
+                (x, (y - item_h).max(rect.1), popup_w, item_h),
+                transform_menu_items(),
+                0,
+                false,
+                window_size,
+            );
+            return None;
+        }
         if !matches!(
-            mseg_hit_test(&layout, data, self.curve_only, scale, x, y),
-            MsegHit::Canvas | MsegHit::Tension(_) | MsegHit::Node(_) | MsegHit::SelectedNode(_)
+            hit,
+            MsegHit::Canvas | MsegHit::Tension(_) | MsegHit::Node(_)
         ) {
             return None;
         }
@@ -2142,5 +2193,52 @@ mod tests {
         state.on_mouse_up(&mut data, RECT, 1.0);
         assert!(state.is_node_selected(1));
         assert!(state.is_node_selected(2));
+    }
+
+    #[test]
+    fn right_click_on_selected_node_opens_transform_menu() {
+        use crate::mseg::render::mseg_layout;
+        let mut data = MsegData::default();
+        let i = data.insert_node(0.5, 0.5).unwrap();
+        let mut state = MsegEditState::new();
+        state.select_only(i);
+        let rect = (0.0, 0.0, 400.0, 200.0);
+        let layout = mseg_layout(rect, false, 1.0);
+        let (px, py, pw, ph) = layout.plot;
+        let n = data.nodes[i];
+        let nx = px + n.time * pw;
+        let ny = py + (1.0 - n.value) * ph;
+        let stepped_before = data.nodes[0].stepped;
+        let _ = state.on_right_click(nx, ny, &mut data, rect, 1.0);
+        assert!(
+            state.dropdown_is_open_for(StripId::Transform),
+            "transform menu should open"
+        );
+        // The segment-stepped flag should NOT have changed.
+        assert_eq!(data.nodes[0].stepped, stepped_before);
+    }
+
+    #[test]
+    fn right_click_on_unselected_node_still_toggles_segment_stepped() {
+        let mut data = MsegData::default();
+        let i = data.insert_node(0.5, 0.5).unwrap();
+        let mut state = MsegEditState::new();
+        // No selection.
+        let rect = (0.0, 0.0, 400.0, 200.0);
+        let layout = crate::mseg::render::mseg_layout(rect, false, 1.0);
+        let (px, py, pw, ph) = layout.plot;
+        let n = data.nodes[i];
+        let nx = px + n.time * pw;
+        let ny = py + (1.0 - n.value) * ph;
+        let stepped_before = data.nodes[0].stepped;
+        let _ = state.on_right_click(nx, ny, &mut data, rect, 1.0);
+        assert!(!state.dropdown_is_open_for(StripId::Transform));
+        // Some segment's stepped flag should have toggled (the one under the click).
+        let any_changed = (0..data.node_count)
+            .any(|j| data.nodes[j].stepped != if j == 0 { stepped_before } else { false });
+        assert!(
+            any_changed,
+            "right-click on unselected node should toggle some segment's stepped flag"
+        );
     }
 }

@@ -126,11 +126,24 @@ pub fn draw_mseg(
     if let Some((idx, text)) = node_tooltip {
         draw_node_tooltip(pixmap, text_renderer, &layout, data, idx, text, scale);
     }
+}
 
-    // Dropdown popup — MUST be drawn last so it overlays everything else.
-    // `window_size` is the far corner of the widget rect, keeping the popup
-    // within the widget bounds (the popup auto-opens upward when near the
-    // bottom).
+/// Draw whichever MSEG dropdown popup is currently open in `state`
+/// (`TimeGrid`, `Style`, or `Transform`). MUST be called AFTER any
+/// layered draws over the same pane — `draw_mseg` doesn't do this
+/// inline because multosis paints ghost MSEGs and the playhead on top
+/// of the active widget, which would otherwise bury the popup.
+///
+/// `rect` is the same MSEG widget rect passed to `draw_mseg`. The
+/// popup uses `(rect.0 + rect.2, rect.1 + rect.3)` as its bounds
+/// hint so it stays inside the widget (and flips upward when near the
+/// bottom).
+pub fn draw_mseg_dropdown(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    state: &MsegEditState,
+    rect: (f32, f32, f32, f32),
+) {
     let window_size = (rect.0 + rect.2, rect.1 + rect.3);
     if state.dropdown_is_open_for(StripId::TimeGrid) {
         let grid_refs = state.grid_label_refs();
@@ -139,6 +152,14 @@ pub fn draw_mseg(
             text_renderer,
             state.dropdown_state(),
             &grid_refs,
+            window_size,
+        );
+    } else if state.dropdown_is_open_for(StripId::Transform) {
+        draw_dropdown_popup(
+            pixmap,
+            text_renderer,
+            state.dropdown_state(),
+            crate::mseg::editor::transform_menu_items(),
             window_size,
         );
     } else {
