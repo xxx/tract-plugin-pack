@@ -797,6 +797,15 @@ pub fn draw_modulation_controls(
     scale: f32,
 ) {
     let lay = effect_layout(scale);
+    // Pass per-segment MSEG colours: each tab paints in its slot's identity
+    // hue — fully when active, hue × 0.24 background + hue text when inactive
+    // — so the user can tell at a glance which tab is which without first
+    // selecting it.
+    let mseg_segment_colors = [
+        crate::editor::mseg_color(0),
+        crate::editor::mseg_color(1),
+        crate::editor::mseg_color(2),
+    ];
     widgets::controls::draw_stepped_selector(
         pixmap,
         tr,
@@ -806,7 +815,7 @@ pub fn draw_modulation_controls(
         lay.mseg_selector.3,
         &["Amp", "MSEG 1", "MSEG 2"],
         selected_mseg.min(2),
-        Some(crate::editor::mseg_color(selected_mseg.min(2))),
+        Some(&mseg_segment_colors),
     );
     if selected_mseg != 0 {
         let label = match target {

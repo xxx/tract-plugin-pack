@@ -130,10 +130,14 @@ pub fn draw_slider(
 /// Draw a segmented control (stepped selector).
 ///
 /// Each segment is an equal-width button; the one at `active_index` is
-/// highlighted. When `active_color` is `Some`, that colour overrides the
-/// default accent for the active segment's fill — used to coordinate the
-/// MSEG selector with the active MSEG's identity colour. `None` preserves
-/// the historical accent-blue behaviour.
+/// highlighted. When `segment_colors` is `Some(colors)` and `colors.len()`
+/// matches `options.len()`, the per-segment identity colour drives both
+/// the active fill (full hue) and the inactive look (hue × 0.24 fill with
+/// the hue itself as text) — used to coordinate the MSEG selector tabs
+/// with each MSEG's identity colour so the user can tell at a glance
+/// which tab is which, even when none of them is active in isolation.
+/// A length mismatch or `None` preserves the historical accent-blue
+/// (active) / control-bg (inactive) behaviour.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_stepped_selector(
     pixmap: &mut Pixmap,
@@ -144,11 +148,15 @@ pub fn draw_stepped_selector(
     h: f32,
     options: &[&str],
     active_index: usize,
-    active_color: Option<Color>,
+    segment_colors: Option<&[Color]>,
 ) {
     if options.is_empty() {
         return;
     }
+
+    // Discard `segment_colors` on a length mismatch — defensive fallback
+    // to the accent scheme so a caller bug doesn't silently misrender.
+    let per_segment = segment_colors.filter(|c| c.len() == options.len());
 
     let seg_w = w / options.len() as f32;
     let text_size = (h * 0.5).max(10.0);
@@ -158,15 +166,28 @@ pub fn draw_stepped_selector(
         let sx = x + i as f32 * seg_w;
         let is_active = i == active_index;
 
-        let bg = if is_active {
-            active_color.unwrap_or_else(color_accent)
-        } else {
-            color_control_bg()
-        };
-        let fg = if is_active {
-            Color::from_rgba8(0x10, 0x10, 0x10, 0xff)
-        } else {
-            color_text()
+        let (bg, fg) = match per_segment {
+            Some(colors) => {
+                let hue = colors[i];
+                if is_active {
+                    (hue, Color::from_rgba8(0x10, 0x10, 0x10, 0xff))
+                } else {
+                    // Hue × 0.24 — dark enough to read as "inactive" but
+                    // carries the segment's identity. Matches the palette
+                    // mockup the design was approved against.
+                    let dim = |c: f32| (c * 255.0 * 0.24).round() as u8;
+                    let bg =
+                        Color::from_rgba8(dim(hue.red()), dim(hue.green()), dim(hue.blue()), 0xff);
+                    (bg, hue)
+                }
+            }
+            None => {
+                if is_active {
+                    (color_accent(), Color::from_rgba8(0x10, 0x10, 0x10, 0xff))
+                } else {
+                    (color_control_bg(), color_text())
+                }
+            }
         };
 
         draw_rect(pixmap, sx, y, seg_w, h, bg);
@@ -611,7 +632,9 @@ mod tests {
             None,
         );
         // Magenta override paints a different active fill — probe the centre of
-        // segment 0.
+        // segment 0. Both segments share the same hue so we only assert on the
+        // active one here; inactive-tinting is exercised by its own test.
+        let magenta = Color::from_rgba8(0xff, 0x00, 0xff, 0xff);
         draw_stepped_selector(
             &mut pm_custom,
             &mut tr,
@@ -621,7 +644,7 @@ mod tests {
             30.0,
             &["A", "B"],
             0,
-            Some(Color::from_rgba8(0xff, 0x00, 0xff, 0xff)),
+            Some(&[magenta, magenta]),
         );
         let px = |pm: &Pixmap| pm.pixels()[(15 * pm.width() + 30) as usize];
         let d = px(&pm_default);
@@ -630,13 +653,80 @@ mod tests {
             d.red() != c.red() || d.green() != c.green() || d.blue() != c.blue(),
             "active-colour override must paint a different fill"
         );
-        // The override actually paints the requested hue.
+        // The override actually paints the requested hue on the active segment.
         assert!(
             c.red() > 200 && c.blue() > 200 && c.green() < 100,
             "magenta probe ({}, {}, {})",
             c.red(),
             c.green(),
             c.blue()
+        );
+    }
+
+    /// Per-segment identity colour drives the *inactive* segments too: each
+    /// inactive segment paints a dim-tinted version of its hue, with the hue
+    /// itself as the text colour. Verifies the inactive-segment readability
+    /// improvement on the MSEG selector tabs.
+    #[test]
+    fn stepped_selector_segment_colours_tint_the_inactive_segments() {
+        use tiny_skia::Color;
+        let mut pm = Pixmap::new(120, 30).unwrap();
+        let mut pm_default = Pixmap::new(120, 30).unwrap();
+        let mut tr = TextRenderer::new(include_bytes!("../test_data/DejaVuSans.ttf"));
+        let amber = Color::from_rgba8(0xff, 0xc8, 0x58, 0xff);
+        let purple = Color::from_rgba8(0xc3, 0x78, 0xff, 0xff);
+        // Active = 0 (amber). Inactive = 1 (purple). Probe segment 1's centre.
+        draw_stepped_selector(
+            &mut pm,
+            &mut tr,
+            0.0,
+            0.0,
+            120.0,
+            30.0,
+            &["A", "B"],
+            0,
+            Some(&[amber, purple]),
+        );
+        // Same dimensions, default (None) — used as the "no tint" baseline.
+        draw_stepped_selector(
+            &mut pm_default,
+            &mut tr,
+            0.0,
+            0.0,
+            120.0,
+            30.0,
+            &["A", "B"],
+            0,
+            None,
+        );
+        // Probe a pixel near the centre of segment 1 (x in 60..120) but offset
+        // from the geometric centre to avoid the glyph stroke. The inactive
+        // fill should be purple-tinted (dark, but skewed toward purple's
+        // channels — red and blue dominant over green).
+        let probe = pm.pixels()[(8 * pm.width() + 75) as usize];
+        let baseline = pm_default.pixels()[(8 * pm_default.width() + 75) as usize];
+        // The tinted bg differs from the neutral baseline.
+        assert!(
+            probe.red() != baseline.red()
+                || probe.green() != baseline.green()
+                || probe.blue() != baseline.blue(),
+            "inactive segment should differ from the default control bg \
+             (tinted: {},{},{}; baseline: {},{},{})",
+            probe.red(),
+            probe.green(),
+            probe.blue(),
+            baseline.red(),
+            baseline.green(),
+            baseline.blue()
+        );
+        // Purple has red ≈ blue, green much lower. Verify the tint preserves
+        // that signature.
+        assert!(
+            probe.red() > probe.green() && probe.blue() > probe.green(),
+            "inactive-segment tint should carry purple's red+blue dominance, got {},{},{}",
+            probe.red(),
+            probe.green(),
+            probe.blue()
         );
     }
 }
