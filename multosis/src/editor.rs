@@ -741,6 +741,7 @@ impl MultosisWindow {
             self.effect_dropdown
                 .is_open_for(EffectAction::ParamDropdown(i))
         });
+        let modulated_norms = self.compute_modulated_norms();
         effect_editor::draw_effect_section(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
@@ -750,6 +751,7 @@ impl MultosisWindow {
             editing_dial,
             editing_mix,
             open_param_dropdown,
+            &modulated_norms,
             self.scale_factor,
         );
         effect_editor::draw_section_header(
@@ -1266,6 +1268,56 @@ impl MultosisWindow {
             crate::effects::ParamFormat::Enum { labels } => Some(labels),
             _ => None,
         }
+    }
+
+    /// Compute, for each parameter slot on the selected track, the
+    /// current modulated value's normalised dial position — or `None`
+    /// when that slot isn't being modulated by any assignable MSEG.
+    /// Returned values are derived from the same `assignable_value`
+    /// math the audio thread runs, fed with the live MSEG phase the
+    /// audio thread publishes via `mseg_phases`. Driving the dial-
+    /// modulation arc from this lets the editor mirror exactly what
+    /// the engine is applying to each parameter in real time.
+    ///
+    /// Matches the engine's last-MSEG-wins ordering: if both
+    /// `targets[0]` and `targets[1]` point at the same slot, the
+    /// MSEG-2 (k=2) contribution is what shows on the dial.
+    fn compute_modulated_norms(&self) -> [Option<f32>; crate::effects::MAX_EFFECT_PARAMS] {
+        use crate::effects::Effect;
+        let mut result: [Option<f32>; crate::effects::MAX_EFFECT_PARAMS] =
+            [None; crate::effects::MAX_EFFECT_PARAMS];
+        let track = self.selected_track_effect();
+        let instance = crate::effects::EffectInstance::new(track.kind);
+        let specs = instance.parameters();
+        let Ok(modu) = self.params.track_modulation.lock() else {
+            return result;
+        };
+        let row = self.selected_track;
+        for k in 1..3 {
+            // `targets` is indexed 0..2 (one per assignable MSEG —
+            // msegs[1] and msegs[2]). `targets[k - 1]` is the slot
+            // this MSEG modulates, or None when unassigned.
+            let Some(target) = modu[row].targets[k - 1] else {
+                continue;
+            };
+            let Some(&spec) = specs.get(target) else {
+                continue;
+            };
+            let mseg = modu[row].msegs[k];
+            let phase = f32::from_bits(self.mseg_phases[row * 3 + k].load(Ordering::Relaxed));
+            let mseg_value = widgets::mseg::value_at_phase(&mseg, phase);
+            let depth = modu[row].depths[k - 1];
+            let modulated = crate::modulation::assignable_value(
+                mseg_value,
+                track.params[target],
+                depth,
+                spec,
+                mseg.polarity,
+            );
+            let norm = crate::effects::value_to_norm(modulated, spec.min, spec.max, spec.scaling);
+            result[target] = Some(norm);
+        }
+        result
     }
 
     /// `ParamFormat` of the selected track's parameter `i` — used by the

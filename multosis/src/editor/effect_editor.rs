@@ -310,6 +310,11 @@ pub fn draw_effect_section(
     // `Some(i)` when a per-param Enum dropdown is currently open — render its
     // trigger in the open (accented) state.
     open_param_dropdown: Option<usize>,
+    // Modulated dial position per param slot, or `None` when that slot
+    // isn't currently being modulated. Drives `draw_dial_ex`'s arc
+    // indicator so the user can see the live modulation envelope on
+    // the same dial whose base value they're editing.
+    modulated_norms: &[Option<f32>; MAX_EFFECT_PARAMS],
     scale: f32,
 ) {
     let lay = effect_layout(scale);
@@ -371,6 +376,7 @@ pub fn draw_effect_section(
             continue;
         }
         let norm = crate::effects::value_to_norm(value, spec.min, spec.max, spec.scaling);
+        let mod_arc = modulated_norms.get(i).copied().flatten();
         match editing_dial {
             Some((idx, buf, caret_on)) if idx == i => {
                 widgets::param_dial::draw_dial_ex(
@@ -382,13 +388,13 @@ pub fn draw_effect_section(
                     spec.name,
                     &value_text,
                     norm,
-                    None,
+                    mod_arc,
                     Some(buf),
                     caret_on,
                 );
             }
             _ => {
-                widgets::param_dial::draw_dial(
+                widgets::param_dial::draw_dial_ex(
                     pixmap,
                     tr,
                     dx + dw / 2.0,
@@ -397,6 +403,9 @@ pub fn draw_effect_section(
                     spec.name,
                     &value_text,
                     norm,
+                    mod_arc,
+                    None,
+                    false,
                 );
             }
         }
