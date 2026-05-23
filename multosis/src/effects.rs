@@ -609,21 +609,29 @@ impl Effect for FmEffect {
             (out_l, out_r)
         } else {
             // Modulator mode: input modulates an internal sine carrier
-            // (per-channel). Through-zero phase modulation: the carrier's
-            // instantaneous frequency is `freq_hz + sr · depth · input`.
-            // Feedback adds the previous output back into the carrier's own
-            // phase increment (DX7-style operator feedback). The fixed
-            // `FB_PHASE_SCALE` keeps the maximum self-modulation phase
-            // deviation at ±0.5 cycles/sample even at feedback = 1, so the
-            // self-modulation doesn't immediately push the carrier into
-            // aliasing-induced noise.
-            const FB_PHASE_SCALE: f32 = 0.5;
-            let inc_l = phase_inc + depth * left + feedback * FB_PHASE_SCALE * self.prev_out_l;
-            let inc_r = phase_inc + depth * right + feedback * FB_PHASE_SCALE * self.prev_out_r;
-            self.carrier_phase_l = (self.carrier_phase_l + inc_l).rem_euclid(1.0);
-            self.carrier_phase_r = (self.carrier_phase_r + inc_r).rem_euclid(1.0);
-            let out_l = (self.carrier_phase_l * two_pi).sin();
-            let out_r = (self.carrier_phase_r * two_pi).sin();
+            // (per-channel) via phase modulation — the way DX7-style
+            // "FM synthesis" actually works under the hood. The base
+            // phase advances at `phase_inc` regardless of input or
+            // feedback; both `depth · input` and `feedback · FB · prev`
+            // apply only as per-sample phase OFFSETS at output time:
+            //
+            //   out = sin(2π · (phase + depth · input + feedback · FB · prev))
+            //
+            // Input and feedback take the SAME modulation path — both
+            // PM — keeping the operator topology consistent with the
+            // textbook definition of "feedback" (operator output routed
+            // back through the same modulation input as the external
+            // signal). For audio-rate modulators PM and FM produce
+            // identical sideband spectra (same Bessel coefficients);
+            // the only audible difference is at sub-audio rates, where
+            // PM reads as phase wobble rather than pitch bend.
+            const FB_PHASE_SCALE: f32 = 0.5; // ±π rad at feedback = 1 — DX7-style.
+            self.carrier_phase_l = (self.carrier_phase_l + phase_inc).rem_euclid(1.0);
+            self.carrier_phase_r = (self.carrier_phase_r + phase_inc).rem_euclid(1.0);
+            let pm_l = depth * left + feedback * FB_PHASE_SCALE * self.prev_out_l;
+            let pm_r = depth * right + feedback * FB_PHASE_SCALE * self.prev_out_r;
+            let out_l = ((self.carrier_phase_l + pm_l) * two_pi).sin();
+            let out_r = ((self.carrier_phase_r + pm_r) * two_pi).sin();
             self.prev_out_l = out_l;
             self.prev_out_r = out_r;
             (out_l, out_r)
@@ -1443,6 +1451,69 @@ mod tests {
             last
         );
         assert!((last.1 - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn fm_modulator_mode_feedback_stays_audibly_active_across_the_range() {
+        // Regression: an earlier formulation added feedback to the carrier's
+        // phase increment, which integrated the self-modulation over time
+        // and drifted the carrier into aliasing-noise (or near-DC) at high
+        // settings — the user perceived this as "anything past 15 % sounds
+        // like the dry signal". With phase modulation (feedback applied as
+        // an instantaneous phase offset at output time, not an increment),
+        // the carrier's base pitch stays stable so feedback only changes
+        // the timbre.
+        let measure_at_fb = |fb_pct: f32| -> (f32, f32) {
+            // Returns (RMS, peak) over a settled 2 048-sample window, on a
+            // SILENT input so the only audible content comes from the
+            // carrier + its own self-feedback.
+            let mut fm = FmEffect::new();
+            fm.set_sample_rate(48_000.0);
+            fm.set_param(3, 1.0); // Mode → Modulator
+            fm.set_param(0, 200.0); // Freq
+            fm.set_param(1, 0.0); // Depth = 0
+            fm.set_param(2, fb_pct);
+            let mut sum_sq = 0.0_f32;
+            let mut peak = 0.0_f32;
+            for _ in 0..2048 {
+                let (l, _r) = fm.process_sample(0.0, 0.0);
+                sum_sq += l * l;
+                peak = peak.max(l.abs());
+            }
+            ((sum_sq / 2048.0).sqrt(), peak)
+        };
+        let (rms_0, peak_0) = measure_at_fb(0.0);
+        let (rms_50, peak_50) = measure_at_fb(50.0);
+        let (rms_100, peak_100) = measure_at_fb(100.0);
+        // fb=0: a clean 200 Hz sine — RMS ≈ 1/√2 ≈ 0.707, peak ≈ 1.
+        assert!(
+            (rms_0 - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.05,
+            "fb=0 RMS should be ~0.707, got {rms_0}"
+        );
+        assert!(
+            (peak_0 - 1.0).abs() < 0.05,
+            "fb=0 peak should be ~1.0, got {peak_0}"
+        );
+        // fb=100%: still audibly present, still bounded — no aliasing
+        // collapse, no runaway.
+        assert!(
+            rms_100 > 0.1,
+            "fb=100% should still produce audible output (RMS > 0.1), got {rms_100}"
+        );
+        assert!(
+            peak_100 < 1.5,
+            "fb=100% output should be bounded (peak < 1.5), got {peak_100}"
+        );
+        // Self-feedback enriches the carrier: the waveform drifts away from
+        // a pure sine toward sawtooth-like content, so the crest factor
+        // (peak / RMS) changes measurably between fb=0 and fb=50%.
+        let crest_0 = peak_0 / rms_0;
+        let crest_50 = peak_50 / rms_50;
+        assert!(
+            (crest_50 - crest_0).abs() > 0.05,
+            "feedback should change the carrier's timbre \
+             (crest@0={crest_0}, crest@50={crest_50})"
+        );
     }
 
     #[test]
