@@ -605,8 +605,12 @@ fn draw_strip(
 /// Result of hit-testing a pixel against the MSEG widget.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum MsegHit {
-    /// On the node dot at this index.
+    /// On the node dot at this index — node is NOT in the active selection.
     Node(usize),
+    /// On the node dot at this index — node IS in the active selection.
+    /// Right-click on a SelectedNode opens the transform menu; left-click
+    /// behaves identically to Node(i).
+    SelectedNode(usize),
     /// On the tension handle of the segment starting at this node index.
     Tension(usize),
     /// On the canvas but not on any node/handle.
@@ -682,6 +686,27 @@ pub fn mseg_hit_test(
         return MsegHit::Strip;
     }
     MsegHit::None
+}
+
+/// Selection-aware wrapper around `mseg_hit_test`. Identical to the bare
+/// version except that a node-hit is reported as `SelectedNode(i)` when
+/// the node is part of the editor's current selection. Used by the
+/// editor's mouse handlers; the bare version is kept for code paths that
+/// don't need to discriminate (e.g. plain hover).
+pub fn mseg_hit_test_with_selection(
+    layout: &MsegLayout,
+    data: &MsegData,
+    curve_only: bool,
+    scale: f32,
+    x: f32,
+    y: f32,
+    state: &crate::mseg::editor::MsegEditState,
+) -> MsegHit {
+    let h = mseg_hit_test(layout, data, curve_only, scale, x, y);
+    match h {
+        MsegHit::Node(i) if state.is_node_selected(i) => MsegHit::SelectedNode(i),
+        other => other,
+    }
 }
 
 /// Draw a 1px line by sampling points along it (sufficient for the curve;

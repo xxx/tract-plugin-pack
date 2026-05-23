@@ -345,7 +345,7 @@ impl MsegEditState {
         }
 
         match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
-            MsegHit::Node(i) => {
+            MsegHit::Node(i) | MsegHit::SelectedNode(i) => {
                 // Click selects: Ctrl toggles membership; a plain click on an
                 // unselected node makes it the sole selection; a plain click
                 // on an already-selected node keeps the selection (so a
@@ -498,7 +498,7 @@ impl MsegEditState {
         // Hover highlight (only when not dragging).
         if self.drag.is_none() {
             self.hover = match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
-                MsegHit::Node(i) => Some(i),
+                MsegHit::Node(i) | MsegHit::SelectedNode(i) => Some(i),
                 _ => None,
             };
         }
@@ -607,7 +607,7 @@ impl MsegEditState {
         use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
         let layout = mseg_layout(rect, self.curve_only, scale);
         match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
-            MsegHit::Node(i) if data.remove_node(i) => {
+            MsegHit::Node(i) | MsegHit::SelectedNode(i) if data.remove_node(i) => {
                 self.drag = None;
                 self.hover = None;
                 self.clear_selection();
@@ -640,7 +640,7 @@ impl MsegEditState {
         let layout = mseg_layout(rect, self.curve_only, scale);
         if !matches!(
             mseg_hit_test(&layout, data, self.curve_only, scale, x, y),
-            MsegHit::Canvas | MsegHit::Tension(_) | MsegHit::Node(_)
+            MsegHit::Canvas | MsegHit::Tension(_) | MsegHit::Node(_) | MsegHit::SelectedNode(_)
         ) {
             return None;
         }
@@ -1925,6 +1925,40 @@ mod tests {
         let ev = state.delete_selection(&mut data);
         assert_eq!(ev, None);
         assert_eq!(data.node_count, 3);
+    }
+
+    // --- Task 5: MsegHit::SelectedNode tests ---
+
+    #[test]
+    fn hit_test_returns_selected_node_when_click_lands_on_a_selected_node() {
+        use crate::mseg::render::{
+            mseg_hit_test, mseg_hit_test_with_selection, mseg_layout, MsegHit,
+        };
+        use crate::mseg::{MsegData, MsegEditState};
+        let mut data = MsegData::default();
+        // Insert a middle node so we have something selectable that isn't an
+        // endpoint.
+        let _ = data.insert_node(0.5, 0.5);
+        let mut state = MsegEditState::new();
+        let rect = (0.0, 0.0, 400.0, 200.0);
+        let layout = mseg_layout(rect, false, 1.0);
+        // Find the canvas-space pixel of the middle node.
+        let (px, py, pw, ph) = layout.plot;
+        let n = data.nodes[1];
+        let nx = px + n.time * pw;
+        let ny = py + (1.0 - n.value) * ph;
+        // Before selection: a hit on node 1 reports Node(1).
+        let h_before = mseg_hit_test(&layout, &data, false, 1.0, nx, ny);
+        assert!(matches!(h_before, MsegHit::Node(1)), "got {:?}", h_before);
+        // Select node 1.
+        state.select_only(1);
+        // Now the same click reports SelectedNode(1).
+        let h_after = mseg_hit_test_with_selection(&layout, &data, false, 1.0, nx, ny, &state);
+        assert!(
+            matches!(h_after, MsegHit::SelectedNode(1)),
+            "got {:?}",
+            h_after
+        );
     }
 
     #[test]
