@@ -280,11 +280,14 @@ pub fn draw_toolbar(
         widgets::draw_button(pixmap, tr, x, y, w, h, op.label(), false, false);
     }
 
-    // Sequence-status readout, at the right end of the lower row.
+    // Sequence-status readout — anchored in the lower row's middle empty
+    // span (between the regen cluster on the left and the clipboard cluster
+    // on the right). The relocation matches the row's new "two action
+    // clusters with an info readout between" rhythm.
     let step = seq_status.read();
     let status = format!("Step {step}");
     let size = 16.0 * scale;
-    let sx = remap(878.0, 0.0).0 * scale;
+    let sx = remap(510.0, 0.0).0 * scale;
     let sy = (TOOLBAR_ROW_H + TOOLBAR_ROW_H / 2.0) * scale + size * 0.36;
     tr.draw_text(pixmap, sx, sy, &status, size, widgets::color_text());
 }
