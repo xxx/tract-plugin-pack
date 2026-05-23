@@ -320,6 +320,7 @@ impl GainBrainWindow {
             /* modulated */ None,
             editing_buf.as_deref(),
             caret,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
         // Hit region covers the full dial area for vertical drag
         self.drag.push_region(

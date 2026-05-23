@@ -1337,9 +1337,9 @@ impl MultosisWindow {
     /// Matches the engine's last-MSEG-wins ordering: if both
     /// `targets[0]` and `targets[1]` point at the same slot, the
     /// MSEG-2 (k=2) contribution is what shows on the dial.
-    fn compute_modulated_norms(&self) -> [Option<f32>; crate::effects::MAX_EFFECT_PARAMS] {
+    fn compute_modulated_norms(&self) -> [Option<(f32, u8)>; crate::effects::MAX_EFFECT_PARAMS] {
         use crate::effects::Effect;
-        let mut result: [Option<f32>; crate::effects::MAX_EFFECT_PARAMS] =
+        let mut result: [Option<(f32, u8)>; crate::effects::MAX_EFFECT_PARAMS] =
             [None; crate::effects::MAX_EFFECT_PARAMS];
         let track = self.selected_track_effect();
         let instance = crate::effects::EffectInstance::new(track.kind);
@@ -1370,7 +1370,7 @@ impl MultosisWindow {
                 mseg.polarity,
             );
             let norm = crate::effects::value_to_norm(modulated, spec.min, spec.max, spec.scaling);
-            result[target] = Some(norm);
+            result[target] = Some((norm, k as u8));
         }
         result
     }

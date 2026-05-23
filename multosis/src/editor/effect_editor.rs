@@ -311,10 +311,11 @@ pub fn draw_effect_section(
     // trigger in the open (accented) state.
     open_param_dropdown: Option<usize>,
     // Modulated dial position per param slot, or `None` when that slot
-    // isn't currently being modulated. Drives `draw_dial_ex`'s arc
+    // isn't currently being modulated. Carries the MSEG slot (1 or 2)
+    // so the arc can be coloured per-MSEG. Drives `draw_dial_ex`'s arc
     // indicator so the user can see the live modulation envelope on
     // the same dial whose base value they're editing.
-    modulated_norms: &[Option<f32>; MAX_EFFECT_PARAMS],
+    modulated_norms: &[Option<(f32, u8)>; MAX_EFFECT_PARAMS],
     scale: f32,
 ) {
     let lay = effect_layout(scale);
@@ -384,7 +385,13 @@ pub fn draw_effect_section(
             continue;
         }
         let norm = crate::effects::value_to_norm(value, spec.min, spec.max, spec.scaling);
-        let mod_arc = modulated_norms.get(i).copied().flatten();
+        let (mod_arc, mod_color) = match modulated_norms.get(i).copied().flatten() {
+            Some((n, slot)) => (Some(n), crate::editor::mseg_color(slot as usize)),
+            None => (
+                None,
+                tiny_skia::Color::from_rgba8(255, 160, 50, 255), // arbitrary; unused when mod_arc is None
+            ),
+        };
         // Effects flag inactive-but-controllable params as "dimmed" (e.g.
         // Delay's Free dial when Time is a sync subdivision). The dimmed
         // entry point swaps the accent-blue value arc for muted grey;
@@ -410,6 +417,7 @@ pub fn draw_effect_section(
                     mod_arc,
                     Some(buf),
                     caret_on,
+                    mod_color,
                 );
             }
             _ => {
@@ -425,6 +433,7 @@ pub fn draw_effect_section(
                     mod_arc,
                     None,
                     false,
+                    mod_color,
                 );
             }
         }
@@ -450,6 +459,7 @@ pub fn draw_effect_section(
                 None,
                 Some(buf),
                 caret_on,
+                tiny_skia::Color::from_rgba8(255, 160, 50, 255),
             );
         }
         None => {

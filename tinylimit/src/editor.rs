@@ -556,6 +556,7 @@ impl TinylimitWindow {
                 None,
                 editing_buf.as_deref(),
                 caret,
+                tiny_skia::Color::from_rgba8(255, 160, 50, 255),
             );
             let hit_w = dial_col_spacing;
             // Bound the dial's visual extent (circle + value readout). The old
@@ -591,6 +592,7 @@ impl TinylimitWindow {
                 None,
                 editing_buf.as_deref(),
                 caret,
+                tiny_skia::Color::from_rgba8(255, 160, 50, 255),
             );
             let hit_w = dial_col_spacing;
             // Bound the dial's visual extent (circle + value readout). The old

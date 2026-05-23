@@ -119,6 +119,7 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
             None,
             editing.as_deref(),
             caret,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
         let hit_w = col_spacing;
         let hit_h = h * 0.85;

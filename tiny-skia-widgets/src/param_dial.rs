@@ -26,14 +26,20 @@ fn color_track() -> tiny_skia::Color {
     tiny_skia::Color::from_rgba8(64, 64, 64, 255)
 }
 
-/// Modulation indicator color (semi-transparent orange).
-fn color_modulation() -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba8(255, 160, 50, 150)
+/// Build the modulation-arc colour from a base hue, applying α=150.
+fn modulation_arc_color(hue: tiny_skia::Color) -> tiny_skia::Color {
+    let r = (hue.red() * 255.0).round() as u8;
+    let g = (hue.green() * 255.0).round() as u8;
+    let b = (hue.blue() * 255.0).round() as u8;
+    tiny_skia::Color::from_rgba8(r, g, b, 150)
 }
 
-/// Modulation dot color (slightly more opaque orange).
-fn color_modulation_dot() -> tiny_skia::Color {
-    tiny_skia::Color::from_rgba8(255, 160, 50, 200)
+/// Build the modulation indicator-dot colour from a base hue, applying α=200.
+fn modulation_dot_color(hue: tiny_skia::Color) -> tiny_skia::Color {
+    let r = (hue.red() * 255.0).round() as u8;
+    let g = (hue.green() * 255.0).round() as u8;
+    let b = (hue.blue() * 255.0).round() as u8;
+    tiny_skia::Color::from_rgba8(r, g, b, 200)
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +155,7 @@ pub fn draw_dial(
         None,
         None,
         false,
+        tiny_skia::Color::from_rgba8(255, 160, 50, 255),
     );
 }
 
@@ -180,6 +187,7 @@ pub fn draw_dial_dimmed(
         None,
         None,
         false,
+        tiny_skia::Color::from_rgba8(255, 160, 50, 255),
     );
 }
 
@@ -201,6 +209,7 @@ pub fn draw_dial_ex(
     modulated_normalized: Option<f32>,
     editing_text: Option<&str>,
     caret_on: bool,
+    mod_color: tiny_skia::Color,
 ) {
     draw_dial_inner(
         pixmap,
@@ -215,6 +224,7 @@ pub fn draw_dial_ex(
         editing_text,
         caret_on,
         color_accent(),
+        mod_color,
     );
 }
 
@@ -234,6 +244,7 @@ pub fn draw_dial_dimmed_ex(
     modulated_normalized: Option<f32>,
     editing_text: Option<&str>,
     caret_on: bool,
+    mod_color: tiny_skia::Color,
 ) {
     draw_dial_inner(
         pixmap,
@@ -248,6 +259,7 @@ pub fn draw_dial_dimmed_ex(
         editing_text,
         caret_on,
         color_muted(),
+        mod_color,
     );
 }
 
@@ -267,6 +279,7 @@ fn draw_dial_inner(
     editing_text: Option<&str>,
     caret_on: bool,
     value_color: tiny_skia::Color,
+    mod_color: tiny_skia::Color,
 ) {
     let n = normalized.clamp(0.0, 1.0);
     let stroke_width = (radius * 0.1).max(2.0);
@@ -315,7 +328,7 @@ fn draw_dial_inner(
             };
             if let Some(mod_path) = build_arc_path(cx, cy, radius, arc_start, arc_end) {
                 let mut paint = Paint::default();
-                paint.set_color(color_modulation());
+                paint.set_color(modulation_arc_color(mod_color));
                 paint.anti_alias = true;
                 let stroke = Stroke {
                     width: stroke_width + 1.0,
@@ -331,7 +344,7 @@ fn draw_dial_inner(
                 mod_dot_x,
                 mod_dot_y,
                 mod_dot_radius,
-                color_modulation_dot(),
+                modulation_dot_color(mod_color),
             );
         }
     }
@@ -484,7 +497,18 @@ mod tests {
         let mut pm = test_pixmap();
         let mut tr = test_renderer();
         draw_dial_ex(
-            &mut pm, &mut tr, 100.0, 100.0, 40.0, "Gain", "0 dB", 0.5, None, None, false,
+            &mut pm,
+            &mut tr,
+            100.0,
+            100.0,
+            40.0,
+            "Gain",
+            "0 dB",
+            0.5,
+            None,
+            None,
+            false,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
     }
 
@@ -505,6 +529,7 @@ mod tests {
             Some(0.7),
             None,
             false,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
     }
 
@@ -525,6 +550,7 @@ mod tests {
             Some(0.3),
             None,
             false,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
     }
 
@@ -545,6 +571,7 @@ mod tests {
             Some(0.5005),
             None,
             false,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
     }
 
@@ -565,6 +592,7 @@ mod tests {
             Some(-0.5),
             None,
             false,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
         draw_dial_ex(
             &mut pm,
@@ -578,6 +606,7 @@ mod tests {
             Some(1.5),
             None,
             false,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
     }
 
@@ -592,8 +621,18 @@ mod tests {
         let mut pm = test_pixmap();
         let mut tr = test_renderer();
         draw_dial_ex(
-            &mut pm, &mut tr, 100.0, 100.0, 40.0, "Gain", "-6.0 dB", 0.5, None,
-            /* editing_text */ None, /* caret_on */ false,
+            &mut pm,
+            &mut tr,
+            100.0,
+            100.0,
+            40.0,
+            "Gain",
+            "-6.0 dB",
+            0.5,
+            None,
+            /* editing_text */ None,
+            /* caret_on */ false,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
     }
 
@@ -613,6 +652,7 @@ mod tests {
             None,
             Some("-6."),
             /* caret_on */ true,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
         draw_dial_ex(
             &mut pm,
@@ -626,6 +666,7 @@ mod tests {
             None,
             Some("-6."),
             /* caret_on */ false,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
     }
 
@@ -646,6 +687,7 @@ mod tests {
             None,
             None,
             false,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
         draw_dial_ex(
             &mut pm_edit,
@@ -659,6 +701,7 @@ mod tests {
             None,
             Some("-6"),
             true,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
         let y = (100.0 + 40.0 * 0.71 + 6.0) as u32;
         let plain_px = pm_plain.pixels()[(y * pm_plain.width() + 100) as usize];
@@ -720,6 +763,69 @@ mod tests {
             Some(0.7),
             Some("250"),
             true,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Modulation arc colour coordination
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dial_modulation_arc_renders_in_the_supplied_mod_color() {
+        use tiny_skia::{Color, Pixmap};
+        let mut pm = Pixmap::new(200, 200).unwrap();
+        let mut tr = TextRenderer::new(include_bytes!("../test_data/DejaVuSans.ttf"));
+        // Two distinct mod colours; probe the arc to confirm each shows.
+        let amber = Color::from_rgba8(0xff, 0xc8, 0x58, 0xff);
+        let purple = Color::from_rgba8(0xc3, 0x78, 0xff, 0xff);
+        // Render with amber.
+        draw_dial_ex(
+            &mut pm,
+            &mut tr,
+            100.0,
+            100.0,
+            40.0,
+            "X",
+            "v",
+            0.3,
+            Some(0.7),
+            None,
+            false,
+            amber,
+        );
+        // Just assert the pixmap contains at least one amber-dominated pixel.
+        let pixels = pm.pixels();
+        let amber_hit = pixels.iter().any(|p| {
+            p.red() > 200 && p.green() > 130 && p.green() < 220 && p.blue() < 130 && p.alpha() > 100
+        });
+        assert!(
+            amber_hit,
+            "expected at least one amber pixel from the mod arc"
+        );
+        // Now render fresh in purple and assert purple-ish pixels appear.
+        let mut pm2 = Pixmap::new(200, 200).unwrap();
+        draw_dial_ex(
+            &mut pm2,
+            &mut tr,
+            100.0,
+            100.0,
+            40.0,
+            "X",
+            "v",
+            0.3,
+            Some(0.7),
+            None,
+            false,
+            purple,
+        );
+        let pixels2 = pm2.pixels();
+        let purple_hit = pixels2
+            .iter()
+            .any(|p| p.red() > 150 && p.green() < 130 && p.blue() > 200 && p.alpha() > 100);
+        assert!(
+            purple_hit,
+            "expected at least one purple pixel from the mod arc"
         );
     }
 

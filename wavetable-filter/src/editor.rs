@@ -519,6 +519,7 @@ impl WavetableFilterWindow {
             Some(modulated),
             editing_buf.as_deref(),
             caret,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
         );
     }
 

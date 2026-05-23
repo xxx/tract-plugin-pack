@@ -229,6 +229,7 @@ impl SatchWindow {
                 None,
                 editing_buf.as_deref(),
                 caret,
+                tiny_skia::Color::from_rgba8(255, 160, 50, 255),
             );
             self.drag.push_region(
                 cx - col_spacing / 2.0,
@@ -259,6 +260,7 @@ impl SatchWindow {
                 None,
                 editing_buf.as_deref(),
                 caret,
+                tiny_skia::Color::from_rgba8(255, 160, 50, 255),
             );
             self.drag.push_region(
                 cx - col_spacing / 2.0,
@@ -292,6 +294,7 @@ impl SatchWindow {
                 None,
                 editing_buf.as_deref(),
                 caret,
+                tiny_skia::Color::from_rgba8(255, 160, 50, 255),
             );
             let hit_w = col_spacing;
             self.drag.push_region(

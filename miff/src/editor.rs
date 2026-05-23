@@ -480,6 +480,7 @@ impl MiffWindow {
                         Some(modulated),
                         editing_buf.as_deref(),
                         caret,
+                        tiny_skia::Color::from_rgba8(255, 160, 50, 255),
                     );
                 }
                 HitAction::GainDial => {
@@ -507,6 +508,7 @@ impl MiffWindow {
                         Some(modulated),
                         editing_buf.as_deref(),
                         caret,
+                        tiny_skia::Color::from_rgba8(255, 160, 50, 255),
                     );
                 }
                 HitAction::LengthDial => {
@@ -534,6 +536,7 @@ impl MiffWindow {
                         Some(modulated),
                         editing_buf.as_deref(),
                         caret,
+                        tiny_skia::Color::from_rgba8(255, 160, 50, 255),
                     );
                 }
             }

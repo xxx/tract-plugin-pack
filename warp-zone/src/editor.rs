@@ -327,6 +327,7 @@ impl WarpZoneWindow {
                 Some(*modulated),
                 editing_buf.as_deref(),
                 caret,
+                tiny_skia::Color::from_rgba8(255, 160, 50, 255),
             );
             self.drag.push_region(
                 dial_area_start + timbre_spacing * i as f32,
@@ -358,6 +359,7 @@ impl WarpZoneWindow {
                 Some(modulated),
                 editing_buf.as_deref(),
                 caret,
+                tiny_skia::Color::from_rgba8(255, 160, 50, 255),
             );
             let mix_hit_w = (w - dial_area_start - timbre_area_w) * 0.8;
             self.drag.push_region(
@@ -398,6 +400,7 @@ impl WarpZoneWindow {
                 Some(*modulated),
                 editing_buf.as_deref(),
                 caret,
+                tiny_skia::Color::from_rgba8(255, 160, 50, 255),
             );
             self.drag.push_region(
                 dial_area_start + row2_spacing * i as f32,
