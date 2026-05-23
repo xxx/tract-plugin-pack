@@ -784,6 +784,30 @@ impl MultosisWindow {
         // MODULATION section.
         let modu = self.selected_track_modulation();
         let sel = self.selected_mseg.min(2);
+        // Build the hover-node tooltip for the active MSEG. Amp (slot 0) shows
+        // a dB readout; assignable MSEGs format through the target's ParamSpec
+        // if one is set, or fall back to the raw 0..1 level.
+        let tooltip: Option<(usize, String)> = self.mseg_edit.hovered_node().map(|idx| {
+            let (spec, base, depth_polarity) = if sel == 0 {
+                (None, 0.0, None)
+            } else {
+                let k = sel - 1;
+                let target = modu.targets[k];
+                let depth = modu.depths[k];
+                let polarity = modu.msegs[sel].polarity;
+                let spec = target.map(|t| {
+                    use crate::effects::Effect as _;
+                    let inst = crate::effects::EffectInstance::new(track.kind);
+                    inst.parameters()[t]
+                });
+                let base = target.map(|t| track.params[t]).unwrap_or(0.0);
+                (spec, base, Some((depth, polarity)))
+            };
+            let text =
+                mseg_node_tooltip_text(sel, &modu.msegs[sel], idx, spec, base, depth_polarity);
+            (idx, text)
+        });
+        let tooltip_ref = tooltip.as_ref().map(|(i, t)| (*i, t.as_str()));
         // Active MSEG first — `draw_mseg` opens with an opaque canvas fill
         // that would otherwise wipe the ghosts. Ghosts are then drawn on top
         // at low alpha (≈ 38%) so they read as faint context, not foreground.
@@ -795,7 +819,7 @@ impl MultosisWindow {
             &self.mseg_edit,
             self.scale_factor,
             mseg_color(sel),
-            None,
+            tooltip_ref,
         );
         for m in 0..3 {
             if m != sel {
@@ -2291,6 +2315,44 @@ impl Editor for MultosisEditor {
     fn param_values_changed(&self) {}
 }
 
+/// Format the tooltip text shown when a node is hovered on the MSEG editor.
+///
+/// Slot `0` is the Amp MSEG — returns a dB readout. Slots `1`/`2` are
+/// assignable MSEGs: when a `spec` is `Some` and `depth_polarity` is `Some`,
+/// the value is mapped through the target's `ParamSpec` using
+/// `assignable_value` + `format_value`; otherwise the raw `0..1` node level
+/// is rendered as a two-decimal number.
+///
+/// Returns an empty string if `node_idx` is out of range.
+pub fn mseg_node_tooltip_text(
+    slot: usize,
+    data: &widgets::MsegData,
+    node_idx: usize,
+    spec: Option<crate::effects::ParamSpec>,
+    base: f32,
+    depth_polarity: Option<(f32, widgets::Polarity)>,
+) -> String {
+    if node_idx >= data.node_count {
+        return String::new();
+    }
+    let value = data.nodes[node_idx].value;
+    if slot == 0 {
+        const FLOOR_DB: f32 = -80.0;
+        if value <= 1e-4 {
+            return "-\u{221e} dB".to_string();
+        }
+        let db = (20.0 * value.log10()).max(FLOOR_DB);
+        return format!("{db:.1} dB");
+    }
+    match (spec, depth_polarity) {
+        (Some(spec), Some((depth, polarity))) => {
+            let v = crate::modulation::assignable_value(value, base, depth, spec, polarity);
+            crate::effects::format_value(v, spec.format)
+        }
+        _ => format!("{value:.2}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2327,5 +2389,41 @@ mod tests {
             let b = (c.blue() * 255.0).round() as u8;
             (r, g, b)
         }
+    }
+
+    #[test]
+    fn node_tooltip_text_for_amp_returns_db_readout() {
+        let mut data = widgets::MsegData::default();
+        // node 1 exists in a default (2-node) MSEG.
+        data.nodes[1].value = 1.0;
+        // Slot 0 = Amp. value 1.0 → 0.0 dB.
+        let text = mseg_node_tooltip_text(0, &data, 1, None, 0.0, None);
+        assert_eq!(text, "0.0 dB");
+
+        data.nodes[1].value = 0.5;
+        let text = mseg_node_tooltip_text(0, &data, 1, None, 0.0, None);
+        // 20·log10(0.5) ≈ -6.02 dB.
+        assert!(text.starts_with("-6.0"), "expected ~-6.0 dB, got {text}");
+
+        data.nodes[1].value = 0.00001;
+        let text = mseg_node_tooltip_text(0, &data, 1, None, 0.0, None);
+        assert_eq!(text, "-\u{221e} dB", "below floor should render as -∞ dB");
+    }
+
+    #[test]
+    fn node_tooltip_text_for_assignable_no_target_returns_raw_level() {
+        let mut data = widgets::MsegData::default();
+        data.nodes[1].value = 0.742;
+        // Slot 1, no spec → raw two-decimal format.
+        let text = mseg_node_tooltip_text(1, &data, 1, None, 0.0, None);
+        assert_eq!(text, "0.74");
+    }
+
+    #[test]
+    fn node_tooltip_text_out_of_range_node_returns_empty() {
+        let data = widgets::MsegData::default();
+        // Default MsegData has node_count == 2, so index 99 is OOB.
+        let text = mseg_node_tooltip_text(0, &data, 99, None, 0.0, None);
+        assert_eq!(text, "");
     }
 }
