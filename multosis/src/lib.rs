@@ -149,6 +149,17 @@ pub struct Multosis {
     /// Set by the editor on any effect/modulation edit; consumed by `process`
     /// to re-bridge the persisted config into the engine.
     config_dirty: Arc<std::sync::atomic::AtomicBool>,
+    /// Posted by the editor when a drag-and-drop reorder completes; consumed
+    /// once per process block to swap the audio engine's per-row DSP state
+    /// (effect instances, MSEG phases, amplitudes) alongside the persisted
+    /// config that the editor already swapped through the mutex-backed
+    /// `track_effects` / `track_modulation` / `grid`.
+    ///
+    /// Encoding: `((from + 1) << 8) | (to + 1)`. The sentinel `0` means "no
+    /// swap pending"; the `+1` offsets keep that sentinel disjoint from any
+    /// legitimate (from, to) pair (rows are 0..16, so the encoded value is
+    /// always non-zero when set).
+    pending_track_swap: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl Default for Multosis {
@@ -168,6 +179,7 @@ impl Default for Multosis {
                 std::sync::atomic::AtomicU32::new(0)
             })),
             config_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pending_track_swap: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 }
@@ -204,6 +216,7 @@ impl Plugin for Multosis {
             self.active_rows.clone(),
             self.mseg_phases.clone(),
             self.config_dirty.clone(),
+            self.pending_track_swap.clone(),
         )
     }
 
@@ -278,6 +291,19 @@ impl Plugin for Multosis {
                 self.config_dirty
                     .store(false, std::sync::atomic::Ordering::Relaxed);
             }
+        }
+
+        // Drain any pending track-swap from the editor. Swapped AFTER the
+        // config re-bridge so the engine's effect instances and modulation
+        // runtime line up with the just-installed config, then the in-place
+        // swap shuffles both together — preserving DSP state across the move.
+        let pending = self
+            .pending_track_swap
+            .swap(0, std::sync::atomic::Ordering::AcqRel);
+        if pending != 0 {
+            let from = ((pending >> 8) & 0xFF) as usize - 1;
+            let to = (pending & 0xFF) as usize - 1;
+            self.engine.swap_tracks(from, to);
         }
 
         let sps =

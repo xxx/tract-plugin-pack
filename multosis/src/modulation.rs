@@ -223,6 +223,29 @@ impl Modulation {
         self.config = config.clone();
     }
 
+    /// Swap rows `a` and `b` — both the config and every piece of runtime
+    /// state attached to those row indices. Called from the audio thread
+    /// when the editor's drag-and-drop reorder posts a swap; pairing this
+    /// with `AudioEngine::swap_tracks` keeps the in-flight MSEG phase
+    /// glued to its track so the swap doesn't audibly glitch.
+    pub fn swap_rows(&mut self, a: usize, b: usize) {
+        if a == b || a >= ROWS || b >= ROWS {
+            return;
+        }
+        self.config.swap(a, b);
+        self.phases.swap(a, b);
+        self.amplitudes.swap(a, b);
+        self.hz_phases.swap(a, b);
+        // `fires` is a u16 bitmask — swap the two bits in place. `fires` is
+        // also zeroed at the start of every block, so this only matters if
+        // the swap lands mid-block (it shouldn't with the current handoff,
+        // but the cost is one xor and it future-proofs the helper).
+        let ba = (self.fires >> a) & 1;
+        let bb = (self.fires >> b) & 1;
+        let mask = (1u16 << a) | (1u16 << b);
+        self.fires = (self.fires & !mask) | (ba << b) | (bb << a);
+    }
+
     /// Reset every MSEG phase to 0.
     pub fn reset(&mut self) {
         self.phases = [[0.0; 3]; ROWS];
@@ -372,6 +395,46 @@ impl Modulation {
     #[cfg(test)]
     pub fn hz_phases_all_zero(&self) -> bool {
         self.hz_phases.iter().all(|&p| p == 0.0)
+    }
+
+    /// Test helper: the current Free-Hz oscillator phase for `row`.
+    #[cfg(test)]
+    pub fn hz_phase_for_test(&self, row: usize) -> f32 {
+        self.hz_phases[row]
+    }
+
+    /// Test helper: shared access to row `row`'s stored config.
+    #[cfg(test)]
+    pub fn config_for_test(&self, row: usize) -> &TrackModulation {
+        &self.config[row]
+    }
+
+    /// Test helper: the cached amplitude gain for `row`.
+    #[cfg(test)]
+    pub fn amplitude_for_test(&self, row: usize) -> f32 {
+        self.amplitudes[row]
+    }
+
+    /// Test helper: write directly into the runtime state for `row`. Lets
+    /// the swap-rows test prime distinct phases/amplitudes without driving
+    /// audio through the engine.
+    #[cfg(test)]
+    pub fn force_runtime_state_for_test(
+        &mut self,
+        row: usize,
+        phases: [f32; 3],
+        amplitude: f32,
+        hz_phase: f32,
+        fired: bool,
+    ) {
+        self.phases[row] = phases;
+        self.amplitudes[row] = amplitude;
+        self.hz_phases[row] = hz_phase;
+        if fired {
+            self.fires |= 1 << row;
+        } else {
+            self.fires &= !(1u16 << row);
+        }
     }
 }
 
@@ -1130,5 +1193,50 @@ mod tests {
             (after_fire - expected).abs() < 1e-6,
             "post-fire phase {after_fire} should equal a from-0 tail advance {expected}"
         );
+    }
+
+    #[test]
+    fn swap_rows_exchanges_config_and_runtime_state() {
+        let mut m = Modulation::new();
+        let mut cfg: [TrackModulation; ROWS] =
+            std::array::from_fn(TrackModulation::default_for_row);
+        // Mark rows 3 and 7 with distinct configs (different trigger sources).
+        cfg[3].trigger = TriggerSource::CellLight;
+        cfg[7].trigger = TriggerSource::CellStep;
+        m.set_config(&cfg);
+        // Distinct runtime state on both rows.
+        m.force_runtime_state_for_test(3, [0.10, 0.20, 0.30], 0.55, 0.42, true);
+        m.force_runtime_state_for_test(7, [0.70, 0.80, 0.90], 0.85, 0.97, false);
+
+        m.swap_rows(3, 7);
+
+        // Config moved.
+        assert_eq!(m.config_for_test(3).trigger, TriggerSource::CellStep);
+        assert_eq!(m.config_for_test(7).trigger, TriggerSource::CellLight);
+        // Phases moved.
+        assert!((m.phase_for_test(3, 0) - 0.70).abs() < 1e-6);
+        assert!((m.phase_for_test(3, 1) - 0.80).abs() < 1e-6);
+        assert!((m.phase_for_test(3, 2) - 0.90).abs() < 1e-6);
+        assert!((m.phase_for_test(7, 0) - 0.10).abs() < 1e-6);
+        // Amplitude and Free-Hz phase moved.
+        assert!((m.amplitude_for_test(3) - 0.85).abs() < 1e-6);
+        assert!((m.amplitude_for_test(7) - 0.55).abs() < 1e-6);
+        assert!((m.hz_phase_for_test(3) - 0.97).abs() < 1e-6);
+        assert!((m.hz_phase_for_test(7) - 0.42).abs() < 1e-6);
+        // The `fires` bit followed the row.
+        assert_eq!(m.fires_last_block() & (1 << 3), 0);
+        assert_ne!(m.fires_last_block() & (1 << 7), 0);
+    }
+
+    #[test]
+    fn swap_rows_is_a_noop_for_self_or_out_of_range_indices() {
+        let mut m = Modulation::new();
+        m.force_runtime_state_for_test(4, [0.11, 0.22, 0.33], 0.5, 0.1, true);
+        m.swap_rows(4, 4);
+        assert!((m.phase_for_test(4, 0) - 0.11).abs() < 1e-6);
+        m.swap_rows(4, ROWS + 5);
+        assert!((m.phase_for_test(4, 0) - 0.11).abs() < 1e-6);
+        m.swap_rows(ROWS + 5, 4);
+        assert!((m.phase_for_test(4, 0) - 0.11).abs() < 1e-6);
     }
 }

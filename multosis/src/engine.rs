@@ -70,6 +70,12 @@ impl AudioEngine {
         &mut self.effects[row]
     }
 
+    /// Test-only: the cached per-track effect config (kind/params/mix).
+    #[cfg(test)]
+    pub fn track_effects_for_test(&self) -> [TrackEffect; ROWS] {
+        self.track_effects
+    }
+
     /// Test-only: the per-row mask of modulation triggers that fired in the
     /// most recent process block.
     #[cfg(test)]
@@ -99,6 +105,21 @@ impl AudioEngine {
     /// engine.
     pub fn set_modulation(&mut self, config: &[TrackModulation; ROWS]) {
         self.modulation.set_config(config);
+    }
+
+    /// Swap rows `a` and `b` across every piece of per-row state: the live
+    /// `EffectInstance` (so DSP state moves with the track instead of being
+    /// rebuilt on the next `set_effects`), the cached `TrackEffect`, and the
+    /// modulation runtime (config + MSEG phases + Free-Hz phase + per-row
+    /// amplitudes). Called from the audio thread when the editor's
+    /// drag-and-drop reorder posts a swap.
+    pub fn swap_tracks(&mut self, a: usize, b: usize) {
+        if a == b || a >= ROWS || b >= ROWS {
+            return;
+        }
+        self.effects.swap(a, b);
+        self.track_effects.swap(a, b);
+        self.modulation.swap_rows(a, b);
     }
 
     /// Recompute sample-rate-dependent effect coefficients.
@@ -616,6 +637,88 @@ mod tests {
             left.iter().any(|&s| (s - 0.3).abs() > 1e-6),
             "per-track effects should change the signal"
         );
+    }
+
+    #[test]
+    fn swap_tracks_exchanges_track_effects_kind_and_params() {
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let mut cfg: [crate::effects::TrackEffect; ROWS] =
+            std::array::from_fn(crate::effects::TrackEffect::default_for_row);
+        cfg[3] = crate::effects::TrackEffect {
+            kind: crate::effects::EffectKind::Lowpass,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Lowpass),
+            mix: 0.7,
+        };
+        cfg[7] = crate::effects::TrackEffect {
+            kind: crate::effects::EffectKind::Bitcrush,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Bitcrush),
+            mix: 0.4,
+        };
+        engine.set_effects(&cfg);
+        engine.swap_tracks(3, 7);
+        let cached = engine.track_effects_for_test();
+        assert_eq!(cached[3].kind, crate::effects::EffectKind::Bitcrush);
+        assert!((cached[3].mix - 0.4).abs() < 1e-6);
+        assert_eq!(cached[7].kind, crate::effects::EffectKind::Lowpass);
+        assert!((cached[7].mix - 0.7).abs() < 1e-6);
+        assert_eq!(
+            engine.effects_mut_for_test(3).kind(),
+            crate::effects::EffectKind::Bitcrush
+        );
+        assert_eq!(
+            engine.effects_mut_for_test(7).kind(),
+            crate::effects::EffectKind::Lowpass
+        );
+    }
+
+    #[test]
+    fn swap_tracks_preserves_effect_dsp_state_so_the_swap_is_seamless() {
+        // The whole point of `swap_tracks` exchanging live `EffectInstance`s
+        // (rather than rebuilding via `set_effects`) is that the lowpass's
+        // delay line stays with its track. Drive row 0 hot, swap with row 5
+        // (whose lowpass has no history), and confirm that what was row 0
+        // is now at row 5 and still produces a settled (non-transient) output.
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let cfg: [crate::effects::TrackEffect; ROWS] =
+            std::array::from_fn(|_| crate::effects::TrackEffect {
+                kind: crate::effects::EffectKind::Lowpass,
+                params: [800.0, 0.2, 0.0, 0.0],
+                mix: 1.0,
+            });
+        engine.set_effects(&cfg);
+        // Charge row 0's lowpass with a DC input.
+        for _ in 0..1024 {
+            engine.effects_mut_for_test(0).process_sample(1.0, 1.0);
+        }
+        let row0_settled = engine.effects_mut_for_test(0).process_sample(1.0, 1.0).0;
+        engine.swap_tracks(0, 5);
+        // The charged state must now be at row 5 (we swapped the instance,
+        // not zeroed it). A fresh sample at row 5 should land near the
+        // settled value, not near zero.
+        let row5_after = engine.effects_mut_for_test(5).process_sample(1.0, 1.0).0;
+        assert!(
+            (row5_after - row0_settled).abs() < 0.2,
+            "swap should carry DSP state across: settled {row0_settled} -> after {row5_after}"
+        );
+    }
+
+    #[test]
+    fn swap_tracks_is_a_noop_when_indices_match_or_are_out_of_range() {
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let mut cfg: [crate::effects::TrackEffect; ROWS] =
+            std::array::from_fn(crate::effects::TrackEffect::default_for_row);
+        cfg[2].mix = 0.33;
+        engine.set_effects(&cfg);
+        let before = engine.track_effects_for_test();
+        engine.swap_tracks(2, 2);
+        assert_eq!(engine.track_effects_for_test()[2].mix, before[2].mix);
+        engine.swap_tracks(2, 999);
+        assert_eq!(engine.track_effects_for_test()[2].mix, before[2].mix);
+        engine.swap_tracks(999, 2);
+        assert_eq!(engine.track_effects_for_test()[2].mix, before[2].mix);
     }
 
     #[test]

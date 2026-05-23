@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::editor::effect_editor::EffectHit;
 use crate::editor::toolbar::{ToolbarControl, ToolbarOp};
+use crate::editor::track_list::TrackDrag;
 use crate::effects::{self, EffectKind, ParamSpec};
 use crate::grid::LoopRegion;
 use crate::handoff::GridHandoff;
@@ -179,6 +180,15 @@ struct MultosisWindow {
     /// Audio→GUI dirty flag: every edit (param dial, kind switch, …) sets it
     /// so `process()` re-bridges the persisted config into the engine.
     config_dirty: Arc<AtomicBool>,
+    /// Editor → audio handoff posted on the release of a drag-and-drop track
+    /// reorder. The audio thread drains it once per process block and swaps
+    /// the engine's per-row DSP state to match the GUI's just-applied
+    /// config swap. Encoded `((from + 1) << 8) | (to + 1)`; `0` = no swap.
+    pending_track_swap: Arc<AtomicU32>,
+    /// In-flight drag-and-drop reorder of the track list, if any. Populated
+    /// on a track-row press and cleared on release (after applying the swap
+    /// if the drop landed on a different track).
+    track_drag: Option<TrackDrag>,
     /// Double-click detector for the toolbar Mix / Output sliders.
     toolbar_click: ClickTracker<ToolbarControl>,
     /// Double-click detector for the effect-editor parameter / depth /
@@ -200,6 +210,7 @@ impl MultosisWindow {
         active_rows: Arc<AtomicU16>,
         mseg_phases: Arc<[AtomicU32; 48]>,
         config_dirty: Arc<AtomicBool>,
+        pending_track_swap: Arc<AtomicU32>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -241,6 +252,8 @@ impl MultosisWindow {
             mseg_last_click_time: std::time::Instant::now(),
             mseg_last_click_pos: (-999.0, -999.0),
             config_dirty,
+            pending_track_swap,
+            track_drag: None,
         }
     }
 
@@ -509,6 +522,39 @@ impl MultosisWindow {
     /// re-bridges it on the next process block.
     fn mark_config_dirty(&self) {
         self.config_dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Swap tracks `from` and `to` end-to-end: grid cells, effect config, and
+    /// modulation config flip across the editor-owned `params` mutexes; the
+    /// audio engine receives a matching command via `pending_track_swap` so
+    /// its DSP state (effect instances, MSEG phases, amplitudes) moves with
+    /// the tracks. Captured as a single undo entry. No-op for `from == to`
+    /// or any out-of-range index.
+    fn swap_tracks(&mut self, from: usize, to: usize) {
+        if from == to || from >= crate::grid::ROWS || to >= crate::grid::ROWS {
+            return;
+        }
+        let snap = self.snapshot();
+        let opened = self.undo.begin_capture(snap);
+        if let (Ok(mut grid), Ok(mut effects), Ok(mut modu)) = (
+            self.params.grid.lock(),
+            self.params.track_effects.lock(),
+            self.params.track_modulation.lock(),
+        ) {
+            track_list::swap_rows_pure(&mut grid, &mut effects, &mut modu, from, to);
+            // Re-publish the freshly swapped grid through the GUI→audio
+            // handoff so the audio thread sees the new cell layout before
+            // the next process block (matches every other grid edit).
+            self.grid_handoff.publish(*grid);
+        }
+        // Encode (from, to) for the audio thread's swap consumer.
+        let encoded = (((from + 1) as u32) << 8) | ((to + 1) as u32);
+        self.pending_track_swap.store(encoded, Ordering::Release);
+        self.mark_config_dirty();
+        if opened {
+            let after = self.snapshot();
+            self.undo.commit_capture(&after);
+        }
     }
 
     /// Snapshot the current DAW-opaque config (grid, effects, modulation).
@@ -1285,12 +1331,21 @@ impl MultosisWindow {
             View::Grid => None,
             View::Effect => Some(self.selected_track),
         };
+        let (drag_source, drag_target) = match self.track_drag {
+            Some(d) => (
+                Some(d.from),
+                track_list::track_at(self.mouse_pos.0, d.current_y, self.scale_factor),
+            ),
+            None => (None, None),
+        };
         track_list::draw_track_list(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
             &kinds,
             active,
             selected,
+            drag_source,
+            drag_target,
             self.scale_factor,
         );
         // Toolbar — both views.
@@ -1374,6 +1429,11 @@ impl baseview::WindowHandler for MultosisWindow {
             }) => {
                 let (px, py) = (position.x as f32, position.y as f32);
                 self.mouse_pos = (px, py);
+                // Track the cursor's y for an in-flight track drag so the
+                // draw pass can highlight the drop target row.
+                if let Some(d) = self.track_drag.as_mut() {
+                    d.current_y = py;
+                }
                 self.toolbar_drag.set_mouse(px, py);
                 self.effect_dial_drag.set_mouse(px, py);
                 if let Some(&ctrl) = self.toolbar_drag.active_action() {
@@ -1611,6 +1671,14 @@ impl baseview::WindowHandler for MultosisWindow {
                                 }
                                 self.selected_track = new_track;
                                 self.view = View::Effect;
+                                // Arm a drag-and-drop reorder. If the release
+                                // lands on a different row, the two tracks
+                                // swap places; releasing on the same row is
+                                // an ordinary track-select click.
+                                self.track_drag = Some(TrackDrag {
+                                    from: new_track,
+                                    current_y: py,
+                                });
                             } else if self.view == View::Grid {
                                 // Grid: region handle / region move / cell pending.
                                 if let Some(handle) = self.region_handle_under_cursor() {
@@ -1650,6 +1718,19 @@ impl baseview::WindowHandler for MultosisWindow {
                 let _ = self.effect_dial_drag.end_drag();
                 self.effect_dropdown.on_mouse_up();
                 self.speed_dropdown.on_mouse_up();
+                // Drop a drag-and-drop track reorder. If the cursor is over a
+                // different track row, swap places (and update the selected
+                // track so the dragged content stays in view at its new
+                // position). Same-row or off-list releases just cancel.
+                if let Some(drag) = self.track_drag.take() {
+                    let (px, py) = self.mouse_pos;
+                    if let Some(to) = track_list::track_at(px, py, self.scale_factor) {
+                        if to != drag.from {
+                            self.swap_tracks(drag.from, to);
+                            self.selected_track = to;
+                        }
+                    }
+                }
                 // A release always terminates any in-flight MSEG node drag,
                 // regardless of where the cursor is.
                 if self.view == View::Effect {
@@ -1780,6 +1861,9 @@ struct MultosisEditor {
     active_rows: Arc<AtomicU16>,
     mseg_phases: Arc<[AtomicU32; 48]>,
     config_dirty: Arc<AtomicBool>,
+    /// Editor → audio handoff for the GUI's drag-and-drop track-swap gesture.
+    /// Encoded `((from + 1) << 8) | (to + 1)`; see `Multosis::pending_track_swap`.
+    pending_track_swap: Arc<AtomicU32>,
     pending_resize: Arc<AtomicU64>,
 }
 
@@ -1794,6 +1878,7 @@ pub fn create(
     active_rows: Arc<AtomicU16>,
     mseg_phases: Arc<[AtomicU32; 48]>,
     config_dirty: Arc<AtomicBool>,
+    pending_track_swap: Arc<AtomicU32>,
 ) -> Option<Box<dyn Editor>> {
     Some(Box::new(MultosisEditor {
         params,
@@ -1804,6 +1889,7 @@ pub fn create(
         active_rows,
         mseg_phases,
         config_dirty,
+        pending_track_swap,
         pending_resize: Arc::new(AtomicU64::new(0)),
     }))
 }
@@ -1827,6 +1913,7 @@ impl Editor for MultosisEditor {
         let active_rows = Arc::clone(&self.active_rows);
         let mseg_phases = Arc::clone(&self.mseg_phases);
         let config_dirty = Arc::clone(&self.config_dirty);
+        let pending_track_swap = Arc::clone(&self.pending_track_swap);
 
         let window = baseview::Window::open_parented(
             &widgets::ParentWindowHandleAdapter(parent),
@@ -1849,6 +1936,7 @@ impl Editor for MultosisEditor {
                     active_rows,
                     mseg_phases,
                     config_dirty,
+                    pending_track_swap,
                     sf,
                 )
             },
