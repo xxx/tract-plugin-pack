@@ -38,16 +38,20 @@ impl ToolbarControl {
         ToolbarControl::Reset,
     ];
 
-    /// Logical `(x, width)` of this control. Six equal-width controls
-    /// with 6 px gaps.
+    /// Logical `(x, width)` of this control in the 1044-px-wide design row.
+    /// Per-button widths are sized to their labels; the row is split into
+    /// three concern groups (sequencer / master / compressor) separated by a
+    /// wider gap, and the `Reset` action button is right-anchored so the
+    /// middle of the row reads as deliberate empty space.
     fn logical_x_w(self) -> (f32, f32) {
+        // within-group gap = 4, between-group gap = 16, right pad = 6.
         match self {
-            ToolbarControl::Speed => (6.0, 144.0),
-            ToolbarControl::Mix => (156.0, 144.0),
-            ToolbarControl::Output => (306.0, 144.0),
-            ToolbarControl::CompThreshold => (456.0, 144.0),
-            ToolbarControl::CompRatio => (606.0, 144.0),
-            ToolbarControl::Reset => (756.0, 144.0),
+            ToolbarControl::Speed => (6.0, 130.0),
+            ToolbarControl::Mix => (152.0, 130.0),
+            ToolbarControl::Output => (286.0, 130.0),
+            ToolbarControl::CompThreshold => (432.0, 130.0),
+            ToolbarControl::CompRatio => (566.0, 130.0),
+            ToolbarControl::Reset => (958.0, 80.0),
         }
     }
 }
@@ -107,13 +111,16 @@ impl ToolbarOp {
         ToolbarOp::Paste,
     ];
 
-    /// Logical `(x, width)` of this op button within the 1056-wide row.
+    /// Logical `(x, width)` of this op button in the 1044-px-wide design row.
+    /// Regen actions (Reinit, Randomize) cluster on the left; clipboard
+    /// actions (Copy, Paste) cluster right-anchored. The middle is deliberate
+    /// empty space.
     fn logical_x_w(self) -> (f32, f32) {
         match self {
-            ToolbarOp::ReinitCells => (6.0, 140.0),
-            ToolbarOp::RandomizeActivations => (150.0, 140.0),
-            ToolbarOp::Copy => (294.0, 140.0),
-            ToolbarOp::Paste => (438.0, 140.0),
+            ToolbarOp::ReinitCells => (6.0, 120.0),
+            ToolbarOp::RandomizeActivations => (130.0, 100.0),
+            ToolbarOp::Copy => (894.0, 70.0),
+            ToolbarOp::Paste => (968.0, 70.0),
         }
     }
 
