@@ -831,6 +831,80 @@ impl MsegEditState {
         data.debug_assert_valid();
         Some(MsegEdit::Changed)
     }
+
+    /// Pull each selected node's value 25 % toward the selection's mean value.
+    pub fn compress_values(&mut self, data: &mut MsegData) -> Option<MsegEdit> {
+        self.scale_values_around_mean(data, 0.75)
+    }
+
+    /// Push each selected node's value 25 % away from the selection's mean
+    /// value, clamping to [0, 1].
+    pub fn expand_values(&mut self, data: &mut MsegData) -> Option<MsegEdit> {
+        self.scale_values_around_mean(data, 1.25)
+    }
+
+    /// Pull each selected node's time 25 % toward the selection's mean time.
+    /// Anchor nodes (index 0 and the last) never move on the time axis and
+    /// never contribute to the time mean.
+    pub fn compress_times(&mut self, data: &mut MsegData) -> Option<MsegEdit> {
+        self.scale_times_around_mean(data, 0.75)
+    }
+
+    /// Push each selected node's time 25 % away from the selection's mean
+    /// time. Anchor nodes never move; each result is clamped to the
+    /// gap-respecting bounds of its immediate neighbours so the time invariant
+    /// (strictly ascending) holds.
+    pub fn expand_times(&mut self, data: &mut MsegData) -> Option<MsegEdit> {
+        self.scale_times_around_mean(data, 1.25)
+    }
+
+    fn scale_values_around_mean(&mut self, data: &mut MsegData, k: f32) -> Option<MsegEdit> {
+        let n = data.node_count;
+        let selected: Vec<usize> = (0..n).filter(|&i| self.is_node_selected(i)).collect();
+        if selected.is_empty() {
+            return None;
+        }
+        let mean: f32 =
+            selected.iter().map(|&i| data.nodes[i].value).sum::<f32>() / selected.len() as f32;
+        for &i in &selected {
+            let v = data.nodes[i].value;
+            data.nodes[i].value = (mean + (v - mean) * k).clamp(0.0, 1.0);
+        }
+        data.debug_assert_valid();
+        Some(MsegEdit::Changed)
+    }
+
+    fn scale_times_around_mean(&mut self, data: &mut MsegData, k: f32) -> Option<MsegEdit> {
+        let n = data.node_count;
+        let last = n.saturating_sub(1);
+        // Anchor nodes (index 0, index last) are never moved on the time axis
+        // and never contribute to the time mean.
+        let movable: Vec<usize> = (0..n)
+            .filter(|&i| self.is_node_selected(i) && i != 0 && i != last)
+            .collect();
+        if movable.is_empty() {
+            return None;
+        }
+        let mean: f32 =
+            movable.iter().map(|&i| data.nodes[i].time).sum::<f32>() / movable.len() as f32;
+        let gap = MsegData::MIN_NODE_GAP;
+        // Apply per-node in ascending index order so each step sees the
+        // just-written previous neighbour for its lower bound.
+        for &i in &movable {
+            let t = data.nodes[i].time;
+            let nt_raw = mean + (t - mean) * k;
+            let lo = data.nodes[i - 1].time + gap;
+            let hi = data.nodes[i + 1].time - gap;
+            data.nodes[i].time = nt_raw.clamp(lo, hi);
+        }
+        data.debug_assert_valid();
+        Some(MsegEdit::Changed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn toggle_selected_for_test(&mut self, i: usize) {
+        self.toggle_selected(i);
+    }
 }
 
 impl Default for MsegEditState {
@@ -1959,6 +2033,76 @@ mod tests {
             "got {:?}",
             h_after
         );
+    }
+
+    #[test]
+    fn compress_values_pulls_selected_values_25pct_toward_mean() {
+        let mut data = MsegData::default();
+        let i1 = data.insert_node(0.25, 0.0).unwrap();
+        let i2 = data.insert_node(0.5, 0.4).unwrap();
+        let i3 = data.insert_node(0.75, 1.0).unwrap();
+        let mut state = MsegEditState::new();
+        state.select_only(i1);
+        state.toggle_selected_for_test(i2);
+        state.toggle_selected_for_test(i3);
+        let mean = (0.0_f32 + 0.4 + 1.0) / 3.0;
+        let exp_i1 = mean + (0.0 - mean) * 0.75;
+        let exp_i2 = mean + (0.4 - mean) * 0.75;
+        let exp_i3 = mean + (1.0 - mean) * 0.75;
+        state.compress_values(&mut data);
+        assert!((data.nodes[i1].value - exp_i1).abs() < 1e-5);
+        assert!((data.nodes[i2].value - exp_i2).abs() < 1e-5);
+        assert!((data.nodes[i3].value - exp_i3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn expand_values_pushes_selected_values_25pct_away_from_mean_and_clamps() {
+        let mut data = MsegData::default();
+        let i1 = data.insert_node(0.25, 0.1).unwrap();
+        let i2 = data.insert_node(0.75, 0.9).unwrap();
+        let mut state = MsegEditState::new();
+        state.select_only(i1);
+        state.toggle_selected_for_test(i2);
+        // mean = 0.5
+        // 0.1 → 0.5 + (0.1 - 0.5) * 1.25 = 0.0; 0.9 → 1.0 — both at the
+        // clamp boundary, exact.
+        state.expand_values(&mut data);
+        assert!((data.nodes[i1].value - 0.0).abs() < 1e-5);
+        assert!((data.nodes[i2].value - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn compress_times_pulls_selected_times_toward_mean_and_leaves_anchors_alone() {
+        let mut data = MsegData::default();
+        let i1 = data.insert_node(0.2, 0.5).unwrap();
+        let i2 = data.insert_node(0.6, 0.5).unwrap();
+        let mut state = MsegEditState::new();
+        // Select the anchor (node 0) AND the two middle nodes. The anchor's
+        // time is locked, so it is excluded from the time mean and not mutated.
+        state.select_only(0);
+        state.toggle_selected_for_test(i1);
+        state.toggle_selected_for_test(i2);
+        let t1_0 = data.nodes[i1].time;
+        let t2_0 = data.nodes[i2].time;
+        let mean = (t1_0 + t2_0) / 2.0;
+        state.compress_times(&mut data);
+        // Anchor untouched.
+        assert_eq!(data.nodes[0].time, 0.0);
+        // Middle nodes pulled toward the (non-anchor) time mean.
+        assert!((data.nodes[i1].time - (mean + (t1_0 - mean) * 0.75)).abs() < 1e-5);
+        assert!((data.nodes[i2].time - (mean + (t2_0 - mean) * 0.75)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn expand_times_is_a_noop_on_a_single_node_selection() {
+        let mut data = MsegData::default();
+        let i1 = data.insert_node(0.4, 0.5).unwrap();
+        let t0 = data.nodes[i1].time;
+        let mut state = MsegEditState::new();
+        state.select_only(i1);
+        state.expand_times(&mut data);
+        // Mean of one node == that node's time → delta is zero → no move.
+        assert_eq!(data.nodes[i1].time, t0);
     }
 
     #[test]
