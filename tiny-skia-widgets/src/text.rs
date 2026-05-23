@@ -23,6 +23,15 @@ struct GlyphEntry {
     metrics: fontdue::Metrics,
 }
 
+/// Two-tone split parameters for [`TextRenderer::draw_text_split`]: pixels
+/// with `dst_x < split_x` are drawn with `left`, the rest with `right`.
+#[derive(Clone, Copy, Debug)]
+pub struct TextSplit {
+    pub split_x: f32,
+    pub left: Color,
+    pub right: Color,
+}
+
 /// A thin wrapper around [`fontdue::Font`] that caches rasterised glyphs and
 /// provides simple text-drawing helpers.
 pub struct TextRenderer {
@@ -63,11 +72,11 @@ impl TextRenderer {
     ///
     /// `color` is the foreground colour; alpha compositing uses the glyph
     /// coverage as opacity.
-    /// Like [`draw_text`](Self::draw_text), but pixels left of `split_x`
-    /// (in pixmap coordinates) are drawn with `color_left` and pixels at or
-    /// past `split_x` with `color_right`. Useful when text overlays a
-    /// two-colour background (e.g. a slider's filled / unfilled bar) and a
-    /// single text colour would lose contrast on one half.
+    /// Like [`draw_text`](Self::draw_text), but pixels left of `split.split_x`
+    /// (in pixmap coordinates) are drawn with `split.left` and pixels at or
+    /// past it with `split.right`. Useful when text overlays a two-colour
+    /// background (e.g. a slider's filled / unfilled bar) and a single text
+    /// colour would lose contrast on one half.
     pub fn draw_text_split(
         &mut self,
         pixmap: &mut Pixmap,
@@ -75,20 +84,18 @@ impl TextRenderer {
         y: f32,
         text: &str,
         size: f32,
-        split_x: f32,
-        color_left: Color,
-        color_right: Color,
+        split: TextSplit,
     ) {
         let pm_width = pixmap.width() as i32;
         let pm_height = pixmap.height() as i32;
-        let split = split_x.round() as i32;
+        let split_px = split.split_x.round() as i32;
 
-        let lr = (color_left.red() * 255.0) as u32;
-        let lg = (color_left.green() * 255.0) as u32;
-        let lb = (color_left.blue() * 255.0) as u32;
-        let rr = (color_right.red() * 255.0) as u32;
-        let rg = (color_right.green() * 255.0) as u32;
-        let rb = (color_right.blue() * 255.0) as u32;
+        let lr = (split.left.red() * 255.0) as u32;
+        let lg = (split.left.green() * 255.0) as u32;
+        let lb = (split.left.blue() * 255.0) as u32;
+        let rr = (split.right.red() * 255.0) as u32;
+        let rg = (split.right.green() * 255.0) as u32;
+        let rb = (split.right.blue() * 255.0) as u32;
 
         for ch in text.chars() {
             let entry = self.rasterise(ch, size);
@@ -109,7 +116,7 @@ impl TextRenderer {
                     if coverage == 0 {
                         continue;
                     }
-                    let (src_r, src_g, src_b) = if px < split {
+                    let (src_r, src_g, src_b) = if px < split_px {
                         (lr, lg, lb)
                     } else {
                         (rr, rg, rb)

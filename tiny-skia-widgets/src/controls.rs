@@ -87,17 +87,12 @@ pub fn draw_slider(
     let text_size = (h * 0.5).max(10.0);
     let text_y = y + (h + text_size) * 0.5 - 2.0;
     let pad = 6.0;
-    let split_x = x + 1.0 + fill_w;
-    text_renderer.draw_text_split(
-        pixmap,
-        x + pad,
-        text_y,
-        label,
-        text_size,
-        split_x,
-        color_bg(),
-        color_text(),
-    );
+    let split = crate::text::TextSplit {
+        split_x: x + 1.0 + fill_w,
+        left: color_bg(),
+        right: color_text(),
+    };
+    text_renderer.draw_text_split(pixmap, x + pad, text_y, label, text_size, split);
 
     // Value readout: buffer + caret when editing, otherwise formatted value
     if let Some(buf) = editing_text {
@@ -127,9 +122,7 @@ pub fn draw_slider(
             text_y,
             value_text,
             text_size,
-            split_x,
-            color_bg(),
-            color_text(),
+            split,
         );
     }
 }
