@@ -997,17 +997,6 @@ impl DelayEffect {
 
     const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
-            name: "Time",
-            min: 0.0,
-            max: (DELAY_TIME_LABELS.len() - 1) as f32,
-            // Default to 1/4 note (index 8) — the most musical starting point.
-            default: 8.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Enum {
-                labels: DELAY_TIME_LABELS,
-            },
-        },
-        ParamSpec {
             name: "Free",
             min: Self::MIN_DELAY_MS,
             max: Self::MAX_DELAY_MS,
@@ -1016,6 +1005,22 @@ impl DelayEffect {
             format: ParamFormat::Number {
                 decimals: 0,
                 unit: "ms",
+            },
+        },
+        ParamSpec {
+            name: "Time",
+            min: 0.0,
+            max: (DELAY_TIME_LABELS.len() - 1) as f32,
+            // Default to the trailing `Free` slot so a fresh delay
+            // uses the (continuous) Free dial directly; the user can
+            // switch to a tempo-synced subdivision via the dropdown.
+            // This also makes the default MSEG target (`Some(0)` →
+            // slot 0 = Free) modulate a useful continuous parameter
+            // rather than rhythmically switching subdivisions.
+            default: (DELAY_TIME_LABELS.len() - 1) as f32,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: DELAY_TIME_LABELS,
             },
         },
         ParamSpec {
@@ -1044,8 +1049,8 @@ impl DelayEffect {
 
     pub fn new() -> Self {
         let mut d = Self {
-            time_idx: Self::PARAMS[0].default,
-            free_ms: Self::PARAMS[1].default,
+            free_ms: Self::PARAMS[0].default,
+            time_idx: Self::PARAMS[1].default,
             feedback_pct: Self::PARAMS[2].default,
             duck_pct: Self::PARAMS[3].default,
             sample_rate: 48_000.0,
@@ -1159,11 +1164,11 @@ impl Effect for DelayEffect {
 
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => {
+            0 => self.free_ms = value.clamp(Self::PARAMS[0].min, Self::PARAMS[0].max),
+            1 => {
                 let max_idx = (DELAY_TIME_LABELS.len() - 1) as f32;
                 self.time_idx = value.round().clamp(0.0, max_idx);
             }
-            1 => self.free_ms = value.clamp(Self::PARAMS[1].min, Self::PARAMS[1].max),
             2 => self.feedback_pct = value.clamp(Self::PARAMS[2].min, Self::PARAMS[2].max),
             3 => self.duck_pct = value.clamp(Self::PARAMS[3].min, Self::PARAMS[3].max),
             _ => {}
@@ -2404,10 +2409,18 @@ mod tests {
         let d = DelayEffect::new();
         let specs = d.parameters();
         assert_eq!(specs.len(), 4);
-        assert_eq!(specs[0].name, "Time");
-        assert!(matches!(specs[0].format, ParamFormat::Enum { .. }));
-        assert_eq!(specs[1].name, "Free");
-        assert!(matches!(specs[1].scaling, ParamScaling::Log));
+        // Free at slot 0 so a fresh delay uses the continuous ms knob,
+        // and the default MSEG target (Some(0)) modulates a useful
+        // continuous param rather than rhythmically switching sync
+        // subdivisions.
+        assert_eq!(specs[0].name, "Free");
+        assert!(matches!(specs[0].scaling, ParamScaling::Log));
+        assert_eq!(specs[1].name, "Time");
+        assert!(matches!(specs[1].format, ParamFormat::Enum { .. }));
+        // Default Time = the trailing "Free" slot, so the dropdown
+        // out of the box defers to the Free ms dial.
+        let max_time_idx = (DELAY_TIME_LABELS.len() - 1) as f32;
+        assert_eq!(specs[1].default, max_time_idx);
         assert_eq!(specs[2].name, "Feedback");
         assert_eq!(specs[3].name, "Duck");
     }
@@ -2419,8 +2432,8 @@ mod tests {
         // later as `output - input`. Additive output: out = dry + delayed.
         let mut d = DelayEffect::new();
         d.set_sample_rate(48_000.0);
-        d.set_param(0, 14.0); // Time → Free
-        d.set_param(1, 100.0); // Free = 100 ms
+        d.set_param(0, 100.0); // Free = 100 ms
+        d.set_param(1, 14.0); // Time → Free
         d.set_param(2, 0.0); // Feedback = 0
         d.set_param(3, 0.0); // Duck = 0
                              // Impulse at sample 0, then silence — count where the echo lands.
@@ -2460,8 +2473,8 @@ mod tests {
         let render_energy = |fb_pct: f32| -> f32 {
             let mut d = DelayEffect::new();
             d.set_sample_rate(48_000.0);
-            d.set_param(0, 14.0); // Free
-            d.set_param(1, 50.0); // 50 ms — quick echoes for a short test
+            d.set_param(0, 50.0); // Free = 50 ms — quick echoes for a short test
+            d.set_param(1, 14.0); // Time → Free
             d.set_param(2, fb_pct);
             d.set_param(3, 0.0);
             let mut energy = 0.0_f32;
@@ -2501,8 +2514,8 @@ mod tests {
         let measure_wet_energy = |duck_pct: f32| -> f32 {
             let mut d = DelayEffect::new();
             d.set_sample_rate(48_000.0);
-            d.set_param(0, 14.0); // Free
-            d.set_param(1, 100.0); // 100 ms
+            d.set_param(0, 100.0); // Free = 100 ms
+            d.set_param(1, 14.0); // Time → Free
             d.set_param(2, 80.0); // Healthy feedback so an echo is audible
             d.set_param(3, duck_pct);
             // Drive 0.5-amplitude DC for 1 s so the duck envelope settles
@@ -2542,7 +2555,7 @@ mod tests {
             let mut d = DelayEffect::new();
             d.set_sample_rate(48_000.0);
             d.set_bpm(bpm);
-            d.set_param(0, 8.0); // Time → 1/4 note
+            d.set_param(1, 8.0); // Time → 1/4 note (Time is at slot 1)
             d.set_param(2, 0.0); // Feedback = 0
             d.set_param(3, 0.0); // Duck = 0
             d.process_sample(1.0, 1.0);
