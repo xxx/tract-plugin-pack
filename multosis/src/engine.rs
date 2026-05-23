@@ -205,8 +205,7 @@ impl AudioEngine {
         let sr = self.sample_rate as f64;
 
         // Block-rate modulation setup: FreeHz fires, and zero the fire mask.
-        self.modulation
-            .begin_block(n, sr, &mut self.effects, &self.track_effects);
+        self.modulation.begin_block(n, sr);
 
         // Gather this block's step-boundary offsets (only while playing).
         let mut boundaries = [0usize; MAX_BOUNDARIES];
