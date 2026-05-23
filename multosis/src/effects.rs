@@ -226,20 +226,52 @@ pub trait Effect {
     fn set_param(&mut self, index: usize, value: f32);
 }
 
-/// A resonant lowpass — a TPT state-variable filter, lowpass output.
+/// A resonant lowpass — `n` cascaded TPT state-variable filter stages, each
+/// contributing 2 poles (12 dB/oct). The `Poles` param picks the cascade
+/// length from {2, 4, 6, 8} poles, giving 12 / 24 / 36 / 48 dB/oct slopes.
+///
+/// Resonance is applied to the **last** stage only; earlier stages run
+/// Butterworth (Q = 0.707, no peak). If every stage shared the user's Q
+/// the resonance peak at cutoff would compound by `Q^stages` — at 8
+/// poles even Q = 2 produces a 16× peak, audibly screeching with a tiny
+/// resonance setting. Keeping the cascade Butterworth except for the
+/// final stage makes the Resonance knob mean roughly the same peak
+/// height across pole counts.
 pub struct LowpassEffect {
     cutoff: f32,
     resonance: f32,
+    /// 0..3 selector index into [2, 4, 6, 8] poles. Stored as f32 so the
+    /// existing Enum-format dropdown machinery handles it identically to
+    /// FM Mode / FM Topology.
+    poles_idx: f32,
     sample_rate: f32,
-    a1: f32,
-    a2: f32,
-    a3: f32,
-    ic1: [f32; 2],
-    ic2: [f32; 2],
+    /// Butterworth (Q = 0.707, no peak) coefficients — used by every
+    /// stage except the last.
+    a1_butter: f32,
+    a2_butter: f32,
+    a3_butter: f32,
+    /// User-resonance coefficients — used by the LAST cascade stage only.
+    /// At pole count = 2 (one stage), this is also the only set in play,
+    /// so single-stage behaviour matches the original 2-pole filter.
+    a1_res: f32,
+    a2_res: f32,
+    a3_res: f32,
+    /// Per-stage integrator state, four stages × two channels. Only the
+    /// first `stages_count()` stages are touched on the audio thread;
+    /// the rest stay zero. State is preserved across param changes so a
+    /// cutoff or resonance sweep doesn't click.
+    stages_ic1: [[f32; 2]; Self::MAX_STAGES],
+    stages_ic2: [[f32; 2]; Self::MAX_STAGES],
 }
 
+/// Poles-dropdown label list. Order matters: `value.round() as usize`
+/// indexes it (0 → "2", 1 → "4", 2 → "6", 3 → "8" poles).
+const LP_POLES_LABELS: &[&str] = &["2", "4", "6", "8"];
+
 impl LowpassEffect {
-    const PARAMS: [ParamSpec; 2] = [
+    const MAX_STAGES: usize = 4;
+
+    const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
             name: "Cutoff",
             min: 20.0,
@@ -259,6 +291,17 @@ impl LowpassEffect {
                 unit: "",
             },
         },
+        ParamSpec {
+            name: "Poles",
+            min: 0.0,
+            max: (LP_POLES_LABELS.len() - 1) as f32,
+            // Index 0 → 2 poles (12 dB/oct) — the original behaviour.
+            default: 0.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: LP_POLES_LABELS,
+            },
+        },
     ];
 
     /// A `LowpassEffect` at its default parameters; call `set_sample_rate`
@@ -267,36 +310,72 @@ impl LowpassEffect {
         let mut lp = Self {
             cutoff: Self::PARAMS[0].default,
             resonance: Self::PARAMS[1].default,
+            poles_idx: Self::PARAMS[2].default,
             sample_rate: 48_000.0,
-            a1: 0.0,
-            a2: 0.0,
-            a3: 0.0,
-            ic1: [0.0; 2],
-            ic2: [0.0; 2],
+            a1_butter: 0.0,
+            a2_butter: 0.0,
+            a3_butter: 0.0,
+            a1_res: 0.0,
+            a2_res: 0.0,
+            a3_res: 0.0,
+            stages_ic1: [[0.0; 2]; Self::MAX_STAGES],
+            stages_ic2: [[0.0; 2]; Self::MAX_STAGES],
         };
         lp.recompute();
         lp
     }
 
-    /// Recompute the TPT-SVF coefficients from cutoff / resonance / SR.
+    /// Number of cascaded SVF stages: index 0 → 1 stage (2 poles), …,
+    /// index 3 → 4 stages (8 poles). Always at least 1.
+    fn stages_count(&self) -> usize {
+        (self.poles_idx.round() as usize + 1).min(Self::MAX_STAGES)
+    }
+
+    /// Build a `(a1, a2, a3)` TPT-SVF coefficient triplet for the given
+    /// Q. Q < 0.5 critically damps; Q = 0.707 is Butterworth (flat,
+    /// 3 dB at cutoff); higher Q peaks the response at cutoff.
+    fn svf_coefs(g: f32, q: f32) -> (f32, f32, f32) {
+        let k = 1.0 / q.max(0.0001);
+        let a1 = 1.0 / (1.0 + g * (g + k));
+        let a2 = g * a1;
+        let a3 = g * a2;
+        (a1, a2, a3)
+    }
+
+    /// Recompute both coefficient sets from cutoff / resonance / SR.
+    /// The Butterworth set is fixed at Q = 1/√2; the resonance set
+    /// follows the user's Q. Cascade stages 0..n-1 use the Butterworth
+    /// set, stage n-1 uses the resonance set.
     fn recompute(&mut self) {
         let sr = self.sample_rate.max(1.0);
         let fc = self.cutoff.clamp(20.0, sr * 0.49);
         let g = (std::f32::consts::PI * fc / sr).tan();
-        let q = 0.5 + self.resonance.clamp(0.0, 1.0) * 9.5;
-        let k = 1.0 / q;
-        self.a1 = 1.0 / (1.0 + g * (g + k));
-        self.a2 = g * self.a1;
-        self.a3 = g * self.a2;
+        let q_res = 0.5 + self.resonance.clamp(0.0, 1.0) * 9.5;
+        let q_butter = std::f32::consts::FRAC_1_SQRT_2;
+        let (a1b, a2b, a3b) = Self::svf_coefs(g, q_butter);
+        let (a1r, a2r, a3r) = Self::svf_coefs(g, q_res);
+        self.a1_butter = a1b;
+        self.a2_butter = a2b;
+        self.a3_butter = a3b;
+        self.a1_res = a1r;
+        self.a2_res = a2r;
+        self.a3_res = a3r;
     }
 
-    /// Process one sample for a single channel using the TPT-SVF integrator form.
-    fn svf_step(&mut self, x: f32, ch: usize) -> f32 {
-        let v3 = x - self.ic2[ch];
-        let v1 = self.a1 * self.ic1[ch] + self.a2 * v3;
-        let v2 = self.ic2[ch] + self.a2 * self.ic1[ch] + self.a3 * v3;
-        self.ic1[ch] = 2.0 * v1 - self.ic1[ch];
-        self.ic2[ch] = 2.0 * v2 - self.ic2[ch];
+    /// One TPT-SVF integrator step for one (stage, channel) using the
+    /// caller-supplied coefficient triplet. The triplet picks between
+    /// the Butterworth and resonance sets so the cascade can apply
+    /// resonance to the final stage only.
+    #[inline]
+    fn svf_step(&mut self, x: f32, stage: usize, ch: usize, coefs: (f32, f32, f32)) -> f32 {
+        let (a1, a2, a3) = coefs;
+        let ic1 = self.stages_ic1[stage][ch];
+        let ic2 = self.stages_ic2[stage][ch];
+        let v3 = x - ic2;
+        let v1 = a1 * ic1 + a2 * v3;
+        let v2 = ic2 + a2 * ic1 + a3 * v3;
+        self.stages_ic1[stage][ch] = 2.0 * v1 - ic1;
+        self.stages_ic2[stage][ch] = 2.0 * v2 - ic2;
         v2
     }
 }
@@ -309,7 +388,19 @@ impl Default for LowpassEffect {
 
 impl Effect for LowpassEffect {
     fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
-        (self.svf_step(left, 0), self.svf_step(right, 1))
+        let stages = self.stages_count();
+        let butter = (self.a1_butter, self.a2_butter, self.a3_butter);
+        let res = (self.a1_res, self.a2_res, self.a3_res);
+        let mut l = left;
+        let mut r = right;
+        for stage in 0..stages {
+            // Last stage carries the resonance peak; earlier stages run
+            // Butterworth so the peak doesn't compound across the cascade.
+            let coefs = if stage + 1 == stages { res } else { butter };
+            l = self.svf_step(l, stage, 0, coefs);
+            r = self.svf_step(r, stage, 1, coefs);
+        }
+        (l, r)
     }
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -318,8 +409,8 @@ impl Effect for LowpassEffect {
     }
 
     fn reset(&mut self) {
-        self.ic1 = [0.0; 2];
-        self.ic2 = [0.0; 2];
+        self.stages_ic1 = [[0.0; 2]; Self::MAX_STAGES];
+        self.stages_ic2 = [[0.0; 2]; Self::MAX_STAGES];
     }
 
     fn parameters(&self) -> &'static [ParamSpec] {
@@ -330,6 +421,14 @@ impl Effect for LowpassEffect {
         match index {
             0 => self.cutoff = value.clamp(Self::PARAMS[0].min, Self::PARAMS[0].max),
             1 => self.resonance = value.clamp(Self::PARAMS[1].min, Self::PARAMS[1].max),
+            // Poles: round to the nearest enum index, clamped to the
+            // labels' length. Doesn't change coefficients (all stages
+            // share `a1..a3`); only the cascade depth changes.
+            2 => {
+                let max_idx = (LP_POLES_LABELS.len() - 1) as f32;
+                self.poles_idx = value.round().clamp(0.0, max_idx);
+                return;
+            }
             _ => return,
         }
         self.recompute();
@@ -981,9 +1080,10 @@ mod tests {
     fn lowpass_effect_parameters_are_declared() {
         let lp = LowpassEffect::new();
         let specs = lp.parameters();
-        assert_eq!(specs.len(), 2);
+        assert_eq!(specs.len(), 3);
         assert_eq!(specs[0].name, "Cutoff");
         assert_eq!(specs[1].name, "Resonance");
+        assert_eq!(specs[2].name, "Poles");
         assert!(specs[0].min < specs[0].max);
     }
 
@@ -1140,7 +1240,7 @@ mod tests {
     fn effect_instance_dispatches_to_the_right_effect() {
         let mut lp = EffectInstance::new(EffectKind::Lowpass);
         assert_eq!(lp.kind(), EffectKind::Lowpass);
-        assert_eq!(lp.parameters().len(), 2);
+        assert_eq!(lp.parameters().len(), 3);
         let mut bc = EffectInstance::new(EffectKind::Bitcrush);
         assert_eq!(bc.kind(), EffectKind::Bitcrush);
         lp.set_sample_rate(48_000.0);
@@ -1239,7 +1339,7 @@ mod tests {
 
     #[test]
     fn param_count_reports_each_kinds_arity() {
-        assert_eq!(param_count(EffectKind::Lowpass), 2);
+        assert_eq!(param_count(EffectKind::Lowpass), 3);
         assert_eq!(param_count(EffectKind::Bitcrush), 2);
     }
 
@@ -1429,6 +1529,63 @@ mod tests {
         assert!(matches!(specs[0].format, ParamFormat::Hertz));
         assert!(matches!(specs[1].scaling, ParamScaling::Linear));
         assert!(matches!(specs[1].format, ParamFormat::Number { .. }));
+        // Poles is an Enum-format dropdown listing the four valid cascade
+        // lengths (2 / 4 / 6 / 8 poles).
+        assert_eq!(specs[2].name, "Poles");
+        if let ParamFormat::Enum { labels } = specs[2].format {
+            assert_eq!(labels, &["2", "4", "6", "8"]);
+        } else {
+            panic!("Poles spec should use ParamFormat::Enum");
+        }
+    }
+
+    #[test]
+    fn lowpass_higher_pole_count_attenuates_above_cutoff_more() {
+        // Decade-above-cutoff response should grow steeper with more
+        // stages: each additional 2-pole stage adds 12 dB/oct of rolloff,
+        // so the RMS at 10× the cutoff is monotonically smaller as the
+        // pole count rises 2 → 8.
+        let measure_rms_decade_above = |poles_idx: f32| -> f32 {
+            let mut lp = LowpassEffect::new();
+            lp.set_sample_rate(48_000.0);
+            lp.set_param(0, 1_000.0); // Cutoff = 1 kHz
+            lp.set_param(1, 0.0); // Resonance = 0 (no peaking)
+            lp.set_param(2, poles_idx); // Poles index
+            let sr = 48_000.0_f32;
+            let f_test = 10_000.0_f32; // one decade above cutoff
+                                       // Warm up the cascade, then measure 4096 samples of the
+                                       // single-channel RMS.
+            for i in 0..2048 {
+                let s = (std::f32::consts::TAU * f_test * i as f32 / sr).sin();
+                lp.process_sample(s, s);
+            }
+            let mut sum_sq = 0.0_f32;
+            for i in 2048..(2048 + 4096) {
+                let s = (std::f32::consts::TAU * f_test * i as f32 / sr).sin();
+                let (l, _r) = lp.process_sample(s, s);
+                sum_sq += l * l;
+            }
+            (sum_sq / 4096.0).sqrt()
+        };
+        let rms_2 = measure_rms_decade_above(0.0); // 2 poles
+        let rms_4 = measure_rms_decade_above(1.0); // 4 poles
+        let rms_6 = measure_rms_decade_above(2.0); // 6 poles
+        let rms_8 = measure_rms_decade_above(3.0); // 8 poles
+                                                   // Strict ordering: each step adds at least some attenuation. (The
+                                                   // exact ratio is 1 / 4^N for N additional 2-pole stages — but
+                                                   // even with shared coefficients we expect a clear monotone
+                                                   // ordering on a steady sine well above cutoff.)
+        assert!(
+            rms_2 > rms_4 && rms_4 > rms_6 && rms_6 > rms_8,
+            "rolloff at 10× cutoff should strictly steepen with pole count \
+             (2p={rms_2}, 4p={rms_4}, 6p={rms_6}, 8p={rms_8})"
+        );
+        // Sanity: 8 poles should be substantially quieter than 2 poles.
+        assert!(
+            rms_8 < rms_2 * 0.25,
+            "8-pole at 10× cutoff should be much quieter than 2-pole \
+             (2p={rms_2}, 8p={rms_8})"
+        );
     }
 
     #[test]

@@ -874,7 +874,8 @@ mod tests {
         assert_eq!(items[0], "(none)");
         assert_eq!(items[1], "Cutoff");
         assert_eq!(items[2], "Resonance");
-        assert_eq!(items.len(), 3);
+        assert_eq!(items[3], "Poles");
+        assert_eq!(items.len(), 4);
     }
 
     #[test]
