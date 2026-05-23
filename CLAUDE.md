@@ -44,7 +44,7 @@ For local release/profile/bundle builds, prefix with `cargo xtask native` (auto-
 Per-plugin Criterion benches live in `<plugin>/benches/`. Workspace-shared render benches are in `bench-suite/benches/render.rs`. Run with `cargo xtask native bench -p <plugin> --bench <name>` so target-cpu auto-tunes. Standard `cargo clippy --workspace -- -D warnings` does not compile bench/test cfg, so latent `#[cfg(test)]` lints (e.g. `field_reassign_with_default` in some test modules) only surface under `--benches`/`--tests`; the CI gate is the no-flag form.
 
 - `bench-suite::render` — shared `draw_rect`, `fill_pixmap_opaque`, `fill_column_opaque`. `cargo xtask bench-compare` runs this twice (target-cpu=x86-64 vs haswell) to quantify SIMD/native gains.
-- `multosis::dsp` — `AudioEngine::process` workload matrix (mixed / silence / idle / many-boundaries / 64-samp / 1024-samp). Baseline: 72 µs/512-samp at 48 kHz for the mixed case.
+- `multosis::dsp` — `AudioEngine::process` workload matrix (mixed / silence / idle / many-boundaries / 64-samp / 1024-samp / fm-heavy / delay-heavy). Baseline: 72 µs/512-samp at 48 kHz for the mixed case.
 - `multosis::effects` — one bench per `EffectKind`, registered via a loop over `EffectKind::ALL`. **Adding a new effect kind requires no edits to the bench file** — implement the `Effect` trait, append the variant to `EffectKind::ALL` and `default_params_for_kind`, and the loop registers `effect/process_sample_<Kind>` on the next run.
 - `warp-zone::dsp` (`SpectralShifter`), `pope-scope::dsp` (`RingBuffer` mipmap push), `wavetable-filter::dsp` (frame interp).
 - `tract-dsp/examples/tract_dsp_profile.rs` — profiling harness for shared DSP primitives (`cargo xtask native run --release -p tract-dsp --example tract_dsp_profile`).

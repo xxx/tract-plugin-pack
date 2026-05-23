@@ -25,8 +25,8 @@ fn engine_uniform(kind: Option<EffectKind>) -> AudioEngine {
     engine
 }
 
-/// Engine with half Lowpass / half Bitcrush — the "loaded" workload that
-/// covers two distinct DSP shapes in one bench.
+/// Engine with half SVF (multimode TPT filter) / half Bitcrush — the
+/// "loaded" workload that covers two distinct DSP shapes in one bench.
 fn engine_mixed() -> AudioEngine {
     let mut engine = AudioEngine::new();
     engine.set_sample_rate(48_000.0);
@@ -51,6 +51,26 @@ fn engine_mixed() -> AudioEngine {
 /// Modulator mode (per-channel sine carrier modulated by the input). The
 /// series chain runs all 16 stages on every sample, exercising both FM
 /// code paths plus the delay-line + carrier-phase stacking.
+/// Engine with every row running Delay. Each `EffectInstance::Delay`
+/// holds a 2-second-at-192-kHz buffer per channel (~3 MB), so 16 rows
+/// is ~48 MB of delay state — the heaviest cache-footprint workload
+/// the engine can produce today. Defaults to Free-mode 250 ms with
+/// 30 % feedback and no ducking, matching `default_params_for_kind`.
+fn engine_delay_loaded() -> AudioEngine {
+    let mut engine = AudioEngine::new();
+    engine.set_sample_rate(48_000.0);
+    let mut effects: [TrackEffect; 16] = std::array::from_fn(TrackEffect::default_for_row);
+    for te in effects.iter_mut() {
+        te.kind = EffectKind::Delay;
+        te.params = default_params_for_kind(EffectKind::Delay);
+        te.mix = 1.0;
+    }
+    engine.set_effects(&effects);
+    let modulation: [TrackModulation; 16] = std::array::from_fn(TrackModulation::default_for_row);
+    engine.set_modulation(&modulation);
+    engine
+}
+
 fn engine_fm_loaded() -> AudioEngine {
     let mut engine = AudioEngine::new();
     engine.set_sample_rate(48_000.0);
@@ -95,7 +115,7 @@ fn bench_process(c: &mut Criterion) {
     let grid = Grid::default();
     let mut group = c.benchmark_group("audio_engine");
 
-    // Headline workload: every row active, half Lowpass / half Bitcrush,
+    // Headline workload: every row active, half SVF / half Bitcrush,
     // modulation running, transport playing, 512-sample block.
     {
         let mut engine = engine_mixed();
@@ -108,7 +128,7 @@ fn bench_process(c: &mut Criterion) {
     }
 
     // Structural baseline: every row's effect is `None` (silence). The
-    // delta from `_mixed` is the actual Lowpass+Bitcrush DSP cost; what
+    // delta from `_mixed` is the actual SVF+Bitcrush DSP cost; what
     // remains is the per-row infrastructure (active loop, modulation,
     // compressor, dry/wet mix).
     {
@@ -170,7 +190,7 @@ fn bench_process(c: &mut Criterion) {
     }
 
     // FM-heavy workload: every row runs FM, half Carrier mode + half
-    // Modulator mode. FM is the heaviest per-sample effect (~4× Lowpass);
+    // Modulator mode. FM is the heaviest per-sample DSP effect (~4× SVF);
     // chaining 16 of them in series stresses the worst case the engine
     // can produce today.
     {
@@ -179,6 +199,23 @@ fn bench_process(c: &mut Criterion) {
         let mut right = vec![0.3_f32; 512];
         group.throughput(Throughput::Elements(left.len() as u64));
         group.bench_function("process_512samp_fm", |b| {
+            b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid));
+        });
+    }
+
+    // Delay-heavy workload: every row runs Delay. Per-sample compute
+    // is light (one tap read + one write), but each instance carries
+    // a 2-second @ 192 kHz buffer per channel (~3 MB), so 16 rows
+    // chained = ~48 MB of delay state — the heaviest cache footprint
+    // the engine can produce today. The delta from `_mixed` here
+    // tells us how much pure memory-bandwidth pressure the chain
+    // adds, separately from per-sample DSP cost.
+    {
+        let mut engine = engine_delay_loaded();
+        let mut left = vec![0.3_f32; 512];
+        let mut right = vec![0.3_f32; 512];
+        group.throughput(Throughput::Elements(left.len() as u64));
+        group.bench_function("process_512samp_delay", |b| {
             b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid));
         });
     }
