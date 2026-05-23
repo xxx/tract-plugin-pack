@@ -263,6 +263,9 @@ pub fn draw_effect_section(
     // `Some((buffer, caret_on))` when a right-click text edit is active on
     // the Mix dial; it renders the buffer + caret in place of the percentage.
     editing_mix: Option<(&str, bool)>,
+    // `Some(i)` when a per-param Enum dropdown is currently open — render its
+    // trigger in the open (accented) state.
+    open_param_dropdown: Option<usize>,
     scale: f32,
 ) {
     let lay = effect_layout(scale);
@@ -287,14 +290,43 @@ pub fn draw_effect_section(
         track.kind.name(),
         kind_dropdown_open,
     );
-    // Parameter dials.
+    // Parameter dials. An `Enum`-format param replaces its dial with a
+    // dropdown trigger — uniform widget for any N-option discrete selector,
+    // whatever the option count.
     let instance = crate::effects::EffectInstance::new(track.kind);
     let specs = instance.parameters();
     for (i, spec) in specs.iter().enumerate() {
         let (dx, dy, dw, dh) = lay.dials[i];
         let value = track.params[i];
-        let norm = crate::effects::value_to_norm(value, spec.min, spec.max, spec.scaling);
         let value_text = crate::effects::format_value(value, spec.format);
+        if matches!(spec.format, crate::effects::ParamFormat::Enum { .. }) {
+            // Centre a labelled dropdown trigger in the dial slot. The label
+            // sits above the trigger like a dial's name above its dial face.
+            let label_size = (dh * 0.18).max(11.0 * scale);
+            let label_w = tr.text_width(spec.name, label_size);
+            tr.draw_text(
+                pixmap,
+                dx + (dw - label_w) * 0.5,
+                dy + dh * 0.22,
+                spec.name,
+                label_size,
+                widgets::color_text(),
+            );
+            let trigger_h = (dh * 0.32).max(22.0 * scale);
+            let trigger_w = (dw - 8.0 * scale).max(40.0);
+            let trigger_x = dx + (dw - trigger_w) * 0.5;
+            let trigger_y = dy + dh * 0.46;
+            let is_open = open_param_dropdown == Some(i);
+            widgets::dropdown::draw_dropdown_trigger(
+                pixmap,
+                tr,
+                (trigger_x, trigger_y, trigger_w, trigger_h),
+                &value_text,
+                is_open,
+            );
+            continue;
+        }
+        let norm = crate::effects::value_to_norm(value, spec.min, spec.max, spec.scaling);
         match editing_dial {
             Some((idx, buf, caret_on)) if idx == i => {
                 widgets::param_dial::draw_dial_ex(

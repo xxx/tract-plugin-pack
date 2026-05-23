@@ -67,14 +67,17 @@ enum View {
 }
 
 /// Which dropdown an `EffectAction`-tagged `DropdownState` event refers to.
-/// The effect-kind, modulation-target, and per-track trigger-source dropdowns
-/// share a single `DropdownState<EffectAction>` — only one is open at a time,
-/// and the payload distinguishes which trigger opened it.
+/// The effect-kind, modulation-target, per-track trigger-source, and per-param
+/// (Enum-format) dropdowns share a single `DropdownState<EffectAction>` — only
+/// one is open at a time, and the payload distinguishes which trigger opened
+/// it. `ParamDropdown(i)` carries the param's slot index (0..MAX_EFFECT_PARAMS)
+/// so the selection routes back to `set_param(i, …)` on the right parameter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum EffectAction {
     Kind,
     Target,
     Trigger,
+    ParamDropdown(usize),
 }
 
 /// Clamp a candidate selected-track index into `0..ROWS`.
@@ -616,6 +619,11 @@ impl MultosisWindow {
             trigger,
         );
         if let Some(EffectHit::Dial(i)) = hit {
+            // Enum params are dropdowns, not editable text fields — let the
+            // right-click fall through (left-click opens the dropdown).
+            if self.param_enum_labels(i).is_some() {
+                return baseview::EventStatus::Ignored;
+            }
             // Right-clicking a *different* dial while one is already
             // being edited would silently discard the prior edit if we
             // jumped straight to `begin` (which clears the buffer).
@@ -728,6 +736,11 @@ impl MultosisWindow {
             }
             _ => None,
         };
+        // Which Enum-format param has its dropdown open, if any.
+        let open_param_dropdown = (0..crate::effects::MAX_EFFECT_PARAMS).find(|&i| {
+            self.effect_dropdown
+                .is_open_for(EffectAction::ParamDropdown(i))
+        });
         effect_editor::draw_effect_section(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
@@ -736,6 +749,7 @@ impl MultosisWindow {
             self.effect_dropdown.is_open_for(EffectAction::Kind),
             editing_dial,
             editing_mix,
+            open_param_dropdown,
             self.scale_factor,
         );
         effect_editor::draw_section_header(
@@ -862,7 +876,29 @@ impl MultosisWindow {
                 );
             }
             EffectHit::Dial(i) => {
-                if self.effect_click.check_and_update(EffectHit::Dial(i)) {
+                // Enum-format params open a dropdown over the dial slot instead
+                // of being draggable. Double-click reset/text-edit/drag are
+                // skipped for them — a discrete selector doesn't have a
+                // continuous default to reset toward, and dragging a binary
+                // value is meaningless.
+                if let Some(labels) = self.param_enum_labels(i) {
+                    let (dx, dy, dw, dh) = lay.dials[i];
+                    let trigger_h = (dh * 0.32).max(22.0 * self.scale_factor);
+                    let trigger_w = (dw - 8.0 * self.scale_factor).max(40.0);
+                    let trigger_x = dx + (dw - trigger_w) * 0.5;
+                    let trigger_y = dy + dh * 0.46;
+                    let current = self.selected_track_effect().params[i].round() as usize;
+                    let win = (self.physical_width as f32, self.physical_height as f32);
+                    let items: Vec<&'static str> = labels.to_vec();
+                    self.effect_dropdown.open(
+                        EffectAction::ParamDropdown(i),
+                        (trigger_x, trigger_y, trigger_w, trigger_h),
+                        &items,
+                        current.min(labels.len().saturating_sub(1)),
+                        false,
+                        win,
+                    );
+                } else if self.effect_click.check_and_update(EffectHit::Dial(i)) {
                     self.reset_effect_dial_to_default(i);
                 } else if let Some(spec) = self.param_spec(i) {
                     let value = self.selected_track_effect().params[i];
@@ -1200,6 +1236,41 @@ impl MultosisWindow {
         self.mark_config_dirty();
     }
 
+    /// `Some(i)` when an Enum-format parameter's dropdown is currently open
+    /// — `i` is the param slot index in `track.params`. `None` when no
+    /// param dropdown is open (Kind / Target / Trigger dropdowns don't count).
+    fn open_param_dropdown_index(&self) -> Option<usize> {
+        (0..crate::effects::MAX_EFFECT_PARAMS).find(|&i| {
+            self.effect_dropdown
+                .is_open_for(EffectAction::ParamDropdown(i))
+        })
+    }
+
+    /// The `&[&str]` labels list for the Enum-format param at slot `i` on the
+    /// selected track, or `None` if that slot is out of range or not Enum-format.
+    fn param_enum_labels(&self, i: usize) -> Option<&'static [&'static str]> {
+        use crate::effects::Effect;
+        let kind = self.selected_track_effect().kind;
+        let specs = crate::effects::EffectInstance::new(kind).parameters();
+        let spec = specs.get(i)?;
+        match spec.format {
+            crate::effects::ParamFormat::Enum { labels } => Some(labels),
+            _ => None,
+        }
+    }
+
+    /// Apply a per-param Enum dropdown selection: write the label's index
+    /// (as `f32`) into the track's `params[param_idx]` and mark dirty.
+    fn apply_param_dropdown_selection(&mut self, param_idx: usize, item: usize) {
+        if param_idx >= crate::effects::MAX_EFFECT_PARAMS {
+            return;
+        }
+        if let Ok(mut eff) = self.params.track_effects.lock() {
+            eff[self.selected_track].params[param_idx] = item as f32;
+        }
+        self.mark_config_dirty();
+    }
+
     /// Apply a target-dropdown selection (item index) to the selected
     /// assignable MSEG. Marks config dirty.
     fn apply_target_selection(&mut self, item: usize) {
@@ -1458,6 +1529,10 @@ impl MultosisWindow {
                 effect_editor::target_items(kind)
             } else if self.effect_dropdown.is_open_for(EffectAction::Trigger) {
                 effect_editor::trigger_items().to_vec()
+            } else if let Some(idx) = self.open_param_dropdown_index() {
+                self.param_enum_labels(idx)
+                    .map(|labs| labs.to_vec())
+                    .unwrap_or_default()
             } else {
                 effect_editor::kind_items()
             };
@@ -1611,6 +1686,10 @@ impl baseview::WindowHandler for MultosisWindow {
                             effect_editor::target_items(kind)
                         } else if self.effect_dropdown.is_open_for(EffectAction::Trigger) {
                             effect_editor::trigger_items().to_vec()
+                        } else if let Some(idx) = self.open_param_dropdown_index() {
+                            self.param_enum_labels(idx)
+                                .map(|labs| labs.to_vec())
+                                .unwrap_or_default()
                         } else {
                             effect_editor::kind_items()
                         };
@@ -1711,6 +1790,11 @@ impl baseview::WindowHandler for MultosisWindow {
                             effect_editor::target_items(kind)
                         } else if self.effect_dropdown.is_open_for(EffectAction::Trigger) {
                             effect_editor::trigger_items().to_vec()
+                        } else if let Some(idx) = self.open_param_dropdown_index() {
+                            // Enum param's label list, for the popup items.
+                            self.param_enum_labels(idx)
+                                .map(|labs| labs.to_vec())
+                                .unwrap_or_default()
                         } else {
                             effect_editor::kind_items()
                         };
@@ -1727,6 +1811,9 @@ impl baseview::WindowHandler for MultosisWindow {
                                 self.apply_target_selection(idx);
                             }
                             EffectAction::Trigger => self.apply_trigger_selection(idx),
+                            EffectAction::ParamDropdown(param_idx) => {
+                                self.apply_param_dropdown_selection(param_idx, idx);
+                            }
                         }
                     }
                     return baseview::EventStatus::Captured;
