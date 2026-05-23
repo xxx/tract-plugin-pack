@@ -1922,6 +1922,39 @@ impl baseview::WindowHandler for MultosisWindow {
                 }
                 return status;
             }
+            baseview::Event::Mouse(baseview::MouseEvent::WheelScrolled { delta, .. }) => {
+                // Mousewheel scrolls the currently-open dropdown popup.
+                // Lines deliver one click per detent; pixel-mode trackpads
+                // deliver fine-grained pixel counts — scale the latter to
+                // match (six-pack uses the same 0.05 factor).
+                let dy = match delta {
+                    baseview::ScrollDelta::Lines { y, .. } => *y,
+                    baseview::ScrollDelta::Pixels { y, .. } => *y * 0.05,
+                };
+                let win = (self.physical_width as f32, self.physical_height as f32);
+                if self.speed_dropdown.is_open() {
+                    let items = toolbar::speed_items();
+                    self.speed_dropdown.on_wheel(dy, &items, win);
+                    return baseview::EventStatus::Captured;
+                }
+                if self.effect_dropdown.is_open() {
+                    let kind = self.selected_track_effect().kind;
+                    let items: Vec<&'static str> =
+                        if self.effect_dropdown.is_open_for(EffectAction::Target) {
+                            effect_editor::target_items(kind)
+                        } else if self.effect_dropdown.is_open_for(EffectAction::Trigger) {
+                            effect_editor::trigger_items().to_vec()
+                        } else if let Some(idx) = self.open_param_dropdown_index() {
+                            self.param_enum_labels(idx)
+                                .map(|labs| labs.to_vec())
+                                .unwrap_or_default()
+                        } else {
+                            effect_editor::kind_items()
+                        };
+                    self.effect_dropdown.on_wheel(dy, &items, win);
+                    return baseview::EventStatus::Captured;
+                }
+            }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
                 button: baseview::MouseButton::Left,
                 ..
