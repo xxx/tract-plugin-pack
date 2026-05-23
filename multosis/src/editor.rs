@@ -884,7 +884,9 @@ impl MultosisWindow {
                 if let Some(labels) = self.param_enum_labels(i) {
                     let (dx, dy, dw, dh) = lay.dials[i];
                     let trigger_h = (dh * 0.32).max(22.0 * self.scale_factor);
-                    let trigger_w = (dw - 8.0 * self.scale_factor).max(40.0);
+                    // Matches the renderer in `draw_effect_section`: overflow
+                    // the dial slot by 6 px each side so "Modulator" fits.
+                    let trigger_w = dw + 12.0 * self.scale_factor;
                     let trigger_x = dx + (dw - trigger_w) * 0.5;
                     let trigger_y = dy + dh * 0.46;
                     let current = self.selected_track_effect().params[i].round() as usize;

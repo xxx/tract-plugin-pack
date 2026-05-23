@@ -313,7 +313,11 @@ pub fn draw_effect_section(
                 widgets::color_text(),
             );
             let trigger_h = (dh * 0.32).max(22.0 * scale);
-            let trigger_w = (dw - 8.0 * scale).max(40.0);
+            // Overflow the dial slot by 6 px on each side so longer labels
+            // (e.g. "Modulator") fit without truncation. The horizontal gap
+            // between adjacent dials is 8 px at scale 1, so a 6 px overflow
+            // leaves a comfortable margin to the neighbouring slot.
+            let trigger_w = dw + 12.0 * scale;
             let trigger_x = dx + (dw - trigger_w) * 0.5;
             let trigger_y = dy + dh * 0.46;
             let is_open = open_param_dropdown == Some(i);
