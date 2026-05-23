@@ -286,6 +286,7 @@ pub fn draw_toolbar(
 fn speed_label(s: crate::clock::Speed) -> &'static str {
     use crate::clock::Speed;
     match s {
+        Speed::Hold => "Hold",
         Speed::Div32 => "1/32",
         Speed::Div16 => "1/16",
         Speed::Div8 => "1/8",
@@ -297,7 +298,7 @@ fn speed_label(s: crate::clock::Speed) -> &'static str {
 
 /// The Speed dropdown items, in `Speed::ALL` order. Item index `i` maps
 /// to `Speed::ALL[i]`.
-pub fn speed_items() -> [&'static str; 6] {
+pub fn speed_items() -> [&'static str; 7] {
     crate::clock::Speed::ALL.map(speed_label)
 }
 

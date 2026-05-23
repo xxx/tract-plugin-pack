@@ -4,10 +4,16 @@
 
 use nih_plug::prelude::Enum;
 
-/// How fast the playhead advances — a musical note division. Backs the
-/// plugin's `speed` parameter, so it derives nih-plug's `Enum`.
+/// How fast the playhead advances — a musical note division, or `Hold`
+/// (the playhead does not advance at all). Backs the plugin's `speed`
+/// parameter, so it derives nih-plug's `Enum`.
 #[derive(Enum, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Speed {
+    /// Playhead frozen — the sequencer does not advance. Effects and
+    /// modulation continue running on whatever rows are currently active.
+    #[id = "hold"]
+    #[name = "Hold"]
+    Hold,
     /// 1/32 note.
     #[id = "div32"]
     #[name = "1/32"]
@@ -35,8 +41,10 @@ pub enum Speed {
 }
 
 impl Speed {
-    /// All six speeds, fastest to slowest.
-    pub const ALL: [Speed; 6] = [
+    /// All speeds, in dropdown order: `Hold` first, then the divisions
+    /// fastest to slowest.
+    pub const ALL: [Speed; 7] = [
+        Speed::Hold,
         Speed::Div32,
         Speed::Div16,
         Speed::Div8,
@@ -46,9 +54,11 @@ impl Speed {
     ];
 
     /// The length of one step in quarter notes (a 1/16 note is 0.25 quarter
-    /// notes; a whole note is 4.0).
+    /// notes; a whole note is 4.0). `Hold` returns infinity — paired with
+    /// the [`StepClock::advance`] guard it makes the clock a no-op.
     pub fn quarter_notes(self) -> f64 {
         match self {
+            Speed::Hold => f64::INFINITY,
             Speed::Div32 => 0.125,
             Speed::Div16 => 0.25,
             Speed::Div8 => 0.5,
@@ -101,15 +111,17 @@ impl StepClock {
     /// Advance the clock across a process block of `block_len` samples at the
     /// given `samples_per_step`. `on_step` is called once per step boundary
     /// that falls within the block, with the sample offset of the boundary
-    /// inside the block. A non-positive `samples_per_step` (or an empty block)
-    /// fires nothing.
+    /// inside the block. A non-positive or non-finite `samples_per_step` (or
+    /// an empty block) fires nothing **and does not accumulate** — so a
+    /// `Speed::Hold` block leaves the clock's phase untouched and resuming
+    /// at a finite speed picks up where the playhead left off.
     pub fn advance(
         &mut self,
         block_len: usize,
         samples_per_step: f64,
         mut on_step: impl FnMut(usize),
     ) {
-        if samples_per_step <= 0.0 || block_len == 0 {
+        if samples_per_step <= 0.0 || !samples_per_step.is_finite() || block_len == 0 {
             return;
         }
         // Immediate first boundary after reset, then regular accumulation.
@@ -141,8 +153,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn speed_all_lists_six_divisions() {
-        assert_eq!(Speed::ALL.len(), 6);
+    fn speed_all_lists_hold_first_then_six_divisions() {
+        assert_eq!(Speed::ALL.len(), 7);
+        assert_eq!(Speed::ALL[0], Speed::Hold);
+    }
+
+    #[test]
+    fn speed_hold_quarter_notes_is_infinite() {
+        assert!(Speed::Hold.quarter_notes().is_infinite());
+    }
+
+    #[test]
+    fn step_clock_advance_with_infinite_step_is_a_noop() {
+        // Hold maps through `samples_per_step` to infinity. The clock must
+        // not tick, and must not accumulate — so resuming at a finite speed
+        // picks up at the same phase, not flooded with pending ticks.
+        let mut clock = StepClock::new();
+        let mut ticks = 0;
+        clock.advance(48_000, f64::INFINITY, |_| ticks += 1);
+        clock.advance(48_000, f64::INFINITY, |_| ticks += 1);
+        assert_eq!(ticks, 0, "no ticks during Hold");
+        // Resume at a finite speed: the immediate first boundary still fires
+        // (transport-start arming), and no spurious ticks pile up.
+        let mut after = 0;
+        clock.advance(64, 1000.0, |_| after += 1);
+        assert_eq!(after, 1, "only the pending-first arm fires");
     }
 
     #[test]
