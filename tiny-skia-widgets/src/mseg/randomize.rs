@@ -123,13 +123,14 @@ pub fn randomize(data: &mut MsegData, style: RandomStyle, seed: u32) {
     let mut rng = Rng::new(seed);
 
     // Node count — every style scales with the time grid. Stepped/Spiky fill
-    // it exactly (one node per cell, +1 for the closing endpoint). Smooth,
-    // Ramps, and Chaos take a randomized fraction of it: sparse for Smooth,
-    // a little denser for Ramps, densest for Chaos.
+    // it exactly (one node per cell, +1 for the closing endpoint). Smooth and
+    // Chaos take 60–100 % of grid_count so a fine grid materially increases
+    // the node density (the user picked it for a reason); Ramps stays a bit
+    // sparser for a calmer feel.
     let grid_count = (data.time_divisions as usize + 1).clamp(2, MAX_NODES);
     let count = match style {
         RandomStyle::Stepped | RandomStyle::Spiky => grid_count,
-        RandomStyle::Smooth => grid_scaled_count(&mut rng, grid_count, 0.25, 0.5),
+        RandomStyle::Smooth => grid_scaled_count(&mut rng, grid_count, 0.6, 1.0),
         RandomStyle::Ramps => grid_scaled_count(&mut rng, grid_count, 0.35, 0.6),
         RandomStyle::Chaos => grid_scaled_count(&mut rng, grid_count, 0.6, 1.0),
     };
@@ -351,6 +352,27 @@ mod tests {
                 fine_total > coarse_total,
                 "{style:?}: fine grid ({fine_total}) should yield more nodes \
                  than coarse ({coarse_total})"
+            );
+        }
+    }
+
+    #[test]
+    fn smooth_density_respects_a_fine_grid() {
+        // Regression for a tuning where Smooth at 0.25–0.5 of grid_count
+        // bottomed out at 4 nodes (= 2 endpoints + 2 interior) on a
+        // 16-division grid — the user picked a fine grid expecting density,
+        // and ignoring it felt broken. With the 0.6–1.0 range, every
+        // realisation must have at least 10 nodes on a 16-division grid
+        // (grid_count = 17 → 0.6 * 17 ≈ 10 after rounding).
+        for seed in 0..32u32 {
+            let mut d = MsegData::default();
+            d.time_divisions = 16;
+            randomize(&mut d, RandomStyle::Smooth, seed);
+            assert!(
+                d.node_count >= 10,
+                "seed {seed}: Smooth on a 16-division grid produced only \
+                 {} nodes (want ≥ 10)",
+                d.node_count
             );
         }
     }
