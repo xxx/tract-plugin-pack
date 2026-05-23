@@ -445,9 +445,14 @@ impl Effect for BitcrushEffect {
 ///   (through-zero phase modulation). Each channel runs its own carrier so
 ///   stereo input produces stereo output.
 ///
-/// `Feedback` adds the previous output sample back into the modulation
-/// signal, enriching the harmonic content (brass-like in Modulator mode;
-/// trippy self-reinforcing wobble in Carrier mode).
+/// `Feedback` mixes the previous output sample back into the effect's
+/// state — chorus-style (delay-tap → write head) in Carrier mode, which
+/// adds resonant density to the vibrato without disturbing the LFO
+/// modulation; DX7-style operator self-FM in Modulator mode, which
+/// produces sawtooth-like harmonic richness on the carrier sine. The
+/// Carrier-mode loop is capped at 0.95 to prevent runaway; the
+/// Modulator-mode self-FM is scaled so feedback = 1.0 stops short of
+/// the aliasing-noise regime.
 pub struct FmEffect {
     // Stored parameters.
     mode: f32, // 0 = Carrier, 1 = Modulator (rounded on set_param).
@@ -581,18 +586,21 @@ impl Effect for FmEffect {
             // Carrier mode: input is the audio. A sine at `freq_hz` modulates
             // the delay length around a 5 ms centre, so the output is the
             // input frequency-shifted by `-d(delay)/dt`. Per-channel buffers,
-            // shared modulator.
+            // shared modulator. Feedback is chorus-style — the delay tap's
+            // previous output mixes back into the write head, adding
+            // resonance/density to the chorus without affecting the LFO
+            // modulation pattern. Capped at 0.95 to keep the ~5 ms loop
+            // from running away.
             let sr_ms = sr * 0.001;
             let center = Self::CENTER_DELAY_MS * sr_ms;
             let swing = depth * center * 0.95;
             let mod_sine = (self.mod_phase * two_pi).sin();
             self.mod_phase = (self.mod_phase + phase_inc).rem_euclid(1.0);
-            let mod_value = mod_sine + feedback * (self.prev_out_l + self.prev_out_r) * 0.5;
-            let delay = (center + swing * mod_value).max(0.5);
+            let delay = (center + swing * mod_sine).max(0.5);
 
-            // Write the new input, then read the modulated delay tap.
-            self.delay_l[self.write_idx] = left;
-            self.delay_r[self.write_idx] = right;
+            let fb = feedback.clamp(0.0, 0.95);
+            self.delay_l[self.write_idx] = left + fb * self.prev_out_l;
+            self.delay_r[self.write_idx] = right + fb * self.prev_out_r;
             let out_l = Self::read_delay(&self.delay_l, self.write_idx, delay);
             let out_r = Self::read_delay(&self.delay_r, self.write_idx, delay);
             self.write_idx = (self.write_idx + 1) % self.delay_l.len();
@@ -603,10 +611,15 @@ impl Effect for FmEffect {
             // Modulator mode: input modulates an internal sine carrier
             // (per-channel). Through-zero phase modulation: the carrier's
             // instantaneous frequency is `freq_hz + sr · depth · input`.
-            let mod_l = left + feedback * self.prev_out_l;
-            let mod_r = right + feedback * self.prev_out_r;
-            let inc_l = phase_inc + depth * mod_l;
-            let inc_r = phase_inc + depth * mod_r;
+            // Feedback adds the previous output back into the carrier's own
+            // phase increment (DX7-style operator feedback). The fixed
+            // `FB_PHASE_SCALE` keeps the maximum self-modulation phase
+            // deviation at ±0.5 cycles/sample even at feedback = 1, so the
+            // self-modulation doesn't immediately push the carrier into
+            // aliasing-induced noise.
+            const FB_PHASE_SCALE: f32 = 0.5;
+            let inc_l = phase_inc + depth * left + feedback * FB_PHASE_SCALE * self.prev_out_l;
+            let inc_r = phase_inc + depth * right + feedback * FB_PHASE_SCALE * self.prev_out_r;
             self.carrier_phase_l = (self.carrier_phase_l + inc_l).rem_euclid(1.0);
             self.carrier_phase_r = (self.carrier_phase_r + inc_r).rem_euclid(1.0);
             let out_l = (self.carrier_phase_l * two_pi).sin();
@@ -1474,6 +1487,59 @@ mod tests {
             "after reset Carrier mode on silent input is silence"
         );
         assert_eq!(r, 0.0);
+    }
+
+    #[test]
+    fn fm_carrier_mode_feedback_is_audible_across_the_full_range() {
+        // Regression: an earlier formulation routed feedback into the
+        // modulation signal, which past ~15 % clamped the delay to its
+        // minimum sample and collapsed the output to dry. With chorus-style
+        // feedback (delay output → write head), every feedback step from
+        // 0 % to 95 % produces a distinct decay character — easiest to
+        // verify on an impulse input where each feedback level rings for
+        // a different number of taps before falling silent.
+        let render_impulse_tail = |fb_pct: f32| -> f32 {
+            let mut fm = FmEffect::new();
+            fm.set_sample_rate(48_000.0);
+            fm.set_param(3, 0.0); // Carrier
+            fm.set_param(0, 5.0); // Freq
+            fm.set_param(1, 0.0); // Depth = 0: pure delay-line, no LFO swing
+            fm.set_param(2, fb_pct);
+            // Impulse at sample 0; then 4000 zero samples (~83 ms — long
+            // enough for the 5 ms-loop to ring out at any feedback level).
+            let mut energy = 0.0_f32;
+            let (l, r) = fm.process_sample(1.0, 1.0);
+            energy += l.abs() + r.abs();
+            for _ in 0..4000 {
+                let (l, r) = fm.process_sample(0.0, 0.0);
+                energy += l.abs() + r.abs();
+            }
+            energy
+        };
+        // 0 % feedback: a single echo at +5 ms, then silence — minimum energy.
+        let e0 = render_impulse_tail(0.0);
+        // 50 % feedback: each echo is half the previous, decaying for many
+        // round-trips. More total energy than 0 %.
+        let e50 = render_impulse_tail(50.0);
+        // 90 % feedback: long, slow decay, still bounded. Strictly more
+        // energy than 50 %.
+        let e90 = render_impulse_tail(90.0);
+        assert!(
+            e50 > e0 * 1.3,
+            "50 % feedback must produce noticeably more tail energy than 0 % \
+             (got {e50} vs {e0})"
+        );
+        assert!(
+            e90 > e50 * 1.3,
+            "90 % feedback must produce noticeably more tail energy than 50 % \
+             (got {e90} vs {e50})"
+        );
+        // Sanity: feedback must not run away to infinity at the 95 % cap.
+        let e95 = render_impulse_tail(95.0);
+        assert!(
+            e95.is_finite() && e95 < 1e6,
+            "feedback at the cap must produce a bounded tail (got {e95})"
+        );
     }
 
     #[test]
