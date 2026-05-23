@@ -387,7 +387,7 @@ pub(crate) fn strip_buttons(
     let grid_w = 130.0 * scale;
     let polarity_w = 100.0 * scale;
     let play_mode_w = 110.0 * scale;
-    let style_w = 150.0 * scale;
+    let style_w = 180.0 * scale;
     let rand_w = 130.0 * scale;
 
     // Left cluster, anchored at `sx + pad`.
