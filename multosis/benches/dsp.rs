@@ -46,6 +46,28 @@ fn engine_mixed() -> AudioEngine {
     engine
 }
 
+/// Engine with every row running FM — the heaviest per-effect workload.
+/// Even-numbered rows are Carrier mode (delay-line vibrato), odd rows are
+/// Modulator mode (per-channel sine carrier modulated by the input). The
+/// series chain runs all 16 stages on every sample, exercising both FM
+/// code paths plus the delay-line + carrier-phase stacking.
+fn engine_fm_loaded() -> AudioEngine {
+    let mut engine = AudioEngine::new();
+    engine.set_sample_rate(48_000.0);
+    let mut effects: [TrackEffect; 16] = std::array::from_fn(TrackEffect::default_for_row);
+    for (i, te) in effects.iter_mut().enumerate() {
+        te.kind = EffectKind::Fm;
+        te.params = default_params_for_kind(EffectKind::Fm);
+        // Mode is at param index 3 (0 = Carrier, 1 = Modulator).
+        te.params[3] = if i % 2 == 0 { 0.0 } else { 1.0 };
+        te.mix = 1.0;
+    }
+    engine.set_effects(&effects);
+    let modulation: [TrackModulation; 16] = std::array::from_fn(TrackModulation::default_for_row);
+    engine.set_modulation(&modulation);
+    engine
+}
+
 /// One `process` iteration: refill the buffers (so feedback/filtering
 /// doesn't accumulate across iterations) then call `process`.
 fn run_process(
@@ -143,6 +165,20 @@ fn bench_process(c: &mut Criterion) {
         let mut right = vec![0.3_f32; 1024];
         group.throughput(Throughput::Elements(left.len() as u64));
         group.bench_function("process_1024samp_mixed", |b| {
+            b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid));
+        });
+    }
+
+    // FM-heavy workload: every row runs FM, half Carrier mode + half
+    // Modulator mode. FM is the heaviest per-sample effect (~4× Lowpass);
+    // chaining 16 of them in series stresses the worst case the engine
+    // can produce today.
+    {
+        let mut engine = engine_fm_loaded();
+        let mut left = vec![0.3_f32; 512];
+        let mut right = vec![0.3_f32; 512];
+        group.throughput(Throughput::Elements(left.len() as u64));
+        group.bench_function("process_512samp_fm", |b| {
             b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid));
         });
     }
