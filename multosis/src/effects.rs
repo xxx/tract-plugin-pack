@@ -448,11 +448,16 @@ impl Effect for BitcrushEffect {
 /// `Feedback` mixes the previous output sample back into the effect's
 /// state — chorus-style (delay-tap → write head) in Carrier mode, which
 /// adds resonant density to the vibrato without disturbing the LFO
-/// modulation; DX7-style operator self-FM in Modulator mode, which
-/// produces sawtooth-like harmonic richness on the carrier sine. The
-/// Carrier-mode loop is capped at 0.95 to prevent runaway; the
-/// Modulator-mode self-FM is scaled so feedback = 1.0 stops short of
-/// the aliasing-noise regime.
+/// modulation; DX7-style operator self-PM in Modulator mode, which
+/// produces sawtooth-like harmonic richness on the carrier sine.
+///
+/// **Modulator-mode input gating**: the internal carrier sine plays only
+/// when there's input to modulate. An envelope follower tracks the input
+/// level (fast attack, slow release) and scales the carrier's amplitude,
+/// so a silent input — including the host having stopped the transport —
+/// yields a silent output instead of a continuously-ringing bare carrier.
+/// Carrier mode is intrinsically input-driven (a silent delay line is
+/// silent), so no gate is needed there.
 pub struct FmEffect {
     // Stored parameters.
     mode: f32, // 0 = Carrier, 1 = Modulator (rounded on set_param).
@@ -469,6 +474,13 @@ pub struct FmEffect {
     // One-sample feedback memory.
     prev_out_l: f32,
     prev_out_r: f32,
+
+    // Modulator-mode input gate: a one-pole envelope follower over
+    // `|left| + |right|`, used as the carrier amplitude. Coefficients
+    // are cached from `set_sample_rate`.
+    input_env: f32,
+    env_attack_coef: f32,
+    env_release_coef: f32,
 
     // Carrier-mode delay lines (one per channel). Sized once in `new`; reads
     // and writes are wrap-around. 4096 samples is ample headroom for the
@@ -488,6 +500,11 @@ impl FmEffect {
     /// reference around which the modulator swings. 5 ms is short enough
     /// that pitch shifts are perceived as FM/vibrato rather than chorus.
     const CENTER_DELAY_MS: f32 = 5.0;
+    /// Modulator-mode input-gate time constants. Fast attack catches
+    /// transients without clipping the carrier's onset; slow release lets
+    /// the carrier ring out smoothly across short silences.
+    const ENV_ATTACK_MS: f32 = 1.0;
+    const ENV_RELEASE_MS: f32 = 100.0;
 
     // Order matters: `targets[0]` (the assignable-MSEG-1 default) is `Some(0)`,
     // so the first param is what fresh tracks modulate. Freq is the natural
@@ -539,7 +556,7 @@ impl FmEffect {
     /// An `FmEffect` at its default parameters; call `set_sample_rate`
     /// before processing.
     pub fn new() -> Self {
-        Self {
+        let mut fm = Self {
             freq_hz: Self::PARAMS[0].default,
             depth_pct: Self::PARAMS[1].default,
             feedback_pct: Self::PARAMS[2].default,
@@ -550,10 +567,24 @@ impl FmEffect {
             mod_phase: 0.0,
             prev_out_l: 0.0,
             prev_out_r: 0.0,
+            input_env: 0.0,
+            env_attack_coef: 0.0,
+            env_release_coef: 0.0,
             delay_l: vec![0.0; Self::DELAY_LEN],
             delay_r: vec![0.0; Self::DELAY_LEN],
             write_idx: 0,
-        }
+        };
+        fm.recompute_env_coefs();
+        fm
+    }
+
+    /// Re-derive the input-gate envelope coefficients from the cached
+    /// `sample_rate` and `ENV_*_MS` time constants. Cheap (two `exp`); only
+    /// called from `new` and `set_sample_rate`.
+    fn recompute_env_coefs(&mut self) {
+        let sr = self.sample_rate.max(1.0);
+        self.env_attack_coef = (-1.0 / (Self::ENV_ATTACK_MS * 0.001 * sr)).exp();
+        self.env_release_coef = (-1.0 / (Self::ENV_RELEASE_MS * 0.001 * sr)).exp();
     }
 
     /// Read one channel's delay buffer at a fractional sample distance
@@ -615,7 +646,7 @@ impl Effect for FmEffect {
             // feedback; both `depth · input` and `feedback · FB · prev`
             // apply only as per-sample phase OFFSETS at output time:
             //
-            //   out = sin(2π · (phase + depth · input + feedback · FB · prev))
+            //   out = gate · sin(2π · (phase + depth · input + feedback · FB · prev))
             //
             // Input and feedback take the SAME modulation path — both
             // PM — keeping the operator topology consistent with the
@@ -625,13 +656,30 @@ impl Effect for FmEffect {
             // identical sideband spectra (same Bessel coefficients);
             // the only audible difference is at sub-audio rates, where
             // PM reads as phase wobble rather than pitch bend.
+            //
+            // The `gate` factor is an input-envelope follower, so the
+            // carrier sine only sounds when there's input to modulate —
+            // silent input (including a stopped host transport) yields
+            // silent output instead of a continuously-ringing bare
+            // carrier.
             const FB_PHASE_SCALE: f32 = 0.5; // ±π rad at feedback = 1 — DX7-style.
+            let target_env = (left.abs() + right.abs()) * 0.5;
+            let env_coef = if target_env > self.input_env {
+                self.env_attack_coef
+            } else {
+                self.env_release_coef
+            };
+            self.input_env = target_env + (self.input_env - target_env) * env_coef;
+            let gate = self.input_env.min(1.0);
+
             self.carrier_phase_l = (self.carrier_phase_l + phase_inc).rem_euclid(1.0);
             self.carrier_phase_r = (self.carrier_phase_r + phase_inc).rem_euclid(1.0);
             let pm_l = depth * left + feedback * FB_PHASE_SCALE * self.prev_out_l;
             let pm_r = depth * right + feedback * FB_PHASE_SCALE * self.prev_out_r;
-            let out_l = ((self.carrier_phase_l + pm_l) * two_pi).sin();
-            let out_r = ((self.carrier_phase_r + pm_r) * two_pi).sin();
+            let sin_l = ((self.carrier_phase_l + pm_l) * two_pi).sin();
+            let sin_r = ((self.carrier_phase_r + pm_r) * two_pi).sin();
+            let out_l = gate * sin_l;
+            let out_r = gate * sin_r;
             self.prev_out_l = out_l;
             self.prev_out_r = out_r;
             (out_l, out_r)
@@ -640,6 +688,7 @@ impl Effect for FmEffect {
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate;
+        self.recompute_env_coefs();
     }
 
     fn reset(&mut self) {
@@ -648,6 +697,7 @@ impl Effect for FmEffect {
         self.mod_phase = 0.0;
         self.prev_out_l = 0.0;
         self.prev_out_r = 0.0;
+        self.input_env = 0.0;
         for s in self.delay_l.iter_mut() {
             *s = 0.0;
         }
@@ -1401,24 +1451,29 @@ mod tests {
     fn fm_mode_set_param_rounds_to_zero_or_one() {
         // Mode is at param index 3. Any value < 0.5 collapses to Carrier (0);
         // ≥ 0.5 to Modulator (1). With Mode = Modulator and Depth = 0, the
-        // bare carrier sine is audible even on silent input.
+        // carrier sine is gated by the input envelope — so a constant unity
+        // input plays the bare carrier at full amplitude.
         let mut fm = FmEffect::new();
         fm.set_sample_rate(48_000.0);
         fm.set_param(3, 0.51); // Mode → Modulator
         fm.set_param(0, 200.0); // Freq
         fm.set_param(1, 0.0); // Depth
         fm.set_param(2, 0.0); // Feedback
+                              // Warm up the input-gate envelope follower (~5 attack TCs).
+        for _ in 0..256 {
+            fm.process_sample(1.0, 1.0);
+        }
         let mut max_abs = 0.0_f32;
         for _ in 0..1024 {
-            let (l, r) = fm.process_sample(0.0, 0.0);
+            let (l, r) = fm.process_sample(1.0, 1.0);
             max_abs = max_abs.max(l.abs().max(r.abs()));
         }
         assert!(
             max_abs > 0.5,
-            "Modulator mode at depth=0 must still produce its carrier sine"
+            "Modulator mode with unity input + depth=0 must produce its carrier sine"
         );
 
-        // Below the half-way threshold rounds to Carrier — silent input now
+        // Below the half-way threshold rounds to Carrier — silent input
         // produces silence (delay line is full of zeros).
         let mut fm2 = FmEffect::new();
         fm2.set_sample_rate(48_000.0);
@@ -1455,28 +1510,28 @@ mod tests {
 
     #[test]
     fn fm_modulator_mode_feedback_stays_audibly_active_across_the_range() {
-        // Regression: an earlier formulation added feedback to the carrier's
-        // phase increment, which integrated the self-modulation over time
-        // and drifted the carrier into aliasing-noise (or near-DC) at high
-        // settings — the user perceived this as "anything past 15 % sounds
-        // like the dry signal". With phase modulation (feedback applied as
-        // an instantaneous phase offset at output time, not an increment),
-        // the carrier's base pitch stays stable so feedback only changes
-        // the timbre.
+        // Modulator mode is now an input-gated PM operator. Driving with a
+        // constant unity input warms the gate envelope to ~1.0, so the
+        // carrier plays at full amplitude and feedback's timbral change
+        // is observable. Three feedback settings must (a) preserve the
+        // carrier at fb = 0, (b) stay bounded and audible at fb = 100 %,
+        // and (c) measurably change the crest factor at intermediate
+        // settings.
         let measure_at_fb = |fb_pct: f32| -> (f32, f32) {
-            // Returns (RMS, peak) over a settled 2 048-sample window, on a
-            // SILENT input so the only audible content comes from the
-            // carrier + its own self-feedback.
             let mut fm = FmEffect::new();
             fm.set_sample_rate(48_000.0);
             fm.set_param(3, 1.0); // Mode → Modulator
             fm.set_param(0, 200.0); // Freq
             fm.set_param(1, 0.0); // Depth = 0
             fm.set_param(2, fb_pct);
+            // Warm up the input-gate envelope follower with constant input.
+            for _ in 0..2048 {
+                fm.process_sample(1.0, 1.0);
+            }
             let mut sum_sq = 0.0_f32;
             let mut peak = 0.0_f32;
             for _ in 0..2048 {
-                let (l, _r) = fm.process_sample(0.0, 0.0);
+                let (l, _r) = fm.process_sample(1.0, 1.0);
                 sum_sq += l * l;
                 peak = peak.max(l.abs());
             }
@@ -1485,7 +1540,8 @@ mod tests {
         let (rms_0, peak_0) = measure_at_fb(0.0);
         let (rms_50, peak_50) = measure_at_fb(50.0);
         let (rms_100, peak_100) = measure_at_fb(100.0);
-        // fb=0: a clean 200 Hz sine — RMS ≈ 1/√2 ≈ 0.707, peak ≈ 1.
+        // fb=0 with the gate fully open: a 200 Hz sine — RMS ≈ 1/√2 ≈ 0.707,
+        // peak ≈ 1.
         assert!(
             (rms_0 - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.05,
             "fb=0 RMS should be ~0.707, got {rms_0}"
@@ -1494,8 +1550,7 @@ mod tests {
             (peak_0 - 1.0).abs() < 0.05,
             "fb=0 peak should be ~1.0, got {peak_0}"
         );
-        // fb=100%: still audibly present, still bounded — no aliasing
-        // collapse, no runaway.
+        // fb=100%: still audibly present, still bounded.
         assert!(
             rms_100 > 0.1,
             "fb=100% should still produce audible output (RMS > 0.1), got {rms_100}"
@@ -1505,8 +1560,8 @@ mod tests {
             "fb=100% output should be bounded (peak < 1.5), got {peak_100}"
         );
         // Self-feedback enriches the carrier: the waveform drifts away from
-        // a pure sine toward sawtooth-like content, so the crest factor
-        // (peak / RMS) changes measurably between fb=0 and fb=50%.
+        // a pure sine, so the crest factor (peak / RMS) changes measurably
+        // between fb=0 and fb=50%.
         let crest_0 = peak_0 / rms_0;
         let crest_50 = peak_50 / rms_50;
         assert!(
@@ -1517,25 +1572,54 @@ mod tests {
     }
 
     #[test]
-    fn fm_modulator_mode_with_silent_input_produces_a_pure_sine() {
-        // No modulation: just the carrier at `freq_hz`. The output sample
-        // sequence must look like sin(2π·freq·t/sr) within numerical noise.
+    fn fm_modulator_mode_silent_input_yields_silent_output() {
+        // The input-gate keeps the carrier asleep until there's input. A
+        // pristine silent input must yield exact-zero output forever — this
+        // is the fix for "Modulator mode keeps playing while the transport
+        // is stopped".
         let mut fm = FmEffect::new();
         fm.set_sample_rate(48_000.0);
         fm.set_param(3, 1.0); // Mode → Modulator
         fm.set_param(0, 100.0); // Freq
         fm.set_param(1, 0.0); // Depth
         fm.set_param(2, 0.0); // Feedback
-        let two_pi = std::f32::consts::TAU;
-        for i in 0..512 {
-            let expected = (two_pi * 100.0 * (i as f32 + 1.0) / 48_000.0).sin();
-            let (got_l, got_r) = fm.process_sample(0.0, 0.0);
-            assert!(
-                (got_l - expected).abs() < 1e-3,
-                "sample {i}: expected {expected}, got {got_l}"
-            );
-            assert!((got_l - got_r).abs() < 1e-6, "L/R agree on silent input");
+        for _ in 0..4096 {
+            let (l, r) = fm.process_sample(0.0, 0.0);
+            assert_eq!(l, 0.0);
+            assert_eq!(r, 0.0);
         }
+    }
+
+    #[test]
+    fn fm_modulator_mode_with_constant_input_plays_a_pure_sine_at_the_carrier_freq() {
+        // Drive with constant unity input so the input-gate envelope settles
+        // to ~1.0. With depth=0 and fb=0 the output is then a clean 100 Hz
+        // sine at the carrier frequency.
+        let mut fm = FmEffect::new();
+        fm.set_sample_rate(48_000.0);
+        fm.set_param(3, 1.0); // Mode → Modulator
+        fm.set_param(0, 100.0); // Freq
+        fm.set_param(1, 0.0); // Depth
+        fm.set_param(2, 0.0); // Feedback
+                              // Settle the input-gate envelope follower.
+        for _ in 0..2048 {
+            fm.process_sample(1.0, 1.0);
+        }
+        // Measure period by finding zero-crossings.
+        let mut zero_crossings = 0;
+        let mut prev = 0.0_f32;
+        for _ in 0..(48_000 / 10) {
+            let (l, _r) = fm.process_sample(1.0, 1.0);
+            if prev <= 0.0 && l > 0.0 {
+                zero_crossings += 1;
+            }
+            prev = l;
+        }
+        // 0.1 s of a 100 Hz sine has exactly 10 positive-going zero crossings.
+        assert!(
+            (8..=12).contains(&zero_crossings),
+            "expected ~10 positive zero crossings of a 100 Hz sine in 100 ms, got {zero_crossings}"
+        );
     }
 
     #[test]
