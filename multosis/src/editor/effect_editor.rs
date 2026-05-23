@@ -74,7 +74,9 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
     // and rate are PER-TRACK (govern all 3 MSEGs).
     let modulation_header = l(ox, oy + 152.0, mw - inset, 16.0);
     let trigger = l(ox, oy + 200.0, 130.0, 34.0);
-    let trigger_rate = l(ox + 146.0, oy + 192.0, 60.0, 42.0);
+    // Same size + raised-y as the depth dial so its label/value text reads at
+    // the same scale as the rest of the modulation-row dials.
+    let trigger_rate = l(ox + 146.0, oy + 172.0, 64.0, 64.0);
     let mseg_selector = l(ox + 222.0, oy + 200.0, 240.0, 34.0);
     let target = l(ox + 478.0, oy + 200.0, 170.0, 34.0);
     // Depth dial: raised so its value text doesn't fall into the MSEG pane below.
