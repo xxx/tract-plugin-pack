@@ -241,6 +241,15 @@ impl AudioEngine {
         // through the detector would tail-chase its own modulation.
         self.modulation.begin_block(&left[..n], &right[..n], sr);
 
+        // Push the current host tempo into every effect once per block so
+        // tempo-syncing effects (Delay's beat-synced subdivisions) compute
+        // their per-sample work from a stable BPM. Effects that don't care
+        // about tempo use the trait's default no-op.
+        let bpm_f32 = bpm as f32;
+        for e in &mut self.effects {
+            e.set_bpm(bpm_f32);
+        }
+
         // Gather this block's step-boundary offsets (only while playing).
         let mut boundaries = [0usize; MAX_BOUNDARIES];
         let mut n_boundaries = 0usize;
