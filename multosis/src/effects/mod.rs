@@ -269,6 +269,7 @@ mod ring;
 mod satch;
 mod stretch;
 mod svf;
+mod varispeed;
 mod warp_zone;
 
 pub use bitcrush::BitcrushEffect;
@@ -290,6 +291,7 @@ pub use ring::RingEffect;
 pub use satch::SatchEffect;
 pub use stretch::StretchEffect;
 pub use svf::SvfEffect;
+pub use varispeed::VarispeedEffect;
 pub use warp_zone::WarpZoneEffect;
 
 /// The effect registry — which effects exist. `Copy`, serde-derivable.
@@ -350,11 +352,16 @@ pub enum EffectKind {
     /// character knobs. Distinct from Bitcrush in that it doesn't
     /// touch bit depth and adds LP-follow smoothing + wow/flutter.
     Downsample,
+    /// Tape-style varispeed: signed playback rate (negative =
+    /// reverse, 0 = freeze), with drift LFO for tape wobble.
+    /// Pitch and time scale together, unlike PitchShift (time-
+    /// preserving) and Stretch (pitch-preserving).
+    Varispeed,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 20] = [
+    pub const ALL: [EffectKind; 21] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -375,6 +382,7 @@ impl EffectKind {
         EffectKind::Flanger,
         EffectKind::FrequencyShift,
         EffectKind::Downsample,
+        EffectKind::Varispeed,
     ];
 
     /// The kind's display name.
@@ -400,6 +408,7 @@ impl EffectKind {
             EffectKind::Flanger => "Flanger",
             EffectKind::FrequencyShift => "Freq Shift",
             EffectKind::Downsample => "Downsample",
+            EffectKind::Varispeed => "Varispeed",
         }
     }
 
@@ -495,6 +504,11 @@ pub enum EffectInstance {
     FrequencyShift(Box<FrequencyShiftEffect>),
     // Not boxed -- DownsampleEffect is tiny (~13 f32s + a u32, no heap).
     Downsample(DownsampleEffect),
+    // Boxed: VarispeedEffect carries a [Grain; 16] pool (~320 B)
+    // plus the ring buffer metadata; the struct itself is past
+    // clippy's large-enum-variant threshold. Same Box-default
+    // pattern as PitchShift.
+    Varispeed(Box<VarispeedEffect>),
 }
 
 impl EffectInstance {
@@ -521,6 +535,7 @@ impl EffectInstance {
             EffectKind::Flanger => EffectInstance::Flanger(FlangerEffect::new()),
             EffectKind::FrequencyShift => EffectInstance::FrequencyShift(Box::default()),
             EffectKind::Downsample => EffectInstance::Downsample(DownsampleEffect::new()),
+            EffectKind::Varispeed => EffectInstance::Varispeed(Box::default()),
         }
     }
 
@@ -547,6 +562,7 @@ impl EffectInstance {
             EffectInstance::Flanger(_) => EffectKind::Flanger,
             EffectInstance::FrequencyShift(_) => EffectKind::FrequencyShift,
             EffectInstance::Downsample(_) => EffectKind::Downsample,
+            EffectInstance::Varispeed(_) => EffectKind::Varispeed,
         }
     }
 }
@@ -574,6 +590,7 @@ impl Effect for EffectInstance {
             EffectInstance::Flanger(e) => e.process_sample(left, right),
             EffectInstance::FrequencyShift(e) => e.process_sample(left, right),
             EffectInstance::Downsample(e) => e.process_sample(left, right),
+            EffectInstance::Varispeed(e) => e.process_sample(left, right),
         }
     }
 
@@ -599,6 +616,7 @@ impl Effect for EffectInstance {
             EffectInstance::Flanger(e) => e.set_sample_rate(sample_rate),
             EffectInstance::FrequencyShift(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Downsample(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Varispeed(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -624,6 +642,7 @@ impl Effect for EffectInstance {
             EffectInstance::Flanger(e) => e.reset(),
             EffectInstance::FrequencyShift(e) => e.reset(),
             EffectInstance::Downsample(e) => e.reset(),
+            EffectInstance::Varispeed(e) => e.reset(),
         }
     }
 
@@ -649,6 +668,7 @@ impl Effect for EffectInstance {
             EffectInstance::Flanger(e) => e.parameters(),
             EffectInstance::FrequencyShift(e) => e.parameters(),
             EffectInstance::Downsample(e) => e.parameters(),
+            EffectInstance::Varispeed(e) => e.parameters(),
         }
     }
 
@@ -674,6 +694,7 @@ impl Effect for EffectInstance {
             EffectInstance::Flanger(e) => e.set_param(index, value),
             EffectInstance::FrequencyShift(e) => e.set_param(index, value),
             EffectInstance::Downsample(e) => e.set_param(index, value),
+            EffectInstance::Varispeed(e) => e.set_param(index, value),
         }
     }
 
@@ -699,6 +720,7 @@ impl Effect for EffectInstance {
             EffectInstance::Flanger(e) => e.set_bpm(bpm),
             EffectInstance::FrequencyShift(e) => e.set_bpm(bpm),
             EffectInstance::Downsample(e) => e.set_bpm(bpm),
+            EffectInstance::Varispeed(e) => e.set_bpm(bpm),
         }
     }
 
@@ -724,6 +746,7 @@ impl Effect for EffectInstance {
             EffectInstance::Flanger(e) => e.param_dimmed(index),
             EffectInstance::FrequencyShift(e) => e.param_dimmed(index),
             EffectInstance::Downsample(e) => e.param_dimmed(index),
+            EffectInstance::Varispeed(e) => e.param_dimmed(index),
         }
     }
 
@@ -749,6 +772,7 @@ impl Effect for EffectInstance {
             EffectInstance::Flanger(e) => e.latency_samples(),
             EffectInstance::FrequencyShift(e) => e.latency_samples(),
             EffectInstance::Downsample(e) => e.latency_samples(),
+            EffectInstance::Varispeed(e) => e.latency_samples(),
         }
     }
 }
@@ -819,7 +843,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 20);
+        assert_eq!(EffectKind::ALL.len(), 21);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -840,6 +864,7 @@ mod tests {
         assert_eq!(EffectKind::Flanger.name(), "Flanger");
         assert_eq!(EffectKind::FrequencyShift.name(), "Freq Shift");
         assert_eq!(EffectKind::Downsample.name(), "Downsample");
+        assert_eq!(EffectKind::Varispeed.name(), "Varispeed");
     }
 
     #[test]
@@ -1262,6 +1287,7 @@ mod tests {
             EffectKind::Flanger,
             EffectKind::FrequencyShift,
             EffectKind::Downsample,
+            EffectKind::Varispeed,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
