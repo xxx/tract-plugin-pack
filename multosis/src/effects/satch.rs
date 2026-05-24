@@ -25,6 +25,13 @@ pub struct SatchEffect {
     detail_pct: f32,
     knee_pct: f32,
     sample_rate: f32,
+    /// Cached linear gain/threshold corresponding to the dB-valued
+    /// params, recomputed in `set_param` so the per-sample path is
+    /// free of `powf`/`exp` calls. MSEG modulation calls `set_param`
+    /// once per sample for modulated targets only — same total cost
+    /// as computing inline, but zero cost when not modulating.
+    gain_linear: f32,
+    threshold_linear: f32,
     spectral_l: tract_dsp::spectral_clipper::SpectralClipper,
     spectral_r: tract_dsp::spectral_clipper::SpectralClipper,
     /// Dry delay buffers — must be FFT_SIZE long so the time-domain
@@ -91,12 +98,17 @@ impl SatchEffect {
     ];
 
     pub fn new() -> Self {
+        let gain_db = Self::PARAMS[0].default;
+        let threshold_db = Self::PARAMS[1].default;
         Self {
-            gain_db: Self::PARAMS[0].default,
-            threshold_db: Self::PARAMS[1].default,
+            gain_db,
+            threshold_db,
             detail_pct: Self::PARAMS[2].default,
             knee_pct: Self::PARAMS[3].default,
             sample_rate: 48_000.0,
+            // Seed the cache from defaults; `set_param` keeps it in sync.
+            gain_linear: tract_dsp::db::db_to_linear_fast(gain_db),
+            threshold_linear: tract_dsp::db::db_to_linear_fast(threshold_db),
             spectral_l: tract_dsp::spectral_clipper::SpectralClipper::new(
                 Self::FFT_SIZE,
                 Self::HOP_SIZE,
@@ -110,12 +122,6 @@ impl SatchEffect {
             dry_delay_pos: 0,
         }
     }
-
-    /// Convert dB to a linear amplitude factor.
-    #[inline]
-    fn db_to_gain(db: f32) -> f32 {
-        10.0_f32.powf(db / 20.0)
-    }
 }
 
 impl Default for SatchEffect {
@@ -126,8 +132,10 @@ impl Default for SatchEffect {
 
 impl Effect for SatchEffect {
     fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
-        let gain = Self::db_to_gain(self.gain_db);
-        let threshold = Self::db_to_gain(self.threshold_db);
+        // Gain and threshold are precomputed in `set_param` — zero
+        // `powf`/`exp` calls per sample here.
+        let gain = self.gain_linear;
+        let threshold = self.threshold_linear;
         let inv_threshold = 1.0 / threshold;
         let detail = self.detail_pct * 0.01;
         let knee = self.knee_pct * 0.01;
@@ -222,8 +230,14 @@ impl Effect for SatchEffect {
 
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => self.gain_db = value.clamp(Self::PARAMS[0].min, Self::PARAMS[0].max),
-            1 => self.threshold_db = value.clamp(Self::PARAMS[1].min, Self::PARAMS[1].max),
+            0 => {
+                self.gain_db = value.clamp(Self::PARAMS[0].min, Self::PARAMS[0].max);
+                self.gain_linear = tract_dsp::db::db_to_linear_fast(self.gain_db);
+            }
+            1 => {
+                self.threshold_db = value.clamp(Self::PARAMS[1].min, Self::PARAMS[1].max);
+                self.threshold_linear = tract_dsp::db::db_to_linear_fast(self.threshold_db);
+            }
             2 => self.detail_pct = value.clamp(Self::PARAMS[2].min, Self::PARAMS[2].max),
             3 => self.knee_pct = value.clamp(Self::PARAMS[3].min, Self::PARAMS[3].max),
             _ => {}

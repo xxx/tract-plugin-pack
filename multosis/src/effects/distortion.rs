@@ -42,6 +42,17 @@ pub struct DistortionEffect {
     tilt_a: f32,
     tilt_state_l: f32,
     tilt_state_r: f32,
+    /// Cached linear gain corresponding to `drive_db` / `out_db` /
+    /// `tone_pct`. Recomputed in `set_param` when the source value
+    /// changes so the per-sample path is free of `powf`/`exp` calls
+    /// — important because MSEG modulation calls `set_param` once
+    /// per sample for modulated targets, but only for those targets.
+    /// `tone_gain_high` is the post-distortion tilt-EQ HP weight
+    /// (`2^tone`); the LP weight is its reciprocal, computed once
+    /// per sample with a divide (still cheap).
+    drive_gain: f32,
+    out_gain: f32,
+    tone_gain_high: f32,
 }
 
 impl DistortionEffect {
@@ -115,16 +126,24 @@ impl DistortionEffect {
     ];
 
     pub fn new() -> Self {
+        let drive_db = Self::PARAMS[0].default;
+        let tone_pct = Self::PARAMS[3].default;
+        let out_db = Self::PARAMS[4].default;
         let mut me = Self {
-            drive_db: Self::PARAMS[0].default,
+            drive_db,
             type_idx: Self::PARAMS[1].default,
             bias_pct: Self::PARAMS[2].default,
-            tone_pct: Self::PARAMS[3].default,
-            out_db: Self::PARAMS[4].default,
+            tone_pct,
+            out_db,
             sample_rate: 48_000.0,
             tilt_a: 0.0,
             tilt_state_l: 0.0,
             tilt_state_r: 0.0,
+            // Seed the cached gains from the defaults. Subsequent
+            // `set_param` calls keep these in sync.
+            drive_gain: tract_dsp::db::db_to_linear_fast(drive_db),
+            out_gain: tract_dsp::db::db_to_linear_fast(out_db),
+            tone_gain_high: (tone_pct * 0.01).exp2(),
         };
         me.set_sample_rate(me.sample_rate);
         me
@@ -189,9 +208,12 @@ impl Default for DistortionEffect {
 
 impl Effect for DistortionEffect {
     fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
-        let drive_gain = 10.0_f32.powf(self.drive_db / 20.0);
+        // Gains are precomputed in `set_param` — zero `powf`/`exp` calls
+        // per sample when the params aren't being modulated, exactly one
+        // per modulated param when they are.
+        let drive_gain = self.drive_gain;
         let bias = (self.bias_pct * 0.01).clamp(-1.0, 1.0);
-        let out_gain = 10.0_f32.powf(self.out_db / 20.0);
+        let out_gain = self.out_gain;
         let type_idx = (self.type_idx.round() as usize).min(Self::TYPE_LABELS.len() - 1);
         // The DC value the clipper outputs at x = 0 with the current
         // bias offset. Subtracting it post-clip AC-couples the output
@@ -214,9 +236,10 @@ impl Effect for DistortionEffect {
 
         // Stage 4: tilt EQ post-distortion. The clipper's harmonics
         // pass through the LP/HP split unaltered; only their relative
-        // weight changes. tone ∈ [-1, +1].
-        let tone = self.tone_pct * 0.01;
-        let gain_high = 2.0_f32.powf(tone);
+        // weight changes. `tone_gain_high = 2^tone` is precomputed in
+        // `set_param`; `gain_low` is its reciprocal (a divide is cheap
+        // enough to do per-sample).
+        let gain_high = self.tone_gain_high;
         let gain_low = 1.0 / gain_high;
 
         self.tilt_state_l = (1.0 - self.tilt_a) * dl + self.tilt_a * self.tilt_state_l;
@@ -252,14 +275,23 @@ impl Effect for DistortionEffect {
 
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => self.drive_db = value.clamp(Self::PARAMS[0].min, Self::PARAMS[0].max),
+            0 => {
+                self.drive_db = value.clamp(Self::PARAMS[0].min, Self::PARAMS[0].max);
+                self.drive_gain = tract_dsp::db::db_to_linear_fast(self.drive_db);
+            }
             1 => {
                 let max_idx = (Self::TYPE_LABELS.len() - 1) as f32;
                 self.type_idx = value.round().clamp(0.0, max_idx);
             }
             2 => self.bias_pct = value.clamp(Self::PARAMS[2].min, Self::PARAMS[2].max),
-            3 => self.tone_pct = value.clamp(Self::PARAMS[3].min, Self::PARAMS[3].max),
-            4 => self.out_db = value.clamp(Self::PARAMS[4].min, Self::PARAMS[4].max),
+            3 => {
+                self.tone_pct = value.clamp(Self::PARAMS[3].min, Self::PARAMS[3].max);
+                self.tone_gain_high = (self.tone_pct * 0.01).exp2();
+            }
+            4 => {
+                self.out_db = value.clamp(Self::PARAMS[4].min, Self::PARAMS[4].max);
+                self.out_gain = tract_dsp::db::db_to_linear_fast(self.out_db);
+            }
             _ => {}
         }
     }

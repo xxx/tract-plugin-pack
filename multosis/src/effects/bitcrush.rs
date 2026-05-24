@@ -4,6 +4,10 @@ use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
 pub struct BitcrushEffect {
     bit_depth: f32,
     rate_reduction: f32,
+    /// Cached `2^bit_depth` — the number of quantization levels.
+    /// Recomputed in `set_param` (once per modulated-sample call)
+    /// so the per-sample `quantize` path is free of `powf` / `exp`.
+    levels: f32,
     held: [f32; 2],
     phase: [f32; 2],
 }
@@ -36,9 +40,11 @@ impl BitcrushEffect {
 
     /// A `BitcrushEffect` at its default (near-clean) parameters.
     pub fn new() -> Self {
+        let bit_depth = Self::PARAMS[0].default;
         Self {
-            bit_depth: Self::PARAMS[0].default,
+            bit_depth,
             rate_reduction: Self::PARAMS[1].default,
+            levels: bit_depth.exp2(),
             held: [0.0; 2],
             phase: [Self::PARAMS[1].default; 2],
         }
@@ -46,8 +52,7 @@ impl BitcrushEffect {
 
     /// Quantize `x` to the current bit depth.
     fn quantize(&self, x: f32) -> f32 {
-        let levels = 2.0_f32.powf(self.bit_depth);
-        let step = 2.0 / levels;
+        let step = 2.0 / self.levels;
         (x / step).round() * step
     }
 
@@ -86,7 +91,10 @@ impl Effect for BitcrushEffect {
 
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => self.bit_depth = value.clamp(Self::PARAMS[0].min, Self::PARAMS[0].max),
+            0 => {
+                self.bit_depth = value.clamp(Self::PARAMS[0].min, Self::PARAMS[0].max);
+                self.levels = self.bit_depth.exp2();
+            }
             1 => self.rate_reduction = value.clamp(Self::PARAMS[1].min, Self::PARAMS[1].max),
             _ => {}
         }
