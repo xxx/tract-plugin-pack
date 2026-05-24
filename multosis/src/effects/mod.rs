@@ -257,6 +257,7 @@ mod fm;
 mod none;
 mod phaser;
 mod repeat;
+mod reverb;
 mod ring;
 mod satch;
 mod stretch;
@@ -270,6 +271,7 @@ pub use fm::FmEffect;
 pub use none::NoneEffect;
 pub use phaser::PhaserEffect;
 pub use repeat::RepeatEffect;
+pub use reverb::ReverbEffect;
 pub use ring::RingEffect;
 pub use satch::SatchEffect;
 pub use stretch::StretchEffect;
@@ -303,11 +305,14 @@ pub enum EffectKind {
     /// Ring modulator with bias control (morphs RM ↔ AM ↔ ±dry) and
     /// stereo carrier phase offset.
     Ring,
+    /// Schroeder–Moorer "Freeverb" with per-comb LFO modulation,
+    /// pre-delay, and stereo width.
+    Reverb,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 12] = [
+    pub const ALL: [EffectKind; 13] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -320,6 +325,7 @@ impl EffectKind {
         EffectKind::Stretch,
         EffectKind::Comb,
         EffectKind::Ring,
+        EffectKind::Reverb,
     ];
 
     /// The kind's display name.
@@ -337,6 +343,7 @@ impl EffectKind {
             EffectKind::Stretch => "Stretch",
             EffectKind::Comb => "Comb",
             EffectKind::Ring => "Ring",
+            EffectKind::Reverb => "Reverb",
         }
     }
 }
@@ -389,6 +396,12 @@ pub enum EffectInstance {
     Comb(CombEffect),
     // Not boxed — RingEffect is tiny (six f32s, no heap).
     Ring(RingEffect),
+    // Boxed: ReverbEffect carries 8 stereo comb lines + 4 stereo
+    // allpasses + pre-delay + per-comb LFO state — the struct itself
+    // (just the metadata, not the Vec heap data) is ~1 KB, well past
+    // clippy's `large-enum-variant` threshold. Box the variant so
+    // every EffectInstance slot stays compact.
+    Reverb(Box<ReverbEffect>),
 }
 
 impl EffectInstance {
@@ -407,6 +420,7 @@ impl EffectInstance {
             EffectKind::Stretch => EffectInstance::Stretch(StretchEffect::new()),
             EffectKind::Comb => EffectInstance::Comb(CombEffect::new()),
             EffectKind::Ring => EffectInstance::Ring(RingEffect::new()),
+            EffectKind::Reverb => EffectInstance::Reverb(Box::default()),
         }
     }
 
@@ -425,6 +439,7 @@ impl EffectInstance {
             EffectInstance::Stretch(_) => EffectKind::Stretch,
             EffectInstance::Comb(_) => EffectKind::Comb,
             EffectInstance::Ring(_) => EffectKind::Ring,
+            EffectInstance::Reverb(_) => EffectKind::Reverb,
         }
     }
 }
@@ -444,6 +459,7 @@ impl Effect for EffectInstance {
             EffectInstance::Stretch(e) => e.process_sample(left, right),
             EffectInstance::Comb(e) => e.process_sample(left, right),
             EffectInstance::Ring(e) => e.process_sample(left, right),
+            EffectInstance::Reverb(e) => e.process_sample(left, right),
         }
     }
 
@@ -461,6 +477,7 @@ impl Effect for EffectInstance {
             EffectInstance::Stretch(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Comb(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Ring(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Reverb(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -478,6 +495,7 @@ impl Effect for EffectInstance {
             EffectInstance::Stretch(e) => e.reset(),
             EffectInstance::Comb(e) => e.reset(),
             EffectInstance::Ring(e) => e.reset(),
+            EffectInstance::Reverb(e) => e.reset(),
         }
     }
 
@@ -495,6 +513,7 @@ impl Effect for EffectInstance {
             EffectInstance::Stretch(e) => e.parameters(),
             EffectInstance::Comb(e) => e.parameters(),
             EffectInstance::Ring(e) => e.parameters(),
+            EffectInstance::Reverb(e) => e.parameters(),
         }
     }
 
@@ -512,6 +531,7 @@ impl Effect for EffectInstance {
             EffectInstance::Stretch(e) => e.set_param(index, value),
             EffectInstance::Comb(e) => e.set_param(index, value),
             EffectInstance::Ring(e) => e.set_param(index, value),
+            EffectInstance::Reverb(e) => e.set_param(index, value),
         }
     }
 
@@ -529,6 +549,7 @@ impl Effect for EffectInstance {
             EffectInstance::Stretch(e) => e.set_bpm(bpm),
             EffectInstance::Comb(e) => e.set_bpm(bpm),
             EffectInstance::Ring(e) => e.set_bpm(bpm),
+            EffectInstance::Reverb(e) => e.set_bpm(bpm),
         }
     }
 
@@ -546,6 +567,7 @@ impl Effect for EffectInstance {
             EffectInstance::Stretch(e) => e.param_dimmed(index),
             EffectInstance::Comb(e) => e.param_dimmed(index),
             EffectInstance::Ring(e) => e.param_dimmed(index),
+            EffectInstance::Reverb(e) => e.param_dimmed(index),
         }
     }
 
@@ -563,6 +585,7 @@ impl Effect for EffectInstance {
             EffectInstance::Stretch(e) => e.latency_samples(),
             EffectInstance::Comb(e) => e.latency_samples(),
             EffectInstance::Ring(e) => e.latency_samples(),
+            EffectInstance::Reverb(e) => e.latency_samples(),
         }
     }
 }
@@ -633,7 +656,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 12);
+        assert_eq!(EffectKind::ALL.len(), 13);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -646,6 +669,7 @@ mod tests {
         assert_eq!(EffectKind::Stretch.name(), "Stretch");
         assert_eq!(EffectKind::Comb.name(), "Comb");
         assert_eq!(EffectKind::Ring.name(), "Ring");
+        assert_eq!(EffectKind::Reverb.name(), "Reverb");
     }
 
     #[test]
@@ -1031,6 +1055,7 @@ mod tests {
             EffectKind::Stretch,
             EffectKind::Comb,
             EffectKind::Ring,
+            EffectKind::Reverb,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
