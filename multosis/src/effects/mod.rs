@@ -253,6 +253,7 @@ pub trait Effect {
 mod bitcrush;
 mod comb;
 mod delay;
+mod distortion;
 mod fm;
 mod none;
 mod phaser;
@@ -267,6 +268,7 @@ mod warp_zone;
 pub use bitcrush::BitcrushEffect;
 pub use comb::CombEffect;
 pub use delay::DelayEffect;
+pub use distortion::DistortionEffect;
 pub use fm::FmEffect;
 pub use none::NoneEffect;
 pub use phaser::PhaserEffect;
@@ -308,11 +310,15 @@ pub enum EffectKind {
     /// Schroeder–Moorer "Freeverb" with per-comb LFO modulation,
     /// pre-delay, and stereo width.
     Reverb,
+    /// Latency-free time-domain distortion / waveshaper. Five clip
+    /// shapes (Hard / Soft / Cubic / Sine / Fold), Bias for
+    /// asymmetric harmonics, post tilt EQ, and output trim.
+    Distortion,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 13] = [
+    pub const ALL: [EffectKind; 14] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -326,6 +332,7 @@ impl EffectKind {
         EffectKind::Comb,
         EffectKind::Ring,
         EffectKind::Reverb,
+        EffectKind::Distortion,
     ];
 
     /// The kind's display name.
@@ -344,6 +351,7 @@ impl EffectKind {
             EffectKind::Comb => "Comb",
             EffectKind::Ring => "Ring",
             EffectKind::Reverb => "Reverb",
+            EffectKind::Distortion => "Distortion",
         }
     }
 }
@@ -402,6 +410,8 @@ pub enum EffectInstance {
     // clippy's `large-enum-variant` threshold. Box the variant so
     // every EffectInstance slot stays compact.
     Reverb(Box<ReverbEffect>),
+    // Not boxed — DistortionEffect is tiny (10 f32s, no heap).
+    Distortion(DistortionEffect),
 }
 
 impl EffectInstance {
@@ -421,6 +431,7 @@ impl EffectInstance {
             EffectKind::Comb => EffectInstance::Comb(CombEffect::new()),
             EffectKind::Ring => EffectInstance::Ring(RingEffect::new()),
             EffectKind::Reverb => EffectInstance::Reverb(Box::default()),
+            EffectKind::Distortion => EffectInstance::Distortion(DistortionEffect::new()),
         }
     }
 
@@ -440,6 +451,7 @@ impl EffectInstance {
             EffectInstance::Comb(_) => EffectKind::Comb,
             EffectInstance::Ring(_) => EffectKind::Ring,
             EffectInstance::Reverb(_) => EffectKind::Reverb,
+            EffectInstance::Distortion(_) => EffectKind::Distortion,
         }
     }
 }
@@ -460,6 +472,7 @@ impl Effect for EffectInstance {
             EffectInstance::Comb(e) => e.process_sample(left, right),
             EffectInstance::Ring(e) => e.process_sample(left, right),
             EffectInstance::Reverb(e) => e.process_sample(left, right),
+            EffectInstance::Distortion(e) => e.process_sample(left, right),
         }
     }
 
@@ -478,6 +491,7 @@ impl Effect for EffectInstance {
             EffectInstance::Comb(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Ring(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Reverb(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Distortion(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -496,6 +510,7 @@ impl Effect for EffectInstance {
             EffectInstance::Comb(e) => e.reset(),
             EffectInstance::Ring(e) => e.reset(),
             EffectInstance::Reverb(e) => e.reset(),
+            EffectInstance::Distortion(e) => e.reset(),
         }
     }
 
@@ -514,6 +529,7 @@ impl Effect for EffectInstance {
             EffectInstance::Comb(e) => e.parameters(),
             EffectInstance::Ring(e) => e.parameters(),
             EffectInstance::Reverb(e) => e.parameters(),
+            EffectInstance::Distortion(e) => e.parameters(),
         }
     }
 
@@ -532,6 +548,7 @@ impl Effect for EffectInstance {
             EffectInstance::Comb(e) => e.set_param(index, value),
             EffectInstance::Ring(e) => e.set_param(index, value),
             EffectInstance::Reverb(e) => e.set_param(index, value),
+            EffectInstance::Distortion(e) => e.set_param(index, value),
         }
     }
 
@@ -550,6 +567,7 @@ impl Effect for EffectInstance {
             EffectInstance::Comb(e) => e.set_bpm(bpm),
             EffectInstance::Ring(e) => e.set_bpm(bpm),
             EffectInstance::Reverb(e) => e.set_bpm(bpm),
+            EffectInstance::Distortion(e) => e.set_bpm(bpm),
         }
     }
 
@@ -568,6 +586,7 @@ impl Effect for EffectInstance {
             EffectInstance::Comb(e) => e.param_dimmed(index),
             EffectInstance::Ring(e) => e.param_dimmed(index),
             EffectInstance::Reverb(e) => e.param_dimmed(index),
+            EffectInstance::Distortion(e) => e.param_dimmed(index),
         }
     }
 
@@ -586,6 +605,7 @@ impl Effect for EffectInstance {
             EffectInstance::Comb(e) => e.latency_samples(),
             EffectInstance::Ring(e) => e.latency_samples(),
             EffectInstance::Reverb(e) => e.latency_samples(),
+            EffectInstance::Distortion(e) => e.latency_samples(),
         }
     }
 }
@@ -656,7 +676,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 13);
+        assert_eq!(EffectKind::ALL.len(), 14);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -670,6 +690,7 @@ mod tests {
         assert_eq!(EffectKind::Comb.name(), "Comb");
         assert_eq!(EffectKind::Ring.name(), "Ring");
         assert_eq!(EffectKind::Reverb.name(), "Reverb");
+        assert_eq!(EffectKind::Distortion.name(), "Distortion");
     }
 
     #[test]
@@ -1056,6 +1077,7 @@ mod tests {
             EffectKind::Comb,
             EffectKind::Ring,
             EffectKind::Reverb,
+            EffectKind::Distortion,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
