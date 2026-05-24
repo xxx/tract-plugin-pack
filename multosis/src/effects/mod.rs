@@ -251,6 +251,7 @@ pub trait Effect {
 }
 
 mod bitcrush;
+mod chorus;
 mod comb;
 mod delay;
 mod distortion;
@@ -266,6 +267,7 @@ mod svf;
 mod warp_zone;
 
 pub use bitcrush::BitcrushEffect;
+pub use chorus::ChorusEffect;
 pub use comb::CombEffect;
 pub use delay::DelayEffect;
 pub use distortion::DistortionEffect;
@@ -314,11 +316,15 @@ pub enum EffectKind {
     /// shapes (Hard / Soft / Cubic / Sine / Fold), Bias for
     /// asymmetric harmonics, post tilt EQ, and output trim.
     Distortion,
+    /// CE-1-style stereo chorus: modulated delay tap per channel
+    /// with L/R LFO phase offset, capable of flanger, chorus, or
+    /// doubler depending on Center.
+    Chorus,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 14] = [
+    pub const ALL: [EffectKind; 15] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -333,6 +339,7 @@ impl EffectKind {
         EffectKind::Ring,
         EffectKind::Reverb,
         EffectKind::Distortion,
+        EffectKind::Chorus,
     ];
 
     /// The kind's display name.
@@ -352,6 +359,7 @@ impl EffectKind {
             EffectKind::Ring => "Ring",
             EffectKind::Reverb => "Reverb",
             EffectKind::Distortion => "Distortion",
+            EffectKind::Chorus => "Chorus",
         }
     }
 }
@@ -412,6 +420,9 @@ pub enum EffectInstance {
     Reverb(Box<ReverbEffect>),
     // Not boxed — DistortionEffect is tiny (10 f32s, no heap).
     Distortion(DistortionEffect),
+    // Not boxed — ChorusEffect itself is small; the two Vec ring
+    // buffers it holds are already heap-allocated by Vec.
+    Chorus(ChorusEffect),
 }
 
 impl EffectInstance {
@@ -432,6 +443,7 @@ impl EffectInstance {
             EffectKind::Ring => EffectInstance::Ring(RingEffect::new()),
             EffectKind::Reverb => EffectInstance::Reverb(Box::default()),
             EffectKind::Distortion => EffectInstance::Distortion(DistortionEffect::new()),
+            EffectKind::Chorus => EffectInstance::Chorus(ChorusEffect::new()),
         }
     }
 
@@ -452,6 +464,7 @@ impl EffectInstance {
             EffectInstance::Ring(_) => EffectKind::Ring,
             EffectInstance::Reverb(_) => EffectKind::Reverb,
             EffectInstance::Distortion(_) => EffectKind::Distortion,
+            EffectInstance::Chorus(_) => EffectKind::Chorus,
         }
     }
 }
@@ -473,6 +486,7 @@ impl Effect for EffectInstance {
             EffectInstance::Ring(e) => e.process_sample(left, right),
             EffectInstance::Reverb(e) => e.process_sample(left, right),
             EffectInstance::Distortion(e) => e.process_sample(left, right),
+            EffectInstance::Chorus(e) => e.process_sample(left, right),
         }
     }
 
@@ -492,6 +506,7 @@ impl Effect for EffectInstance {
             EffectInstance::Ring(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Reverb(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Distortion(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Chorus(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -511,6 +526,7 @@ impl Effect for EffectInstance {
             EffectInstance::Ring(e) => e.reset(),
             EffectInstance::Reverb(e) => e.reset(),
             EffectInstance::Distortion(e) => e.reset(),
+            EffectInstance::Chorus(e) => e.reset(),
         }
     }
 
@@ -530,6 +546,7 @@ impl Effect for EffectInstance {
             EffectInstance::Ring(e) => e.parameters(),
             EffectInstance::Reverb(e) => e.parameters(),
             EffectInstance::Distortion(e) => e.parameters(),
+            EffectInstance::Chorus(e) => e.parameters(),
         }
     }
 
@@ -549,6 +566,7 @@ impl Effect for EffectInstance {
             EffectInstance::Ring(e) => e.set_param(index, value),
             EffectInstance::Reverb(e) => e.set_param(index, value),
             EffectInstance::Distortion(e) => e.set_param(index, value),
+            EffectInstance::Chorus(e) => e.set_param(index, value),
         }
     }
 
@@ -568,6 +586,7 @@ impl Effect for EffectInstance {
             EffectInstance::Ring(e) => e.set_bpm(bpm),
             EffectInstance::Reverb(e) => e.set_bpm(bpm),
             EffectInstance::Distortion(e) => e.set_bpm(bpm),
+            EffectInstance::Chorus(e) => e.set_bpm(bpm),
         }
     }
 
@@ -587,6 +606,7 @@ impl Effect for EffectInstance {
             EffectInstance::Ring(e) => e.param_dimmed(index),
             EffectInstance::Reverb(e) => e.param_dimmed(index),
             EffectInstance::Distortion(e) => e.param_dimmed(index),
+            EffectInstance::Chorus(e) => e.param_dimmed(index),
         }
     }
 
@@ -606,6 +626,7 @@ impl Effect for EffectInstance {
             EffectInstance::Ring(e) => e.latency_samples(),
             EffectInstance::Reverb(e) => e.latency_samples(),
             EffectInstance::Distortion(e) => e.latency_samples(),
+            EffectInstance::Chorus(e) => e.latency_samples(),
         }
     }
 }
@@ -676,7 +697,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 14);
+        assert_eq!(EffectKind::ALL.len(), 15);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -691,6 +712,7 @@ mod tests {
         assert_eq!(EffectKind::Ring.name(), "Ring");
         assert_eq!(EffectKind::Reverb.name(), "Reverb");
         assert_eq!(EffectKind::Distortion.name(), "Distortion");
+        assert_eq!(EffectKind::Chorus.name(), "Chorus");
     }
 
     #[test]
@@ -1078,6 +1100,7 @@ mod tests {
             EffectKind::Ring,
             EffectKind::Reverb,
             EffectKind::Distortion,
+            EffectKind::Chorus,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
