@@ -3,13 +3,15 @@
 //! STFT analysis → bin remapping (shift + stretch) → phase accumulation →
 //! STFT synthesis → overlap-add.
 //!
-//! FFT size 4096, hop size 1024 (75% overlap, 4x redundancy), Hann window.
+//! Configurable FFT size + hop. Default usage (warp-zone, multosis): FFT 4096,
+//! hop 1024 (75 % overlap, 4× redundancy), Hann window. Latency equals
+//! `fft_size` samples.
 
+use crate::stft_analysis::StftAnalyzer;
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 use std::f32::consts::{PI, TAU};
 use std::sync::Arc;
-use tract_dsp::stft_analysis::StftAnalyzer;
 
 /// Zero complex value. Defined as a function because `Complex::new` is not
 /// const-compatible in this version of num_complex.

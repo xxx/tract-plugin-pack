@@ -3,7 +3,13 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 pub mod editor;
-pub mod spectral;
+// SpectralShifter has been promoted to `tract_dsp::spectral_shifter` so
+// it can be reused by multosis's Warp Zone effect. The module re-export
+// keeps existing call sites (and the public `warp_zone::spectral::…`
+// surface used by benches) building without changes.
+pub mod spectral {
+    pub use tract_dsp::spectral_shifter::SpectralShifter;
+}
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
