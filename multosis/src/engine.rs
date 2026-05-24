@@ -331,6 +331,34 @@ impl AudioEngine {
         self.last_active = active & !mute_mask;
     }
 
+    /// Sum of per-effect latency samples across rows that are reachable
+    /// in the audio chain — i.e. not effectively muted (own mute or
+    /// solo-cancelled) and not `EffectKind::None`. This is what multosis
+    /// reports to the host as plugin delay compensation, so PDC keeps the
+    /// track aligned with the rest of the project regardless of which
+    /// rows have latency-introducing effects (today: only Warp Zone).
+    ///
+    /// We use the "potentially reachable" set rather than the grid-active
+    /// set: a row whose cells are off at the current playhead would
+    /// otherwise toggle latency every step, which is impractical for
+    /// hosts that re-align on each change. With this conservative sum the
+    /// host pulls back enough buffer for any column the user can reach
+    /// without re-arranging the track lanes.
+    pub fn chain_latency_samples(&self) -> usize {
+        let mute_mask = self.effective_mute_mask();
+        let mut total = 0;
+        for (r, te) in self.track_effects.iter().enumerate() {
+            if te.kind == crate::effects::EffectKind::None {
+                continue;
+            }
+            if mute_mask & (1 << r) != 0 {
+                continue;
+            }
+            total += self.effects[r].latency_samples();
+        }
+        total
+    }
+
     /// Build the per-block mute mask: bit `r` set when row `r` is
     /// effectively bypassed — either its own `muted` flag is on, or some
     /// other row is soloed and this one isn't. A row that is both `muted`
@@ -400,6 +428,61 @@ mod tests {
             engine.active_mask() != 0,
             "after the playhead starts, at least one row should be active"
         );
+    }
+
+    #[test]
+    fn chain_latency_samples_sums_warpzone_rows_and_skips_muted_or_none() {
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        // Fresh engine: every row is None → zero chain latency.
+        assert_eq!(engine.chain_latency_samples(), 0);
+        // Put a Warp Zone on rows 0 and 2; row 1 stays None.
+        let mut effects = [TrackEffect::default_for_row(0); ROWS];
+        effects[0] = TrackEffect {
+            kind: crate::effects::EffectKind::WarpZone,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::WarpZone),
+            mix: 1.0,
+            muted: false,
+            soloed: false,
+        };
+        effects[2] = TrackEffect {
+            kind: crate::effects::EffectKind::WarpZone,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::WarpZone),
+            mix: 1.0,
+            muted: false,
+            soloed: false,
+        };
+        engine.set_effects(&effects);
+        // Two Warp Zone rows × FFT_SIZE = 2 × 4096 = 8192.
+        assert_eq!(engine.chain_latency_samples(), 8192);
+
+        // Muting row 2 drops it from the sum.
+        effects[2].muted = true;
+        engine.set_effects(&effects);
+        assert_eq!(engine.chain_latency_samples(), 4096);
+
+        // Soloing row 0 cancels the un-muted row 2-equivalent — but row 2
+        // is already muted, so this is the same 4096.
+        effects[0].soloed = true;
+        engine.set_effects(&effects);
+        assert_eq!(engine.chain_latency_samples(), 4096);
+
+        // Un-mute row 2 and turn solo off; back to 8192.
+        effects[2].muted = false;
+        effects[0].soloed = false;
+        engine.set_effects(&effects);
+        assert_eq!(engine.chain_latency_samples(), 8192);
+
+        // Non-WarpZone effects don't contribute (latency_samples = 0).
+        effects[1] = TrackEffect {
+            kind: crate::effects::EffectKind::Svf,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Svf),
+            mix: 1.0,
+            muted: false,
+            soloed: false,
+        };
+        engine.set_effects(&effects);
+        assert_eq!(engine.chain_latency_samples(), 8192);
     }
 
     #[test]

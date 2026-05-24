@@ -239,6 +239,15 @@ pub trait Effect {
     fn param_dimmed(&self, _index: usize) -> bool {
         false
     }
+
+    /// The latency in samples this effect adds to its input. Reported to
+    /// the host (via the engine's chain latency sum) so plugin delay
+    /// compensation keeps the multosis output aligned with the rest of
+    /// the project. Zero-latency effects (SVF, Bitcrush, Delay, Phaser,
+    /// FM, …) leave the default; Warp Zone overrides to its FFT size.
+    fn latency_samples(&self) -> usize {
+        0
+    }
 }
 
 /// A multimode state-variable filter — `n` cascaded TPT-SVF stages, each
@@ -1559,6 +1568,13 @@ impl Effect for WarpZoneEffect {
             _ => {}
         }
     }
+
+    /// 4096-sample FFT delay through the phase vocoder. The engine sums
+    /// this across non-muted/non-solo-cancelled WarpZone rows to report a
+    /// dynamic latency to the host.
+    fn latency_samples(&self) -> usize {
+        Self::FFT_SIZE
+    }
 }
 
 /// A silent "no-effect" — used when a track has no effect assigned. The row
@@ -1785,6 +1801,18 @@ impl Effect for EffectInstance {
             EffectInstance::Delay(e) => e.param_dimmed(index),
             EffectInstance::Phaser(e) => e.param_dimmed(index),
             EffectInstance::WarpZone(e) => e.param_dimmed(index),
+        }
+    }
+
+    fn latency_samples(&self) -> usize {
+        match self {
+            EffectInstance::None(e) => e.latency_samples(),
+            EffectInstance::Svf(e) => e.latency_samples(),
+            EffectInstance::Bitcrush(e) => e.latency_samples(),
+            EffectInstance::Fm(e) => e.latency_samples(),
+            EffectInstance::Delay(e) => e.latency_samples(),
+            EffectInstance::Phaser(e) => e.latency_samples(),
+            EffectInstance::WarpZone(e) => e.latency_samples(),
         }
     }
 }

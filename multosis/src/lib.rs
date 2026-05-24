@@ -160,6 +160,11 @@ pub struct Multosis {
     /// legitimate (from, to) pair (rows are 0..16, so the encoded value is
     /// always non-zero when set).
     pending_track_swap: Arc<std::sync::atomic::AtomicU32>,
+    /// The latency value most-recently reported to the host via
+    /// `set_latency_samples`. Cached so `process` only calls
+    /// `set_latency_samples` when the chain's latency actually changes
+    /// (avoids hosts re-aligning every single block).
+    last_reported_latency: u32,
 }
 
 impl Default for Multosis {
@@ -180,6 +185,7 @@ impl Default for Multosis {
             })),
             config_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_track_swap: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            last_reported_latency: 0,
         }
     }
 }
@@ -224,7 +230,7 @@ impl Plugin for Multosis {
         &mut self,
         _audio_io_layout: &AudioIOLayout,
         buffer_config: &BufferConfig,
-        _context: &mut impl InitContext<Self>,
+        context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
         self.engine.set_sample_rate(self.sample_rate);
@@ -242,6 +248,13 @@ impl Plugin for Multosis {
             self.engine.set_modulation(&m);
         }
         self.was_playing = false;
+        // Report the initial chain latency to the host (sum of every
+        // effect that adds latency in non-muted rows — today: only
+        // Warp Zone's FFT_SIZE per instance). `process` re-reports on
+        // change so PDC tracks edits made after this point.
+        let latency = self.engine.chain_latency_samples() as u32;
+        context.set_latency_samples(latency);
+        self.last_reported_latency = latency;
         true
     }
 
@@ -304,6 +317,17 @@ impl Plugin for Multosis {
             let from = ((pending >> 8) & 0xFF) as usize - 1;
             let to = (pending & 0xFF) as usize - 1;
             self.engine.swap_tracks(from, to);
+        }
+
+        // Re-report latency if the chain's total has changed (e.g. the user
+        // added a Warp Zone row or muted/un-muted one). Hosts that support
+        // dynamic latency re-align their PDC; the call is a no-op when the
+        // value matches what's already reported. Compared as an integer so
+        // we only re-publish on actual change, never every block.
+        let latency = self.engine.chain_latency_samples() as u32;
+        if latency != self.last_reported_latency {
+            context.set_latency_samples(latency);
+            self.last_reported_latency = latency;
         }
 
         let sps =
