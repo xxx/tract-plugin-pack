@@ -59,6 +59,38 @@ pub fn track_entry_rect(row: usize, scale: f32) -> (f32, f32, f32, f32) {
     (x, y, TRACK_PANEL_W * scale, CELL * scale)
 }
 
+/// One of the track-list buttons inside an entry's `track_entry_rect`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TrackButton {
+    /// The M (mute) toggle.
+    Mute,
+    /// The S (solo) toggle.
+    Solo,
+}
+
+// Logical-pixel layout of the M/S buttons inside the track entry. Picked so
+// they sit between the effect-name column and the sounding dot on the right.
+// `BUTTON_W` ×`BUTTON_H` is the hit + draw rect; `BUTTON_M_X` / `BUTTON_S_X`
+// are the left edge of each, measured from the entry's left edge.
+const BUTTON_W: f32 = 14.0;
+const BUTTON_H: f32 = 16.0;
+const BUTTON_M_X: f32 = 76.0;
+const BUTTON_S_X: f32 = 92.0;
+
+/// Physical-pixel rect of a `button` inside row `row`'s entry.
+pub fn track_button_rect(row: usize, button: TrackButton, scale: f32) -> (f32, f32, f32, f32) {
+    let (ex, ey, _ew, eh) = track_entry_rect(row, scale);
+    let bx_off = match button {
+        TrackButton::Mute => BUTTON_M_X,
+        TrackButton::Solo => BUTTON_S_X,
+    };
+    let bw = BUTTON_W * scale;
+    let bh = BUTTON_H * scale;
+    let bx = ex + bx_off * scale;
+    let by = ey + (eh - bh) * 0.5;
+    (bx, by, bw, bh)
+}
+
 /// The track-listing entry under physical-pixel point `(px, py)` at `scale`,
 /// or `None` if the point is outside the panel.
 pub fn track_at(px: f32, py: f32, scale: f32) -> Option<usize> {
@@ -74,8 +106,30 @@ pub fn track_at(px: f32, py: f32, scale: f32) -> Option<usize> {
     None
 }
 
+/// The M/S button under physical-pixel point `(px, py)` at `scale`, paired
+/// with the row it belongs to. Returns `None` when the point is outside
+/// every button. Used by the editor to route track-list clicks to mute/solo
+/// toggles before falling back to the row-selection path.
+pub fn track_button_at(px: f32, py: f32, scale: f32) -> Option<(usize, TrackButton)> {
+    if scale <= 0.0 {
+        return None;
+    }
+    for row in 0..ROWS {
+        for button in [TrackButton::Mute, TrackButton::Solo] {
+            let (bx, by, bw, bh) = track_button_rect(row, button, scale);
+            if px >= bx && px < bx + bw && py >= by && py < by + bh {
+                return Some((row, button));
+            }
+        }
+    }
+    None
+}
+
 /// Draw the track listing into `pixmap`. `kinds[r]` is row `r`'s effect kind;
-/// bit `r` of `active_mask` lights row `r`'s "sounding" dot; `selected` is the
+/// bit `r` of `active_mask` lights row `r`'s "sounding" dot (the engine
+/// already masks muted/non-soloed rows out of `active_mask`, so muted rows
+/// stay dark automatically). `mutes[r]` / `solos[r]` drive the M/S buttons
+/// and dim the effect name when effectively bypassed. `selected` is the
 /// row highlighted while the effect editor is open (`None` in the grid view).
 ///
 /// `drag_source` dims the row the user is dragging; `drag_target` outlines the
@@ -86,6 +140,8 @@ pub fn draw_track_list(
     pixmap: &mut Pixmap,
     tr: &mut widgets::TextRenderer,
     kinds: &[EffectKind; ROWS],
+    mutes: &[bool; ROWS],
+    solos: &[bool; ROWS],
     active_mask: u16,
     selected: Option<usize>,
     drag_source: Option<usize>,
@@ -105,15 +161,30 @@ pub fn draw_track_list(
     let dim_name_col = Color::from_rgba8(0x55, 0x4C, 0x3E, 0xFF);
     let dot_dark = Color::from_rgba8(0x2A, 0x24, 0x1E, 0xFF);
     let dot_live = Color::from_rgba8(0x5F, 0xC9, 0x6A, 0xFF);
+    // Mute/solo button colours. Inactive buttons reuse the dim-name swatch
+    // (subtle, doesn't fight the row text); active lights up red for Mute
+    // and yellow for Solo — the standard DAW convention.
+    let btn_off_bg = Color::from_rgba8(0x22, 0x1F, 0x1B, 0xFF);
+    let btn_off_text = Color::from_rgba8(0x55, 0x4C, 0x3E, 0xFF);
+    let btn_mute_bg = Color::from_rgba8(0xC0, 0x40, 0x3A, 0xFF);
+    let btn_solo_bg = Color::from_rgba8(0xE8, 0xC9, 0x4A, 0xFF);
+    let btn_active_text = Color::from_rgba8(0x10, 0x10, 0x10, 0xFF);
 
     // Track entries are CELL (40 px) tall — an 11 px font left them looking
     // tiny in that band. 15 px reads clearly and still leaves the number +
     // name + sounding-dot columns non-overlapping.
     let text_size = 15.0 * scale;
+    let btn_text_size = 11.0 * scale;
+    let any_soloed = solos.iter().any(|&s| s);
     for (row, &kind) in kinds.iter().enumerate() {
         let (x, y, w, h) = track_entry_rect(row, scale);
         let is_sel = selected == Some(row);
         let is_drag_source = drag_source == Some(row);
+        let muted = mutes[row];
+        let soloed = solos[row];
+        // Effectively bypassed iff own mute is on OR some other row is soloed
+        // and we aren't. Drives the row-name dim.
+        let bypassed = muted || (any_soloed && !soloed);
         let bg = if is_drag_source {
             drag_src_bg
         } else if is_sel {
@@ -127,8 +198,10 @@ pub fn draw_track_list(
         // Vertically centred text baseline — same formula `draw_button` uses.
         let ty = y + (h + text_size) * 0.5 - 2.0;
         // While dragging, the source row's text dims so the user can see
-        // which entry is "in flight" without needing a floating ghost.
-        let (nc, mc) = if is_drag_source {
+        // which entry is "in flight" without needing a floating ghost. A
+        // bypassed row also dims, even when selected, so the user gets
+        // immediate "this row isn't contributing" feedback.
+        let (nc, mc) = if is_drag_source || bypassed {
             (dim_num_col, dim_name_col)
         } else if is_sel {
             (sel_col, sel_col)
@@ -144,12 +217,50 @@ pub fn draw_track_list(
             nc,
         );
         tr.draw_text(pixmap, x + 30.0 * scale, ty, kind.name(), text_size, mc);
-        // "sounding" dot — a small square at the right edge
+
+        // M and S buttons. Hit-test geometry mirrors `track_button_rect`
+        // exactly so a click on a glyph lands on the right toggle.
+        let (mx, my, mw, mh) = track_button_rect(row, TrackButton::Mute, scale);
+        let (sx_, sy_, sw, sh) = track_button_rect(row, TrackButton::Solo, scale);
+        let m_bg = if muted { btn_mute_bg } else { btn_off_bg };
+        let s_bg = if soloed { btn_solo_bg } else { btn_off_bg };
+        let m_fg = if muted { btn_active_text } else { btn_off_text };
+        let s_fg = if soloed {
+            btn_active_text
+        } else {
+            btn_off_text
+        };
+        widgets::draw_rect(pixmap, mx, my, mw, mh, m_bg);
+        widgets::draw_rect(pixmap, sx_, sy_, sw, sh, s_bg);
+        // Centre the M/S glyphs in their buttons.
+        let m_w = tr.text_width("M", btn_text_size);
+        let s_w = tr.text_width("S", btn_text_size);
+        let m_ty = my + (mh + btn_text_size) * 0.5 - 2.0;
+        let s_ty = sy_ + (sh + btn_text_size) * 0.5 - 2.0;
+        tr.draw_text(
+            pixmap,
+            mx + (mw - m_w) * 0.5,
+            m_ty,
+            "M",
+            btn_text_size,
+            m_fg,
+        );
+        tr.draw_text(
+            pixmap,
+            sx_ + (sw - s_w) * 0.5,
+            s_ty,
+            "S",
+            btn_text_size,
+            s_fg,
+        );
+
+        // "sounding" dot — a small square at the right edge. Moved 8 px to
+        // the right of its previous position to clear the new S button.
         let lit = (active_mask >> row) & 1 != 0;
-        let d = 8.0 * scale;
+        let d = 6.0 * scale;
         widgets::draw_rect(
             pixmap,
-            x + w - 16.0 * scale,
+            x + w - 10.0 * scale,
             y + (h - d) / 2.0,
             d,
             d,
@@ -184,6 +295,54 @@ mod tests {
     }
 
     #[test]
+    fn track_button_at_returns_mute_for_centre_of_m_button() {
+        for row in 0..ROWS {
+            let (bx, by, bw, bh) = track_button_rect(row, TrackButton::Mute, 1.5);
+            assert_eq!(
+                track_button_at(bx + bw / 2.0, by + bh / 2.0, 1.5),
+                Some((row, TrackButton::Mute)),
+                "row {row} M centre"
+            );
+        }
+    }
+
+    #[test]
+    fn track_button_at_returns_solo_for_centre_of_s_button() {
+        for row in 0..ROWS {
+            let (bx, by, bw, bh) = track_button_rect(row, TrackButton::Solo, 1.5);
+            assert_eq!(
+                track_button_at(bx + bw / 2.0, by + bh / 2.0, 1.5),
+                Some((row, TrackButton::Solo)),
+                "row {row} S centre"
+            );
+        }
+    }
+
+    #[test]
+    fn track_button_at_misses_outside_both_buttons() {
+        // Centre of an entry's name column should not be either button.
+        let (ex, ey, _ew, eh) = track_entry_rect(3, 1.0);
+        // Name column is at logical x = 24..74 of the entry, well left of
+        // the M button at 76. Pick a point at logical x = 50 inside it.
+        let px = ex + 50.0;
+        let py = ey + eh / 2.0;
+        assert_eq!(track_button_at(px, py, 1.0), None);
+    }
+
+    #[test]
+    fn mute_and_solo_buttons_do_not_overlap_each_other_or_the_entry_edges() {
+        // Two adjacent buttons must be disjoint and stay inside the entry
+        // (TRACK_PANEL_W minus the dot's right margin).
+        for row in 0..ROWS {
+            let (ex, _, ew, _) = track_entry_rect(row, 1.0);
+            let (mx, _, mw, _) = track_button_rect(row, TrackButton::Mute, 1.0);
+            let (sx, _, sw, _) = track_button_rect(row, TrackButton::Solo, 1.0);
+            assert!(mx + mw <= sx, "row {row}: M overlaps S");
+            assert!(sx + sw <= ex + ew, "row {row}: S overflows entry");
+        }
+    }
+
+    #[test]
     fn track_at_misses_outside_the_panel() {
         // Above the first entry (in the toolbar strip) — no hit.
         assert_eq!(track_at(MARGIN + 1.0, 1.0, 1.0), None);
@@ -208,11 +367,15 @@ mod tests {
             kind: EffectKind::Svf,
             params: default_params_for_kind(EffectKind::Svf),
             mix: 0.42,
+            muted: false,
+            soloed: false,
         };
         effects[9] = TrackEffect {
             kind: EffectKind::Bitcrush,
             params: default_params_for_kind(EffectKind::Bitcrush),
             mix: 0.81,
+            muted: false,
+            soloed: false,
         };
         let mut modu: [TrackModulation; ROWS] =
             std::array::from_fn(TrackModulation::default_for_row);

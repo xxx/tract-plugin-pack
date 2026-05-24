@@ -1582,9 +1582,15 @@ impl Effect for EffectInstance {
 pub const MAX_EFFECT_PARAMS: usize = 5;
 
 /// One track row's persisted effect configuration: which effect, its
-/// parameter values, and its dry/wet mix. `params[i]` is the value for the
-/// kind's `parameters()[i]`; entries past the kind's parameter count are
-/// unused.
+/// parameter values, its dry/wet mix, and its mute/solo state. `params[i]`
+/// is the value for the kind's `parameters()[i]`; entries past the kind's
+/// parameter count are unused.
+///
+/// **Mute** bypasses the row — the effect is skipped and audio flows
+/// straight through to the next row, identical to `kind == None`.
+/// **Solo** flips the rest of the chain into bypass: when any row is
+/// soloed, every non-soloed row behaves as if muted (a row that is BOTH
+/// muted and soloed stays muted — the user's mute intent wins).
 #[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TrackEffect {
     pub kind: EffectKind,
@@ -1593,6 +1599,14 @@ pub struct TrackEffect {
     /// deserialize so presets predating this field load as fully wet.
     #[serde(default = "default_track_mix")]
     pub mix: f32,
+    /// Per-track Mute toggle — bypasses this row's effect when `true`.
+    /// Serde-defaulted to `false` so older presets load unmuted.
+    #[serde(default)]
+    pub muted: bool,
+    /// Per-track Solo toggle — when any row in the chain is soloed, every
+    /// non-soloed row is effectively muted. Serde-defaulted to `false`.
+    #[serde(default)]
+    pub soloed: bool,
 }
 
 /// The serde default for `TrackEffect::mix` — fully wet, matching the
@@ -1602,14 +1616,16 @@ fn default_track_mix() -> f32 {
 }
 
 impl TrackEffect {
-    /// The default effect for a track row — no effect, fully wet. Audio
-    /// passes through the track unchanged. Users assign an effect kind via
-    /// the editor's dropdown.
+    /// The default effect for a track row — no effect, fully wet, neither
+    /// muted nor soloed. Audio passes through the track unchanged. Users
+    /// assign an effect kind via the editor's dropdown.
     pub fn default_for_row(_row: usize) -> Self {
         TrackEffect {
             kind: EffectKind::None,
             params: [0.0; MAX_EFFECT_PARAMS],
             mix: 1.0,
+            muted: false,
+            soloed: false,
         }
     }
 }
@@ -1828,6 +1844,8 @@ mod tests {
             kind: EffectKind::Bitcrush,
             params: [3.0, 8.0, 0.0, 0.0, 0.0],
             mix: 1.0,
+            muted: false,
+            soloed: false,
         };
         let json = serde_json::to_string(&te).unwrap();
         let back: TrackEffect = serde_json::from_str(&json).unwrap();

@@ -534,6 +534,49 @@ impl MultosisWindow {
         }
     }
 
+    /// Per-track `(muted, soloed)` snapshot for the track-list draw. Same
+    /// lock-failure fallback as `track_kinds`: all-false (no row muted, no
+    /// row soloed) so a contended frame draws indistinguishable from the
+    /// default state rather than a misleading mute/solo display.
+    fn track_mute_solo(&self) -> ([bool; crate::grid::ROWS], [bool; crate::grid::ROWS]) {
+        if let Ok(cfg) = self.params.track_effects.lock() {
+            (
+                std::array::from_fn(|r| cfg[r].muted),
+                std::array::from_fn(|r| cfg[r].soloed),
+            )
+        } else {
+            ([false; crate::grid::ROWS], [false; crate::grid::ROWS])
+        }
+    }
+
+    /// Toggle the M (mute) or S (solo) flag on row `row`, snapshot the
+    /// config for undo, and mark the audio thread to re-bridge. Wrapped
+    /// in `try_lock` so a brief lock-contended click is a no-op rather
+    /// than a freeze.
+    fn toggle_track_button(&mut self, row: usize, button: track_list::TrackButton) {
+        if row >= crate::grid::ROWS {
+            return;
+        }
+        let snap = self.snapshot();
+        let opened = self.undo.begin_capture(snap);
+        let changed = if let Ok(mut cfg) = self.params.track_effects.try_lock() {
+            match button {
+                track_list::TrackButton::Mute => cfg[row].muted = !cfg[row].muted,
+                track_list::TrackButton::Solo => cfg[row].soloed = !cfg[row].soloed,
+            }
+            true
+        } else {
+            false
+        };
+        if changed {
+            self.mark_config_dirty();
+        }
+        if opened {
+            let after = self.snapshot();
+            self.undo.commit_capture(&after);
+        }
+    }
+
     /// Mark the persisted effect/modulation config dirty so the audio thread
     /// re-bridges it on the next process block.
     fn mark_config_dirty(&self) {
@@ -1609,6 +1652,7 @@ impl MultosisWindow {
         }
         // Track listing — both views.
         let kinds = self.track_kinds();
+        let (mutes, solos) = self.track_mute_solo();
         let active = self.active_rows.load(Ordering::Relaxed);
         let selected = match self.view {
             View::Grid => None,
@@ -1625,6 +1669,8 @@ impl MultosisWindow {
             &mut self.surface.pixmap,
             &mut self.text_renderer,
             &kinds,
+            &mutes,
+            &solos,
             active,
             selected,
             drag_source,
@@ -1981,7 +2027,16 @@ impl baseview::WindowHandler for MultosisWindow {
                             {
                                 return baseview::EventStatus::Captured;
                             }
-                            // Track listing — both views.
+                            // Track listing — both views. M/S button hit-test
+                            // runs BEFORE track-select so a click on one of
+                            // those small buttons just toggles its flag, with
+                            // no track switch and no drag arming.
+                            if let Some((row, button)) =
+                                track_list::track_button_at(px, py, self.scale_factor)
+                            {
+                                self.toggle_track_button(row, button);
+                                return baseview::EventStatus::Captured;
+                            }
                             if let Some(row) = track_list::track_at(px, py, self.scale_factor) {
                                 let new_track = clamp_track(row);
                                 // Switching tracks changes which MSEG the shared

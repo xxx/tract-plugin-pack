@@ -262,6 +262,16 @@ impl AudioEngine {
             });
         }
 
+        // Block-rate cache of the mute/solo mask. Each bit set means the row
+        // is effectively muted — either its own `muted` flag, or some other
+        // row is soloed and this one isn't. Recomputed once per block so the
+        // hot per-sample loop stays branch-light. Modulation triggers
+        // (CellLight / CellStep) intentionally run from the UN-masked grid
+        // activity below: muting a row bypasses its effect but should NOT
+        // disrupt its MSEG timing, so when the user un-mutes, the curve is
+        // exactly where it would have been.
+        let mute_mask = self.effective_mute_mask();
+
         // Walk the block in segments split at each boundary. Per segment:
         // advance the per-MSEG-clock modulation, then render the audio. At a
         // boundary, fire the CellLight and CellStep rows so the phase reset
@@ -282,9 +292,10 @@ impl AudioEngine {
                 &mut self.effects,
                 &self.track_effects,
             );
+            let active_audio = active & !mute_mask;
             for i in cursor..seg_end {
                 let (dry_l, dry_r) = (left[i], right[i]);
-                let (wet_l, wet_r) = self.process_sample(dry_l, dry_r, active);
+                let (wet_l, wet_r) = self.process_sample(dry_l, dry_r, active_audio);
                 // Limit the chain output on the wet bus, then mix dry/wet.
                 let (cw_l, cw_r) = self.compressor.process_sample(wet_l, wet_r);
                 left[i] = dry_l + (cw_l - dry_l) * mix;
@@ -314,7 +325,26 @@ impl AudioEngine {
                 bi += 1;
             }
         }
-        self.last_active = active;
+        // last_active is the audible mask — what the user sees in the track
+        // listing's "sounding" dot. Muted/non-soloed rows stay dark even when
+        // their grid cell is on.
+        self.last_active = active & !mute_mask;
+    }
+
+    /// Build the per-block mute mask: bit `r` set when row `r` is
+    /// effectively bypassed — either its own `muted` flag is on, or some
+    /// other row is soloed and this one isn't. A row that is both `muted`
+    /// and `soloed` stays muted (the explicit mute wins).
+    fn effective_mute_mask(&self) -> u16 {
+        let any_soloed = self.track_effects.iter().any(|te| te.soloed);
+        let mut mask = 0u16;
+        for r in 0..ROWS {
+            let te = &self.track_effects[r];
+            if te.muted || (any_soloed && !te.soloed) {
+                mask |= 1 << r;
+            }
+        }
+        mask
     }
 }
 
@@ -373,6 +403,138 @@ mod tests {
     }
 
     #[test]
+    fn muted_row_drops_out_of_the_active_mask_and_audio_chain() {
+        // Row 0 with an SVF heavily attenuating a high signal: with the
+        // effect active the output is small; with row 0 muted the dry
+        // signal passes through.
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let mut effects = [TrackEffect::default_for_row(0); ROWS];
+        effects[0] = TrackEffect {
+            kind: crate::effects::EffectKind::Svf,
+            // Cutoff = 80 Hz; resonance low; LP; 8 poles. With a 0.5 DC-ish
+            // input the SVF settles ~unity at DC but the test below uses a
+            // simple identity assertion at mute: if muted the audible output
+            // matches dry, otherwise it doesn't.
+            params: [80.0, 0.1, 0.0, 3.0, 0.0],
+            mix: 1.0,
+            muted: false,
+            soloed: false,
+        };
+        engine.set_effects(&effects);
+
+        let grid = Grid::default();
+        let mut left = [0.5_f32; 64];
+        let mut right = [0.5_f32; 64];
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, &grid);
+        // active_mask reports the audible mask — row 0 is set when un-muted.
+        assert!(
+            engine.active_mask() & 1 != 0,
+            "row 0 should be in the active mask when un-muted"
+        );
+
+        // Now mute row 0 and run a fresh block from the same input.
+        effects[0].muted = true;
+        engine.set_effects(&effects);
+        engine.reset();
+        let mut left2 = [0.5_f32; 64];
+        let mut right2 = [0.5_f32; 64];
+        engine.process(&mut left2, &mut right2, true, 10.0, 120.0, 1.0, &grid);
+        // Muted row drops out of the active mask.
+        assert_eq!(
+            engine.active_mask() & 1,
+            0,
+            "row 0 should be cleared from active_mask when muted"
+        );
+        // And audibly: muted samples equal the dry input.
+        for (i, &s) in left2.iter().enumerate() {
+            assert!(
+                (s - 0.5).abs() < 1e-5,
+                "muted row 0 sample {i} should pass dry through, got {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn solo_mask_silences_every_non_soloed_row_but_keeps_soloed_rows_audible() {
+        // Two rows wired with effects. Solo row 1; row 0 should drop out
+        // of active_mask while row 1 stays. No row soloed → both audible.
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let mut effects = [TrackEffect::default_for_row(0); ROWS];
+        effects[0] = TrackEffect {
+            kind: crate::effects::EffectKind::Svf,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Svf),
+            mix: 1.0,
+            muted: false,
+            soloed: false,
+        };
+        effects[1] = TrackEffect {
+            kind: crate::effects::EffectKind::Bitcrush,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Bitcrush),
+            mix: 1.0,
+            muted: false,
+            soloed: false,
+        };
+        engine.set_effects(&effects);
+
+        let grid = Grid::default();
+        let mut left = [0.3_f32; 64];
+        let mut right = [0.3_f32; 64];
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, &grid);
+        // Baseline: both rows audible.
+        let unsoloed_mask = engine.active_mask();
+        assert!(
+            unsoloed_mask & 0b11 == 0b11,
+            "both rows should be in the active mask before soloing (got {unsoloed_mask:#06b})"
+        );
+
+        // Solo row 1 → row 0 drops out, row 1 stays.
+        effects[1].soloed = true;
+        engine.set_effects(&effects);
+        let mut left2 = [0.3_f32; 64];
+        let mut right2 = [0.3_f32; 64];
+        engine.process(&mut left2, &mut right2, true, 10.0, 120.0, 1.0, &grid);
+        let mask = engine.active_mask();
+        assert_eq!(
+            mask & 1,
+            0,
+            "row 0 should drop out under solo (got {mask:#06b})"
+        );
+        assert!(
+            mask & 0b10 != 0,
+            "row 1 (soloed) stays audible (got {mask:#06b})"
+        );
+    }
+
+    #[test]
+    fn explicit_mute_wins_over_solo_when_both_set() {
+        // A row that is both soloed AND muted stays muted — the explicit
+        // mute is the user's intent.
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let mut effects = [TrackEffect::default_for_row(0); ROWS];
+        effects[2] = TrackEffect {
+            kind: crate::effects::EffectKind::Svf,
+            params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Svf),
+            mix: 1.0,
+            muted: true,
+            soloed: true,
+        };
+        engine.set_effects(&effects);
+
+        let grid = Grid::default();
+        let mut left = [0.3_f32; 64];
+        let mut right = [0.3_f32; 64];
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, &grid);
+        assert_eq!(
+            engine.active_mask() & (1 << 2),
+            0,
+            "muted+soloed row should be silent — mute wins"
+        );
+    }
+
+    #[test]
     fn new_engine_has_an_unstarted_playhead() {
         let engine = AudioEngine::new();
         assert_eq!(engine.playhead_column(), 0);
@@ -422,6 +584,8 @@ mod tests {
             kind: crate::effects::EffectKind::Svf,
             params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Svf),
             mix: 1.0,
+            muted: false,
+            soloed: false,
         };
         engine.set_effects(&effects);
         let grid = Grid::default();
@@ -447,11 +611,15 @@ mod tests {
             kind: crate::effects::EffectKind::Svf,
             params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Svf),
             mix: 1.0,
+            muted: false,
+            soloed: false,
         };
         lp_first[1] = TrackEffect {
             kind: crate::effects::EffectKind::Bitcrush,
             params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Bitcrush),
             mix: 1.0,
+            muted: false,
+            soloed: false,
         };
         let mut bc_first = lp_first;
         bc_first.swap(0, 1);
@@ -498,6 +666,8 @@ mod tests {
             kind: crate::effects::EffectKind::Svf,
             params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Svf),
             mix: 1.0,
+            muted: false,
+            soloed: false,
         };
 
         let sr = 48_000.0_f32;
@@ -636,6 +806,8 @@ mod tests {
             kind: crate::effects::EffectKind::Svf,
             params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Svf),
             mix: 1.0,
+            muted: false,
+            soloed: false,
         };
         let mut engine = AudioEngine::new();
         engine.set_sample_rate(48_000.0);
@@ -661,11 +833,15 @@ mod tests {
             kind: crate::effects::EffectKind::Svf,
             params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Svf),
             mix: 0.7,
+            muted: false,
+            soloed: false,
         };
         cfg[7] = crate::effects::TrackEffect {
             kind: crate::effects::EffectKind::Bitcrush,
             params: crate::effects::default_params_for_kind(crate::effects::EffectKind::Bitcrush),
             mix: 0.4,
+            muted: false,
+            soloed: false,
         };
         engine.set_effects(&cfg);
         engine.swap_tracks(3, 7);
@@ -698,6 +874,8 @@ mod tests {
                 kind: crate::effects::EffectKind::Svf,
                 params: [800.0, 0.2, 0.0, 0.0, 0.0],
                 mix: 1.0,
+                muted: false,
+                soloed: false,
             });
         engine.set_effects(&cfg);
         // Charge row 0's lowpass with a DC input.
@@ -744,6 +922,8 @@ mod tests {
                 kind: crate::effects::EffectKind::Svf,
                 params: [800.0, 0.2, 0.0, 0.0, 0.0],
                 mix: 1.0,
+                muted: false,
+                soloed: false,
             });
         engine.set_effects(&cfg);
         // Drive row 0's effect so it has non-zero internal state.
@@ -876,6 +1056,8 @@ mod tests {
             kind: crate::effects::EffectKind::Svf,
             params: [2000.0, 0.1, 0.0, 0.0, 0.0],
             mix: 1.0,
+            muted: false,
+            soloed: false,
         };
         engine.set_effects(&cfg);
         assert_eq!(
@@ -942,6 +1124,8 @@ mod tests {
                 kind: crate::effects::EffectKind::Svf,
                 params: [2_000.0, 0.15, 0.0, 0.0, 0.0],
                 mix: 1.0,
+                muted: false,
+                soloed: false,
             });
         engine.set_effects(&effect_cfg);
         let mod_cfg: [crate::modulation::TrackModulation; ROWS] =

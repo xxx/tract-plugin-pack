@@ -1088,6 +1088,8 @@ mod tests {
             kind: EffectKind::Bitcrush,
             params: crate::effects::default_params_for_kind(EffectKind::Bitcrush),
             mix: 1.0,
+            muted: false,
+            soloed: false,
         };
         let mut modulation = TrackModulation::default_for_row(0);
         modulation.targets[0] = Some(1);
@@ -1116,6 +1118,8 @@ mod tests {
             kind: EffectKind::Svf,
             params: crate::effects::default_params_for_kind(EffectKind::Svf),
             mix: 1.0,
+            muted: false,
+            soloed: false,
         };
         let mut modulation = TrackModulation::default_for_row(0);
         modulation.targets[0] = Some(0);
