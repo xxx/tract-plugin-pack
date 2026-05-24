@@ -256,6 +256,7 @@ mod comb;
 mod compressor;
 mod delay;
 mod distortion;
+mod flanger;
 mod fm;
 mod none;
 mod phaser;
@@ -274,6 +275,7 @@ pub use comb::CombEffect;
 pub use compressor::CompressorEffect;
 pub use delay::DelayEffect;
 pub use distortion::DistortionEffect;
+pub use flanger::FlangerEffect;
 pub use fm::FmEffect;
 pub use none::NoneEffect;
 pub use phaser::PhaserEffect;
@@ -331,11 +333,15 @@ pub enum EffectKind {
     /// same engine as the master-bus compressor: stereo-linked, fixed
     /// 5 ms attack / 50 ms release / 6 dB knee.
     Compressor,
+    /// Classic stereo flanger with triangle LFO. Shorter delay
+    /// range and hotter feedback defaults than Chorus, tuned for
+    /// flanging out of the box.
+    Flanger,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 17] = [
+    pub const ALL: [EffectKind; 18] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -353,6 +359,7 @@ impl EffectKind {
         EffectKind::Chorus,
         EffectKind::PitchShift,
         EffectKind::Compressor,
+        EffectKind::Flanger,
     ];
 
     /// The kind's display name.
@@ -375,6 +382,7 @@ impl EffectKind {
             EffectKind::Chorus => "Chorus",
             EffectKind::PitchShift => "Pitch Shift",
             EffectKind::Compressor => "Compressor",
+            EffectKind::Flanger => "Flanger",
         }
     }
 
@@ -459,6 +467,9 @@ pub enum EffectInstance {
     // Not boxed -- CompressorEffect is tiny (the inner Compressor
     // has 6 f32s plus the two cached param values).
     Compressor(CompressorEffect),
+    // Not boxed -- FlangerEffect itself is small; the two Vec
+    // ring buffers it holds are already heap-allocated by Vec.
+    Flanger(FlangerEffect),
 }
 
 impl EffectInstance {
@@ -482,6 +493,7 @@ impl EffectInstance {
             EffectKind::Chorus => EffectInstance::Chorus(ChorusEffect::new()),
             EffectKind::PitchShift => EffectInstance::PitchShift(Box::default()),
             EffectKind::Compressor => EffectInstance::Compressor(CompressorEffect::new()),
+            EffectKind::Flanger => EffectInstance::Flanger(FlangerEffect::new()),
         }
     }
 
@@ -505,6 +517,7 @@ impl EffectInstance {
             EffectInstance::Chorus(_) => EffectKind::Chorus,
             EffectInstance::PitchShift(_) => EffectKind::PitchShift,
             EffectInstance::Compressor(_) => EffectKind::Compressor,
+            EffectInstance::Flanger(_) => EffectKind::Flanger,
         }
     }
 }
@@ -529,6 +542,7 @@ impl Effect for EffectInstance {
             EffectInstance::Chorus(e) => e.process_sample(left, right),
             EffectInstance::PitchShift(e) => e.process_sample(left, right),
             EffectInstance::Compressor(e) => e.process_sample(left, right),
+            EffectInstance::Flanger(e) => e.process_sample(left, right),
         }
     }
 
@@ -551,6 +565,7 @@ impl Effect for EffectInstance {
             EffectInstance::Chorus(e) => e.set_sample_rate(sample_rate),
             EffectInstance::PitchShift(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Compressor(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Flanger(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -573,6 +588,7 @@ impl Effect for EffectInstance {
             EffectInstance::Chorus(e) => e.reset(),
             EffectInstance::PitchShift(e) => e.reset(),
             EffectInstance::Compressor(e) => e.reset(),
+            EffectInstance::Flanger(e) => e.reset(),
         }
     }
 
@@ -595,6 +611,7 @@ impl Effect for EffectInstance {
             EffectInstance::Chorus(e) => e.parameters(),
             EffectInstance::PitchShift(e) => e.parameters(),
             EffectInstance::Compressor(e) => e.parameters(),
+            EffectInstance::Flanger(e) => e.parameters(),
         }
     }
 
@@ -617,6 +634,7 @@ impl Effect for EffectInstance {
             EffectInstance::Chorus(e) => e.set_param(index, value),
             EffectInstance::PitchShift(e) => e.set_param(index, value),
             EffectInstance::Compressor(e) => e.set_param(index, value),
+            EffectInstance::Flanger(e) => e.set_param(index, value),
         }
     }
 
@@ -639,6 +657,7 @@ impl Effect for EffectInstance {
             EffectInstance::Chorus(e) => e.set_bpm(bpm),
             EffectInstance::PitchShift(e) => e.set_bpm(bpm),
             EffectInstance::Compressor(e) => e.set_bpm(bpm),
+            EffectInstance::Flanger(e) => e.set_bpm(bpm),
         }
     }
 
@@ -661,6 +680,7 @@ impl Effect for EffectInstance {
             EffectInstance::Chorus(e) => e.param_dimmed(index),
             EffectInstance::PitchShift(e) => e.param_dimmed(index),
             EffectInstance::Compressor(e) => e.param_dimmed(index),
+            EffectInstance::Flanger(e) => e.param_dimmed(index),
         }
     }
 
@@ -683,6 +703,7 @@ impl Effect for EffectInstance {
             EffectInstance::Chorus(e) => e.latency_samples(),
             EffectInstance::PitchShift(e) => e.latency_samples(),
             EffectInstance::Compressor(e) => e.latency_samples(),
+            EffectInstance::Flanger(e) => e.latency_samples(),
         }
     }
 }
@@ -753,7 +774,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 17);
+        assert_eq!(EffectKind::ALL.len(), 18);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -771,6 +792,7 @@ mod tests {
         assert_eq!(EffectKind::Chorus.name(), "Chorus");
         assert_eq!(EffectKind::PitchShift.name(), "Pitch Shift");
         assert_eq!(EffectKind::Compressor.name(), "Compressor");
+        assert_eq!(EffectKind::Flanger.name(), "Flanger");
     }
 
     #[test]
@@ -1190,6 +1212,7 @@ mod tests {
             EffectKind::Chorus,
             EffectKind::PitchShift,
             EffectKind::Compressor,
+            EffectKind::Flanger,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
