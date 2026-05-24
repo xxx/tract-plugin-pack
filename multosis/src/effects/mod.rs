@@ -369,6 +369,20 @@ impl EffectKind {
             EffectKind::PitchShift => "Pitch Shift",
         }
     }
+
+    /// True iff a default-parameter instance of this kind reports
+    /// nonzero `latency_samples()` to the host. Used by the editor
+    /// to draw a "this row adds PDC" badge on the track listing.
+    ///
+    /// Today this is purely a function of kind (Satch and WarpZone
+    /// have fixed FFT-sized latency; everything else is zero-latency);
+    /// if a future kind grows a state-dependent latency the editor
+    /// will need a per-instance hook here instead. The
+    /// `effect_kind_reports_latency_matches_instance_latency` test
+    /// keeps this in sync with the trait impls.
+    pub fn reports_latency(self) -> bool {
+        matches!(self, Self::Satch | Self::WarpZone)
+    }
 }
 
 /// The number of modulatable parameters effect `kind` declares.
@@ -735,6 +749,35 @@ mod tests {
         assert_eq!(EffectKind::Distortion.name(), "Distortion");
         assert_eq!(EffectKind::Chorus.name(), "Chorus");
         assert_eq!(EffectKind::PitchShift.name(), "Pitch Shift");
+    }
+
+    #[test]
+    fn effect_kind_reports_latency_matches_instance_latency() {
+        // The editor's PDC badge consults `EffectKind::reports_latency()`
+        // without instantiating the effect. Verify that flag stays in
+        // lock-step with what a fresh instance actually reports via
+        // `latency_samples()` -- if a future effect grows latency,
+        // this test fires until both sides are updated together.
+        for &kind in &EffectKind::ALL {
+            let instance = EffectInstance::new(kind);
+            let actual = instance.latency_samples() > 0;
+            assert_eq!(
+                kind.reports_latency(),
+                actual,
+                "{:?}: reports_latency()={} but a fresh instance reports latency_samples()={}",
+                kind,
+                kind.reports_latency(),
+                instance.latency_samples()
+            );
+        }
+        // Sanity: at least Satch and WarpZone DO report latency, so
+        // the badge has something to draw.
+        assert!(EffectKind::Satch.reports_latency());
+        assert!(EffectKind::WarpZone.reports_latency());
+        // ...and at least one common one doesn't, so the badge is
+        // actually selective.
+        assert!(!EffectKind::Svf.reports_latency());
+        assert!(!EffectKind::None.reports_latency());
     }
 
     #[test]

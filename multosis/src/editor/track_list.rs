@@ -154,6 +154,13 @@ pub fn draw_track_list(
     let drag_src_bg = Color::from_rgba8(0x10, 0x0D, 0x0A, 0xFF);
     let drag_target_outline = Color::from_rgba8(0xE8, 0xC9, 0x8A, 0xFF);
     let border = Color::from_rgba8(0x3A, 0x34, 0x2E, 0xFF);
+    // PDC badge stripe: a thin vertical bar on the left edge of any
+    // row whose effect kind reports latency AND is currently
+    // contributing to the engine's chain-latency sum (i.e. NOT
+    // bypassed via mute/solo). Teal stands out against the warm
+    // brown/amber palette so the eye can scan a column of badges
+    // without competing with the row text colours.
+    let pdc_stripe_col = Color::from_rgba8(0x4A, 0xB8, 0xC8, 0xFF);
     let num_col = Color::from_rgba8(0x6A, 0x60, 0x52, 0xFF);
     let name_col = Color::from_rgba8(0x9A, 0x8A, 0x70, 0xFF);
     let sel_col = Color::from_rgba8(0xE8, 0xC9, 0x8A, 0xFF);
@@ -195,6 +202,17 @@ pub fn draw_track_list(
         widgets::draw_rect(pixmap, x, y, w, h, bg);
         // bottom hairline
         widgets::draw_rect(pixmap, x, y + h - scale, w, scale, border);
+        // PDC badge: drawn only when the effect kind reports latency
+        // AND the row is currently contributing to chain latency
+        // (matches `AudioEngine::chain_latency_samples`, which skips
+        // bypassed rows). Stripe sits to the left of the row number
+        // (number text starts at +6 px, so a 3 px-wide stripe at +1
+        // leaves a 2 px breathing gap before the digit).
+        if kind.reports_latency() && !bypassed {
+            let sw = 3.0 * scale;
+            let sh = h - 8.0 * scale;
+            widgets::draw_rect(pixmap, x + scale, y + 4.0 * scale, sw, sh, pdc_stripe_col);
+        }
         // Vertically centred text baseline — same formula `draw_button` uses.
         let ty = y + (h + text_size) * 0.5 - 2.0;
         // While dragging, the source row's text dims so the user can see
