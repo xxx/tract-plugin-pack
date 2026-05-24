@@ -258,6 +258,7 @@ mod delay;
 mod distortion;
 mod flanger;
 mod fm;
+mod frequency_shift;
 mod none;
 mod phaser;
 mod pitch_shift;
@@ -277,6 +278,7 @@ pub use delay::DelayEffect;
 pub use distortion::DistortionEffect;
 pub use flanger::FlangerEffect;
 pub use fm::FmEffect;
+pub use frequency_shift::FrequencyShiftEffect;
 pub use none::NoneEffect;
 pub use phaser::PhaserEffect;
 pub use pitch_shift::PitchShiftEffect;
@@ -337,11 +339,16 @@ pub enum EffectKind {
     /// range and hotter feedback defaults than Chorus, tuned for
     /// flanging out of the box.
     Flanger,
+    /// Latency-free single-sideband frequency shifter (Bode-style
+    /// IIR-Hilbert SSB modulator). Adds a constant Hz offset to
+    /// every spectral component, breaking harmonic relationships
+    /// for inharmonic / bell / clang sounds.
+    FrequencyShift,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 18] = [
+    pub const ALL: [EffectKind; 19] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -360,6 +367,7 @@ impl EffectKind {
         EffectKind::PitchShift,
         EffectKind::Compressor,
         EffectKind::Flanger,
+        EffectKind::FrequencyShift,
     ];
 
     /// The kind's display name.
@@ -383,6 +391,7 @@ impl EffectKind {
             EffectKind::PitchShift => "Pitch Shift",
             EffectKind::Compressor => "Compressor",
             EffectKind::Flanger => "Flanger",
+            EffectKind::FrequencyShift => "Freq Shift",
         }
     }
 
@@ -470,6 +479,12 @@ pub enum EffectInstance {
     // Not boxed -- FlangerEffect itself is small; the two Vec
     // ring buffers it holds are already heap-allocated by Vec.
     Flanger(FlangerEffect),
+    // Boxed: the Signalsmith Hilbert IIR carries 6 inline `[f32; 12]`
+    // arrays per channel (state + coefficients + poles) -- ~576 B for
+    // the stereo pair alone, past clippy's `large-enum-variant`
+    // threshold. The Box allocation happens once per kind-switch from
+    // the GUI thread, never on the audio path.
+    FrequencyShift(Box<FrequencyShiftEffect>),
 }
 
 impl EffectInstance {
@@ -494,6 +509,7 @@ impl EffectInstance {
             EffectKind::PitchShift => EffectInstance::PitchShift(Box::default()),
             EffectKind::Compressor => EffectInstance::Compressor(CompressorEffect::new()),
             EffectKind::Flanger => EffectInstance::Flanger(FlangerEffect::new()),
+            EffectKind::FrequencyShift => EffectInstance::FrequencyShift(Box::default()),
         }
     }
 
@@ -518,6 +534,7 @@ impl EffectInstance {
             EffectInstance::PitchShift(_) => EffectKind::PitchShift,
             EffectInstance::Compressor(_) => EffectKind::Compressor,
             EffectInstance::Flanger(_) => EffectKind::Flanger,
+            EffectInstance::FrequencyShift(_) => EffectKind::FrequencyShift,
         }
     }
 }
@@ -543,6 +560,7 @@ impl Effect for EffectInstance {
             EffectInstance::PitchShift(e) => e.process_sample(left, right),
             EffectInstance::Compressor(e) => e.process_sample(left, right),
             EffectInstance::Flanger(e) => e.process_sample(left, right),
+            EffectInstance::FrequencyShift(e) => e.process_sample(left, right),
         }
     }
 
@@ -566,6 +584,7 @@ impl Effect for EffectInstance {
             EffectInstance::PitchShift(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Compressor(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Flanger(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::FrequencyShift(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -589,6 +608,7 @@ impl Effect for EffectInstance {
             EffectInstance::PitchShift(e) => e.reset(),
             EffectInstance::Compressor(e) => e.reset(),
             EffectInstance::Flanger(e) => e.reset(),
+            EffectInstance::FrequencyShift(e) => e.reset(),
         }
     }
 
@@ -612,6 +632,7 @@ impl Effect for EffectInstance {
             EffectInstance::PitchShift(e) => e.parameters(),
             EffectInstance::Compressor(e) => e.parameters(),
             EffectInstance::Flanger(e) => e.parameters(),
+            EffectInstance::FrequencyShift(e) => e.parameters(),
         }
     }
 
@@ -635,6 +656,7 @@ impl Effect for EffectInstance {
             EffectInstance::PitchShift(e) => e.set_param(index, value),
             EffectInstance::Compressor(e) => e.set_param(index, value),
             EffectInstance::Flanger(e) => e.set_param(index, value),
+            EffectInstance::FrequencyShift(e) => e.set_param(index, value),
         }
     }
 
@@ -658,6 +680,7 @@ impl Effect for EffectInstance {
             EffectInstance::PitchShift(e) => e.set_bpm(bpm),
             EffectInstance::Compressor(e) => e.set_bpm(bpm),
             EffectInstance::Flanger(e) => e.set_bpm(bpm),
+            EffectInstance::FrequencyShift(e) => e.set_bpm(bpm),
         }
     }
 
@@ -681,6 +704,7 @@ impl Effect for EffectInstance {
             EffectInstance::PitchShift(e) => e.param_dimmed(index),
             EffectInstance::Compressor(e) => e.param_dimmed(index),
             EffectInstance::Flanger(e) => e.param_dimmed(index),
+            EffectInstance::FrequencyShift(e) => e.param_dimmed(index),
         }
     }
 
@@ -704,6 +728,7 @@ impl Effect for EffectInstance {
             EffectInstance::PitchShift(e) => e.latency_samples(),
             EffectInstance::Compressor(e) => e.latency_samples(),
             EffectInstance::Flanger(e) => e.latency_samples(),
+            EffectInstance::FrequencyShift(e) => e.latency_samples(),
         }
     }
 }
@@ -774,7 +799,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 18);
+        assert_eq!(EffectKind::ALL.len(), 19);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -793,6 +818,7 @@ mod tests {
         assert_eq!(EffectKind::PitchShift.name(), "Pitch Shift");
         assert_eq!(EffectKind::Compressor.name(), "Compressor");
         assert_eq!(EffectKind::Flanger.name(), "Flanger");
+        assert_eq!(EffectKind::FrequencyShift.name(), "Freq Shift");
     }
 
     #[test]
@@ -1213,6 +1239,7 @@ mod tests {
             EffectKind::PitchShift,
             EffectKind::Compressor,
             EffectKind::Flanger,
+            EffectKind::FrequencyShift,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
