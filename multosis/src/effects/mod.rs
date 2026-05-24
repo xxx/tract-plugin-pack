@@ -258,6 +258,7 @@ mod distortion;
 mod fm;
 mod none;
 mod phaser;
+mod pitch_shift;
 mod repeat;
 mod reverb;
 mod ring;
@@ -274,6 +275,7 @@ pub use distortion::DistortionEffect;
 pub use fm::FmEffect;
 pub use none::NoneEffect;
 pub use phaser::PhaserEffect;
+pub use pitch_shift::PitchShiftEffect;
 pub use repeat::RepeatEffect;
 pub use reverb::ReverbEffect;
 pub use ring::RingEffect;
@@ -320,11 +322,14 @@ pub enum EffectKind {
     /// with L/R LFO phase offset, capable of flanger, chorus, or
     /// doubler depending on Center.
     Chorus,
+    /// Granular pitch shifter spanning +/-24 semitones with grain
+    /// frequency, size, feedback, and stereo detune.
+    PitchShift,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 15] = [
+    pub const ALL: [EffectKind; 16] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -340,6 +345,7 @@ impl EffectKind {
         EffectKind::Reverb,
         EffectKind::Distortion,
         EffectKind::Chorus,
+        EffectKind::PitchShift,
     ];
 
     /// The kind's display name.
@@ -360,6 +366,7 @@ impl EffectKind {
             EffectKind::Reverb => "Reverb",
             EffectKind::Distortion => "Distortion",
             EffectKind::Chorus => "Chorus",
+            EffectKind::PitchShift => "Pitch Shift",
         }
     }
 }
@@ -423,6 +430,10 @@ pub enum EffectInstance {
     // Not boxed — ChorusEffect itself is small; the two Vec ring
     // buffers it holds are already heap-allocated by Vec.
     Chorus(ChorusEffect),
+    // Boxed: PitchShiftEffect holds a [Grain; 16] pool plus the
+    // standard ring buffers; the struct itself is ~420 B, past
+    // clippy's large-enum-variant threshold.
+    PitchShift(Box<PitchShiftEffect>),
 }
 
 impl EffectInstance {
@@ -444,6 +455,7 @@ impl EffectInstance {
             EffectKind::Reverb => EffectInstance::Reverb(Box::default()),
             EffectKind::Distortion => EffectInstance::Distortion(DistortionEffect::new()),
             EffectKind::Chorus => EffectInstance::Chorus(ChorusEffect::new()),
+            EffectKind::PitchShift => EffectInstance::PitchShift(Box::default()),
         }
     }
 
@@ -465,6 +477,7 @@ impl EffectInstance {
             EffectInstance::Reverb(_) => EffectKind::Reverb,
             EffectInstance::Distortion(_) => EffectKind::Distortion,
             EffectInstance::Chorus(_) => EffectKind::Chorus,
+            EffectInstance::PitchShift(_) => EffectKind::PitchShift,
         }
     }
 }
@@ -487,6 +500,7 @@ impl Effect for EffectInstance {
             EffectInstance::Reverb(e) => e.process_sample(left, right),
             EffectInstance::Distortion(e) => e.process_sample(left, right),
             EffectInstance::Chorus(e) => e.process_sample(left, right),
+            EffectInstance::PitchShift(e) => e.process_sample(left, right),
         }
     }
 
@@ -507,6 +521,7 @@ impl Effect for EffectInstance {
             EffectInstance::Reverb(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Distortion(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Chorus(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::PitchShift(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -527,6 +542,7 @@ impl Effect for EffectInstance {
             EffectInstance::Reverb(e) => e.reset(),
             EffectInstance::Distortion(e) => e.reset(),
             EffectInstance::Chorus(e) => e.reset(),
+            EffectInstance::PitchShift(e) => e.reset(),
         }
     }
 
@@ -547,6 +563,7 @@ impl Effect for EffectInstance {
             EffectInstance::Reverb(e) => e.parameters(),
             EffectInstance::Distortion(e) => e.parameters(),
             EffectInstance::Chorus(e) => e.parameters(),
+            EffectInstance::PitchShift(e) => e.parameters(),
         }
     }
 
@@ -567,6 +584,7 @@ impl Effect for EffectInstance {
             EffectInstance::Reverb(e) => e.set_param(index, value),
             EffectInstance::Distortion(e) => e.set_param(index, value),
             EffectInstance::Chorus(e) => e.set_param(index, value),
+            EffectInstance::PitchShift(e) => e.set_param(index, value),
         }
     }
 
@@ -587,6 +605,7 @@ impl Effect for EffectInstance {
             EffectInstance::Reverb(e) => e.set_bpm(bpm),
             EffectInstance::Distortion(e) => e.set_bpm(bpm),
             EffectInstance::Chorus(e) => e.set_bpm(bpm),
+            EffectInstance::PitchShift(e) => e.set_bpm(bpm),
         }
     }
 
@@ -607,6 +626,7 @@ impl Effect for EffectInstance {
             EffectInstance::Reverb(e) => e.param_dimmed(index),
             EffectInstance::Distortion(e) => e.param_dimmed(index),
             EffectInstance::Chorus(e) => e.param_dimmed(index),
+            EffectInstance::PitchShift(e) => e.param_dimmed(index),
         }
     }
 
@@ -627,6 +647,7 @@ impl Effect for EffectInstance {
             EffectInstance::Reverb(e) => e.latency_samples(),
             EffectInstance::Distortion(e) => e.latency_samples(),
             EffectInstance::Chorus(e) => e.latency_samples(),
+            EffectInstance::PitchShift(e) => e.latency_samples(),
         }
     }
 }
@@ -697,7 +718,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 15);
+        assert_eq!(EffectKind::ALL.len(), 16);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -713,6 +734,7 @@ mod tests {
         assert_eq!(EffectKind::Reverb.name(), "Reverb");
         assert_eq!(EffectKind::Distortion.name(), "Distortion");
         assert_eq!(EffectKind::Chorus.name(), "Chorus");
+        assert_eq!(EffectKind::PitchShift.name(), "Pitch Shift");
     }
 
     #[test]
@@ -1101,6 +1123,7 @@ mod tests {
             EffectKind::Reverb,
             EffectKind::Distortion,
             EffectKind::Chorus,
+            EffectKind::PitchShift,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
