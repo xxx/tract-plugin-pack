@@ -975,6 +975,9 @@ impl MultosisWindow {
                     win,
                 );
             }
+            EffectHit::Randomize => {
+                self.randomize_selected_track_effect();
+            }
             EffectHit::Dial(i) => {
                 // Enum-format params open a dropdown over the dial slot instead
                 // of being draggable. Double-click reset/text-edit/drag are
@@ -1326,6 +1329,41 @@ impl MultosisWindow {
             self.params.track_modulation.lock(),
         ) {
             crate::modulation::switch_effect_kind(&mut eff[row], &mut modu[row], kind);
+        }
+        self.mark_config_dirty();
+    }
+
+    /// Handle a click on the Randomize button. The two spec'd branches:
+    /// - If the selected track's effect is None, pick a random kind from
+    ///   `EffectKind::ALL` that is NOT in use on any OTHER track; assign
+    ///   it (resetting params + clamping modulation targets via
+    ///   `switch_effect_kind`); then randomize all params.
+    /// - Otherwise, keep the kind and randomize the params only.
+    ///
+    /// `mix` is preserved in both branches. `rng_seed` is consumed and
+    /// advanced so each click produces a distinct re-roll.
+    fn randomize_selected_track_effect(&mut self) {
+        let row = self.selected_track;
+        let seed = self.rng_seed;
+        self.rng_seed = self.rng_seed.wrapping_add(1);
+        // Gather kinds currently in use on OTHER tracks. Skip None
+        // (it's not a "claim" on anything), and skip the current row
+        // since we're about to overwrite it anyway.
+        if let (Ok(mut eff), Ok(mut modu)) = (
+            self.params.track_effects.lock(),
+            self.params.track_modulation.lock(),
+        ) {
+            let in_use_elsewhere: Vec<EffectKind> = (0..eff.len())
+                .filter(|&i| i != row)
+                .map(|i| eff[i].kind)
+                .filter(|k| *k != EffectKind::None)
+                .collect();
+            crate::randomize::randomize_track_effect(
+                &mut eff[row],
+                &mut modu[row],
+                &in_use_elsewhere,
+                seed,
+            );
         }
         self.mark_config_dirty();
     }

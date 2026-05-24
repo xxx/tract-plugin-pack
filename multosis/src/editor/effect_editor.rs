@@ -26,6 +26,11 @@ pub struct EffectLayout {
     pub effect_header: (f32, f32, f32, f32),
     /// Effect-kind dropdown trigger.
     pub kind: (f32, f32, f32, f32),
+    /// "Randomize" button. Picks a random unused effect kind (if
+    /// current is None) and randomizes the parameter values, never
+    /// touching Mix. Sits below the kind dropdown, inside the gap
+    /// the dial row doesn't cover.
+    pub randomize: (f32, f32, f32, f32),
     /// Parameter dial bounding boxes, slot order. Only the first
     /// `parameters().len()` are used by the current effect.
     pub dials: [(f32, f32, f32, f32); DIAL_SLOTS],
@@ -71,6 +76,10 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
     // EFFECT section — a header band, then the controls shifted down to clear it.
     let effect_header = l(ox, oy + 36.0, mw - inset, 16.0);
     let kind = l(ox, oy + 66.0, 150.0, 34.0);
+    // Randomize button: sits directly below the kind dropdown, in
+    // the empty column the dial row doesn't use (dial slot 0 starts
+    // at ox+180 logical, so x=0..150 below the kind is free).
+    let randomize = l(ox, oy + 108.0, 150.0, 30.0);
     let dials = std::array::from_fn(|i| {
         // Slots 0..3 sit in the standard 96-px-spaced dial row; slot 4 sits
         // in the dial column immediately to its right at ox+580.
@@ -108,6 +117,7 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
         back,
         effect_header,
         kind,
+        randomize,
         dials,
         mix,
         modulation_header,
@@ -168,6 +178,9 @@ pub fn enum_trigger_width_for(
 pub enum EffectHit {
     Back,
     Kind,
+    /// The Randomize button — picks a fresh unused kind (if current
+    /// is None) and re-rolls all parameter values, leaving Mix alone.
+    Randomize,
     Dial(usize),
     MsegSelector(usize),
     Target,
@@ -206,6 +219,9 @@ pub fn effect_hit(
     }
     if in_rect(lay.kind, px, py) {
         return Some(EffectHit::Kind);
+    }
+    if in_rect(lay.randomize, px, py) {
+        return Some(EffectHit::Randomize);
     }
     for i in 0..param_count.min(DIAL_SLOTS) {
         if in_rect(lay.dials[i], px, py) {
@@ -339,6 +355,20 @@ pub fn draw_effect_section(
         lay.kind,
         track.kind.name(),
         kind_dropdown_open,
+    );
+    // Randomize button: sits below the kind dropdown. Always
+    // active; the click handler chooses kind-then-params (for
+    // None) or params-only (otherwise) based on current state.
+    widgets::controls::draw_button(
+        pixmap,
+        tr,
+        lay.randomize.0,
+        lay.randomize.1,
+        lay.randomize.2,
+        lay.randomize.3,
+        "Randomize",
+        false,
+        false,
     );
     // Parameter dials. An `Enum`-format param replaces its dial with a
     // dropdown trigger — uniform widget for any N-option discrete selector,
