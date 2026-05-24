@@ -107,11 +107,18 @@ impl Default for Compressor {
 }
 
 fn db_to_lin(db: f32) -> f32 {
-    10.0_f32.powf(db / 20.0)
+    // `db_to_linear_fast` rewrites 10^(dB/20) as exp(dB * LN_10 / 20),
+    // which on f32 is ~2x faster than the libm powf path. Matters here
+    // when this compressor is used as a per-track effect whose
+    // Threshold is MSEG-modulated -- `set_params` then fires every
+    // sample, and the powf would dominate. The master-bus call site
+    // doesn't care (it runs off-thread on slider changes) but it's
+    // happy to inherit the speedup.
+    tract_dsp::db::db_to_linear_fast(db)
 }
 
 fn lin_to_db(lin: f32) -> f32 {
-    20.0 * lin.max(1e-12).log10()
+    tract_dsp::db::linear_to_db(lin.max(1e-12))
 }
 
 /// One-pole envelope coefficient for a given time constant (ms) at `sr` Hz.

@@ -253,6 +253,7 @@ pub trait Effect {
 mod bitcrush;
 mod chorus;
 mod comb;
+mod compressor;
 mod delay;
 mod distortion;
 mod fm;
@@ -270,6 +271,7 @@ mod warp_zone;
 pub use bitcrush::BitcrushEffect;
 pub use chorus::ChorusEffect;
 pub use comb::CombEffect;
+pub use compressor::CompressorEffect;
 pub use delay::DelayEffect;
 pub use distortion::DistortionEffect;
 pub use fm::FmEffect;
@@ -325,11 +327,15 @@ pub enum EffectKind {
     /// Granular pitch shifter spanning +/-24 semitones with grain
     /// frequency, size, feedback, and stereo detune.
     PitchShift,
+    /// Soft-knee peak compressor (Threshold + Ratio). Wraps the
+    /// same engine as the master-bus compressor: stereo-linked, fixed
+    /// 5 ms attack / 50 ms release / 6 dB knee.
+    Compressor,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 16] = [
+    pub const ALL: [EffectKind; 17] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -346,6 +352,7 @@ impl EffectKind {
         EffectKind::Distortion,
         EffectKind::Chorus,
         EffectKind::PitchShift,
+        EffectKind::Compressor,
     ];
 
     /// The kind's display name.
@@ -367,6 +374,7 @@ impl EffectKind {
             EffectKind::Distortion => "Distortion",
             EffectKind::Chorus => "Chorus",
             EffectKind::PitchShift => "Pitch Shift",
+            EffectKind::Compressor => "Compressor",
         }
     }
 
@@ -448,6 +456,9 @@ pub enum EffectInstance {
     // standard ring buffers; the struct itself is ~420 B, past
     // clippy's large-enum-variant threshold.
     PitchShift(Box<PitchShiftEffect>),
+    // Not boxed -- CompressorEffect is tiny (the inner Compressor
+    // has 6 f32s plus the two cached param values).
+    Compressor(CompressorEffect),
 }
 
 impl EffectInstance {
@@ -470,6 +481,7 @@ impl EffectInstance {
             EffectKind::Distortion => EffectInstance::Distortion(DistortionEffect::new()),
             EffectKind::Chorus => EffectInstance::Chorus(ChorusEffect::new()),
             EffectKind::PitchShift => EffectInstance::PitchShift(Box::default()),
+            EffectKind::Compressor => EffectInstance::Compressor(CompressorEffect::new()),
         }
     }
 
@@ -492,6 +504,7 @@ impl EffectInstance {
             EffectInstance::Distortion(_) => EffectKind::Distortion,
             EffectInstance::Chorus(_) => EffectKind::Chorus,
             EffectInstance::PitchShift(_) => EffectKind::PitchShift,
+            EffectInstance::Compressor(_) => EffectKind::Compressor,
         }
     }
 }
@@ -515,6 +528,7 @@ impl Effect for EffectInstance {
             EffectInstance::Distortion(e) => e.process_sample(left, right),
             EffectInstance::Chorus(e) => e.process_sample(left, right),
             EffectInstance::PitchShift(e) => e.process_sample(left, right),
+            EffectInstance::Compressor(e) => e.process_sample(left, right),
         }
     }
 
@@ -536,6 +550,7 @@ impl Effect for EffectInstance {
             EffectInstance::Distortion(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Chorus(e) => e.set_sample_rate(sample_rate),
             EffectInstance::PitchShift(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Compressor(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -557,6 +572,7 @@ impl Effect for EffectInstance {
             EffectInstance::Distortion(e) => e.reset(),
             EffectInstance::Chorus(e) => e.reset(),
             EffectInstance::PitchShift(e) => e.reset(),
+            EffectInstance::Compressor(e) => e.reset(),
         }
     }
 
@@ -578,6 +594,7 @@ impl Effect for EffectInstance {
             EffectInstance::Distortion(e) => e.parameters(),
             EffectInstance::Chorus(e) => e.parameters(),
             EffectInstance::PitchShift(e) => e.parameters(),
+            EffectInstance::Compressor(e) => e.parameters(),
         }
     }
 
@@ -599,6 +616,7 @@ impl Effect for EffectInstance {
             EffectInstance::Distortion(e) => e.set_param(index, value),
             EffectInstance::Chorus(e) => e.set_param(index, value),
             EffectInstance::PitchShift(e) => e.set_param(index, value),
+            EffectInstance::Compressor(e) => e.set_param(index, value),
         }
     }
 
@@ -620,6 +638,7 @@ impl Effect for EffectInstance {
             EffectInstance::Distortion(e) => e.set_bpm(bpm),
             EffectInstance::Chorus(e) => e.set_bpm(bpm),
             EffectInstance::PitchShift(e) => e.set_bpm(bpm),
+            EffectInstance::Compressor(e) => e.set_bpm(bpm),
         }
     }
 
@@ -641,6 +660,7 @@ impl Effect for EffectInstance {
             EffectInstance::Distortion(e) => e.param_dimmed(index),
             EffectInstance::Chorus(e) => e.param_dimmed(index),
             EffectInstance::PitchShift(e) => e.param_dimmed(index),
+            EffectInstance::Compressor(e) => e.param_dimmed(index),
         }
     }
 
@@ -662,6 +682,7 @@ impl Effect for EffectInstance {
             EffectInstance::Distortion(e) => e.latency_samples(),
             EffectInstance::Chorus(e) => e.latency_samples(),
             EffectInstance::PitchShift(e) => e.latency_samples(),
+            EffectInstance::Compressor(e) => e.latency_samples(),
         }
     }
 }
@@ -732,7 +753,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 16);
+        assert_eq!(EffectKind::ALL.len(), 17);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -749,6 +770,7 @@ mod tests {
         assert_eq!(EffectKind::Distortion.name(), "Distortion");
         assert_eq!(EffectKind::Chorus.name(), "Chorus");
         assert_eq!(EffectKind::PitchShift.name(), "Pitch Shift");
+        assert_eq!(EffectKind::Compressor.name(), "Compressor");
     }
 
     #[test]
@@ -1167,6 +1189,7 @@ mod tests {
             EffectKind::Distortion,
             EffectKind::Chorus,
             EffectKind::PitchShift,
+            EffectKind::Compressor,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
