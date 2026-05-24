@@ -19,10 +19,10 @@
 //!
 //! FFT size 2048, hop size 512 (75% overlap, 4x redundancy), Hann window.
 
+use crate::stft_analysis::StftAnalyzer;
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
-use tract_dsp::stft_analysis::StftAnalyzer;
 
 /// Ratio of spectral peak above which bins are classified as 100% loud.
 /// -6 dB relative to the frame's peak magnitude.
