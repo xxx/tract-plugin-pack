@@ -256,6 +256,7 @@ mod comb;
 mod compressor;
 mod delay;
 mod distortion;
+mod downsample;
 mod flanger;
 mod fm;
 mod frequency_shift;
@@ -276,6 +277,7 @@ pub use comb::CombEffect;
 pub use compressor::CompressorEffect;
 pub use delay::DelayEffect;
 pub use distortion::DistortionEffect;
+pub use downsample::DownsampleEffect;
 pub use flanger::FlangerEffect;
 pub use fm::FmEffect;
 pub use frequency_shift::FrequencyShiftEffect;
@@ -344,11 +346,15 @@ pub enum EffectKind {
     /// every spectral component, breaking harmonic relationships
     /// for inharmonic / bell / clang sounds.
     FrequencyShift,
+    /// Sample-rate reduction with smoothing and timing-jitter
+    /// character knobs. Distinct from Bitcrush in that it doesn't
+    /// touch bit depth and adds LP-follow smoothing + wow/flutter.
+    Downsample,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 19] = [
+    pub const ALL: [EffectKind; 20] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -368,6 +374,7 @@ impl EffectKind {
         EffectKind::Compressor,
         EffectKind::Flanger,
         EffectKind::FrequencyShift,
+        EffectKind::Downsample,
     ];
 
     /// The kind's display name.
@@ -392,6 +399,7 @@ impl EffectKind {
             EffectKind::Compressor => "Compressor",
             EffectKind::Flanger => "Flanger",
             EffectKind::FrequencyShift => "Freq Shift",
+            EffectKind::Downsample => "Downsample",
         }
     }
 
@@ -485,6 +493,8 @@ pub enum EffectInstance {
     // threshold. The Box allocation happens once per kind-switch from
     // the GUI thread, never on the audio path.
     FrequencyShift(Box<FrequencyShiftEffect>),
+    // Not boxed -- DownsampleEffect is tiny (~13 f32s + a u32, no heap).
+    Downsample(DownsampleEffect),
 }
 
 impl EffectInstance {
@@ -510,6 +520,7 @@ impl EffectInstance {
             EffectKind::Compressor => EffectInstance::Compressor(CompressorEffect::new()),
             EffectKind::Flanger => EffectInstance::Flanger(FlangerEffect::new()),
             EffectKind::FrequencyShift => EffectInstance::FrequencyShift(Box::default()),
+            EffectKind::Downsample => EffectInstance::Downsample(DownsampleEffect::new()),
         }
     }
 
@@ -535,6 +546,7 @@ impl EffectInstance {
             EffectInstance::Compressor(_) => EffectKind::Compressor,
             EffectInstance::Flanger(_) => EffectKind::Flanger,
             EffectInstance::FrequencyShift(_) => EffectKind::FrequencyShift,
+            EffectInstance::Downsample(_) => EffectKind::Downsample,
         }
     }
 }
@@ -561,6 +573,7 @@ impl Effect for EffectInstance {
             EffectInstance::Compressor(e) => e.process_sample(left, right),
             EffectInstance::Flanger(e) => e.process_sample(left, right),
             EffectInstance::FrequencyShift(e) => e.process_sample(left, right),
+            EffectInstance::Downsample(e) => e.process_sample(left, right),
         }
     }
 
@@ -585,6 +598,7 @@ impl Effect for EffectInstance {
             EffectInstance::Compressor(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Flanger(e) => e.set_sample_rate(sample_rate),
             EffectInstance::FrequencyShift(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Downsample(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -609,6 +623,7 @@ impl Effect for EffectInstance {
             EffectInstance::Compressor(e) => e.reset(),
             EffectInstance::Flanger(e) => e.reset(),
             EffectInstance::FrequencyShift(e) => e.reset(),
+            EffectInstance::Downsample(e) => e.reset(),
         }
     }
 
@@ -633,6 +648,7 @@ impl Effect for EffectInstance {
             EffectInstance::Compressor(e) => e.parameters(),
             EffectInstance::Flanger(e) => e.parameters(),
             EffectInstance::FrequencyShift(e) => e.parameters(),
+            EffectInstance::Downsample(e) => e.parameters(),
         }
     }
 
@@ -657,6 +673,7 @@ impl Effect for EffectInstance {
             EffectInstance::Compressor(e) => e.set_param(index, value),
             EffectInstance::Flanger(e) => e.set_param(index, value),
             EffectInstance::FrequencyShift(e) => e.set_param(index, value),
+            EffectInstance::Downsample(e) => e.set_param(index, value),
         }
     }
 
@@ -681,6 +698,7 @@ impl Effect for EffectInstance {
             EffectInstance::Compressor(e) => e.set_bpm(bpm),
             EffectInstance::Flanger(e) => e.set_bpm(bpm),
             EffectInstance::FrequencyShift(e) => e.set_bpm(bpm),
+            EffectInstance::Downsample(e) => e.set_bpm(bpm),
         }
     }
 
@@ -705,6 +723,7 @@ impl Effect for EffectInstance {
             EffectInstance::Compressor(e) => e.param_dimmed(index),
             EffectInstance::Flanger(e) => e.param_dimmed(index),
             EffectInstance::FrequencyShift(e) => e.param_dimmed(index),
+            EffectInstance::Downsample(e) => e.param_dimmed(index),
         }
     }
 
@@ -729,6 +748,7 @@ impl Effect for EffectInstance {
             EffectInstance::Compressor(e) => e.latency_samples(),
             EffectInstance::Flanger(e) => e.latency_samples(),
             EffectInstance::FrequencyShift(e) => e.latency_samples(),
+            EffectInstance::Downsample(e) => e.latency_samples(),
         }
     }
 }
@@ -799,7 +819,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 19);
+        assert_eq!(EffectKind::ALL.len(), 20);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -819,6 +839,7 @@ mod tests {
         assert_eq!(EffectKind::Compressor.name(), "Compressor");
         assert_eq!(EffectKind::Flanger.name(), "Flanger");
         assert_eq!(EffectKind::FrequencyShift.name(), "Freq Shift");
+        assert_eq!(EffectKind::Downsample.name(), "Downsample");
     }
 
     #[test]
@@ -1240,6 +1261,7 @@ mod tests {
             EffectKind::Compressor,
             EffectKind::Flanger,
             EffectKind::FrequencyShift,
+            EffectKind::Downsample,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
