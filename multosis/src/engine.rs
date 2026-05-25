@@ -486,6 +486,60 @@ mod tests {
     }
 
     #[test]
+    fn chain_latency_samples_tracks_spectral_fft_size_selection() {
+        // SpectralRotate's FFT selector controls its reported latency.
+        // Selecting a new size via set_effects must (after the SpectralEngine
+        // applies the latched switch at the next hop boundary) propagate
+        // through to chain_latency_samples so the host's PDC can re-align.
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+        let mut effects = [TrackEffect::default_for_row(0); ROWS];
+        // SpectralRotate with default params: FFT slot is the LAST param
+        // (index 1); default value 2.0 -> FFT_SIZES[2] = 2048-pt, hop = 1024.
+        effects[0] = TrackEffect {
+            kind: crate::effects::EffectKind::SpectralRotate,
+            params: crate::effects::default_params_for_kind(
+                crate::effects::EffectKind::SpectralRotate,
+            ),
+            mix: 1.0,
+            muted: false,
+            soloed: false,
+        };
+        engine.set_effects(&effects);
+        assert_eq!(
+            engine.chain_latency_samples(),
+            1024,
+            "default FFT=2048 reports hop=1024 latency"
+        );
+
+        // Select FFT=512 (param value 0.0 -> FFT_SIZES[0]) via the same
+        // set_effects path the editor uses for a parameter edit.
+        effects[0].params[1] = 0.0;
+        engine.set_effects(&effects);
+
+        // The SpectralEngine LATCHES the new size; the switch doesn't apply
+        // until the next hop boundary of the OLD slot (<= 1024 samples).
+        // chain_latency hasn't updated yet.
+        assert_eq!(
+            engine.chain_latency_samples(),
+            1024,
+            "latched FFT switch hasn't yet applied — old latency still reported"
+        );
+
+        // Drive enough samples through to cross the 1024-sample old hop.
+        for _ in 0..1100 {
+            engine.effects_mut_for_test(0).process_sample(0.0, 0.0);
+        }
+
+        // Now the switch has fired and the new hop_size is in play.
+        assert_eq!(
+            engine.chain_latency_samples(),
+            256,
+            "after the switch applies, chain latency reports the new hop=256"
+        );
+    }
+
+    #[test]
     fn muted_row_drops_out_of_the_active_mask_and_audio_chain() {
         // Row 0 with an SVF heavily attenuating a high signal: with the
         // effect active the output is small; with row 0 muted the dry
