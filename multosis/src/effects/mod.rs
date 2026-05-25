@@ -555,28 +555,28 @@ impl EffectKind {
             EffectKind::Downsample => "Downsample",
             EffectKind::Varispeed => "Varispeed",
             EffectKind::Vocoder => "Vocoder",
-            EffectKind::SpectralRotate => "Spectral Rotate",
-            EffectKind::SpectralBandpass => "Spectral Bandpass",
-            EffectKind::SpectralMirror => "Spectral Mirror",
-            EffectKind::SpectralShift => "Spectral Shift",
-            EffectKind::SpectralSmear => "Spectral Smear",
-            EffectKind::SpectralSpread => "Spectral Spread",
-            EffectKind::SpectralLofi => "Spectral Lofi",
-            EffectKind::SpectralCorrupt => "Spectral Corrupt",
-            EffectKind::SpectralCompress => "Spectral Compress",
-            EffectKind::SpectralCascade => "Spectral Cascade",
-            EffectKind::SpectralReverb => "Spectral Reverb",
-            EffectKind::SpectralScatter => "Spectral Scatter",
-            EffectKind::SpectralTwist => "Spectral Twist",
-            EffectKind::SpectralStretch => "Spectral Stretch",
+            EffectKind::SpectralRotate => "Rotate",
+            EffectKind::SpectralBandpass => "Bandpass",
+            EffectKind::SpectralMirror => "Mirror",
+            EffectKind::SpectralShift => "Shift",
+            EffectKind::SpectralSmear => "Smear",
+            EffectKind::SpectralSpread => "Spread",
+            EffectKind::SpectralLofi => "Lofi",
+            EffectKind::SpectralCorrupt => "Corrupt",
+            EffectKind::SpectralCompress => "Compress",
+            EffectKind::SpectralCascade => "Cascade",
+            EffectKind::SpectralReverb => "Reverb",
+            EffectKind::SpectralScatter => "Scatter",
+            EffectKind::SpectralTwist => "Twist",
+            EffectKind::SpectralStretch => "Stretch",
         }
     }
 
     /// The family this kind belongs to, or `None` for a stand-alone effect.
-    /// Drives the two-line track-listing label (family caption above the
-    /// suffix). For kinds whose `name()` starts with the family prefix the
-    /// track-list renderer strips it; for kinds whose names don't (`Satch`,
-    /// `Warp Zone`) the full name is shown beneath the family caption.
+    /// Drives the two-line track-listing label (family caption above
+    /// `name()`) and groups kinds in the effect-kind picker. `name()` returns
+    /// just the unique suffix for family kinds -- the family word lives only
+    /// here so each surface can decide how to present it.
     pub fn family(self) -> Option<&'static str> {
         match self {
             Self::Satch
@@ -1288,20 +1288,23 @@ mod tests {
         assert_eq!(EffectKind::Downsample.name(), "Downsample");
         assert_eq!(EffectKind::Varispeed.name(), "Varispeed");
         assert_eq!(EffectKind::Vocoder.name(), "Vocoder");
-        assert_eq!(EffectKind::SpectralRotate.name(), "Spectral Rotate");
-        assert_eq!(EffectKind::SpectralBandpass.name(), "Spectral Bandpass");
-        assert_eq!(EffectKind::SpectralMirror.name(), "Spectral Mirror");
-        assert_eq!(EffectKind::SpectralShift.name(), "Spectral Shift");
-        assert_eq!(EffectKind::SpectralSmear.name(), "Spectral Smear");
-        assert_eq!(EffectKind::SpectralSpread.name(), "Spectral Spread");
-        assert_eq!(EffectKind::SpectralLofi.name(), "Spectral Lofi");
-        assert_eq!(EffectKind::SpectralCorrupt.name(), "Spectral Corrupt");
-        assert_eq!(EffectKind::SpectralCompress.name(), "Spectral Compress");
-        assert_eq!(EffectKind::SpectralCascade.name(), "Spectral Cascade");
-        assert_eq!(EffectKind::SpectralReverb.name(), "Spectral Reverb");
-        assert_eq!(EffectKind::SpectralScatter.name(), "Spectral Scatter");
-        assert_eq!(EffectKind::SpectralTwist.name(), "Spectral Twist");
-        assert_eq!(EffectKind::SpectralStretch.name(), "Spectral Stretch");
+        // Spectral family kinds drop the "Spectral " prefix; the family is
+        // surfaced separately via `EffectKind::family()` so the unique suffix
+        // is what shows up in the UI.
+        assert_eq!(EffectKind::SpectralRotate.name(), "Rotate");
+        assert_eq!(EffectKind::SpectralBandpass.name(), "Bandpass");
+        assert_eq!(EffectKind::SpectralMirror.name(), "Mirror");
+        assert_eq!(EffectKind::SpectralShift.name(), "Shift");
+        assert_eq!(EffectKind::SpectralSmear.name(), "Smear");
+        assert_eq!(EffectKind::SpectralSpread.name(), "Spread");
+        assert_eq!(EffectKind::SpectralLofi.name(), "Lofi");
+        assert_eq!(EffectKind::SpectralCorrupt.name(), "Corrupt");
+        assert_eq!(EffectKind::SpectralCompress.name(), "Compress");
+        assert_eq!(EffectKind::SpectralCascade.name(), "Cascade");
+        assert_eq!(EffectKind::SpectralReverb.name(), "Reverb");
+        assert_eq!(EffectKind::SpectralScatter.name(), "Scatter");
+        assert_eq!(EffectKind::SpectralTwist.name(), "Twist");
+        assert_eq!(EffectKind::SpectralStretch.name(), "Stretch");
     }
 
     #[test]
