@@ -908,7 +908,7 @@ pub fn draw_modulation_controls(
             dy + dh / 2.0,
             (dw.min(dh) / 2.0) - 8.0 * scale,
             "Depth",
-            &format!("{depth:+.2}"),
+            &format!("{:+.0}%", depth * 100.0),
             norm,
         );
     }
