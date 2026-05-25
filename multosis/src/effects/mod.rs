@@ -268,6 +268,7 @@ mod reverb;
 mod ring;
 mod satch;
 mod spectral_bandpass;
+mod spectral_compress;
 mod spectral_corrupt;
 mod spectral_lofi;
 mod spectral_mirror;
@@ -299,6 +300,7 @@ pub use reverb::ReverbEffect;
 pub use ring::RingEffect;
 pub use satch::SatchEffect;
 pub use spectral_bandpass::SpectralBandpassEffect;
+pub use spectral_compress::SpectralCompressEffect;
 pub use spectral_corrupt::SpectralCorruptEffect;
 pub use spectral_lofi::SpectralLofiEffect;
 pub use spectral_mirror::SpectralMirrorEffect;
@@ -427,11 +429,18 @@ pub enum EffectKind {
     /// FFT size (512 / 1024 / 2048 / 4096); seventh of the Infiltrator-
     /// inspired spectral effects.
     SpectralCorrupt,
+    /// Per-bin compression toward a target spectrum. Each bin's magnitude
+    /// is tracked by a ~50 ms one-pole follower; the target is a power-law
+    /// curve f^tone normalised at 1 kHz (tone=-1 pink, 0 flat, +1 white).
+    /// Per-bin ratio = (target / current)^Amount preserves phase. Switchable
+    /// FFT size (512 / 1024 / 2048 / 4096); eighth of the Infiltrator-
+    /// inspired spectral effects.
+    SpectralCompress,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 30] = [
+    pub const ALL: [EffectKind; 31] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -462,6 +471,7 @@ impl EffectKind {
         EffectKind::SpectralSpread,
         EffectKind::SpectralLofi,
         EffectKind::SpectralCorrupt,
+        EffectKind::SpectralCompress,
     ];
 
     /// The kind's display name.
@@ -497,6 +507,7 @@ impl EffectKind {
             EffectKind::SpectralSpread => "Spectral Spread",
             EffectKind::SpectralLofi => "Spectral Lofi",
             EffectKind::SpectralCorrupt => "Spectral Corrupt",
+            EffectKind::SpectralCompress => "Spectral Compress",
         }
     }
 
@@ -523,6 +534,7 @@ impl EffectKind {
                 | Self::SpectralSpread
                 | Self::SpectralLofi
                 | Self::SpectralCorrupt
+                | Self::SpectralCompress
         )
     }
 }
@@ -645,6 +657,10 @@ pub enum EffectInstance {
     // instances with all four FFT-size slots pre-allocated (plus the
     // per-channel bin-index, bin-gain, and target scratch buffers).
     SpectralCorrupt(Box<SpectralCorruptEffect>),
+    // Boxed for the same reason as SpectralRotate: two SpectralEngine
+    // instances with all four FFT-size slots pre-allocated (plus the
+    // per-channel magnitude envelope scratch).
+    SpectralCompress(Box<SpectralCompressEffect>),
 }
 
 impl EffectInstance {
@@ -681,6 +697,7 @@ impl EffectInstance {
             EffectKind::SpectralSpread => EffectInstance::SpectralSpread(Box::default()),
             EffectKind::SpectralLofi => EffectInstance::SpectralLofi(Box::default()),
             EffectKind::SpectralCorrupt => EffectInstance::SpectralCorrupt(Box::default()),
+            EffectKind::SpectralCompress => EffectInstance::SpectralCompress(Box::default()),
         }
     }
 
@@ -717,6 +734,7 @@ impl EffectInstance {
             EffectInstance::SpectralSpread(_) => EffectKind::SpectralSpread,
             EffectInstance::SpectralLofi(_) => EffectKind::SpectralLofi,
             EffectInstance::SpectralCorrupt(_) => EffectKind::SpectralCorrupt,
+            EffectInstance::SpectralCompress(_) => EffectKind::SpectralCompress,
         }
     }
 }
@@ -754,6 +772,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralSpread(e) => e.process_sample(left, right),
             EffectInstance::SpectralLofi(e) => e.process_sample(left, right),
             EffectInstance::SpectralCorrupt(e) => e.process_sample(left, right),
+            EffectInstance::SpectralCompress(e) => e.process_sample(left, right),
         }
     }
 
@@ -789,6 +808,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralSpread(e) => e.set_sample_rate(sample_rate),
             EffectInstance::SpectralLofi(e) => e.set_sample_rate(sample_rate),
             EffectInstance::SpectralCorrupt(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::SpectralCompress(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -824,6 +844,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralSpread(e) => e.reset(),
             EffectInstance::SpectralLofi(e) => e.reset(),
             EffectInstance::SpectralCorrupt(e) => e.reset(),
+            EffectInstance::SpectralCompress(e) => e.reset(),
         }
     }
 
@@ -859,6 +880,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralSpread(e) => e.parameters(),
             EffectInstance::SpectralLofi(e) => e.parameters(),
             EffectInstance::SpectralCorrupt(e) => e.parameters(),
+            EffectInstance::SpectralCompress(e) => e.parameters(),
         }
     }
 
@@ -894,6 +916,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralSpread(e) => e.set_param(index, value),
             EffectInstance::SpectralLofi(e) => e.set_param(index, value),
             EffectInstance::SpectralCorrupt(e) => e.set_param(index, value),
+            EffectInstance::SpectralCompress(e) => e.set_param(index, value),
         }
     }
 
@@ -929,6 +952,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralSpread(e) => e.set_bpm(bpm),
             EffectInstance::SpectralLofi(e) => e.set_bpm(bpm),
             EffectInstance::SpectralCorrupt(e) => e.set_bpm(bpm),
+            EffectInstance::SpectralCompress(e) => e.set_bpm(bpm),
         }
     }
 
@@ -964,6 +988,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralSpread(e) => e.param_dimmed(index),
             EffectInstance::SpectralLofi(e) => e.param_dimmed(index),
             EffectInstance::SpectralCorrupt(e) => e.param_dimmed(index),
+            EffectInstance::SpectralCompress(e) => e.param_dimmed(index),
         }
     }
 
@@ -999,6 +1024,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralSpread(e) => e.latency_samples(),
             EffectInstance::SpectralLofi(e) => e.latency_samples(),
             EffectInstance::SpectralCorrupt(e) => e.latency_samples(),
+            EffectInstance::SpectralCompress(e) => e.latency_samples(),
         }
     }
 }
@@ -1069,7 +1095,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 30);
+        assert_eq!(EffectKind::ALL.len(), 31);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -1100,6 +1126,7 @@ mod tests {
         assert_eq!(EffectKind::SpectralSpread.name(), "Spectral Spread");
         assert_eq!(EffectKind::SpectralLofi.name(), "Spectral Lofi");
         assert_eq!(EffectKind::SpectralCorrupt.name(), "Spectral Corrupt");
+        assert_eq!(EffectKind::SpectralCompress.name(), "Spectral Compress");
     }
 
     #[test]
@@ -1532,6 +1559,7 @@ mod tests {
             EffectKind::SpectralSpread,
             EffectKind::SpectralLofi,
             EffectKind::SpectralCorrupt,
+            EffectKind::SpectralCompress,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
