@@ -115,15 +115,21 @@ impl SpectralEngine {
         self.slots[self.active].fft_size
     }
 
-    /// Algorithmic latency in samples -- equal to the hop size of the slot
+    /// Algorithmic latency in samples -- equal to the FFT size of the slot
     /// the engine will be using by the time audio reaches steady state.
+    /// One full window of latency is the STFT-OLA standard: the analysis
+    /// frame can only produce its centre-aligned output once the trailing
+    /// half of the window has arrived, plus the leading half must still
+    /// flow through the output ring before it's read. This matches
+    /// `SpectralShifter` and warp-zone, which also report `fft_size`.
+    ///
     /// When a `set_fft_size` switch is pending, this reports the *target*
-    /// slot's hop so the host can re-align PDC immediately; the audio path
-    /// takes up to one old-hop to actually swap, which manifests as a
+    /// slot's FFT size so the host can re-align PDC immediately; the audio
+    /// path takes up to one old-hop to actually swap, which manifests as a
     /// one-shot transient at the switch moment, not a steady-state lag.
     pub fn latency_samples(&self) -> usize {
         let idx = self.pending.unwrap_or(self.active);
-        self.slots[idx].hop_size
+        self.slots[idx].fft_size
     }
 
     /// Zero all ring buffers in all four slots. Used by `Effect::reset`.
@@ -234,7 +240,10 @@ mod tests {
     fn default_active_is_2048() {
         let e = SpectralEngine::new(48_000.0);
         assert_eq!(e.fft_size(), 2048);
-        assert_eq!(e.latency_samples(), 1024);
+        // Latency = full window. The host's PDC pulls back one window so the
+        // analysis frame's centre-aligned output can flow through the output
+        // ring before being read.
+        assert_eq!(e.latency_samples(), 2048);
     }
 
     #[test]
@@ -245,16 +254,17 @@ mod tests {
         // the switch is latched until the next hop boundary completes inside
         // process_sample.
         assert_eq!(e.fft_size(), 2048);
-        // But latency_samples reports the TARGET (pending) slot's hop so the
-        // host can re-align PDC immediately, even before any audio flows.
-        assert_eq!(e.latency_samples(), 256);
+        // But latency_samples reports the TARGET (pending) slot's FFT size
+        // so the host can re-align PDC immediately, even before any audio
+        // flows.
+        assert_eq!(e.latency_samples(), 512);
 
         // Drive enough samples to cross at least one hop_size (= 1024 for
         // 2048-pt). The pending switch must be consumed inside that window.
         let mut id = Identity;
         let _ = drive(&mut e, 1100, |_| 0.0, &mut id);
         assert_eq!(e.fft_size(), 512);
-        assert_eq!(e.latency_samples(), 256);
+        assert_eq!(e.latency_samples(), 512);
     }
 
     #[test]
@@ -356,7 +366,10 @@ mod tests {
         // synthesis path is wired correctly.
         let mut e = SpectralEngine::new(48_000.0);
         let mut t = DcConstant;
-        let out = drive(&mut e, 4096, |_| 1.0, &mut t);
+        // Drive long enough to have a meaningful tail past 2 * latency.
+        // Latency = fft_size = 2048, so warmup = 4096; we need substantially
+        // more than that.
+        let out = drive(&mut e, 8192, |_| 1.0, &mut t);
         // After warm-up, the output should be a roughly-steady non-zero value.
         let warmup = 2 * e.latency_samples();
         let tail = &out[warmup..];

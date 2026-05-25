@@ -508,8 +508,8 @@ mod tests {
         engine.set_effects(&effects);
         assert_eq!(
             engine.chain_latency_samples(),
-            1024,
-            "default FFT=2048 reports hop=1024 latency"
+            2048,
+            "default FFT=2048 reports one-window latency"
         );
 
         // Select FFT=512 (param value 0.0 -> FFT_SIZES[0]) via the same
@@ -518,12 +518,13 @@ mod tests {
         engine.set_effects(&effects);
 
         // chain_latency updates IMMEDIATELY -- SpectralEngine::latency_samples
-        // reports the pending slot's hop so the host can re-align PDC right
-        // away, even before any audio flows through the effect. The audio
-        // path itself still latches the switch until the next hop boundary.
+        // reports the pending slot's FFT size so the host can re-align PDC
+        // right away, even before any audio flows through the effect. The
+        // audio path itself still latches the switch until the next hop
+        // boundary.
         assert_eq!(
             engine.chain_latency_samples(),
-            256,
+            512,
             "FFT change must propagate to chain_latency immediately so the host can re-align PDC"
         );
 
@@ -532,7 +533,7 @@ mod tests {
         for _ in 0..1100 {
             engine.effects_mut_for_test(0).process_sample(0.0, 0.0);
         }
-        assert_eq!(engine.chain_latency_samples(), 256);
+        assert_eq!(engine.chain_latency_samples(), 512);
     }
 
     #[test]
