@@ -574,12 +574,14 @@ impl EffectKind {
 
     /// The family this kind belongs to, or `None` for a stand-alone effect.
     /// Drives the two-line track-listing label (family caption above the
-    /// unique suffix). `name()` is `"{family} {suffix}"` for kinds that
-    /// declare a family -- the track-list renderer strips the family prefix
-    /// off the full name to recover the suffix.
+    /// suffix). For kinds whose `name()` starts with the family prefix the
+    /// track-list renderer strips it; for kinds whose names don't (`Satch`,
+    /// `Warp Zone`) the full name is shown beneath the family caption.
     pub fn family(self) -> Option<&'static str> {
         match self {
-            Self::SpectralRotate
+            Self::Satch
+            | Self::WarpZone
+            | Self::SpectralRotate
             | Self::SpectralBandpass
             | Self::SpectralMirror
             | Self::SpectralShift

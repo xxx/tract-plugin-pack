@@ -256,15 +256,14 @@ pub fn draw_track_list(
             nc,
         );
         // Family kinds render as caption + suffix on stacked lines; everything
-        // else uses the original vertically-centred line. The suffix is the
-        // full name with the family prefix stripped -- `name()` is built as
-        // `"{family} {suffix}"` for any kind that declares a family.
+        // else uses the original vertically-centred line. When the kind's
+        // `name()` starts with the family prefix (e.g. "Spectral Bandpass")
+        // we strip it; when it doesn't (`Satch`, `Warp Zone`) we show the
+        // full name beneath the caption.
         let name = kind.name();
         let name_x = x + 30.0 * scale;
-        let suffix = kind
-            .family()
-            .and_then(|fam| name.strip_prefix(fam).map(|s| s.trim_start()));
-        if let (Some(fam), Some(suf)) = (kind.family(), suffix) {
+        if let Some(fam) = kind.family() {
+            let suf = name.strip_prefix(fam).map(|s| s.trim_start()).unwrap_or(name);
             let caption_ty = y + 14.0 * scale;
             let suffix_ty = y + 32.0 * scale;
             tr.draw_text(pixmap, name_x, caption_ty, fam, caption_size, cc);
