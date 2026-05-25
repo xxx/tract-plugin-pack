@@ -400,8 +400,14 @@ impl MultosisWindow {
             .position(|&s| s == self.params.speed.value())
             .unwrap_or(0);
         let win = (self.physical_width as f32, self.physical_height as f32);
-        self.speed_dropdown
-            .open((), rect, &items, current, false, win);
+        self.speed_dropdown.open(
+            (),
+            rect,
+            widgets::dropdown::DropdownList::flat(&items),
+            current,
+            false,
+            win,
+        );
     }
 
     /// Apply a Speed dropdown selection by writing `params.speed` via
@@ -963,7 +969,7 @@ impl MultosisWindow {
                 self.view = View::Grid;
             }
             EffectHit::Kind => {
-                let items: Vec<&'static str> = effect_editor::kind_items();
+                let kind_items = effect_editor::kind_items();
                 let current = EffectKind::ALL
                     .iter()
                     .position(|k| *k == self.selected_track_effect().kind)
@@ -972,7 +978,10 @@ impl MultosisWindow {
                 self.effect_dropdown.open(
                     EffectAction::Kind,
                     lay.kind,
-                    &items,
+                    widgets::dropdown::DropdownList::sectioned(
+                        &kind_items.items,
+                        &kind_items.sections,
+                    ),
                     current,
                     false,
                     win,
@@ -1008,7 +1017,7 @@ impl MultosisWindow {
                     self.effect_dropdown.open(
                         EffectAction::ParamDropdown(i),
                         (trigger_x, trigger_y, trigger_w, trigger_h),
-                        &items,
+                        widgets::dropdown::DropdownList::flat(&items),
                         current.min(labels.len().saturating_sub(1)),
                         false,
                         win,
@@ -1044,7 +1053,7 @@ impl MultosisWindow {
                 self.effect_dropdown.open(
                     EffectAction::Target,
                     lay.target,
-                    &items,
+                    widgets::dropdown::DropdownList::flat(&items),
                     current,
                     false,
                     win,
@@ -1101,7 +1110,7 @@ impl MultosisWindow {
                 self.effect_dropdown.open(
                     EffectAction::Trigger,
                     lay.trigger,
-                    &items,
+                    widgets::dropdown::DropdownList::flat(&items),
                     current,
                     false,
                     win,
@@ -1753,7 +1762,7 @@ impl MultosisWindow {
                     .map(|labs| labs.to_vec())
                     .unwrap_or_default()
             } else {
-                effect_editor::kind_items()
+                effect_editor::kind_items().items
             };
             let win = (self.physical_width as f32, self.physical_height as f32);
             widgets::dropdown::draw_dropdown_popup(
@@ -1910,7 +1919,7 @@ impl baseview::WindowHandler for MultosisWindow {
                                 .map(|labs| labs.to_vec())
                                 .unwrap_or_default()
                         } else {
-                            effect_editor::kind_items()
+                            effect_editor::kind_items().items
                         };
                     let win = (self.physical_width as f32, self.physical_height as f32);
                     self.effect_dropdown.on_mouse_move(px, py, &items, win);
@@ -2015,7 +2024,7 @@ impl baseview::WindowHandler for MultosisWindow {
                                 .map(|labs| labs.to_vec())
                                 .unwrap_or_default()
                         } else {
-                            effect_editor::kind_items()
+                            effect_editor::kind_items().items
                         };
                     let win = (self.physical_width as f32, self.physical_height as f32);
                     if let Some(widgets::dropdown::DropdownEvent::Selected(action, idx)) =
@@ -2152,7 +2161,7 @@ impl baseview::WindowHandler for MultosisWindow {
                                 .map(|labs| labs.to_vec())
                                 .unwrap_or_default()
                         } else {
-                            effect_editor::kind_items()
+                            effect_editor::kind_items().items
                         };
                     self.effect_dropdown.on_wheel(dy, &items, win);
                     return baseview::EventStatus::Captured;

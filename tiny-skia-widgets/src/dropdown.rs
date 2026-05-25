@@ -66,6 +66,10 @@ struct Active<A> {
     filter_enabled: bool,
     /// `Some(grab_offset_y)` while the scrollbar thumb is being dragged.
     scrollbar_drag: Option<f32>,
+    /// Section headers as `(item_index, header_label)`, in ascending item-index
+    /// order. Empty when the caller passed no sections at `open()` time. The
+    /// labels are owned so they live for the dropdown's open lifetime.
+    sections: Vec<(usize, String)>,
 }
 
 /// Per-editor dropdown focus + transient state. At most one open at a time.
@@ -83,12 +87,54 @@ pub struct DropdownState<A: Copy + PartialEq> {
     last_filter_change: Instant,
 }
 
-/// A single visible (post-filter) row: its on-screen rect and the index it
-/// maps back to in the UNFILTERED list.
+/// Whether a [`RowRect`] is an item or a non-selectable section header.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RowKind {
+    Item,
+    Header,
+}
+
+/// The contents of a dropdown popup: a flat item list plus optional section
+/// headers. Bundled into one parameter so `DropdownState::open()` stays under
+/// clippy's `too_many_arguments` threshold.
+///
+/// Section markers are `(item_index, header_label)` tuples; each inserts a
+/// non-selectable header row above `items[item_index]`. Indices must be
+/// ascending. Construct with `DropdownList::flat(items)` for a header-free
+/// list, or `DropdownList::sectioned(items, sections)` to include headers.
+#[derive(Clone, Copy)]
+pub struct DropdownList<'a> {
+    pub items: &'a [&'a str],
+    pub sections: &'a [(usize, &'a str)],
+}
+
+impl<'a> DropdownList<'a> {
+    /// A list with no section headers (the common case).
+    pub fn flat(items: &'a [&'a str]) -> Self {
+        Self {
+            items,
+            sections: &[],
+        }
+    }
+
+    /// A list with `(item_index, header_label)` section markers above the
+    /// indicated items. Indices must be ascending.
+    pub fn sectioned(items: &'a [&'a str], sections: &'a [(usize, &'a str)]) -> Self {
+        Self { items, sections }
+    }
+}
+
+/// A single visible (post-filter) row: its on-screen rect, the role of the
+/// row, and the index it maps back to.
+///
+/// For `RowKind::Item`, `item_index` indexes into the UNFILTERED `items` list.
+/// For `RowKind::Header`, `item_index` indexes into `Active.sections` (the
+/// list passed to `open()`).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct RowRect {
     pub rect: (f32, f32, f32, f32),
     pub item_index: usize,
+    pub kind: RowKind,
 }
 
 /// Scrollbar geometry.
@@ -118,14 +164,91 @@ fn filter_matches(item: &str, filter: &str) -> bool {
     item.to_lowercase().contains(&filter.to_lowercase())
 }
 
-/// UNFILTERED indices of items matching `filter`, in original order.
-/// Allocates — fine here, this runs on the editor thread, never `process()`.
-fn filtered_indices(items: &[&str], filter: &str) -> Vec<usize> {
-    items
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| filter_matches(item, filter))
-        .map(|(i, _)| i)
+/// The index of the section that contains item `item_index`, or `None` when
+/// the item sits above the first section (or no sections are configured).
+/// `sections` must be ascending by `item_index`.
+fn section_of(sections: &[(usize, String)], item_index: usize) -> Option<usize> {
+    let mut found: Option<usize> = None;
+    for (s, &(start, _)) in sections.iter().enumerate() {
+        if start <= item_index {
+            found = Some(s);
+        } else {
+            break;
+        }
+    }
+    found
+}
+
+/// `true` when `items[item_index]` survives `filter`. A match against the
+/// item label OR the label of its owning section header (if any) qualifies.
+fn item_matches(
+    items: &[&str],
+    sections: &[(usize, String)],
+    item_index: usize,
+    filter: &str,
+) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let item = items.get(item_index).copied().unwrap_or("");
+    if filter_matches(item, filter) {
+        return true;
+    }
+    if let Some(s) = section_of(sections, item_index) {
+        return filter_matches(&sections[s].1, filter);
+    }
+    false
+}
+
+/// One entry in the interleaved post-filter row sequence: a section header or
+/// an item, in display order. Headers carry the section index; items carry the
+/// UNFILTERED item index.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum FilteredRow {
+    Header(usize),
+    Item(usize),
+}
+
+/// The interleaved post-filter row sequence in display order.
+///
+/// Rules:
+/// - An item matches when its label OR the label of its owning section header
+///   (if any) contains the filter (case-insensitive). Empty filter matches all.
+/// - A section header is shown iff at least one item in its section matches.
+fn filtered_rows(items: &[&str], sections: &[(usize, String)], filter: &str) -> Vec<FilteredRow> {
+    let mut out = Vec::new();
+    let mut next_section = 0usize;
+    for i in 0..items.len() {
+        // Insert any section header whose start index is this item.
+        while next_section < sections.len() && sections[next_section].0 == i {
+            // Header visible if any item in this section matches the filter.
+            let section_end = sections
+                .get(next_section + 1)
+                .map(|(s, _)| *s)
+                .unwrap_or(items.len());
+            let any_match = (sections[next_section].0..section_end)
+                .any(|j| item_matches(items, sections, j, filter));
+            if any_match {
+                out.push(FilteredRow::Header(next_section));
+            }
+            next_section += 1;
+        }
+        if item_matches(items, sections, i, filter) {
+            out.push(FilteredRow::Item(i));
+        }
+    }
+    out
+}
+
+/// UNFILTERED indices of items in `filtered_rows`, in display order. Used by
+/// the keyboard-nav code paths that only care about item rows.
+fn filtered_item_indices(items: &[&str], sections: &[(usize, String)], filter: &str) -> Vec<usize> {
+    filtered_rows(items, sections, filter)
+        .into_iter()
+        .filter_map(|r| match r {
+            FilteredRow::Item(i) => Some(i),
+            FilteredRow::Header(_) => None,
+        })
         .collect()
 }
 
@@ -151,8 +274,8 @@ pub fn dropdown_popup_layout<A: Copy + PartialEq>(
     let item_h = ah;
     let filter_h = if active.filter_enabled { ah } else { 0.0 };
 
-    let matches = filtered_indices(items, &active.filter);
-    let n = matches.len();
+    let rows = filtered_rows(items, &active.sections, &active.filter);
+    let n = rows.len();
     let content_height = n as f32 * item_h;
 
     let visible = n.min(MAX_VISIBLE_ROWS);
@@ -201,16 +324,22 @@ pub fn dropdown_popup_layout<A: Copy + PartialEq>(
     };
 
     // Visible rows: filtered position k -> screen y. Keep rows that intersect
-    // the viewport at all.
+    // the viewport at all. Headers occupy a full row of `item_h`, same as
+    // items, so the geometry math stays uniform.
     let mut visible_rows = Vec::new();
-    for (k, &item_index) in matches.iter().enumerate() {
+    for (k, row) in rows.iter().enumerate() {
         let row_y = lv_y - active.scroll_px + k as f32 * item_h;
         if row_y + item_h <= lv_y || row_y >= lv_y + lv_h {
             continue;
         }
+        let (item_index, kind) = match *row {
+            FilteredRow::Item(i) => (i, RowKind::Item),
+            FilteredRow::Header(s) => (s, RowKind::Header),
+        };
         visible_rows.push(RowRect {
             rect: (lv_x, row_y, row_w, item_h),
             item_index,
+            kind,
         });
     }
 
@@ -375,26 +504,45 @@ pub fn draw_dropdown_popup<A: Copy + PartialEq>(
         return;
     }
 
-    // Item rows.
+    // Item + header rows. Headers render smaller, dimmer, with no highlight
+    // tint or marker — they're non-selectable labels above their section.
+    let header_size = (text_size * 0.8).max(8.0);
     for row in &layout.visible_rows {
         let (rx, ry, rw, rh) = row.rect;
-        if row.item_index == active.highlight {
-            draw_rect(pixmap, rx, ry, rw, rh, color_accent());
+        match row.kind {
+            RowKind::Header => {
+                let label = active
+                    .sections
+                    .get(row.item_index)
+                    .map(|(_, s)| s.as_str())
+                    .unwrap_or("");
+                let shown =
+                    truncate_to_width(text_renderer, label, header_size, (rw - 2.0 * pad).max(0.0));
+                let ty = ry + (rh + header_size) * 0.5 - 2.0;
+                text_renderer.draw_text(pixmap, rx + pad, ty, &shown, header_size, color_muted());
+            }
+            RowKind::Item => {
+                if row.item_index == active.highlight {
+                    draw_rect(pixmap, rx, ry, rw, rh, color_accent());
+                }
+                // Marker bar for the originally-selected item is omitted:
+                // `open()` seeds the highlight from the current selection, so
+                // the highlight tint already shows it on open. (A separate
+                // marker would only matter after the highlight moves;
+                // deliberately kept minimal.)
+                let label = items.get(row.item_index).copied().unwrap_or("");
+                let shown =
+                    truncate_to_width(text_renderer, label, text_size, (rw - 2.0 * pad).max(0.0));
+                let color = if row.item_index == active.highlight {
+                    // Dark text on the accent fill, matching `draw_button`.
+                    tiny_skia::Color::from_rgba8(0x1a, 0x1c, 0x22, 0xff)
+                } else {
+                    color_text()
+                };
+                let ty = ry + (rh + text_size) * 0.5 - 2.0;
+                text_renderer.draw_text(pixmap, rx + pad, ty, &shown, text_size, color);
+            }
         }
-        // Marker bar for the originally-selected item is omitted: `open()`
-        // seeds the highlight from the current selection, so the highlight
-        // tint already shows it on open. (A separate marker would only
-        // matter after the highlight moves; deliberately kept minimal.)
-        let label = items.get(row.item_index).copied().unwrap_or("");
-        let shown = truncate_to_width(text_renderer, label, text_size, (rw - 2.0 * pad).max(0.0));
-        let color = if row.item_index == active.highlight {
-            // Dark text on the accent fill, matching `draw_button`.
-            tiny_skia::Color::from_rgba8(0x1a, 0x1c, 0x22, 0xff)
-        } else {
-            color_text()
-        };
-        let ty = ry + (rh + text_size) * 0.5 - 2.0;
-        text_renderer.draw_text(pixmap, rx + pad, ty, &shown, text_size, color);
     }
 
     // Scrollbar.
@@ -425,18 +573,29 @@ impl<A: Copy + PartialEq> DropdownState<A> {
     }
 
     /// Open the dropdown for `action`, auto-closing any other. `items` is the
-    /// full UNFILTERED list; `current` seeds the highlight and is scrolled into
-    /// view. `window_size` is the editor pixmap size.
+    /// full UNFILTERED list; `current` seeds the highlight and is scrolled
+    /// into view. `sections` is the list of `(item_index, header_label)`
+    /// section markers (indices must be ascending). Pass `&[]` for a flat
+    /// (un-sectioned) dropdown. `window_size` is the editor pixmap size.
+    ///
+    /// The section labels are cloned into owned `String`s and held for the
+    /// dropdown's open lifetime — fine because `open()` runs on the editor
+    /// thread, never on the audio thread.
     pub fn open(
         &mut self,
         action: A,
         anchor: (f32, f32, f32, f32),
-        items: &[&str],
+        list: DropdownList<'_>,
         current: usize,
         filter_enabled: bool,
         window_size: (f32, f32),
     ) {
+        let DropdownList { items, sections } = list;
         let highlight = current.min(items.len().saturating_sub(1));
+        let sections: Vec<(usize, String)> = sections
+            .iter()
+            .map(|(idx, label)| (*idx, (*label).to_string()))
+            .collect();
         self.active = Some(Active {
             action,
             anchor,
@@ -445,6 +604,7 @@ impl<A: Copy + PartialEq> DropdownState<A> {
             filter: String::new(),
             filter_enabled,
             scrollbar_drag: None,
+            sections,
         });
         self.last_filter_change = Instant::now();
         self.scroll_highlight_into_view(items, window_size);
@@ -471,8 +631,13 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         let Some(active) = self.active.as_ref() else {
             return;
         };
-        let matches = filtered_indices(items, &active.filter);
-        let Some(k) = matches.iter().position(|&i| i == active.highlight) else {
+        // Display position is into the *interleaved* row sequence (headers +
+        // items) so the row-y math matches what `dropdown_popup_layout` does.
+        let rows = filtered_rows(items, &active.sections, &active.filter);
+        let Some(k) = rows
+            .iter()
+            .position(|r| matches!(r, FilteredRow::Item(i) if *i == active.highlight))
+        else {
             return;
         };
         let Some(layout) = dropdown_popup_layout(self, items, window_size) else {
@@ -503,7 +668,8 @@ impl<A: Copy + PartialEq> DropdownState<A> {
     ) -> Option<DropdownEvent<A>> {
         let active = self.active.as_ref()?;
         let action = active.action;
-        let matches = filtered_indices(items, &active.filter);
+        // Navigation walks the item rows only (headers are skipped).
+        let item_matches = filtered_item_indices(items, &active.sections, &active.filter);
 
         match key {
             DropdownKey::Esc => {
@@ -511,7 +677,7 @@ impl<A: Copy + PartialEq> DropdownState<A> {
                 Some(DropdownEvent::Closed(action))
             }
             DropdownKey::Enter => {
-                if matches.is_empty() {
+                if item_matches.is_empty() {
                     return None;
                 }
                 let highlight = active.highlight;
@@ -525,15 +691,15 @@ impl<A: Copy + PartialEq> DropdownState<A> {
             | DropdownKey::PageDown
             | DropdownKey::Home
             | DropdownKey::End => {
-                if matches.is_empty() {
+                if item_matches.is_empty() {
                     return None;
                 }
                 // Current filtered position of the highlight (fall back to 0).
-                let cur = matches
+                let cur = item_matches
                     .iter()
                     .position(|&i| i == active.highlight)
                     .unwrap_or(0);
-                let last = matches.len() - 1;
+                let last = item_matches.len() - 1;
                 let page = MAX_VISIBLE_ROWS.saturating_sub(1).max(1);
                 let next = match key {
                     DropdownKey::Up => cur.saturating_sub(1),
@@ -544,7 +710,7 @@ impl<A: Copy + PartialEq> DropdownState<A> {
                     DropdownKey::End => last,
                     _ => cur,
                 };
-                let new_highlight = matches[next];
+                let new_highlight = item_matches[next];
                 self.active.as_mut().unwrap().highlight = new_highlight;
                 self.scroll_highlight_into_view(items, window_size);
                 Some(DropdownEvent::HighlightChanged(action, new_highlight))
@@ -577,7 +743,9 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         }
         active.scroll_px = 0.0;
         let action = active.action;
-        let first = filtered_indices(items, &active.filter).first().copied();
+        let first = filtered_item_indices(items, &active.sections, &active.filter)
+            .first()
+            .copied();
         if let Some(idx) = first {
             active.highlight = idx;
         }
@@ -612,12 +780,18 @@ impl<A: Copy + PartialEq> DropdownState<A> {
             }
         }
 
-        // Item row -> select and close.
+        // Item row -> select and close. Header rows are non-selectable: a
+        // click on a header is consumed (popup stays open, no selection).
         for row in &layout.visible_rows {
             if Self::point_in(row.rect, x, y) {
-                let idx = row.item_index;
-                self.close();
-                return Some(DropdownEvent::Selected(action, idx));
+                match row.kind {
+                    RowKind::Item => {
+                        let idx = row.item_index;
+                        self.close();
+                        return Some(DropdownEvent::Selected(action, idx));
+                    }
+                    RowKind::Header => return None,
+                }
             }
         }
 
@@ -659,9 +833,13 @@ impl<A: Copy + PartialEq> DropdownState<A> {
             return None;
         }
 
-        // Row hover -> move highlight.
+        // Row hover -> move highlight. Headers are not selectable so hovering
+        // over one neither moves the highlight nor returns an event.
         for row in &layout.visible_rows {
             if Self::point_in(row.rect, x, y) {
+                if row.kind == RowKind::Header {
+                    return None;
+                }
                 let idx = row.item_index;
                 if self.active.as_ref().unwrap().highlight != idx {
                     self.active.as_mut().unwrap().highlight = idx;
@@ -805,26 +983,33 @@ mod tests {
     #[test]
     fn filtered_indices_empty_filter_returns_all() {
         let items = ["a", "b", "c"];
-        assert_eq!(filtered_indices(&items, ""), vec![0, 1, 2]);
+        assert_eq!(filtered_item_indices(&items, &[], ""), vec![0, 1, 2]);
     }
 
     #[test]
     fn filtered_indices_returns_unfiltered_positions() {
         let items = ["alpha", "bravo", "bravado", "bract"];
         // "bra" matches bravo(1), bravado(2), bract(3) — alpha(0) does not.
-        assert_eq!(filtered_indices(&items, "bra"), vec![1, 2, 3]);
+        assert_eq!(filtered_item_indices(&items, &[], "bra"), vec![1, 2, 3]);
     }
 
     #[test]
     fn filtered_indices_no_match_is_empty() {
         let items = ["a", "b"];
-        assert!(filtered_indices(&items, "z").is_empty());
+        assert!(filtered_item_indices(&items, &[], "z").is_empty());
     }
 
     #[test]
     fn open_marks_dropdown_open() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, &vec!["x"; 50], 3, true, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&vec!["x"; 50]),
+            3,
+            true,
+            WIN,
+        );
         assert!(s.is_open());
         assert!(s.is_open_for(A::Wavetable));
         assert!(!s.is_open_for(A::Algorithm));
@@ -833,8 +1018,22 @@ mod tests {
     #[test]
     fn open_auto_closes_previous() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, &vec!["x"; 50], 3, true, WIN);
-        s.open(A::Algorithm, ANCHOR, &vec!["x"; 6], 0, false, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&vec!["x"; 50]),
+            3,
+            true,
+            WIN,
+        );
+        s.open(
+            A::Algorithm,
+            ANCHOR,
+            DropdownList::flat(&vec!["x"; 6]),
+            0,
+            false,
+            WIN,
+        );
         assert!(!s.is_open_for(A::Wavetable));
         assert!(s.is_open_for(A::Algorithm));
     }
@@ -842,14 +1041,28 @@ mod tests {
     #[test]
     fn open_seeds_highlight_from_current() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, &vec!["x"; 50], 7, true, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&vec!["x"; 50]),
+            7,
+            true,
+            WIN,
+        );
         assert_eq!(s.highlight_for_test(), Some(7));
     }
 
     #[test]
     fn close_clears_state() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, &vec!["x"; 50], 3, true, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&vec!["x"; 50]),
+            3,
+            true,
+            WIN,
+        );
         s.close();
         assert!(!s.is_open());
         assert!(!s.is_open_for(A::Wavetable));
@@ -865,7 +1078,14 @@ mod tests {
     fn open_state(item_count: usize, filter_enabled: bool) -> DropdownState<A> {
         let mut s: DropdownState<A> = DropdownState::new();
         let items: Vec<&str> = vec!["x"; item_count];
-        s.open(A::Wavetable, ANCHOR, &items, 0, filter_enabled, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&items),
+            0,
+            filter_enabled,
+            WIN,
+        );
         s
     }
 
@@ -884,7 +1104,14 @@ mod tests {
         // Anchor near the bottom of an 600px window; 12 rows of 24px won't fit.
         let mut s: DropdownState<A> = DropdownState::new();
         let low_anchor = (100.0, 560.0, 160.0, 24.0);
-        s.open(A::Wavetable, low_anchor, &vec!["x"; 20], 0, false, WIN);
+        s.open(
+            A::Wavetable,
+            low_anchor,
+            DropdownList::flat(&vec!["x"; 20]),
+            0,
+            false,
+            WIN,
+        );
         let items: Vec<&str> = vec!["a"; 20];
         let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
         assert!(l.opens_upward);
@@ -896,7 +1123,14 @@ mod tests {
     fn layout_clamps_to_right_window_edge() {
         let mut s: DropdownState<A> = DropdownState::new();
         let edge_anchor = (760.0, 100.0, 160.0, 24.0); // 760 + 160 = 920 > 800
-        s.open(A::Wavetable, edge_anchor, &vec!["x"; 3], 0, false, WIN);
+        s.open(
+            A::Wavetable,
+            edge_anchor,
+            DropdownList::flat(&vec!["x"; 3]),
+            0,
+            false,
+            WIN,
+        );
         let items: Vec<&str> = vec!["a"; 3];
         let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
         assert!(l.popup_rect.0 + l.popup_rect.2 <= 800.0 + 0.01);
@@ -939,7 +1173,14 @@ mod tests {
     fn layout_visible_rows_map_to_unfiltered_indices() {
         // 4 items; filter "bra" -> matches indices 1,2,3.
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, &vec!["x"; 4], 0, true, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&vec!["x"; 4]),
+            0,
+            true,
+            WIN,
+        );
         s.set_filter_for_test("bra");
         let items = ["alpha", "bravo", "bravado", "bract"];
         let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
@@ -966,7 +1207,14 @@ mod tests {
     #[test]
     fn key_up_moves_highlight_back() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, &vec!["x"; 5], 3, false, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&vec!["x"; 5]),
+            3,
+            false,
+            WIN,
+        );
         let items: Vec<&str> = vec!["a"; 5];
         s.on_key(DropdownKey::Up, &items, WIN);
         assert_eq!(s.highlight_for_test(), Some(2));
@@ -975,7 +1223,14 @@ mod tests {
     #[test]
     fn key_down_clamps_at_last_item() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, &vec!["x"; 3], 2, false, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&vec!["x"; 3]),
+            2,
+            false,
+            WIN,
+        );
         let items: Vec<&str> = vec!["a"; 3];
         s.on_key(DropdownKey::Down, &items, WIN);
         assert_eq!(s.highlight_for_test(), Some(2));
@@ -1002,7 +1257,14 @@ mod tests {
     #[test]
     fn key_enter_emits_selected_and_closes() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, &vec!["x"; 5], 2, false, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&vec!["x"; 5]),
+            2,
+            false,
+            WIN,
+        );
         let items: Vec<&str> = vec!["a"; 5];
         let ev = s.on_key(DropdownKey::Enter, &items, WIN);
         assert_eq!(ev, Some(DropdownEvent::Selected(A::Wavetable, 2)));
@@ -1023,7 +1285,14 @@ mod tests {
         // 4 items, filter "bra" -> visible indices 1,2,3. Down from highlight=1
         // (filtered position 0) should land on 2, the next *visible* item.
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, &vec!["x"; 4], 1, true, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&vec!["x"; 4]),
+            1,
+            true,
+            WIN,
+        );
         s.set_filter_for_test("bra");
         let items = ["alpha", "bravo", "bravado", "bract"];
         s.on_key(DropdownKey::Down, &items, WIN);
@@ -1033,7 +1302,14 @@ mod tests {
     #[test]
     fn key_enter_noop_when_no_matches() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, &vec!["x"; 4], 0, true, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&vec!["x"; 4]),
+            0,
+            true,
+            WIN,
+        );
         s.set_filter_for_test("zzz");
         let items = ["alpha", "bravo", "bravado", "bract"];
         let ev = s.on_key(DropdownKey::Enter, &items, WIN);
@@ -1044,7 +1320,14 @@ mod tests {
     #[test]
     fn key_arrows_noop_when_no_matches() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, &vec!["x"; 4], 0, true, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&vec!["x"; 4]),
+            0,
+            true,
+            WIN,
+        );
         s.set_filter_for_test("zzz");
         let items = ["alpha", "bravo", "bravado", "bract"];
         // Every arrow/page/home/end key must be a no-op when nothing matches.
@@ -1084,7 +1367,14 @@ mod tests {
     #[test]
     fn char_resets_highlight_to_first_match() {
         let mut s: DropdownState<A> = DropdownState::new();
-        s.open(A::Wavetable, ANCHOR, &vec!["x"; 4], 3, true, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&vec!["x"; 4]),
+            3,
+            true,
+            WIN,
+        );
         let items = ["sine", "saw", "square", "sample"];
         // typing "sq" filters to index 2 only -> highlight should become 2.
         s.on_char('s', &items);
@@ -1291,7 +1581,14 @@ mod tests {
         let mut s: DropdownState<A> = DropdownState::new();
         let low_anchor = (100.0, 560.0, 160.0, 24.0);
         let items: Vec<&str> = vec!["x"; 40];
-        s.open(A::Wavetable, low_anchor, &items, 0, false, WIN);
+        s.open(
+            A::Wavetable,
+            low_anchor,
+            DropdownList::flat(&items),
+            0,
+            false,
+            WIN,
+        );
         let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
         assert!(l.opens_upward);
         assert!(l.scrollbar.is_some(), "40 items must overflow the popup");
@@ -1303,7 +1600,14 @@ mod tests {
         // push scroll_px past 0 to bring that row into the viewport.
         let mut s: DropdownState<A> = DropdownState::new();
         let items: Vec<&str> = vec!["x"; 40];
-        s.open(A::Wavetable, ANCHOR, &items, 0, false, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&items),
+            0,
+            false,
+            WIN,
+        );
         assert_eq!(s.scroll_for_test(), Some(0.0));
         s.on_key(DropdownKey::End, &items, WIN);
         assert!(
@@ -1316,7 +1620,14 @@ mod tests {
     fn open_with_empty_item_list_does_not_panic() {
         let mut s: DropdownState<A> = DropdownState::new();
         let items: [&str; 0] = [];
-        s.open(A::Wavetable, ANCHOR, &items, 0, false, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&items),
+            0,
+            false,
+            WIN,
+        );
         assert!(s.is_open());
         assert!(dropdown_popup_layout(&s, &items, WIN).is_some());
         let mut pm = Pixmap::new(800, 600).unwrap();
@@ -1328,7 +1639,14 @@ mod tests {
     fn open_with_single_item() {
         let mut s: DropdownState<A> = DropdownState::new();
         let items = ["only"];
-        s.open(A::Wavetable, ANCHOR, &items, 0, false, WIN);
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::flat(&items),
+            0,
+            false,
+            WIN,
+        );
         assert_eq!(s.highlight_for_test(), Some(0));
         let l = dropdown_popup_layout(&s, &items, WIN).unwrap();
         assert_eq!(l.visible_rows.len(), 1);
@@ -1341,5 +1659,247 @@ mod tests {
         let items = ["a", "b"];
         assert_eq!(s.on_key(DropdownKey::Down, &items, WIN), None);
         assert_eq!(s.on_char('a', &items), None);
+    }
+
+    // ---- Section-header tests ----------------------------------------------
+    //
+    // Fixture: six items, two sections.
+    //   idx 0 "Alpha"     <- no section
+    //   idx 1 "Bravo"     <- no section
+    //   --- "Greek" header ---
+    //   idx 2 "Gamma"
+    //   idx 3 "Delta"
+    //   --- "Math" header ---
+    //   idx 4 "Sigma"
+    //   idx 5 "Theta"
+    const SECTIONED_ITEMS: [&str; 6] = ["Alpha", "Bravo", "Gamma", "Delta", "Sigma", "Theta"];
+    fn sectioned_sections() -> [(usize, &'static str); 2] {
+        [(2, "Greek"), (4, "Math")]
+    }
+
+    #[test]
+    fn layout_visible_rows_interleave_headers_with_items() {
+        // Empty filter, sections at 2 and 4 -> rows: 0,1,H(0),2,3,H(1),4,5
+        let mut s: DropdownState<A> = DropdownState::new();
+        let sections = sectioned_sections();
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::sectioned(&SECTIONED_ITEMS, &sections),
+            0,
+            true,
+            WIN,
+        );
+        let l = dropdown_popup_layout(&s, &SECTIONED_ITEMS, WIN).unwrap();
+        let kinds: Vec<RowKind> = l.visible_rows.iter().map(|r| r.kind).collect();
+        let idxs: Vec<usize> = l.visible_rows.iter().map(|r| r.item_index).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                RowKind::Item,
+                RowKind::Item,
+                RowKind::Header,
+                RowKind::Item,
+                RowKind::Item,
+                RowKind::Header,
+                RowKind::Item,
+                RowKind::Item,
+            ]
+        );
+        // For Item rows, item_index points into items; for Header, into sections.
+        assert_eq!(idxs, vec![0, 1, 0, 2, 3, 1, 4, 5]);
+    }
+
+    #[test]
+    fn key_down_skips_header_between_items() {
+        // Highlight starts at idx 1 (last item before the "Greek" header).
+        // Down should land on idx 2 (Gamma), not on the header.
+        let mut s: DropdownState<A> = DropdownState::new();
+        let sections = sectioned_sections();
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::sectioned(&SECTIONED_ITEMS, &sections),
+            1,
+            false,
+            WIN,
+        );
+        assert_eq!(s.highlight_for_test(), Some(1));
+        let ev = s.on_key(DropdownKey::Down, &SECTIONED_ITEMS, WIN);
+        assert_eq!(ev, Some(DropdownEvent::HighlightChanged(A::Wavetable, 2)));
+        assert_eq!(s.highlight_for_test(), Some(2));
+    }
+
+    #[test]
+    fn mouse_click_on_header_row_is_noop() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        let sections = sectioned_sections();
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::sectioned(&SECTIONED_ITEMS, &sections),
+            0,
+            false,
+            WIN,
+        );
+        let l = dropdown_popup_layout(&s, &SECTIONED_ITEMS, WIN).unwrap();
+        // Find a header row in the layout.
+        let header = l
+            .visible_rows
+            .iter()
+            .find(|r| r.kind == RowKind::Header)
+            .copied()
+            .expect("expected at least one header row");
+        let (rx, ry, rw, rh) = header.rect;
+        let ev = s.on_mouse_down(rx + rw * 0.5, ry + rh * 0.5, &SECTIONED_ITEMS, WIN);
+        assert_eq!(ev, None, "header click must not select or close");
+        assert!(s.is_open(), "header click must keep the popup open");
+        assert_eq!(
+            s.highlight_for_test(),
+            Some(0),
+            "header click must not change the highlight"
+        );
+    }
+
+    #[test]
+    fn empty_filter_shows_all_headers_and_items() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        let sections = sectioned_sections();
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::sectioned(&SECTIONED_ITEMS, &sections),
+            0,
+            true,
+            WIN,
+        );
+        let l = dropdown_popup_layout(&s, &SECTIONED_ITEMS, WIN).unwrap();
+        let header_count = l
+            .visible_rows
+            .iter()
+            .filter(|r| r.kind == RowKind::Header)
+            .count();
+        let item_count = l
+            .visible_rows
+            .iter()
+            .filter(|r| r.kind == RowKind::Item)
+            .count();
+        assert_eq!(header_count, 2);
+        assert_eq!(item_count, SECTIONED_ITEMS.len());
+    }
+
+    #[test]
+    fn filter_matching_item_label_keeps_its_section_header() {
+        // "del" matches only "Delta" by item-label; its section header
+        // ("Greek") must still be visible.
+        let mut s: DropdownState<A> = DropdownState::new();
+        let sections = sectioned_sections();
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::sectioned(&SECTIONED_ITEMS, &sections),
+            0,
+            true,
+            WIN,
+        );
+        s.set_filter_for_test("del");
+        let l = dropdown_popup_layout(&s, &SECTIONED_ITEMS, WIN).unwrap();
+        let header_idxs: Vec<usize> = l
+            .visible_rows
+            .iter()
+            .filter(|r| r.kind == RowKind::Header)
+            .map(|r| r.item_index)
+            .collect();
+        let item_idxs: Vec<usize> = l
+            .visible_rows
+            .iter()
+            .filter(|r| r.kind == RowKind::Item)
+            .map(|r| r.item_index)
+            .collect();
+        assert_eq!(item_idxs, vec![3]);
+        assert_eq!(header_idxs, vec![0], "Greek header must remain visible");
+    }
+
+    #[test]
+    fn filter_matching_only_section_header_shows_all_items_in_section() {
+        // "gree" matches no item label, but matches the "Greek" header.
+        // Result: header is visible AND every item in the Greek section
+        // (Gamma, Delta) is visible. Items in other sections stay hidden.
+        let mut s: DropdownState<A> = DropdownState::new();
+        let sections = sectioned_sections();
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::sectioned(&SECTIONED_ITEMS, &sections),
+            0,
+            true,
+            WIN,
+        );
+        s.set_filter_for_test("gree");
+        let l = dropdown_popup_layout(&s, &SECTIONED_ITEMS, WIN).unwrap();
+        let header_idxs: Vec<usize> = l
+            .visible_rows
+            .iter()
+            .filter(|r| r.kind == RowKind::Header)
+            .map(|r| r.item_index)
+            .collect();
+        let item_idxs: Vec<usize> = l
+            .visible_rows
+            .iter()
+            .filter(|r| r.kind == RowKind::Item)
+            .map(|r| r.item_index)
+            .collect();
+        assert_eq!(header_idxs, vec![0]);
+        assert_eq!(item_idxs, vec![2, 3]);
+    }
+
+    #[test]
+    fn filter_matching_nothing_shows_no_rows() {
+        let mut s: DropdownState<A> = DropdownState::new();
+        let sections = sectioned_sections();
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::sectioned(&SECTIONED_ITEMS, &sections),
+            0,
+            true,
+            WIN,
+        );
+        s.set_filter_for_test("xyzqqq");
+        let l = dropdown_popup_layout(&s, &SECTIONED_ITEMS, WIN).unwrap();
+        assert!(l.visible_rows.is_empty(), "no rows when nothing matches");
+    }
+
+    #[test]
+    fn draw_popup_with_sections_paints_something() {
+        let mut pm = Pixmap::new(800, 600).unwrap();
+        let mut tr = TextRenderer::new(&test_font_data());
+        let mut s: DropdownState<A> = DropdownState::new();
+        let sections = sectioned_sections();
+        s.open(
+            A::Wavetable,
+            ANCHOR,
+            DropdownList::sectioned(&SECTIONED_ITEMS, &sections),
+            0,
+            false,
+            WIN,
+        );
+        draw_dropdown_popup(&mut pm, &mut tr, &s, &SECTIONED_ITEMS, WIN);
+        // Highlight is item 0 -> accent fill on its row. Just make sure
+        // drawing didn't panic and the panel painted something.
+        let l = dropdown_popup_layout(&s, &SECTIONED_ITEMS, WIN).unwrap();
+        let (px, py, _pw, _ph) = l.popup_rect;
+        assert!(px_alpha(&pm, px as u32 + 4, py as u32 + 4) > 0);
+    }
+
+    #[test]
+    fn section_of_returns_correct_index() {
+        let sections: Vec<(usize, String)> = vec![(2, "Greek".into()), (4, "Math".into())];
+        assert_eq!(section_of(&sections, 0), None);
+        assert_eq!(section_of(&sections, 1), None);
+        assert_eq!(section_of(&sections, 2), Some(0));
+        assert_eq!(section_of(&sections, 3), Some(0));
+        assert_eq!(section_of(&sections, 4), Some(1));
+        assert_eq!(section_of(&sections, 5), Some(1));
     }
 }

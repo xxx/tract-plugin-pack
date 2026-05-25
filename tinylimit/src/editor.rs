@@ -875,7 +875,7 @@ impl baseview::WindowHandler for TinylimitWindow {
                             self.dropdown.open(
                                 DropdownId::Preset,
                                 (region.x, region.y, region.w, region.h),
-                                preset_names(),
+                                widgets::dropdown::DropdownList::flat(preset_names()),
                                 self.current_preset,
                                 false, // 7 presets — no typeahead filter
                                 win,

@@ -393,8 +393,14 @@ mod tests {
             assert_eq!(mx, sx, "row {row}: M/S must share an x column");
             assert_eq!(mw, sw, "row {row}: M/S widths differ");
             assert!(my + mh <= sy, "row {row}: M overlaps S vertically");
-            assert!(sx + sw <= ex + ew, "row {row}: column overflows entry right");
-            assert!(my >= ey && sy + sh <= ey + eh, "row {row}: column overflows entry top/bottom");
+            assert!(
+                sx + sw <= ex + ew,
+                "row {row}: column overflows entry right"
+            );
+            assert!(
+                my >= ey && sy + sh <= ey + eh,
+                "row {row}: column overflows entry top/bottom"
+            );
         }
     }
 

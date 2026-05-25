@@ -490,44 +490,52 @@ pub enum EffectKind {
 }
 
 impl EffectKind {
-    /// Every effect kind, in display / registry order.
+    /// Every effect kind, in display / registry order. All kinds whose
+    /// `family()` returns `Some("Spectral")` are grouped contiguously at the
+    /// end so the kind-picker can render a single "Spectral" section header
+    /// above them.
     pub const ALL: [EffectKind; 36] = [
+        // None stays first; the rest of this block is alphabetised by display
+        // name, then the Spectral family below is its own alphabetised block.
         EffectKind::None,
-        EffectKind::Svf,
         EffectKind::Bitcrush,
-        EffectKind::Fm,
-        EffectKind::Delay,
-        EffectKind::Phaser,
-        EffectKind::WarpZone,
-        EffectKind::Satch,
-        EffectKind::Repeat,
-        EffectKind::Stretch,
-        EffectKind::Comb,
-        EffectKind::Ring,
-        EffectKind::Reverb,
-        EffectKind::Distortion,
         EffectKind::Chorus,
-        EffectKind::PitchShift,
+        EffectKind::Comb,
         EffectKind::Compressor,
-        EffectKind::Flanger,
-        EffectKind::FrequencyShift,
+        EffectKind::Delay,
+        EffectKind::Distortion,
         EffectKind::Downsample,
+        EffectKind::Flanger,
+        EffectKind::Fm,
+        EffectKind::FrequencyShift,
+        EffectKind::Phaser,
+        EffectKind::PitchShift,
+        EffectKind::Repeat,
+        EffectKind::Reverb,
+        EffectKind::Ring,
+        EffectKind::Stretch,
+        EffectKind::Svf,
         EffectKind::Varispeed,
         EffectKind::Vocoder,
-        EffectKind::SpectralRotate,
+        // Spectral family, alphabetised by display name. `Satch` and
+        // `WarpZone` keep their own display names (no "Spectral" prefix);
+        // every `SpectralXxx` variant displays just its suffix.
         EffectKind::SpectralBandpass,
+        EffectKind::SpectralCascade,
+        EffectKind::SpectralCompress,
+        EffectKind::SpectralCorrupt,
+        EffectKind::SpectralLofi,
         EffectKind::SpectralMirror,
+        EffectKind::SpectralReverb,
+        EffectKind::SpectralRotate,
+        EffectKind::Satch,
+        EffectKind::SpectralScatter,
         EffectKind::SpectralShift,
         EffectKind::SpectralSmear,
         EffectKind::SpectralSpread,
-        EffectKind::SpectralLofi,
-        EffectKind::SpectralCorrupt,
-        EffectKind::SpectralCompress,
-        EffectKind::SpectralCascade,
-        EffectKind::SpectralReverb,
-        EffectKind::SpectralScatter,
-        EffectKind::SpectralTwist,
         EffectKind::SpectralStretch,
+        EffectKind::SpectralTwist,
+        EffectKind::WarpZone,
     ];
 
     /// The kind's display name.

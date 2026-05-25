@@ -530,9 +530,32 @@ pub fn draw_effect_section(
 }
 
 /// The list of effect-kind names for the kind dropdown, in `EffectKind::ALL`
-/// order.
-pub fn kind_items() -> Vec<&'static str> {
-    EffectKind::ALL.iter().map(|k| k.name()).collect()
+/// order, paired with the section markers the dropdown should render between
+/// kinds.
+///
+/// `sections` is a list of `(item_index, header_label)` tuples: each tuple
+/// inserts a non-selectable section header row above `items[item_index]`. A
+/// section header is emitted whenever `EffectKind::family()` transitions from
+/// one value to another (skipping transitions into `None`).
+pub struct KindItems {
+    pub items: Vec<&'static str>,
+    pub sections: Vec<(usize, &'static str)>,
+}
+
+pub fn kind_items() -> KindItems {
+    let items: Vec<_> = EffectKind::ALL.iter().map(|k| k.name()).collect();
+    let mut sections = Vec::new();
+    let mut prev_family: Option<&'static str> = None;
+    for (i, k) in EffectKind::ALL.iter().enumerate() {
+        let fam = k.family();
+        if fam != prev_family {
+            if let Some(name) = fam {
+                sections.push((i, name));
+            }
+        }
+        prev_family = fam;
+    }
+    KindItems { items, sections }
 }
 
 /// The target-dropdown items for `kind`: `(none)` followed by each parameter

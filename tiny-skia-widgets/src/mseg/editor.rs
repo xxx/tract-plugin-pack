@@ -461,7 +461,7 @@ impl MsegEditState {
                         self.dropdown.open(
                             StripId::TimeGrid,
                             b.grid,
-                            &grid_refs,
+                            crate::dropdown::DropdownList::flat(&grid_refs),
                             grid_idx,
                             false,
                             window_size,
@@ -475,7 +475,7 @@ impl MsegEditState {
                         self.dropdown.open(
                             StripId::Style,
                             b.style,
-                            style_items(),
+                            crate::dropdown::DropdownList::flat(style_items()),
                             self.style.index(),
                             false,
                             window_size,
@@ -682,7 +682,7 @@ impl MsegEditState {
             self.dropdown.open(
                 StripId::Transform,
                 (x, (y - item_h).max(rect.1), popup_w, item_h),
-                transform_menu_items(),
+                crate::dropdown::DropdownList::flat(transform_menu_items()),
                 0,
                 false,
                 window_size,
