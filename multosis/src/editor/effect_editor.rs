@@ -203,7 +203,7 @@ pub enum EffectHit {
 
 /// The effect-editor control under physical-pixel point `(px, py)` at `scale`,
 /// given the current effect's parameter count `param_count` and the active
-/// MSEG `selected_mseg` (0 = amplitude, 1/2 = assignable). Returns `None` for
+/// MSEG `selected_mseg` (0 = amplitude, 1/2/3 = assignable). Returns `None` for
 /// a point over no control.
 pub fn effect_hit(
     px: f32,
@@ -246,10 +246,10 @@ pub fn effect_hit(
     if trigger_has_aux && in_rect(lay.trigger_aux, px, py) {
         return Some(EffectHit::TriggerAux);
     }
-    // MSEG selector — three equal segments.
+    // MSEG selector — four equal segments.
     let (sx, sy, sw, sh) = lay.mseg_selector;
     if px >= sx && px < sx + sw && py >= sy && py < sy + sh {
-        let seg = (((px - sx) / (sw / 3.0)) as usize).min(2);
+        let seg = (((px - sx) / (sw / 4.0)) as usize).min(3);
         return Some(EffectHit::MsegSelector(seg));
     }
     // Active-MSEG sync mode (2-segment selector) + length slider.
@@ -835,6 +835,7 @@ pub fn draw_modulation_controls(
         crate::editor::mseg_color(0),
         crate::editor::mseg_color(1),
         crate::editor::mseg_color(2),
+        crate::editor::mseg_color(3),
     ];
     widgets::controls::draw_stepped_selector(
         pixmap,
@@ -843,8 +844,12 @@ pub fn draw_modulation_controls(
         lay.mseg_selector.1,
         lay.mseg_selector.2,
         lay.mseg_selector.3,
-        &["Amp", "MSEG 1", "MSEG 2"],
-        selected_mseg.min(2),
+        // Short labels so all four segments fit comfortably in the
+        // 240 px selector width (60 px per segment). The colour-coded
+        // backgrounds carry the slot identity; the numbered labels are
+        // just a visible nudge to which assignable MSEG is which.
+        &["Amp", "1", "2", "3"],
+        selected_mseg.min(3),
         Some(&mseg_segment_colors),
     );
     if selected_mseg != 0 {
@@ -1132,7 +1137,7 @@ mod tests {
         let (ax, ay, aw, ah) = lay.trigger_aux;
         let cx = ax + aw / 2.0;
         let cy = ay + ah / 2.0;
-        // Transient: aux dial (Hold) is hot.
+        // Transient: aux dial (Hold) is hot at the dial's center.
         assert_eq!(
             effect_hit(
                 cx,
@@ -1161,5 +1166,7 @@ mod tests {
         assert!(!rects_overlap(lay.trigger_aux, lay.depth));
         // Aux sits to the RIGHT of the rate dial.
         assert!(lay.trigger_rate.0 < lay.trigger_aux.0);
+        // Aux sits to the LEFT of the MSEG selector.
+        assert!(lay.trigger_aux.0 + lay.trigger_aux.2 <= lay.mseg_selector.0);
     }
 }

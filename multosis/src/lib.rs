@@ -143,9 +143,9 @@ pub struct Multosis {
     /// Audio→GUI mirror of the engine's active-row mask, shared with the editor.
     active_rows: Arc<AtomicU16>,
     /// Audio→GUI mirror of every MSEG's free-running phase, as f32 bit-patterns.
-    /// Slot `row*3 + k` holds phase of MSEG `k` on row `r`. For the editor's
-    /// playhead overlay; 48 stores per process block, allocation-free.
-    mseg_phases: Arc<[std::sync::atomic::AtomicU32; 48]>,
+    /// Slot `row*4 + k` holds phase of MSEG `k` on row `r` (4 MSEGs per row:
+    /// 1 amplitude + 3 assignable). 64 stores per process block, allocation-free.
+    mseg_phases: Arc<[std::sync::atomic::AtomicU32; 64]>,
     /// Set by the editor on any effect/modulation edit; consumed by `process`
     /// to re-bridge the persisted config into the engine.
     config_dirty: Arc<std::sync::atomic::AtomicBool>,
@@ -355,11 +355,11 @@ impl Plugin for Multosis {
             self.engine.active_mask(),
             std::sync::atomic::Ordering::Relaxed,
         );
-        // Publish the 16x3 MSEG phases for the editor's playhead overlay.
+        // Publish the 16x4 MSEG phases for the editor's playhead overlay.
         for row in 0..16 {
-            for k in 0..3 {
+            for k in 0..4 {
                 let phase = self.engine.modulation_phase(row, k);
-                self.mseg_phases[row * 3 + k]
+                self.mseg_phases[row * 4 + k]
                     .store(phase.to_bits(), std::sync::atomic::Ordering::Relaxed);
             }
         }

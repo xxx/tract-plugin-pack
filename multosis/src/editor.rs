@@ -85,16 +85,17 @@ fn clamp_track(row: usize) -> usize {
     row.min(crate::grid::ROWS - 1)
 }
 
-/// The three MSEG slots each get their own colour: Amp = sky blue (the
-/// existing accent), MSEG 1 = amber, MSEG 2 = purple. Used as the value
-/// colour for `draw_mseg`/`draw_mseg_ghost`, the active fill of the MSEG
-/// selector tab, and the modulation arc of any param dial driven by that
-/// MSEG. Slot indices past 2 clamp to 2.
+/// The four MSEG slots each get their own colour: Amp = sky blue (the
+/// existing accent), MSEG 1 = amber, MSEG 2 = purple, MSEG 3 = mint.
+/// Used as the value colour for `draw_mseg`/`draw_mseg_ghost`, the
+/// active fill of the MSEG selector tab, and the modulation arc of
+/// any param dial driven by that MSEG. Slot indices past 3 clamp to 3.
 pub fn mseg_color(slot: usize) -> tiny_skia::Color {
-    match slot.min(2) {
+    match slot.min(3) {
         0 => tiny_skia::Color::from_rgba8(0x4f, 0xc3, 0xf7, 0xff), // Amp — sky blue
         1 => tiny_skia::Color::from_rgba8(0xff, 0xc8, 0x58, 0xff), // MSEG 1 — amber
-        _ => tiny_skia::Color::from_rgba8(0xc3, 0x78, 0xff, 0xff), // MSEG 2 — purple
+        2 => tiny_skia::Color::from_rgba8(0xc3, 0x78, 0xff, 0xff), // MSEG 2 — purple
+        _ => tiny_skia::Color::from_rgba8(0x66, 0xd9, 0xa0, 0xff), // MSEG 3 — mint
     }
 }
 
@@ -145,7 +146,7 @@ struct MultosisWindow {
     /// Audio→GUI mirror of every MSEG's free-running phase, as f32 bit-patterns.
     /// Slot `row*3 + k`. The editor's playhead overlay reads the active one
     /// each frame.
-    mseg_phases: Arc<[AtomicU32; 48]>,
+    mseg_phases: Arc<[AtomicU32; 64]>,
     /// Latest cursor position in physical pixels, updated on CursorMoved.
     mouse_pos: (f32, f32),
     text_renderer: widgets::TextRenderer,
@@ -224,7 +225,7 @@ impl MultosisWindow {
         gui_context: Arc<dyn GuiContext>,
         reset_request: Arc<AtomicBool>,
         active_rows: Arc<AtomicU16>,
-        mseg_phases: Arc<[AtomicU32; 48]>,
+        mseg_phases: Arc<[AtomicU32; 64]>,
         config_dirty: Arc<AtomicBool>,
         pending_track_swap: Arc<AtomicU32>,
         scale_factor: f32,
@@ -711,7 +712,7 @@ impl MultosisWindow {
         }
         let lay = effect_editor::effect_layout(self.scale_factor);
         if effect_editor::in_rect(lay.mseg_pane, px, py) {
-            let sel = self.selected_mseg.min(2);
+            let sel = self.selected_mseg.min(3);
             let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
                 let row = self.selected_track;
                 self.mseg_edit.on_right_click(
@@ -826,7 +827,7 @@ impl MultosisWindow {
         );
         // MODULATION section.
         let modu = self.selected_track_modulation();
-        let sel = self.selected_mseg.min(2);
+        let sel = self.selected_mseg.min(3);
         // Build the hover-node tooltip for the active MSEG. Amp (slot 0) shows
         // a dB readout; assignable MSEGs format through the target's ParamSpec
         // if one is set, or fall back to the raw 0..1 level.
@@ -864,7 +865,7 @@ impl MultosisWindow {
             mseg_color(sel),
             tooltip_ref,
         );
-        for m in 0..3 {
+        for m in 0..4 {
             if m != sel {
                 let c = mseg_color(m);
                 // Pack the slot colour with ghost alpha (~0x60).
@@ -885,7 +886,7 @@ impl MultosisWindow {
         // Playhead overlay: a thin vertical line at the active MSEG's current
         // phase, drawn over the active curve + ghosts.
         let phase =
-            f32::from_bits(self.mseg_phases[self.selected_track * 3 + sel].load(Ordering::Relaxed));
+            f32::from_bits(self.mseg_phases[self.selected_track * 4 + sel].load(Ordering::Relaxed));
         effect_editor::draw_mseg_playhead(
             &mut self.surface.pixmap,
             lay.mseg_pane,
@@ -1021,7 +1022,7 @@ impl MultosisWindow {
             }
             EffectHit::MsegSelector(seg) => {
                 let old = self.selected_mseg;
-                self.selected_mseg = seg.min(2);
+                self.selected_mseg = seg.min(3);
                 // Only clear when the selection actually changed; re-clicking
                 // the active MSEG must not discard the node selection.
                 if self.selected_mseg != old {
@@ -1061,7 +1062,7 @@ impl MultosisWindow {
                 }
             }
             EffectHit::MsegPane => {
-                let sel = self.selected_mseg.min(2);
+                let sel = self.selected_mseg.min(3);
                 let is_double = self.mseg_double_click_check(px, py);
                 let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
                     let row = self.selected_track;
@@ -1174,7 +1175,7 @@ impl MultosisWindow {
     /// its current sync mode (the slider range and scaling depend on it).
     fn active_mseg_length_norm(&self) -> f32 {
         let modu = self.selected_track_modulation();
-        let sel = self.selected_mseg.min(2);
+        let sel = self.selected_mseg.min(3);
         let mseg = modu.msegs[sel];
         match mseg.sync_mode {
             tiny_skia_widgets::SyncMode::Time => effects::value_to_norm(
@@ -1197,7 +1198,7 @@ impl MultosisWindow {
             tiny_skia_widgets::SyncMode::Beat
         };
         let row = self.selected_track;
-        let k = self.selected_mseg.min(2);
+        let k = self.selected_mseg.min(3);
         if let Ok(mut modu) = self.params.track_modulation.lock() {
             modu[row].msegs[k].sync_mode = new_mode;
         }
@@ -1208,7 +1209,7 @@ impl MultosisWindow {
     /// `beats` or `time_seconds` depending on the active sync mode.
     fn apply_mseg_length_drag(&mut self, norm: f32) {
         let row = self.selected_track;
-        let k = self.selected_mseg.min(2);
+        let k = self.selected_mseg.min(3);
         if let Ok(mut modu) = self.params.track_modulation.lock() {
             let mseg = &mut modu[row].msegs[k];
             match mseg.sync_mode {
@@ -1429,7 +1430,7 @@ impl MultosisWindow {
             return result;
         };
         let row = self.selected_track;
-        for k in 1..3 {
+        for k in 1..4 {
             // `targets` is indexed 0..2 (one per assignable MSEG —
             // msegs[1] and msegs[2]). `targets[k - 1]` is the slot
             // this MSEG modulates, or None when unassigned.
@@ -1440,7 +1441,7 @@ impl MultosisWindow {
                 continue;
             };
             let mseg = modu[row].msegs[k];
-            let phase = f32::from_bits(self.mseg_phases[row * 3 + k].load(Ordering::Relaxed));
+            let phase = f32::from_bits(self.mseg_phases[row * 4 + k].load(Ordering::Relaxed));
             let mseg_value = widgets::mseg::value_at_phase(&mseg, phase);
             let depth = modu[row].depths[k - 1];
             let modulated = crate::modulation::assignable_value(
@@ -1917,7 +1918,7 @@ impl baseview::WindowHandler for MultosisWindow {
                 // tracking (matches miff's behaviour).
                 if self.view == View::Effect {
                     let lay = effect_editor::effect_layout(self.scale_factor);
-                    let sel = self.selected_mseg.min(2);
+                    let sel = self.selected_mseg.min(3);
                     let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
                         let row = self.selected_track;
                         self.mseg_edit.on_mouse_move(
@@ -2181,7 +2182,7 @@ impl baseview::WindowHandler for MultosisWindow {
                 // A release always terminates any in-flight MSEG node drag,
                 // regardless of where the cursor is.
                 if self.view == View::Effect {
-                    let sel = self.selected_mseg.min(2);
+                    let sel = self.selected_mseg.min(3);
                     let lay = effect_editor::effect_layout(self.scale_factor);
                     let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
                         let row = self.selected_track;
@@ -2268,7 +2269,7 @@ impl baseview::WindowHandler for MultosisWindow {
                         keyboard_types::Key::Delete | keyboard_types::Key::Backspace => {
                             let snap = self.snapshot();
                             let opened = self.undo.begin_capture(snap);
-                            let sel = self.selected_mseg.min(2);
+                            let sel = self.selected_mseg.min(3);
                             let changed = if let Ok(mut modu) = self.params.track_modulation.lock()
                             {
                                 let row = self.selected_track;
@@ -2306,7 +2307,7 @@ struct MultosisEditor {
     grid_handoff: Arc<GridHandoff>,
     reset_request: Arc<AtomicBool>,
     active_rows: Arc<AtomicU16>,
-    mseg_phases: Arc<[AtomicU32; 48]>,
+    mseg_phases: Arc<[AtomicU32; 64]>,
     config_dirty: Arc<AtomicBool>,
     /// Editor → audio handoff for the GUI's drag-and-drop track-swap gesture.
     /// Encoded `((from + 1) << 8) | (to + 1)`; see `Multosis::pending_track_swap`.
@@ -2323,7 +2324,7 @@ pub fn create(
     grid_handoff: Arc<GridHandoff>,
     reset_request: Arc<AtomicBool>,
     active_rows: Arc<AtomicU16>,
-    mseg_phases: Arc<[AtomicU32; 48]>,
+    mseg_phases: Arc<[AtomicU32; 64]>,
     config_dirty: Arc<AtomicBool>,
     pending_track_swap: Arc<AtomicU32>,
 ) -> Option<Box<dyn Editor>> {
@@ -2492,23 +2493,29 @@ mod tests {
     }
 
     #[test]
-    fn mseg_color_returns_the_three_slot_hues_and_clamps_oob() {
+    fn mseg_color_returns_the_four_slot_hues_and_clamps_oob() {
         use tiny_skia::Color;
         let amp = mseg_color(0);
         let m1 = mseg_color(1);
         let m2 = mseg_color(2);
-        // Three distinct colours.
-        assert_ne!(rgb8(amp), rgb8(m1));
-        assert_ne!(rgb8(amp), rgb8(m2));
-        assert_ne!(rgb8(m1), rgb8(m2));
+        let m3 = mseg_color(3);
+        // Four distinct colours.
+        let all = [amp, m1, m2, m3];
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                assert_ne!(rgb8(all[i]), rgb8(all[j]), "slots {i} and {j} share a hue");
+            }
+        }
         // Amp matches the existing accent (sky blue 0x4fc3f7).
         assert_eq!(rgb8(amp), (0x4f, 0xc3, 0xf7));
         // MSEG 1 amber.
         assert_eq!(rgb8(m1), (0xff, 0xc8, 0x58));
         // MSEG 2 purple.
         assert_eq!(rgb8(m2), (0xc3, 0x78, 0xff));
-        // OOB clamps to MSEG 2 (the highest valid slot).
-        assert_eq!(rgb8(mseg_color(99)), rgb8(m2));
+        // MSEG 3 mint.
+        assert_eq!(rgb8(m3), (0x66, 0xd9, 0xa0));
+        // OOB clamps to MSEG 3 (the highest valid slot).
+        assert_eq!(rgb8(mseg_color(99)), rgb8(m3));
 
         fn rgb8(c: Color) -> (u8, u8, u8) {
             let r = (c.red() * 255.0).round() as u8;

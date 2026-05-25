@@ -8,10 +8,10 @@ use crate::effects::{
     default_params_for_kind, norm_to_value, param_count, value_to_norm, Effect, EffectInstance,
     EffectKind, ParamScaling, ParamSpec, TrackEffect,
 };
-use tiny_skia_widgets::{advance, value_at_phase, MsegData, PlayMode, Polarity, SyncMode};
-
-/// The number of track rows. Matches `crate::grid::ROWS`.
-const ROWS: usize = 16;
+use crate::grid::ROWS;
+use tiny_skia_widgets::{
+    advance, value_at_phase, MsegData, MsegNode, PlayMode, Polarity, SyncMode,
+};
 
 /// Default threshold for a fresh `TriggerSource::Transient` (≈ +3.5 dB on the
 /// fast/slow envelope ratio — fires on clear percussive onsets without
@@ -138,18 +138,23 @@ pub enum TriggerSource {
     },
 }
 
-/// One track row's modulation: three MSEGs and the two assignable MSEGs'
-/// targets and depths. `msegs[0]` is the amplitude MSEG; `msegs[1]` and
-/// `msegs[2]` are the assignable MSEGs — `targets[k]` / `depths[k]` belong to
+/// One track row's modulation: four MSEGs and the three assignable MSEGs'
+/// targets and depths. `msegs[0]` is the amplitude MSEG; `msegs[1..=3]` are
+/// the assignable MSEGs — `targets[k]` / `depths[k]` belong to
 /// `msegs[k + 1]`.
-#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+///
+/// Backward compat: legacy presets persisted three MSEGs and two
+/// targets/depths. A custom `Deserialize` impl below accepts both
+/// shapes -- short arrays are padded with default cyclic MSEGs and
+/// no-target / zero-depth assignable slots.
+#[derive(Clone, PartialEq, Debug, serde::Serialize)]
 pub struct TrackModulation {
-    pub msegs: [MsegData; 3],
+    pub msegs: [MsegData; 4],
     /// Target effect-parameter index for each assignable MSEG, or `None`.
-    pub targets: [Option<usize>; 2],
+    pub targets: [Option<usize>; 3],
     /// Bipolar modulation depth (−1..1) for each assignable MSEG.
-    pub depths: [f32; 2],
-    /// The event that resets all three of this row's MSEG phases.
+    pub depths: [f32; 3],
+    /// The event that resets all four of this row's MSEG phases.
     #[serde(default)]
     pub trigger: TriggerSource,
 }
@@ -158,9 +163,9 @@ impl TrackModulation {
     /// The default modulation for track row `row`. The amplitude MSEG is flat
     /// at 1.0 (no level change); `msegs[1]` is a cyclic triangle assigned to
     /// effect parameter 0, its loop length spread by row so each track drifts
-    /// at its own rate; `msegs[2]` is an unused cyclic default.
+    /// at its own rate; `msegs[2]` and `msegs[3]` are unused cyclic defaults.
     pub fn default_for_row(row: usize) -> Self {
-        // All three MSEGs on a row default to the SAME beat-synced length so
+        // All four MSEGs on a row default to the SAME beat-synced length so
         // their playheads visibly stay in lockstep. The length varies by row
         // (4..34 beats) for audible per-track variety. The user can re-tune
         // any single MSEG's clock via its strip.
@@ -182,7 +187,8 @@ impl TrackModulation {
         sweep.sync_mode = SyncMode::Beat;
         sweep.beats = beats;
 
-        // msegs[2] — assignable: unused default, same clock as the others.
+        // msegs[2] — assignable: unused cyclic default, same clock as
+        // the others. Flat-line at 0..1 with no curvature.
         let spare = MsegData {
             play_mode: PlayMode::Cyclic,
             sync_mode: SyncMode::Beat,
@@ -190,10 +196,63 @@ impl TrackModulation {
             ..MsegData::default()
         };
 
+        // msegs[3] — assignable: a 5-node sine-approximating cycle
+        // (mid -> peak -> mid -> trough -> mid). Each segment has
+        // tension applied to round its corner so the rendered curve
+        // looks sinusoidal rather than triangular. Magnitude 0.5
+        // is enough to clearly distinguish the bowed shape from a
+        // straight line without going so far it warps into a
+        // saw / hold profile.
+        let mut sine = MsegData {
+            play_mode: PlayMode::Cyclic,
+            sync_mode: SyncMode::Beat,
+            beats,
+            ..MsegData::default()
+        };
+        // The default Mseg has 2 nodes; overwrite with 5.
+        sine.node_count = 5;
+        // Sign convention (see `warp` in tiny-skia-widgets/mseg):
+        //   tension > 0 = slow-start  (concave bow)
+        //   tension < 0 = fast-start  (convex bow)
+        // For a rising sine quarter, value moves FAST near the
+        // midline and SLOWS into the peak -> fast-start = neg.
+        // For the falling quarter from the peak, value moves SLOW
+        // near the peak and ACCELERATES downward -> slow-start = pos.
+        sine.nodes[0] = MsegNode {
+            time: 0.0,
+            value: 0.5,
+            tension: -0.5,
+            stepped: false,
+        };
+        sine.nodes[1] = MsegNode {
+            time: 0.25,
+            value: 1.0,
+            tension: 0.5,
+            stepped: false,
+        };
+        sine.nodes[2] = MsegNode {
+            time: 0.5,
+            value: 0.5,
+            tension: -0.5,
+            stepped: false,
+        };
+        sine.nodes[3] = MsegNode {
+            time: 0.75,
+            value: 0.0,
+            tension: 0.5,
+            stepped: false,
+        };
+        sine.nodes[4] = MsegNode {
+            time: 1.0,
+            value: 0.5,
+            tension: 0.0,
+            stepped: false,
+        };
+
         TrackModulation {
-            msegs: [amplitude, sweep, spare],
-            targets: [Some(0), None],
-            depths: [0.4, 0.0],
+            msegs: [amplitude, sweep, spare, sine],
+            targets: [Some(0), None, None],
+            depths: [0.4, 0.0, 0.0],
             trigger: TriggerSource::Free,
         }
     }
@@ -209,6 +268,65 @@ impl TrackModulation {
                 }
             }
         }
+    }
+}
+
+/// Backward-compatible deserializer for `TrackModulation`.
+///
+/// Legacy presets (before the MSEG count grew from 3 to 4) serialize
+/// `msegs` as a 3-element array and `targets` / `depths` as 2-element
+/// arrays. Modern serialization uses 4 / 3 / 3. This impl accepts
+/// either shape: it deserializes the fields as Vec<_>, validates
+/// the per-field lengths against the legacy or modern length, and
+/// pads short arrays with sensible defaults (a cyclic spare MSEG
+/// matching the existing default-style for new assignable slots,
+/// no-target / zero-depth for the new assignable's bookkeeping).
+impl<'de> serde::Deserialize<'de> for TrackModulation {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Intermediate shape: same fields as TrackModulation but with
+        // Vec lengths so we can accept either the legacy or current
+        // sizes. Deserialized with serde's derive machinery via a
+        // local Helper struct.
+        #[derive(serde::Deserialize)]
+        struct Helper {
+            msegs: Vec<MsegData>,
+            targets: Vec<Option<usize>>,
+            depths: Vec<f32>,
+            #[serde(default)]
+            trigger: TriggerSource,
+        }
+        let h = Helper::deserialize(deserializer)?;
+
+        // Pad / truncate the mseg array to exactly 4 entries. Use a
+        // cyclic-default spare for any short-form padding, matching
+        // what `default_for_row` does for fresh tracks.
+        let mut msegs: [MsegData; 4] = std::array::from_fn(|_| MsegData {
+            play_mode: PlayMode::Cyclic,
+            sync_mode: SyncMode::Beat,
+            beats: 4.0,
+            ..MsegData::default()
+        });
+        for (i, m) in h.msegs.into_iter().take(4).enumerate() {
+            msegs[i] = m;
+        }
+
+        // Pad targets / depths to 3 (the 3 assignable slots) with
+        // "unassigned, no depth" defaults.
+        let mut targets: [Option<usize>; 3] = [None; 3];
+        for (i, t) in h.targets.into_iter().take(3).enumerate() {
+            targets[i] = t;
+        }
+        let mut depths: [f32; 3] = [0.0; 3];
+        for (i, d) in h.depths.into_iter().take(3).enumerate() {
+            depths[i] = d;
+        }
+
+        Ok(TrackModulation {
+            msegs,
+            targets,
+            depths,
+            trigger: h.trigger,
+        })
     }
 }
 
@@ -300,7 +418,7 @@ pub fn switch_effect_kind(
 pub struct Modulation {
     config: [TrackModulation; ROWS],
     /// Free-running phase per `[row][mseg]`.
-    phases: [[f32; 3]; ROWS],
+    phases: [[f32; 4]; ROWS],
     /// Latest per-row amplitude gain, set by `begin_block` / `advance_segment`.
     amplitudes: [f32; ROWS],
     /// Free-Hz oscillator phase per row, advances 0..1 and wraps modulo 1.
@@ -317,7 +435,7 @@ impl Modulation {
     pub fn new() -> Self {
         Self {
             config: std::array::from_fn(TrackModulation::default_for_row),
-            phases: [[0.0; 3]; ROWS],
+            phases: [[0.0; 4]; ROWS],
             amplitudes: [1.0; ROWS],
             hz_phases: [0.0; ROWS],
             transient_state: [TransientDetector::default(); ROWS],
@@ -362,7 +480,7 @@ impl Modulation {
 
     /// Reset every MSEG phase to 0.
     pub fn reset(&mut self) {
-        self.phases = [[0.0; 3]; ROWS];
+        self.phases = [[0.0; 4]; ROWS];
         self.hz_phases = [0.0; ROWS];
         for det in &mut self.transient_state {
             det.reset();
@@ -375,7 +493,7 @@ impl Modulation {
         self.amplitudes[row]
     }
 
-    /// The current free-running phase of MSEG `k` (`0..3`) on `row` (`0..ROWS`).
+    /// The current free-running phase of MSEG `k` (`0..4`) on `row` (`0..ROWS`).
     /// Published to the editor for the playhead overlay.
     pub fn phase(&self, row: usize, k: usize) -> f32 {
         self.phases[row][k]
@@ -412,7 +530,7 @@ impl Modulation {
                     if self.hz_phases[row] >= 1.0 {
                         self.hz_phases[row] -= self.hz_phases[row].floor();
                         self.fires |= 1 << row;
-                        self.phases[row] = [0.0; 3];
+                        self.phases[row] = [0.0; 4];
                     }
                 }
                 TriggerSource::Transient { threshold, hold_ms } => {
@@ -423,7 +541,7 @@ impl Modulation {
                         let trip = det.process_sample(mono, threshold, hold_ms, sr_f32);
                         if trip && !fired {
                             self.fires |= 1 << row;
-                            self.phases[row] = [0.0; 3];
+                            self.phases[row] = [0.0; 4];
                             fired = true;
                         }
                     }
@@ -454,7 +572,7 @@ impl Modulation {
             return;
         }
         for row in 0..ROWS {
-            for k in 0..3 {
+            for k in 0..4 {
                 let mseg = self.config[row].msegs[k];
                 let dt = mseg_phase_delta(&mseg, seg_len, bpm, sample_rate);
                 let (next, _finished) = advance(&mseg, self.phases[row][k], dt, false);
@@ -484,7 +602,7 @@ impl Modulation {
                 | TriggerSource::Transient { .. } => false,
             };
             if reset {
-                self.phases[row] = [0.0; 3];
+                self.phases[row] = [0.0; 4];
                 self.fires |= 1 << row;
             }
         }
@@ -585,7 +703,7 @@ impl Modulation {
     pub fn force_runtime_state_for_test(
         &mut self,
         row: usize,
-        phases: [f32; 3],
+        phases: [f32; 4],
         amplitude: f32,
         hz_phase: f32,
         fired: bool,
@@ -630,10 +748,17 @@ mod tests {
 
     #[test]
     fn track_modulation_array_serde_round_trips() {
-        let cfg: [TrackModulation; ROWS] = std::array::from_fn(TrackModulation::default_for_row);
-        let json = serde_json::to_string(&cfg).unwrap();
-        let back: [TrackModulation; ROWS] = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, cfg);
+        // The 16-row TrackModulation array carries (16 * 4 = 64) MsegData
+        // instances, each with a 16-slot node table -- the full struct is
+        // tens of kilobytes. serde_json's recursive descent through the
+        // array elements uses enough additional stack frames that the
+        // default 2 MB test-thread stack overflows. Box the round-trip
+        // value so the bulk lives on the heap.
+        let cfg: Box<[TrackModulation; ROWS]> =
+            Box::new(std::array::from_fn(TrackModulation::default_for_row));
+        let json = serde_json::to_string(&*cfg).unwrap();
+        let back: Box<[TrackModulation; ROWS]> = serde_json::from_str(&json).unwrap();
+        assert_eq!(*back, *cfg);
     }
 
     #[test]
@@ -903,14 +1028,15 @@ mod tests {
     #[test]
     fn clamp_targets_clears_out_of_range_targets() {
         let mut tm = TrackModulation::default_for_row(0);
-        tm.targets = [Some(0), Some(5)];
-        // An effect with 2 parameters: target 0 survives, target 5 is cleared.
+        tm.targets = [Some(0), Some(5), Some(3)];
+        // An effect with 2 parameters: target 0 survives, targets 5 and 3
+        // are out of range.
         tm.clamp_targets(2);
-        assert_eq!(tm.targets, [Some(0), None]);
+        assert_eq!(tm.targets, [Some(0), None, None]);
         // A target exactly at the count is out of range.
-        tm.targets = [Some(2), None];
+        tm.targets = [Some(2), None, Some(1)];
         tm.clamp_targets(2);
-        assert_eq!(tm.targets, [None, None]);
+        assert_eq!(tm.targets, [None, None, Some(1)]);
     }
 
     #[test]
@@ -1381,8 +1507,8 @@ mod tests {
         cfg[7].trigger = TriggerSource::CellStep;
         m.set_config(&cfg);
         // Distinct runtime state on both rows.
-        m.force_runtime_state_for_test(3, [0.10, 0.20, 0.30], 0.55, 0.42, true);
-        m.force_runtime_state_for_test(7, [0.70, 0.80, 0.90], 0.85, 0.97, false);
+        m.force_runtime_state_for_test(3, [0.10, 0.20, 0.30, 0.40], 0.55, 0.42, true);
+        m.force_runtime_state_for_test(7, [0.70, 0.80, 0.90, 0.95], 0.85, 0.97, false);
 
         m.swap_rows(3, 7);
 
@@ -1501,7 +1627,7 @@ mod tests {
             m.begin_block(&warm, &warm, sr);
         }
         // Force non-zero phases so the fire-reset is observable.
-        m.force_runtime_state_for_test(2, [0.4, 0.5, 0.6], 0.9, 0.0, false);
+        m.force_runtime_state_for_test(2, [0.4, 0.5, 0.6, 0.7], 0.9, 0.0, false);
         // Hit block: a sharp click in the middle.
         let mut left = vec![0.05_f32; 1024];
         let mut right = vec![0.05_f32; 1024];
@@ -1549,7 +1675,7 @@ mod tests {
     #[test]
     fn swap_rows_is_a_noop_for_self_or_out_of_range_indices() {
         let mut m = Modulation::new();
-        m.force_runtime_state_for_test(4, [0.11, 0.22, 0.33], 0.5, 0.1, true);
+        m.force_runtime_state_for_test(4, [0.11, 0.22, 0.33, 0.44], 0.5, 0.1, true);
         m.swap_rows(4, 4);
         assert!((m.phase_for_test(4, 0) - 0.11).abs() < 1e-6);
         m.swap_rows(4, ROWS + 5);
