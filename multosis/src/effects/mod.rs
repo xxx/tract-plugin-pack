@@ -572,6 +572,31 @@ impl EffectKind {
         }
     }
 
+    /// The family this kind belongs to, or `None` for a stand-alone effect.
+    /// Drives the two-line track-listing label (family caption above the
+    /// unique suffix). `name()` is `"{family} {suffix}"` for kinds that
+    /// declare a family -- the track-list renderer strips the family prefix
+    /// off the full name to recover the suffix.
+    pub fn family(self) -> Option<&'static str> {
+        match self {
+            Self::SpectralRotate
+            | Self::SpectralBandpass
+            | Self::SpectralMirror
+            | Self::SpectralShift
+            | Self::SpectralSmear
+            | Self::SpectralSpread
+            | Self::SpectralLofi
+            | Self::SpectralCorrupt
+            | Self::SpectralCompress
+            | Self::SpectralCascade
+            | Self::SpectralReverb
+            | Self::SpectralScatter
+            | Self::SpectralTwist
+            | Self::SpectralStretch => Some("Spectral"),
+            _ => None,
+        }
+    }
+
     /// True iff a default-parameter instance of this kind reports
     /// nonzero `latency_samples()` to the host. Used by the editor
     /// to draw a "this row adds PDC" badge on the track listing.

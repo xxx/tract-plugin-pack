@@ -68,26 +68,28 @@ pub enum TrackButton {
     Solo,
 }
 
-// Logical-pixel layout of the M/S buttons inside the track entry. Picked so
-// they sit between the effect-name column and the sounding dot on the right.
-// `BUTTON_W` ×`BUTTON_H` is the hit + draw rect; `BUTTON_M_X` / `BUTTON_S_X`
-// are the left edge of each, measured from the entry's left edge.
+// Logical-pixel layout of the M/S buttons inside the track entry. The two
+// buttons stack vertically in a single column near the right edge -- this
+// frees ~16 px of horizontal room compared to a side-by-side layout, which
+// the two-line effect name (family on top, suffix on bottom) needs to keep
+// e.g. "Spectral Bandpass" readable without the buttons occluding it.
 const BUTTON_W: f32 = 14.0;
-const BUTTON_H: f32 = 16.0;
-const BUTTON_M_X: f32 = 76.0;
-const BUTTON_S_X: f32 = 92.0;
+const BUTTON_H: f32 = 14.0;
+const BUTTON_X: f32 = 92.0;
+const BUTTON_M_Y_OFF: f32 = 4.0;
+const BUTTON_S_Y_OFF: f32 = 22.0;
 
 /// Physical-pixel rect of a `button` inside row `row`'s entry.
 pub fn track_button_rect(row: usize, button: TrackButton, scale: f32) -> (f32, f32, f32, f32) {
-    let (ex, ey, _ew, eh) = track_entry_rect(row, scale);
-    let bx_off = match button {
-        TrackButton::Mute => BUTTON_M_X,
-        TrackButton::Solo => BUTTON_S_X,
+    let (ex, ey, _ew, _eh) = track_entry_rect(row, scale);
+    let by_off = match button {
+        TrackButton::Mute => BUTTON_M_Y_OFF,
+        TrackButton::Solo => BUTTON_S_Y_OFF,
     };
     let bw = BUTTON_W * scale;
     let bh = BUTTON_H * scale;
-    let bx = ex + bx_off * scale;
-    let by = ey + (eh - bh) * 0.5;
+    let bx = ex + BUTTON_X * scale;
+    let by = ey + by_off * scale;
     (bx, by, bw, bh)
 }
 
@@ -166,6 +168,11 @@ pub fn draw_track_list(
     let sel_col = Color::from_rgba8(0xE8, 0xC9, 0x8A, 0xFF);
     let dim_num_col = Color::from_rgba8(0x3A, 0x33, 0x2C, 0xFF);
     let dim_name_col = Color::from_rgba8(0x55, 0x4C, 0x3E, 0xFF);
+    // Family caption: noticeably present but still subordinate to the
+    // unique-suffix line. Sits between `dim_name_col` and `name_col` on the
+    // same warm-brown axis so the two lines look like one label, not two
+    // unrelated texts.
+    let caption_col = Color::from_rgba8(0x78, 0x6C, 0x58, 0xFF);
     let dot_dark = Color::from_rgba8(0x2A, 0x24, 0x1E, 0xFF);
     let dot_live = Color::from_rgba8(0x5F, 0xC9, 0x6A, 0xFF);
     // Mute/solo button colours. Inactive buttons reuse the dim-name swatch
@@ -181,6 +188,11 @@ pub fn draw_track_list(
     // tiny in that band. 15 px reads clearly and still leaves the number +
     // name + sounding-dot columns non-overlapping.
     let text_size = 15.0 * scale;
+    // Kinds that opt into a family (via `EffectKind::family`) render as a
+    // small family caption above the unique suffix; this keeps the part the
+    // user is actually scanning ("Bandpass", "Twist") readable instead of
+    // being truncated behind "Spectral".
+    let caption_size = 10.0 * scale;
     let btn_text_size = 11.0 * scale;
     let any_soloed = solos.iter().any(|&s| s);
     for (row, &kind) in kinds.iter().enumerate() {
@@ -226,6 +238,15 @@ pub fn draw_track_list(
         } else {
             (num_col, name_col)
         };
+        // Family caption colour: the dedicated mid-warm swatch when the row is
+        // active so the caption is legible without competing with the suffix.
+        // Dragged / bypassed rows dim to the same swatch as the suffix so the
+        // whole label fades together.
+        let cc = if is_drag_source || bypassed {
+            dim_name_col
+        } else {
+            caption_col
+        };
         tr.draw_text(
             pixmap,
             x + 6.0 * scale,
@@ -234,7 +255,23 @@ pub fn draw_track_list(
             text_size,
             nc,
         );
-        tr.draw_text(pixmap, x + 30.0 * scale, ty, kind.name(), text_size, mc);
+        // Family kinds render as caption + suffix on stacked lines; everything
+        // else uses the original vertically-centred line. The suffix is the
+        // full name with the family prefix stripped -- `name()` is built as
+        // `"{family} {suffix}"` for any kind that declares a family.
+        let name = kind.name();
+        let name_x = x + 30.0 * scale;
+        let suffix = kind
+            .family()
+            .and_then(|fam| name.strip_prefix(fam).map(|s| s.trim_start()));
+        if let (Some(fam), Some(suf)) = (kind.family(), suffix) {
+            let caption_ty = y + 14.0 * scale;
+            let suffix_ty = y + 32.0 * scale;
+            tr.draw_text(pixmap, name_x, caption_ty, fam, caption_size, cc);
+            tr.draw_text(pixmap, name_x, suffix_ty, suf, text_size, mc);
+        } else {
+            tr.draw_text(pixmap, name_x, ty, name, text_size, mc);
+        }
 
         // M and S buttons. Hit-test geometry mirrors `track_button_rect`
         // exactly so a click on a glyph lands on the right toggle.
@@ -349,14 +386,18 @@ mod tests {
 
     #[test]
     fn mute_and_solo_buttons_do_not_overlap_each_other_or_the_entry_edges() {
-        // Two adjacent buttons must be disjoint and stay inside the entry
+        // M sits above S in a single vertical column; the two must be
+        // disjoint vertically and the column must stay inside the entry
         // (TRACK_PANEL_W minus the dot's right margin).
         for row in 0..ROWS {
-            let (ex, _, ew, _) = track_entry_rect(row, 1.0);
-            let (mx, _, mw, _) = track_button_rect(row, TrackButton::Mute, 1.0);
-            let (sx, _, sw, _) = track_button_rect(row, TrackButton::Solo, 1.0);
-            assert!(mx + mw <= sx, "row {row}: M overlaps S");
-            assert!(sx + sw <= ex + ew, "row {row}: S overflows entry");
+            let (ex, ey, ew, eh) = track_entry_rect(row, 1.0);
+            let (mx, my, mw, mh) = track_button_rect(row, TrackButton::Mute, 1.0);
+            let (sx, sy, sw, sh) = track_button_rect(row, TrackButton::Solo, 1.0);
+            assert_eq!(mx, sx, "row {row}: M/S must share an x column");
+            assert_eq!(mw, sw, "row {row}: M/S widths differ");
+            assert!(my + mh <= sy, "row {row}: M overlaps S vertically");
+            assert!(sx + sw <= ex + ew, "row {row}: column overflows entry right");
+            assert!(my >= ey && sy + sh <= ey + eh, "row {row}: column overflows entry top/bottom");
         }
     }
 
