@@ -268,6 +268,7 @@ mod reverb;
 mod ring;
 mod satch;
 mod spectral_bandpass;
+mod spectral_lofi;
 mod spectral_mirror;
 mod spectral_rotate;
 mod spectral_shift;
@@ -296,6 +297,7 @@ pub use reverb::ReverbEffect;
 pub use ring::RingEffect;
 pub use satch::SatchEffect;
 pub use spectral_bandpass::SpectralBandpassEffect;
+pub use spectral_lofi::SpectralLofiEffect;
 pub use spectral_mirror::SpectralMirrorEffect;
 pub use spectral_rotate::SpectralRotateEffect;
 pub use spectral_shift::SpectralShiftEffect;
@@ -401,11 +403,17 @@ pub enum EffectKind {
     /// FFT size (512 / 1024 / 2048 / 4096); fifth of the Infiltrator-
     /// inspired spectral effects, and the first to use per-channel scratch.
     SpectralSpread,
+    /// Bin decimation with optional randomisation. A keep-bitmask refreshed
+    /// every Slow hops zeroes a Factor% fraction of bins; Random interpolates
+    /// between regular (every Nth bin) and independent random keep. Switchable
+    /// FFT size (512 / 1024 / 2048 / 4096); sixth of the Infiltrator-inspired
+    /// spectral effects.
+    SpectralLofi,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 27] = [
+    pub const ALL: [EffectKind; 28] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -433,6 +441,7 @@ impl EffectKind {
         EffectKind::SpectralMirror,
         EffectKind::SpectralShift,
         EffectKind::SpectralSpread,
+        EffectKind::SpectralLofi,
     ];
 
     /// The kind's display name.
@@ -465,6 +474,7 @@ impl EffectKind {
             EffectKind::SpectralMirror => "Spectral Mirror",
             EffectKind::SpectralShift => "Spectral Shift",
             EffectKind::SpectralSpread => "Spectral Spread",
+            EffectKind::SpectralLofi => "Spectral Lofi",
         }
     }
 
@@ -488,6 +498,7 @@ impl EffectKind {
                 | Self::SpectralMirror
                 | Self::SpectralShift
                 | Self::SpectralSpread
+                | Self::SpectralLofi
         )
     }
 }
@@ -598,6 +609,10 @@ pub enum EffectInstance {
     // instances with all four FFT-size slots pre-allocated (plus the
     // per-channel magnitude scratch).
     SpectralSpread(Box<SpectralSpreadEffect>),
+    // Boxed for the same reason as SpectralRotate: two SpectralEngine
+    // instances with all four FFT-size slots pre-allocated (plus the
+    // per-channel keep_mask scratch and RNG state).
+    SpectralLofi(Box<SpectralLofiEffect>),
 }
 
 impl EffectInstance {
@@ -631,6 +646,7 @@ impl EffectInstance {
             EffectKind::SpectralMirror => EffectInstance::SpectralMirror(Box::default()),
             EffectKind::SpectralShift => EffectInstance::SpectralShift(Box::default()),
             EffectKind::SpectralSpread => EffectInstance::SpectralSpread(Box::default()),
+            EffectKind::SpectralLofi => EffectInstance::SpectralLofi(Box::default()),
         }
     }
 
@@ -664,6 +680,7 @@ impl EffectInstance {
             EffectInstance::SpectralMirror(_) => EffectKind::SpectralMirror,
             EffectInstance::SpectralShift(_) => EffectKind::SpectralShift,
             EffectInstance::SpectralSpread(_) => EffectKind::SpectralSpread,
+            EffectInstance::SpectralLofi(_) => EffectKind::SpectralLofi,
         }
     }
 }
@@ -698,6 +715,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralMirror(e) => e.process_sample(left, right),
             EffectInstance::SpectralShift(e) => e.process_sample(left, right),
             EffectInstance::SpectralSpread(e) => e.process_sample(left, right),
+            EffectInstance::SpectralLofi(e) => e.process_sample(left, right),
         }
     }
 
@@ -730,6 +748,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralMirror(e) => e.set_sample_rate(sample_rate),
             EffectInstance::SpectralShift(e) => e.set_sample_rate(sample_rate),
             EffectInstance::SpectralSpread(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::SpectralLofi(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -762,6 +781,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralMirror(e) => e.reset(),
             EffectInstance::SpectralShift(e) => e.reset(),
             EffectInstance::SpectralSpread(e) => e.reset(),
+            EffectInstance::SpectralLofi(e) => e.reset(),
         }
     }
 
@@ -794,6 +814,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralMirror(e) => e.parameters(),
             EffectInstance::SpectralShift(e) => e.parameters(),
             EffectInstance::SpectralSpread(e) => e.parameters(),
+            EffectInstance::SpectralLofi(e) => e.parameters(),
         }
     }
 
@@ -826,6 +847,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralMirror(e) => e.set_param(index, value),
             EffectInstance::SpectralShift(e) => e.set_param(index, value),
             EffectInstance::SpectralSpread(e) => e.set_param(index, value),
+            EffectInstance::SpectralLofi(e) => e.set_param(index, value),
         }
     }
 
@@ -858,6 +880,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralMirror(e) => e.set_bpm(bpm),
             EffectInstance::SpectralShift(e) => e.set_bpm(bpm),
             EffectInstance::SpectralSpread(e) => e.set_bpm(bpm),
+            EffectInstance::SpectralLofi(e) => e.set_bpm(bpm),
         }
     }
 
@@ -890,6 +913,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralMirror(e) => e.param_dimmed(index),
             EffectInstance::SpectralShift(e) => e.param_dimmed(index),
             EffectInstance::SpectralSpread(e) => e.param_dimmed(index),
+            EffectInstance::SpectralLofi(e) => e.param_dimmed(index),
         }
     }
 
@@ -922,6 +946,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralMirror(e) => e.latency_samples(),
             EffectInstance::SpectralShift(e) => e.latency_samples(),
             EffectInstance::SpectralSpread(e) => e.latency_samples(),
+            EffectInstance::SpectralLofi(e) => e.latency_samples(),
         }
     }
 }
@@ -992,7 +1017,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 27);
+        assert_eq!(EffectKind::ALL.len(), 28);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -1020,6 +1045,7 @@ mod tests {
         assert_eq!(EffectKind::SpectralMirror.name(), "Spectral Mirror");
         assert_eq!(EffectKind::SpectralShift.name(), "Spectral Shift");
         assert_eq!(EffectKind::SpectralSpread.name(), "Spectral Spread");
+        assert_eq!(EffectKind::SpectralLofi.name(), "Spectral Lofi");
     }
 
     #[test]
@@ -1449,6 +1475,7 @@ mod tests {
             EffectKind::SpectralMirror,
             EffectKind::SpectralShift,
             EffectKind::SpectralSpread,
+            EffectKind::SpectralLofi,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
