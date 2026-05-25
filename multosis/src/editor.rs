@@ -983,7 +983,7 @@ impl MultosisWindow {
                         &kind_items.sections,
                     ),
                     current,
-                    false,
+                    true,
                     win,
                 );
             }
@@ -2215,6 +2215,84 @@ impl baseview::WindowHandler for MultosisWindow {
                 self.left_gesture = None;
                 let after = self.snapshot();
                 self.undo.commit_capture(&after);
+            }
+            baseview::Event::Keyboard(ev) if self.effect_dropdown.is_open() => {
+                // Swallow key-ups so the host DAW doesn't act on Enter/Esc
+                // releases. The dropdown only cares about key-downs.
+                if ev.state != keyboard_types::KeyState::Down {
+                    return baseview::EventStatus::Captured;
+                }
+                let kind = self.selected_track_effect().kind;
+                let items: Vec<&'static str> =
+                    if self.effect_dropdown.is_open_for(EffectAction::Target) {
+                        effect_editor::target_items(kind)
+                    } else if self.effect_dropdown.is_open_for(EffectAction::Trigger) {
+                        effect_editor::trigger_items().to_vec()
+                    } else if let Some(idx) = self.open_param_dropdown_index() {
+                        self.param_enum_labels(idx)
+                            .map(|labs| labs.to_vec())
+                            .unwrap_or_default()
+                    } else {
+                        effect_editor::kind_items().items
+                    };
+                let win = (self.physical_width as f32, self.physical_height as f32);
+                let dd_key = match &ev.key {
+                    keyboard_types::Key::ArrowUp => {
+                        Some(widgets::dropdown::DropdownKey::Up)
+                    }
+                    keyboard_types::Key::ArrowDown => {
+                        Some(widgets::dropdown::DropdownKey::Down)
+                    }
+                    keyboard_types::Key::Enter => {
+                        Some(widgets::dropdown::DropdownKey::Enter)
+                    }
+                    keyboard_types::Key::Escape => {
+                        Some(widgets::dropdown::DropdownKey::Esc)
+                    }
+                    keyboard_types::Key::Backspace => {
+                        Some(widgets::dropdown::DropdownKey::Backspace)
+                    }
+                    keyboard_types::Key::PageUp => {
+                        Some(widgets::dropdown::DropdownKey::PageUp)
+                    }
+                    keyboard_types::Key::PageDown => {
+                        Some(widgets::dropdown::DropdownKey::PageDown)
+                    }
+                    keyboard_types::Key::Home => {
+                        Some(widgets::dropdown::DropdownKey::Home)
+                    }
+                    keyboard_types::Key::End => {
+                        Some(widgets::dropdown::DropdownKey::End)
+                    }
+                    _ => None,
+                };
+                let event = if let Some(k) = dd_key {
+                    self.effect_dropdown.on_key(k, &items, win)
+                } else if let keyboard_types::Key::Character(s) = &ev.key {
+                    let mut last = None;
+                    for c in s.chars() {
+                        if let Some(e) = self.effect_dropdown.on_char(c, &items) {
+                            last = Some(e);
+                        }
+                    }
+                    last
+                } else {
+                    None
+                };
+                if let Some(widgets::dropdown::DropdownEvent::Selected(action, idx)) = event {
+                    match action {
+                        EffectAction::Kind => {
+                            let kind = EffectKind::ALL[idx.min(EffectKind::ALL.len() - 1)];
+                            self.apply_kind_switch(kind);
+                        }
+                        EffectAction::Target => self.apply_target_selection(idx),
+                        EffectAction::Trigger => self.apply_trigger_selection(idx),
+                        EffectAction::ParamDropdown(param_idx) => {
+                            self.apply_param_dropdown_selection(param_idx, idx);
+                        }
+                    }
+                }
+                return baseview::EventStatus::Captured;
             }
             baseview::Event::Keyboard(ev) if self.text_edit.is_active() => {
                 // Swallow key-ups while editing so the host DAW doesn't
