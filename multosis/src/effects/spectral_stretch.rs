@@ -30,16 +30,15 @@ fn xorshift(mut s: u32) -> u32 {
 }
 
 fn wrap_pi(x: f32) -> f32 {
-    // Wrap `x` into [-pi, pi).
-    let mut y = x;
+    // Wrap `x` into approximately [-pi, pi]. Range reduction via
+    // x - TAU * round(x / TAU) is constant-time -- previously this was a
+    // pair of while-loops, which for high-k bins iterated hundreds of times
+    // (the input `phase - last_input_phase - expected` is dominated by
+    // `expected = TAU * k * hop / n`, far outside [-pi, pi]). The while-loop
+    // form was the top hot spot in the SpectralStretch profile (~50% of
+    // total cycles).
     let tau = std::f32::consts::TAU;
-    while y >= std::f32::consts::PI {
-        y -= tau;
-    }
-    while y < -std::f32::consts::PI {
-        y += tau;
-    }
-    y
+    x - (x * (1.0 / tau)).round() * tau
 }
 
 /// Same four FFT sizes selectable on every spectral effect.
