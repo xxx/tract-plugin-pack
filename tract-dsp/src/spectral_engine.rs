@@ -115,9 +115,15 @@ impl SpectralEngine {
         self.slots[self.active].fft_size
     }
 
-    /// Algorithmic latency in samples — equal to the active slot's hop size.
+    /// Algorithmic latency in samples -- equal to the hop size of the slot
+    /// the engine will be using by the time audio reaches steady state.
+    /// When a `set_fft_size` switch is pending, this reports the *target*
+    /// slot's hop so the host can re-align PDC immediately; the audio path
+    /// takes up to one old-hop to actually swap, which manifests as a
+    /// one-shot transient at the switch moment, not a steady-state lag.
     pub fn latency_samples(&self) -> usize {
-        self.slots[self.active].hop_size
+        let idx = self.pending.unwrap_or(self.active);
+        self.slots[idx].hop_size
     }
 
     /// Zero all ring buffers in all four slots. Used by `Effect::reset`.
@@ -232,12 +238,16 @@ mod tests {
     }
 
     #[test]
-    fn set_fft_size_latches_change_until_next_hop() {
+    fn set_fft_size_latches_audio_path_but_reports_target_latency_immediately() {
         let mut e = SpectralEngine::new(48_000.0);
         e.set_fft_size(512);
-        // Active is still 2048 right after the call — the switch is latched
-        // until the next hop boundary completes inside process_sample.
+        // The audio path's active slot is still 2048 right after the call --
+        // the switch is latched until the next hop boundary completes inside
+        // process_sample.
         assert_eq!(e.fft_size(), 2048);
+        // But latency_samples reports the TARGET (pending) slot's hop so the
+        // host can re-align PDC immediately, even before any audio flows.
+        assert_eq!(e.latency_samples(), 256);
 
         // Drive enough samples to cross at least one hop_size (= 1024 for
         // 2048-pt). The pending switch must be consumed inside that window.

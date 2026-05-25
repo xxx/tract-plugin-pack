@@ -201,11 +201,14 @@ mod tests {
 
     #[test]
     fn fft_size_param_changes_latency() {
+        // The latency reported to the host changes IMMEDIATELY when the FFT
+        // param moves -- no audio needs to flow first. The audio path's
+        // active slot still latches the switch until the next hop boundary,
+        // but `latency_samples()` reports the pending slot's hop so the host
+        // can re-align PDC right away.
         let mut e = SpectralRotateEffect::default();
         for (i, expected) in [(0.0, 256), (1.0, 512), (2.0, 1024), (3.0, 2048)] {
-            e.set_param(1, i); // FFT is now the LAST param (slot 1)
-                               // Drive enough samples to trigger the pending switch.
-            let _ = drive(&mut e, 2200, |_| 0.0);
+            e.set_param(1, i); // FFT is the LAST param (slot 1)
             assert_eq!(e.latency_samples(), expected);
         }
     }

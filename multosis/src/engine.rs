@@ -517,26 +517,22 @@ mod tests {
         effects[0].params[1] = 0.0;
         engine.set_effects(&effects);
 
-        // The SpectralEngine LATCHES the new size; the switch doesn't apply
-        // until the next hop boundary of the OLD slot (<= 1024 samples).
-        // chain_latency hasn't updated yet.
-        assert_eq!(
-            engine.chain_latency_samples(),
-            1024,
-            "latched FFT switch hasn't yet applied — old latency still reported"
-        );
-
-        // Drive enough samples through to cross the 1024-sample old hop.
-        for _ in 0..1100 {
-            engine.effects_mut_for_test(0).process_sample(0.0, 0.0);
-        }
-
-        // Now the switch has fired and the new hop_size is in play.
+        // chain_latency updates IMMEDIATELY -- SpectralEngine::latency_samples
+        // reports the pending slot's hop so the host can re-align PDC right
+        // away, even before any audio flows through the effect. The audio
+        // path itself still latches the switch until the next hop boundary.
         assert_eq!(
             engine.chain_latency_samples(),
             256,
-            "after the switch applies, chain latency reports the new hop=256"
+            "FFT change must propagate to chain_latency immediately so the host can re-align PDC"
         );
+
+        // Driving samples does not move chain_latency further -- the value
+        // was already correct.
+        for _ in 0..1100 {
+            engine.effects_mut_for_test(0).process_sample(0.0, 0.0);
+        }
+        assert_eq!(engine.chain_latency_samples(), 256);
     }
 
     #[test]
