@@ -267,6 +267,7 @@ mod repeat;
 mod reverb;
 mod ring;
 mod satch;
+mod spectral_bandpass;
 mod spectral_rotate;
 mod stretch;
 mod svf;
@@ -291,6 +292,7 @@ pub use repeat::RepeatEffect;
 pub use reverb::ReverbEffect;
 pub use ring::RingEffect;
 pub use satch::SatchEffect;
+pub use spectral_bandpass::SpectralBandpassEffect;
 pub use spectral_rotate::SpectralRotateEffect;
 pub use stretch::StretchEffect;
 pub use svf::SvfEffect;
@@ -370,11 +372,16 @@ pub enum EffectKind {
     /// (512 / 1024 / 2048 / 4096); first effect in the Infiltrator-
     /// inspired spectral family.
     SpectralRotate,
+    /// Brickwall FFT bandpass -- zeros every bin outside the band
+    /// [Freq * 2^(-Width/2), Freq * 2^(Width/2)]. Switchable FFT
+    /// size (512 / 1024 / 2048 / 4096); second of the Infiltrator-
+    /// inspired spectral effects.
+    SpectralBandpass,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 23] = [
+    pub const ALL: [EffectKind; 24] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -398,6 +405,7 @@ impl EffectKind {
         EffectKind::Varispeed,
         EffectKind::Vocoder,
         EffectKind::SpectralRotate,
+        EffectKind::SpectralBandpass,
     ];
 
     /// The kind's display name.
@@ -426,6 +434,7 @@ impl EffectKind {
             EffectKind::Varispeed => "Varispeed",
             EffectKind::Vocoder => "Vocoder",
             EffectKind::SpectralRotate => "Spectral Rotate",
+            EffectKind::SpectralBandpass => "Spectral Bandpass",
         }
     }
 
@@ -440,7 +449,10 @@ impl EffectKind {
     /// `effect_kind_reports_latency_matches_instance_latency` test
     /// keeps this in sync with the trait impls.
     pub fn reports_latency(self) -> bool {
-        matches!(self, Self::Satch | Self::WarpZone | Self::SpectralRotate)
+        matches!(
+            self,
+            Self::Satch | Self::WarpZone | Self::SpectralRotate | Self::SpectralBandpass
+        )
     }
 }
 
@@ -537,6 +549,9 @@ pub enum EffectInstance {
     // trip clippy's large-enum-variant threshold. Allocation happens
     // once per kind-switch from the GUI thread, never on the audio path.
     SpectralRotate(Box<SpectralRotateEffect>),
+    // Boxed for the same reason as SpectralRotate: two SpectralEngine
+    // instances with all four FFT-size slots pre-allocated.
+    SpectralBandpass(Box<SpectralBandpassEffect>),
 }
 
 impl EffectInstance {
@@ -566,6 +581,7 @@ impl EffectInstance {
             EffectKind::Varispeed => EffectInstance::Varispeed(Box::default()),
             EffectKind::Vocoder => EffectInstance::Vocoder(Box::default()),
             EffectKind::SpectralRotate => EffectInstance::SpectralRotate(Box::default()),
+            EffectKind::SpectralBandpass => EffectInstance::SpectralBandpass(Box::default()),
         }
     }
 
@@ -595,6 +611,7 @@ impl EffectInstance {
             EffectInstance::Varispeed(_) => EffectKind::Varispeed,
             EffectInstance::Vocoder(_) => EffectKind::Vocoder,
             EffectInstance::SpectralRotate(_) => EffectKind::SpectralRotate,
+            EffectInstance::SpectralBandpass(_) => EffectKind::SpectralBandpass,
         }
     }
 }
@@ -625,6 +642,7 @@ impl Effect for EffectInstance {
             EffectInstance::Varispeed(e) => e.process_sample(left, right),
             EffectInstance::Vocoder(e) => e.process_sample(left, right),
             EffectInstance::SpectralRotate(e) => e.process_sample(left, right),
+            EffectInstance::SpectralBandpass(e) => e.process_sample(left, right),
         }
     }
 
@@ -653,6 +671,7 @@ impl Effect for EffectInstance {
             EffectInstance::Varispeed(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Vocoder(e) => e.set_sample_rate(sample_rate),
             EffectInstance::SpectralRotate(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::SpectralBandpass(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -681,6 +700,7 @@ impl Effect for EffectInstance {
             EffectInstance::Varispeed(e) => e.reset(),
             EffectInstance::Vocoder(e) => e.reset(),
             EffectInstance::SpectralRotate(e) => e.reset(),
+            EffectInstance::SpectralBandpass(e) => e.reset(),
         }
     }
 
@@ -709,6 +729,7 @@ impl Effect for EffectInstance {
             EffectInstance::Varispeed(e) => e.parameters(),
             EffectInstance::Vocoder(e) => e.parameters(),
             EffectInstance::SpectralRotate(e) => e.parameters(),
+            EffectInstance::SpectralBandpass(e) => e.parameters(),
         }
     }
 
@@ -737,6 +758,7 @@ impl Effect for EffectInstance {
             EffectInstance::Varispeed(e) => e.set_param(index, value),
             EffectInstance::Vocoder(e) => e.set_param(index, value),
             EffectInstance::SpectralRotate(e) => e.set_param(index, value),
+            EffectInstance::SpectralBandpass(e) => e.set_param(index, value),
         }
     }
 
@@ -765,6 +787,7 @@ impl Effect for EffectInstance {
             EffectInstance::Varispeed(e) => e.set_bpm(bpm),
             EffectInstance::Vocoder(e) => e.set_bpm(bpm),
             EffectInstance::SpectralRotate(e) => e.set_bpm(bpm),
+            EffectInstance::SpectralBandpass(e) => e.set_bpm(bpm),
         }
     }
 
@@ -793,6 +816,7 @@ impl Effect for EffectInstance {
             EffectInstance::Varispeed(e) => e.param_dimmed(index),
             EffectInstance::Vocoder(e) => e.param_dimmed(index),
             EffectInstance::SpectralRotate(e) => e.param_dimmed(index),
+            EffectInstance::SpectralBandpass(e) => e.param_dimmed(index),
         }
     }
 
@@ -821,6 +845,7 @@ impl Effect for EffectInstance {
             EffectInstance::Varispeed(e) => e.latency_samples(),
             EffectInstance::Vocoder(e) => e.latency_samples(),
             EffectInstance::SpectralRotate(e) => e.latency_samples(),
+            EffectInstance::SpectralBandpass(e) => e.latency_samples(),
         }
     }
 }
@@ -891,7 +916,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 23);
+        assert_eq!(EffectKind::ALL.len(), 24);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -915,6 +940,7 @@ mod tests {
         assert_eq!(EffectKind::Varispeed.name(), "Varispeed");
         assert_eq!(EffectKind::Vocoder.name(), "Vocoder");
         assert_eq!(EffectKind::SpectralRotate.name(), "Spectral Rotate");
+        assert_eq!(EffectKind::SpectralBandpass.name(), "Spectral Bandpass");
     }
 
     #[test]
@@ -1340,6 +1366,7 @@ mod tests {
             EffectKind::Varispeed,
             EffectKind::Vocoder,
             EffectKind::SpectralRotate,
+            EffectKind::SpectralBandpass,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
