@@ -259,7 +259,9 @@ impl MultosisWindow {
             grid_cache: grid_view::GridCache::new(pw, ph),
             view: View::Grid,
             selected_track: 0,
-            selected_mseg: 0,
+            // Default to the first assignable MSEG (slot 1, the leftmost
+            // tab in visual order). Amp lives on the rightmost tab.
+            selected_mseg: 1,
             effect_dropdown: widgets::dropdown::DropdownState::new(),
             speed_dropdown: widgets::dropdown::DropdownState::new(),
             effect_dial_drag: widgets::DragState::new(),

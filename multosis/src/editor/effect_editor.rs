@@ -182,6 +182,10 @@ pub enum EffectHit {
     /// is None) and re-rolls all parameter values, leaving Mix alone.
     Randomize,
     Dial(usize),
+    /// A click on one of the four MSEG-selector tabs. Carries the underlying
+    /// **slot index** (0 = Amp, 1/2/3 = assignable) so the receiver can index
+    /// `msegs[]` / `depths[]` / `targets[]` directly. The mapping from visible
+    /// tab position to slot lives in [`segment_to_slot`] / [`slot_to_segment`].
     MsegSelector(usize),
     Target,
     Depth,
@@ -199,6 +203,29 @@ pub enum EffectHit {
     MsegLength,
     /// The per-track Mix dial.
     Mix,
+}
+
+/// The MSEG-selector tab order shown to the user. The three assignable MSEGs
+/// come first (so the leftmost tab is the one selected by default on a fresh
+/// editor), and Amp sits last. Indexed by visible segment, value is the
+/// underlying slot in `msegs[]` / `depths[]` / `targets[]`.
+const SEGMENT_TO_SLOT: [usize; 4] = [1, 2, 3, 0];
+
+/// Map a visible MSEG-selector segment index (0..=3, left to right) to the
+/// underlying slot index (0 = Amp, 1/2/3 = assignable). Clamps OOB inputs
+/// to the rightmost segment.
+pub fn segment_to_slot(seg: usize) -> usize {
+    SEGMENT_TO_SLOT[seg.min(3)]
+}
+
+/// Inverse of [`segment_to_slot`]: the visible segment that represents this
+/// slot. Used when drawing the stepped selector so the highlighted tab tracks
+/// `selected_mseg`. Clamps OOB inputs to slot 3 (the last assignable MSEG).
+pub fn slot_to_segment(slot: usize) -> usize {
+    SEGMENT_TO_SLOT
+        .iter()
+        .position(|&s| s == slot.min(3))
+        .expect("SEGMENT_TO_SLOT must contain every slot 0..=3")
 }
 
 /// The effect-editor control under physical-pixel point `(px, py)` at `scale`,
@@ -246,11 +273,13 @@ pub fn effect_hit(
     if trigger_has_aux && in_rect(lay.trigger_aux, px, py) {
         return Some(EffectHit::TriggerAux);
     }
-    // MSEG selector — four equal segments.
+    // MSEG selector — four equal segments. We emit the underlying slot index
+    // (not the segment index) so the receiver can read msegs[]/depths[]/
+    // targets[] without re-mapping.
     let (sx, sy, sw, sh) = lay.mseg_selector;
     if px >= sx && px < sx + sw && py >= sy && py < sy + sh {
         let seg = (((px - sx) / (sw / 4.0)) as usize).min(3);
-        return Some(EffectHit::MsegSelector(seg));
+        return Some(EffectHit::MsegSelector(segment_to_slot(seg)));
     }
     // Active-MSEG sync mode (2-segment selector) + length slider.
     let (sx, sy, sw, sh) = lay.mseg_sync;
@@ -827,15 +856,16 @@ pub fn draw_modulation_controls(
     scale: f32,
 ) {
     let lay = effect_layout(scale);
-    // Pass per-segment MSEG colours: each tab paints in its slot's identity
-    // hue — fully when active, hue × 0.24 background + hue text when inactive
-    // — so the user can tell at a glance which tab is which without first
-    // selecting it.
+    // Per-segment MSEG colours, in visible-tab order (matches
+    // SEGMENT_TO_SLOT): assignable 1/2/3 first, then Amp. Each tab paints
+    // in its slot's identity hue — fully when active, hue × 0.24
+    // background + hue text when inactive — so the user can tell at a
+    // glance which tab is which without first selecting it.
     let mseg_segment_colors = [
-        crate::editor::mseg_color(0),
-        crate::editor::mseg_color(1),
-        crate::editor::mseg_color(2),
-        crate::editor::mseg_color(3),
+        crate::editor::mseg_color(SEGMENT_TO_SLOT[0]),
+        crate::editor::mseg_color(SEGMENT_TO_SLOT[1]),
+        crate::editor::mseg_color(SEGMENT_TO_SLOT[2]),
+        crate::editor::mseg_color(SEGMENT_TO_SLOT[3]),
     ];
     widgets::controls::draw_stepped_selector(
         pixmap,
@@ -844,12 +874,12 @@ pub fn draw_modulation_controls(
         lay.mseg_selector.1,
         lay.mseg_selector.2,
         lay.mseg_selector.3,
-        // Short labels so all four segments fit comfortably in the
-        // 240 px selector width (60 px per segment). The colour-coded
-        // backgrounds carry the slot identity; the numbered labels are
-        // just a visible nudge to which assignable MSEG is which.
-        &["Amp", "1", "2", "3"],
-        selected_mseg.min(3),
+        // Short labels in visible order. The colour-coded backgrounds
+        // carry the slot identity; the numbered labels are just a
+        // visible nudge to which assignable MSEG is which. All four
+        // fit comfortably in 60 px segments inside the 240 px selector.
+        &["1", "2", "3", "Amp"],
+        slot_to_segment(selected_mseg),
         Some(&mseg_segment_colors),
     );
     if selected_mseg != 0 {
@@ -1129,6 +1159,48 @@ mod tests {
         // Not FreeHz nor Transient: rate dial falls through (not TriggerRate).
         let other = effect_hit(rx + rw / 2.0, ry + rh / 2.0, 1.0, 2, 0, TriggerSource::Free);
         assert_ne!(other, Some(EffectHit::TriggerRate));
+    }
+
+    #[test]
+    fn segment_to_slot_orders_assignables_first_then_amp() {
+        // Visible left-to-right: MSEG 1, MSEG 2, MSEG 3, Amp.
+        assert_eq!(segment_to_slot(0), 1);
+        assert_eq!(segment_to_slot(1), 2);
+        assert_eq!(segment_to_slot(2), 3);
+        assert_eq!(segment_to_slot(3), 0);
+        // OOB clamps to the rightmost tab (Amp).
+        assert_eq!(segment_to_slot(99), 0);
+    }
+
+    #[test]
+    fn slot_to_segment_round_trips_segment_to_slot() {
+        for seg in 0..4 {
+            assert_eq!(slot_to_segment(segment_to_slot(seg)), seg);
+        }
+        for slot in 0..4 {
+            assert_eq!(segment_to_slot(slot_to_segment(slot)), slot);
+        }
+        // OOB clamps into the valid slot range and returns a real segment.
+        assert!(slot_to_segment(99) < 4);
+    }
+
+    #[test]
+    fn effect_hit_selector_emits_slot_not_segment() {
+        // Click the leftmost tab. With the new visible order it should
+        // route to slot 1 (MSEG 1), not slot 0 (Amp).
+        let lay = effect_layout(1.0);
+        let (sx, sy, sw, sh) = lay.mseg_selector;
+        let left = (sx + sw / 8.0, sy + sh / 2.0);
+        assert_eq!(
+            effect_hit(left.0, left.1, 1.0, 2, 1, TriggerSource::Free),
+            Some(EffectHit::MsegSelector(1))
+        );
+        // Click the rightmost tab — slot 0 (Amp).
+        let right = (sx + sw - sw / 8.0, sy + sh / 2.0);
+        assert_eq!(
+            effect_hit(right.0, right.1, 1.0, 2, 1, TriggerSource::Free),
+            Some(EffectHit::MsegSelector(0))
+        );
     }
 
     #[test]
