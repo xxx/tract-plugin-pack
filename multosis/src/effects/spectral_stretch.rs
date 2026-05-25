@@ -1,16 +1,19 @@
-//! Spectral Stretch: phase-vocoder time stretching with chaos.
+//! Spectral Stretch: creative phase-vocoder pitch shifter with chaos.
 //!
 //! Unlike the other spectral effects (which use the shared SpectralEngine at
 //! 50% overlap), Stretch holds its own analyzer per FFT size at 75% overlap
-//! (`hop = fft_size / 4`). Phase A (this commit) lays the scaffolding with an
-//! IDENTITY-PASS transform so the EffectKind variant builds, registers, and
-//! routes audio cleanly. Phase B fills in the phase-vocoder math (per-bin
-//! phase advance scaled by Speed, Tempo throttle on re-analyze, Chaos
-//! injected random phase).
+//! (`hop = fft_size / 4`). The synthesis loop captures source magnitudes and
+//! per-bin phase deviations at Tempo-throttled boundaries, then remaps each
+//! source bin k_src to target bin round(k_src * Speed) with max-magnitude
+//! collisions, and finally synthesises a complex spectrum from
+//! per-target-bin accumulated output phase. Speed therefore acts as a pitch
+//! shifter in disguise; the name 'Stretch' tracks Infiltrator's creative
+//! terminology rather than literal time-stretching.
 //!
 //! Each FFT-size slot pre-allocates its own analyzer + IFFT + output ring
-//! AND its own per-bin phase state vectors (`last_input_phase`,
-//! `accumulated_output_phase`), so switching FFT size in flight is
+//! AND its own per-bin phase + remap scratch (`last_input_phase`,
+//! `accumulated_output_phase`, `captured_mags`, `captured_phase_dev`,
+//! `remap_mag`, `remap_dev`), so switching FFT size in flight is
 //! allocation-free.
 
 use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
@@ -18,6 +21,26 @@ use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
 use tract_dsp::stft_analysis::StftAnalyzer;
+
+fn xorshift(mut s: u32) -> u32 {
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    s.max(1)
+}
+
+fn wrap_pi(x: f32) -> f32 {
+    // Wrap `x` into [-pi, pi).
+    let mut y = x;
+    let tau = std::f32::consts::TAU;
+    while y >= std::f32::consts::PI {
+        y -= tau;
+    }
+    while y < -std::f32::consts::PI {
+        y += tau;
+    }
+    y
+}
 
 /// Same four FFT sizes selectable on every spectral effect.
 const FFT_SIZES: [usize; 4] = [512, 1024, 2048, 4096];
@@ -38,6 +61,19 @@ struct Slot {
     /// transform doesn't touch phase.
     last_input_phase: Vec<f32>,
     accumulated_output_phase: Vec<f32>,
+    /// Captured magnitudes from the last re-analyze; the synthesizer reuses
+    /// these between captures so Tempo<100% holds magnitude content longer.
+    captured_mags: Vec<f32>,
+    /// Per-bin phase deviation (true_freq - expected_per_hop) captured at
+    /// the last re-analyze. The synthesizer reuses this between captures.
+    captured_phase_dev: Vec<f32>,
+    /// Per-target-bin scratch for Speed bin-remap: magnitude written to bin
+    /// k_dst = round(k_src * speed), max-wins on collisions. Length is
+    /// fft_size/2 + 1 (positive half-spectrum, inclusive of DC and Nyquist).
+    remap_mag: Vec<f32>,
+    /// Companion to remap_mag -- the phase deviation of the source bin that
+    /// won the max-magnitude vote for each target bin.
+    remap_dev: Vec<f32>,
     /// Tempo throttle counter -- how many hops since the last analyze that
     /// fed the phase tracker. Phase A leaves it at zero (re-analyze every hop).
     analyze_throttle: u32,
@@ -60,6 +96,10 @@ impl Slot {
             ifft_scratch: vec![Complex::default(); scratch_len],
             last_input_phase: vec![0.0; fft_size],
             accumulated_output_phase: vec![0.0; fft_size],
+            captured_mags: vec![0.0; fft_size],
+            captured_phase_dev: vec![0.0; fft_size],
+            remap_mag: vec![0.0; fft_size / 2 + 1],
+            remap_dev: vec![0.0; fft_size / 2 + 1],
             analyze_throttle: 0,
         }
     }
@@ -71,6 +111,10 @@ impl Slot {
         self.hop_counter = 0;
         self.last_input_phase.fill(0.0);
         self.accumulated_output_phase.fill(0.0);
+        self.captured_mags.fill(0.0);
+        self.captured_phase_dev.fill(0.0);
+        self.remap_mag.fill(0.0);
+        self.remap_dev.fill(0.0);
         self.analyze_throttle = 0;
     }
 }
@@ -81,10 +125,11 @@ struct StretchChannel {
     slots: [Slot; 4],
     active: usize,
     pending: Option<usize>,
+    rng_state: u32,
 }
 
 impl StretchChannel {
-    fn new() -> Self {
+    fn new(seed: u32) -> Self {
         let mut planner = FftPlanner::<f32>::new();
         let slots = [
             Slot::new(FFT_SIZES[0], &mut planner),
@@ -96,6 +141,7 @@ impl StretchChannel {
             slots,
             active: 2,
             pending: None,
+            rng_state: seed.max(1),
         }
     }
 
@@ -120,10 +166,13 @@ impl StretchChannel {
         self.pending = None;
     }
 
-    /// Drive one sample through the active slot. PHASE A: the per-hop
-    /// transform is identity -- it just copies the analyzed spectrum into
-    /// the IFFT input, runs the inverse, windows, and overlap-adds.
-    fn process_sample(&mut self, input: f32, _params: ParamsCache, _sample_rate: f32) -> f32 {
+    /// Drive one sample through the active slot. PHASE B: target-bin magnitude
+    /// remap from source bin k_src = k_dst / speed (linear position, max-wins
+    /// on collisions), then per-target-bin phase advance (`expected + dev`,
+    /// NOT scaled by Speed -- the pitch shift comes from the remap, not from
+    /// scaling the residual). Tempo throttles re-analysis; Chaos rotates each
+    /// target bin's synthesized phase per hop.
+    fn process_sample(&mut self, input: f32, params: ParamsCache, _sample_rate: f32) -> f32 {
         let slot = &mut self.slots[self.active];
 
         // Output read first.
@@ -137,21 +186,91 @@ impl StretchChannel {
         if slot.hop_counter >= slot.hop_size {
             slot.hop_counter = 0;
 
-            let fft_size = slot.fft_size;
-            let frame = slot.analyzer.analyze();
+            let n = slot.fft_size;
+            let half = n / 2;
+            let hop = slot.hop_size;
+            let speed = params.speed.clamp(0.25, 4.0);
+            let chaos = (params.chaos_pct * 0.01).clamp(0.0, 1.0);
+            let tempo = (params.tempo_pct * 0.01).clamp(0.01, 1.0);
+            let analyze_period = (1.0 / tempo).round().max(1.0) as u32;
 
-            // PHASE A: identity transform -- copy spectrum verbatim.
-            // PHASE B will insert per-bin phase advance here.
-            slot.spectrum_scratch.copy_from_slice(frame.spectrum);
+            // Always call analyze() to keep the analyzer's internal ring state
+            // advancing; only USE its output at Tempo-throttled boundaries.
+            let frame = slot.analyzer.analyze();
+            slot.analyze_throttle = slot.analyze_throttle.wrapping_add(1);
+            if slot.analyze_throttle >= analyze_period {
+                slot.analyze_throttle = 0;
+                let inv_n = 1.0 / n as f32;
+                let tau_n = std::f32::consts::TAU * inv_n;
+                for k in 0..=half {
+                    let c = frame.spectrum[k];
+                    let mag = (c.re * c.re + c.im * c.im).sqrt();
+                    let phase = c.im.atan2(c.re);
+                    let expected = tau_n * (k as f32) * (hop as f32);
+                    let dev = wrap_pi(phase - slot.last_input_phase[k] - expected);
+                    slot.captured_mags[k] = mag;
+                    slot.captured_phase_dev[k] = dev;
+                    slot.last_input_phase[k] = phase;
+                }
+            }
+
+            // Bin remap: for each source bin k_src, write to target bin
+            // round(k_src * speed). Max-magnitude-wins on collisions
+            // (mirrors tract-dsp::spectral_shifter). Source out of range
+            // is dropped; targets without a winning source stay zero.
+            for k in 0..=half {
+                slot.remap_mag[k] = 0.0;
+                slot.remap_dev[k] = 0.0;
+            }
+            for k_src in 0..=half {
+                let mag = slot.captured_mags[k_src];
+                if mag <= 0.0 {
+                    continue;
+                }
+                let k_dst_f = k_src as f32 * speed;
+                let k_dst = k_dst_f.round() as i32;
+                if k_dst < 0 || (k_dst as usize) > half {
+                    continue;
+                }
+                let k_dst = k_dst as usize;
+                if mag > slot.remap_mag[k_dst] {
+                    slot.remap_mag[k_dst] = mag;
+                    slot.remap_dev[k_dst] = slot.captured_phase_dev[k_src];
+                }
+            }
+
+            // Synthesize from remap_mag + accumulated_output_phase. Phase
+            // advance is per-TARGET-bin: expected_increment + remap_dev.
+            let inv_n = 1.0 / n as f32;
+            let tau_n = std::f32::consts::TAU * inv_n;
+            for k in 0..=half {
+                let expected = tau_n * (k as f32) * (hop as f32);
+                let advance = expected + slot.remap_dev[k];
+                slot.accumulated_output_phase[k] += advance;
+                if slot.accumulated_output_phase[k].abs() > 1e6 {
+                    slot.accumulated_output_phase[k] = wrap_pi(slot.accumulated_output_phase[k]);
+                }
+                let phase = if chaos > 1e-6 {
+                    self.rng_state = xorshift(self.rng_state);
+                    let r = (self.rng_state as f32) / (u32::MAX as f32) - 0.5;
+                    slot.accumulated_output_phase[k] + chaos * std::f32::consts::TAU * r
+                } else {
+                    slot.accumulated_output_phase[k]
+                };
+                let mag = slot.remap_mag[k];
+                slot.spectrum_scratch[k] = Complex::new(mag * phase.cos(), mag * phase.sin());
+                // Hermitian mirror for the negative-frequency half.
+                if k != 0 && k != half {
+                    slot.spectrum_scratch[n - k] = slot.spectrum_scratch[k].conj();
+                }
+            }
 
             slot.ifft
                 .process_with_scratch(&mut slot.spectrum_scratch, &mut slot.ifft_scratch);
 
             // 1/N normalisation + synthesis window + overlap-add.
-            let inv_n = 1.0 / fft_size as f32;
             let synth = frame.synthesis_window;
             let pos = slot.output_pos;
-            let n = slot.fft_size;
             for (i, (&w, c)) in synth.iter().zip(slot.spectrum_scratch.iter()).enumerate() {
                 let ring_idx = (pos + i) % n;
                 slot.output_ring[ring_idx] += c.re * inv_n * w;
@@ -246,8 +365,8 @@ impl Default for SpectralStretchEffect {
         Self {
             sample_rate: 48_000.0,
             params: ParamsCache::default(),
-            chan_l: StretchChannel::new(),
-            chan_r: StretchChannel::new(),
+            chan_l: StretchChannel::new(0x5717_E001),
+            chan_r: StretchChannel::new(0x5717_E002),
         }
     }
 }
@@ -268,8 +387,8 @@ impl Effect for SpectralStretchEffect {
     fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate;
         // Rebuild channels at the new sample rate.
-        self.chan_l = StretchChannel::new();
-        self.chan_r = StretchChannel::new();
+        self.chan_l = StretchChannel::new(0x5717_E001);
+        self.chan_r = StretchChannel::new(0x5717_E002);
         let fft_size = FFT_SIZES[self.params.fft_param.round().clamp(0.0, 3.0) as usize];
         self.chan_l.set_fft_size(fft_size);
         self.chan_r.set_fft_size(fft_size);
@@ -316,8 +435,10 @@ mod tests {
     }
 
     #[test]
-    fn identity_passes_sine_phase_a() {
-        // Phase A is identity-pass; output should reconstruct the input.
+    fn default_params_preserve_sine_amplitude() {
+        // Speed=1 + Tempo=100% + Chaos=0 reconstructs the sine amplitude
+        // (phase is not preserved -- the output's phase relationship to the
+        // input is arbitrary because accumulated_output_phase starts at 0).
         let sr = 48_000.0_f32;
         let mut e = SpectralStretchEffect::default();
         e.set_param(0, 1.0); // FFT = 1024
@@ -326,23 +447,58 @@ mod tests {
         let out = drive(&mut e, n, |i| {
             (2.0 * std::f32::consts::PI * f * i as f32 / sr).sin()
         });
-        let warmup = 2 * e.latency_samples();
+        let warmup = 4 * e.latency_samples();
         let peak = out[warmup..].iter().cloned().fold(0.0_f32, f32::max);
         let trough = out[warmup..].iter().cloned().fold(0.0_f32, |a, x| a.min(x));
         let amp = (peak - trough) / 2.0;
-        // 75% overlap Hann COLA should reconstruct within tighter than the
-        // 3 dB tolerance the engine's 50% test used. Allow 3 dB for safety.
+        // Allow 6 dB tolerance -- phase vocoder is creative, not surgical.
         assert!(
-            amp > 0.708 && amp < 1.0 / 0.708,
-            "identity sine amp {amp} outside +/- 3 dB"
+            amp > 0.5 && amp < 2.0,
+            "default-params sine amp {amp} outside +/- 6 dB"
         );
     }
 
     #[test]
-    fn silence_in_silence_out_phase_a() {
+    fn silence_in_silence_out() {
         let mut e = SpectralStretchEffect::default();
         e.set_param(0, 1.0);
         let out = drive(&mut e, 4096, |_| 0.0);
         assert!(out.iter().all(|x| x.abs() < 1e-6));
+    }
+
+    #[test]
+    fn speed_half_lowers_output_pitch() {
+        // Speed=0.5 remaps source bin k -> target bin round(k * 0.5), so a
+        // 2 kHz input sine should produce most output energy near 1 kHz.
+        use rustfft::num_complex::Complex;
+        let sr = 48_000.0_f32;
+        let mut e = SpectralStretchEffect::default();
+        e.set_param(0, 1.0); // FFT = 1024
+        e.set_param(1, 0.5); // Speed = 0.5
+        let n = 8192_usize;
+        let out = drive(&mut e, n, |i| {
+            (2.0 * std::f32::consts::PI * 2000.0 * i as f32 / sr).sin()
+        });
+        let tail_start = 4 * e.latency_samples();
+        let mut tail: Vec<Complex<f32>> = out[tail_start..tail_start + 2048]
+            .iter()
+            .map(|&x| Complex::new(x, 0.0))
+            .collect();
+        let mut planner = rustfft::FftPlanner::<f32>::new();
+        planner.plan_fft_forward(2048).process(&mut tail);
+        let bin_2k = (2000.0 * 2048.0 / sr).round() as usize;
+        let bin_1k = (1000.0 * 2048.0 / sr).round() as usize;
+        let e_2k: f32 = tail[bin_2k.saturating_sub(2)..=bin_2k + 2]
+            .iter()
+            .map(|c| c.norm_sqr())
+            .sum();
+        let e_1k: f32 = tail[bin_1k.saturating_sub(2)..=bin_1k + 2]
+            .iter()
+            .map(|c| c.norm_sqr())
+            .sum();
+        assert!(
+            e_1k > e_2k,
+            "Speed=0.5 should move 2k energy down toward 1k; got 1k={e_1k} 2k={e_2k}"
+        );
     }
 }
