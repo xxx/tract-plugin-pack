@@ -55,10 +55,15 @@ pub struct SpectralRotateEffect {
 
 impl SpectralRotateEffect {
     pub const PARAMS: [ParamSpec; 2] = [
+        // Shift is intentionally narrow (+/-15%). Outside this range the
+        // bin rotation moves nearly all musical energy out of the audible
+        // low-bin band and replaces it with high-bin near-silence -- the
+        // output collapses to noise/silence. Keep the dial in the useful
+        // textural range.
         ParamSpec {
             name: "Shift",
-            min: -100.0,
-            max: 100.0,
+            min: -15.0,
+            max: 15.0,
             default: 0.0,
             scaling: ParamScaling::Linear,
             format: ParamFormat::Number {
@@ -132,7 +137,7 @@ impl Effect for SpectralRotateEffect {
 
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => self.params.shift_pct = value.clamp(-100.0, 100.0),
+            0 => self.params.shift_pct = value.clamp(-15.0, 15.0),
             1 => {
                 self.params.fft_param = value;
                 let fft_size = FFT_SIZES[value.round().clamp(0.0, 3.0) as usize];
@@ -189,7 +194,7 @@ mod tests {
     #[test]
     fn silence_in_silence_out() {
         let mut e = SpectralRotateEffect::default();
-        e.set_param(0, 50.0); // arbitrary non-zero shift
+        e.set_param(0, 10.0); // arbitrary non-zero shift within +/-15% range
         let out = drive(&mut e, 4096, |_| 0.0);
         assert!(out.iter().all(|x| x.abs() < 1e-6));
     }
@@ -214,7 +219,7 @@ mod tests {
         let f = 1000.0_f32;
         let mut e = SpectralRotateEffect::default();
         e.set_param(1, 1.0); // FFT = 1024 (slot 1)
-        e.set_param(0, 50.0); // Shift = 50% (slot 0)
+        e.set_param(0, 15.0); // Shift = 15% (slot 0) -- max in the new range
         let n = 8192_usize;
         let out = drive(&mut e, n, |i| {
             (2.0 * std::f32::consts::PI * f * i as f32 / sr).sin()
