@@ -58,16 +58,6 @@ pub struct SpectralBandpassEffect {
 impl SpectralBandpassEffect {
     pub const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
-            name: "FFT",
-            min: 0.0,
-            max: 3.0,
-            default: 2.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Enum {
-                labels: &["512", "1024", "2048", "4096"],
-            },
-        },
-        ParamSpec {
             name: "Freq",
             min: 20.0,
             max: 20_000.0,
@@ -84,6 +74,17 @@ impl SpectralBandpassEffect {
             format: ParamFormat::Number {
                 decimals: 2,
                 unit: " oct",
+            },
+        },
+        // FFT in the LAST slot so it isn't the first dial users grab to modulate.
+        ParamSpec {
+            name: "FFT",
+            min: 0.0,
+            max: 3.0,
+            default: 2.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: &["512", "1024", "2048", "4096"],
             },
         },
     ];
@@ -136,14 +137,14 @@ impl Effect for SpectralBandpassEffect {
 
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => {
+            0 => self.params.freq_hz = value.clamp(20.0, 20_000.0),
+            1 => self.params.bw_oct = value.clamp(0.1, 4.0),
+            2 => {
                 self.params.fft_param = value;
                 let fft_size = FFT_SIZES[value.round().clamp(0.0, 3.0) as usize];
                 self.engine_l.set_fft_size(fft_size);
                 self.engine_r.set_fft_size(fft_size);
             }
-            1 => self.params.freq_hz = value.clamp(20.0, 20_000.0),
-            2 => self.params.bw_oct = value.clamp(0.1, 4.0),
             _ => {}
         }
     }
@@ -169,7 +170,7 @@ mod tests {
     #[test]
     fn silence_in_silence_out() {
         let mut e = SpectralBandpassEffect::default();
-        e.set_param(1, 5000.0);
+        e.set_param(0, 5000.0); // Freq is now slot 0
         let out = drive(&mut e, 4096, |_| 0.0);
         assert!(out.iter().all(|x| x.abs() < 1e-6));
     }
@@ -178,11 +179,11 @@ mod tests {
     fn narrow_band_kills_out_of_band_content() {
         let sr = 48_000.0;
         let mut e = SpectralBandpassEffect::default();
-        e.set_param(0, 1.0); // FFT = 1024
-        e.set_param(1, 1000.0);
-        // Half-octave passband centred at 1 kHz.
-        e.set_param(2, 0.5);
-        // Drive a 5 kHz sine -- well outside the passband.
+        e.set_param(2, 1.0); // FFT = 1024 (slot 2)
+        e.set_param(0, 1000.0); // Freq (slot 0)
+                                // Half-octave passband centred at 1 kHz.
+        e.set_param(1, 0.5); // Width (slot 1)
+                             // Drive a 5 kHz sine -- well outside the passband.
         let out = drive(&mut e, 4096, |i| {
             (2.0 * std::f32::consts::PI * 5000.0 * i as f32 / sr).sin()
         });

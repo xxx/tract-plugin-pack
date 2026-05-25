@@ -140,16 +140,6 @@ pub struct SpectralCascadeEffect {
 impl SpectralCascadeEffect {
     pub const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
-            name: "FFT",
-            min: 0.0,
-            max: 3.0,
-            default: 2.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Enum {
-                labels: &["512", "1024", "2048", "4096"],
-            },
-        },
-        ParamSpec {
             name: "Length",
             min: 10.0,
             max: 2000.0,
@@ -178,6 +168,17 @@ impl SpectralCascadeEffect {
             default: 1000.0,
             scaling: ParamScaling::Log,
             format: ParamFormat::Hertz,
+        },
+        // FFT in the LAST slot so it isn't the first dial users grab to modulate.
+        ParamSpec {
+            name: "FFT",
+            min: 0.0,
+            max: 3.0,
+            default: 2.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: &["512", "1024", "2048", "4096"],
+            },
         },
     ];
 }
@@ -229,15 +230,15 @@ impl Effect for SpectralCascadeEffect {
     }
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => {
+            0 => self.params.length_ms = value.clamp(10.0, 2000.0),
+            1 => self.params.feedback_pct = value.clamp(0.0, 95.0),
+            2 => self.params.centre_hz = value.clamp(20.0, 20_000.0),
+            3 => {
                 self.params.fft_param = value;
                 let fft_size = FFT_SIZES[value.round().clamp(0.0, 3.0) as usize];
                 self.engine_l.set_fft_size(fft_size);
                 self.engine_r.set_fft_size(fft_size);
             }
-            1 => self.params.length_ms = value.clamp(10.0, 2000.0),
-            2 => self.params.feedback_pct = value.clamp(0.0, 95.0),
-            3 => self.params.centre_hz = value.clamp(20.0, 20_000.0),
             _ => {}
         }
     }
@@ -270,11 +271,10 @@ mod tests {
         // delay=0 and feedback=0 -- the ring stores the input verbatim and
         // outputs it unchanged. Effectively passthrough.
         let mut e = SpectralCascadeEffect::default();
-        e.set_param(0, 1.0); // FFT = 1024
-        e.set_param(1, 10.0); // 10 ms -> round(10*48/512) = 1 hop, but the
-                              // ramp around Centre keeps most bins at delay 0
-        e.set_param(2, 0.0); // Feedback = 0
-        e.set_param(3, 20_000.0); // Centre at Nyquist -> nearly every bin is
+        e.set_param(3, 1.0); // FFT = 1024 (slot 3)
+        e.set_param(0, 10.0); // Length = 10 ms (slot 0)
+        e.set_param(1, 0.0); // Feedback = 0 (slot 1)
+        e.set_param(2, 20_000.0); // Centre at Nyquist (slot 2) -> nearly every bin is
                                   // BELOW centre -> dk clamped to 0 -> read
                                   // current frame -> passthrough.
         let f = 1000.0;
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn silence_in_silence_out() {
         let mut e = SpectralCascadeEffect::default();
-        e.set_param(2, 50.0); // arbitrary feedback (still bounded < 0.95)
+        e.set_param(1, 50.0); // arbitrary feedback (slot 1, still bounded < 0.95)
         let out = drive(&mut e, 8192, |_| 0.0);
         assert!(out.iter().all(|x| x.abs() < 1e-6));
     }

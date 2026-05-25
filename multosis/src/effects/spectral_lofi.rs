@@ -123,16 +123,6 @@ pub struct SpectralLofiEffect {
 impl SpectralLofiEffect {
     pub const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
-            name: "FFT",
-            min: 0.0,
-            max: 3.0,
-            default: 2.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Enum {
-                labels: &["512", "1024", "2048", "4096"],
-            },
-        },
-        ParamSpec {
             name: "Factor",
             min: 0.0,
             max: 100.0,
@@ -163,6 +153,17 @@ impl SpectralLofiEffect {
             format: ParamFormat::Number {
                 decimals: 0,
                 unit: " hops",
+            },
+        },
+        // FFT in the LAST slot so it isn't the first dial users grab to modulate.
+        ParamSpec {
+            name: "FFT",
+            min: 0.0,
+            max: 3.0,
+            default: 2.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: &["512", "1024", "2048", "4096"],
             },
         },
     ];
@@ -217,15 +218,15 @@ impl Effect for SpectralLofiEffect {
     }
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => {
+            0 => self.params.factor_pct = value.clamp(0.0, 100.0),
+            1 => self.params.randomise_pct = value.clamp(0.0, 100.0),
+            2 => self.params.slow = value.round().clamp(1.0, 100.0) as i32,
+            3 => {
                 self.params.fft_param = value;
                 let fft_size = FFT_SIZES[value.round().clamp(0.0, 3.0) as usize];
                 self.engine_l.set_fft_size(fft_size);
                 self.engine_r.set_fft_size(fft_size);
             }
-            1 => self.params.factor_pct = value.clamp(0.0, 100.0),
-            2 => self.params.randomise_pct = value.clamp(0.0, 100.0),
-            3 => self.params.slow = value.round().clamp(1.0, 100.0) as i32,
             _ => {}
         }
     }
@@ -255,8 +256,8 @@ mod tests {
     #[test]
     fn factor_zero_is_passthrough() {
         let mut e = SpectralLofiEffect::default();
-        e.set_param(0, 1.0); // FFT = 1024
-        e.set_param(1, 0.0); // Factor = 0 -> return early
+        e.set_param(3, 1.0); // FFT = 1024 (slot 3)
+        e.set_param(0, 0.0); // Factor = 0 -> return early (slot 0)
         let f = 1000.0;
         let sr = 48_000.0;
         let n = 4096;
@@ -270,7 +271,7 @@ mod tests {
     #[test]
     fn silence_in_silence_out() {
         let mut e = SpectralLofiEffect::default();
-        e.set_param(1, 50.0); // arbitrary Factor
+        e.set_param(0, 50.0); // arbitrary Factor (slot 0)
         let out = drive(&mut e, 4096, |_| 0.0);
         assert!(out.iter().all(|x| x.abs() < 1e-6));
     }

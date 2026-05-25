@@ -87,16 +87,6 @@ pub struct SpectralShiftEffect {
 impl SpectralShiftEffect {
     pub const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
-            name: "FFT",
-            min: 0.0,
-            max: 3.0,
-            default: 2.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Enum {
-                labels: &["512", "1024", "2048", "4096"],
-            },
-        },
-        ParamSpec {
             name: "Scale",
             min: 0.5,
             max: 2.0,
@@ -116,6 +106,17 @@ impl SpectralShiftEffect {
             format: ParamFormat::Number {
                 decimals: 0,
                 unit: " %",
+            },
+        },
+        // FFT in the LAST slot so it isn't the first dial users grab to modulate.
+        ParamSpec {
+            name: "FFT",
+            min: 0.0,
+            max: 3.0,
+            default: 2.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: &["512", "1024", "2048", "4096"],
             },
         },
     ];
@@ -168,14 +169,14 @@ impl Effect for SpectralShiftEffect {
 
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => {
+            0 => self.params.scale = value.clamp(0.5, 2.0),
+            1 => self.params.translate_pct = value.clamp(-100.0, 100.0),
+            2 => {
                 self.params.fft_param = value;
                 let fft_size = FFT_SIZES[value.round().clamp(0.0, 3.0) as usize];
                 self.engine_l.set_fft_size(fft_size);
                 self.engine_r.set_fft_size(fft_size);
             }
-            1 => self.params.scale = value.clamp(0.5, 2.0),
-            2 => self.params.translate_pct = value.clamp(-100.0, 100.0),
             _ => {}
         }
     }
@@ -206,8 +207,8 @@ mod tests {
     #[test]
     fn translate_zero_is_passthrough() {
         let mut e = SpectralShiftEffect::default();
-        e.set_param(0, 1.0); // FFT = 1024
-        e.set_param(2, 0.0); // Translate = 0
+        e.set_param(2, 1.0); // FFT = 1024 (slot 2)
+        e.set_param(1, 0.0); // Translate = 0 (slot 1)
         let f = 1000.0;
         let sr = 48_000.0;
         let n = 4096;
@@ -221,7 +222,7 @@ mod tests {
     #[test]
     fn silence_in_silence_out() {
         let mut e = SpectralShiftEffect::default();
-        e.set_param(2, 50.0);
+        e.set_param(1, 50.0); // Translate (slot 1)
         let out = drive(&mut e, 4096, |_| 0.0);
         assert!(out.iter().all(|x| x.abs() < 1e-6));
     }
@@ -234,8 +235,8 @@ mod tests {
         use rustfft::num_complex::Complex;
         let sr = 48_000.0_f32;
         let mut e = SpectralShiftEffect::default();
-        e.set_param(0, 1.0); // FFT = 1024, Nyquist = 24 kHz, 25% = 6 kHz
-        e.set_param(2, 25.0);
+        e.set_param(2, 1.0); // FFT = 1024 (slot 2), Nyquist = 24 kHz, 25% = 6 kHz
+        e.set_param(1, 25.0); // Translate (slot 1)
         let n = 8192_usize;
         let out = drive(&mut e, n, |i| {
             (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr).sin()
@@ -270,9 +271,9 @@ mod tests {
         use rustfft::num_complex::Complex;
         let sr = 48_000.0_f32;
         let mut e = SpectralShiftEffect::default();
-        e.set_param(0, 1.0); // FFT = 1024
-        e.set_param(1, 2.0); // Scale = 2
-        e.set_param(2, 0.0); // Translate = 0
+        e.set_param(2, 1.0); // FFT = 1024 (slot 2)
+        e.set_param(0, 2.0); // Scale = 2 (slot 0)
+        e.set_param(1, 0.0); // Translate = 0 (slot 1)
         let n = 8192_usize;
         let out: Vec<f32> = (0..n)
             .map(|i| {

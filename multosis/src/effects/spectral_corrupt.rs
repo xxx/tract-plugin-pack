@@ -134,16 +134,6 @@ pub struct SpectralCorruptEffect {
 impl SpectralCorruptEffect {
     pub const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
-            name: "FFT",
-            min: 0.0,
-            max: 3.0,
-            default: 2.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Enum {
-                labels: &["512", "1024", "2048", "4096"],
-            },
-        },
-        ParamSpec {
             name: "Amount",
             min: -100.0,
             max: 100.0,
@@ -163,6 +153,17 @@ impl SpectralCorruptEffect {
             format: ParamFormat::Number {
                 decimals: 0,
                 unit: " %",
+            },
+        },
+        // FFT in the LAST slot so it isn't the first dial users grab to modulate.
+        ParamSpec {
+            name: "FFT",
+            min: 0.0,
+            max: 3.0,
+            default: 2.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: &["512", "1024", "2048", "4096"],
             },
         },
     ];
@@ -215,14 +216,14 @@ impl Effect for SpectralCorruptEffect {
     }
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => {
+            0 => self.params.amount_pct = value.clamp(-100.0, 100.0),
+            1 => self.params.decay_pct = value.clamp(0.0, 100.0),
+            2 => {
                 self.params.fft_param = value;
                 let fft_size = FFT_SIZES[value.round().clamp(0.0, 3.0) as usize];
                 self.engine_l.set_fft_size(fft_size);
                 self.engine_r.set_fft_size(fft_size);
             }
-            1 => self.params.amount_pct = value.clamp(-100.0, 100.0),
-            2 => self.params.decay_pct = value.clamp(0.0, 100.0),
             _ => {}
         }
     }
@@ -252,9 +253,9 @@ mod tests {
     #[test]
     fn amount_zero_with_decay_zero_is_passthrough() {
         let mut e = SpectralCorruptEffect::default();
-        e.set_param(0, 1.0); // FFT = 1024
-        e.set_param(1, 0.0); // Amount = 0
-        e.set_param(2, 0.0); // Decay = 0 -> bin_gains snap straight to 1.0
+        e.set_param(2, 1.0); // FFT = 1024 (slot 2)
+        e.set_param(0, 0.0); // Amount = 0 (slot 0)
+        e.set_param(1, 0.0); // Decay = 0 -> bin_gains snap straight to 1.0 (slot 1)
         let f = 1000.0;
         let sr = 48_000.0;
         let n = 4096;
@@ -268,7 +269,7 @@ mod tests {
     #[test]
     fn silence_in_silence_out() {
         let mut e = SpectralCorruptEffect::default();
-        e.set_param(1, 50.0); // arbitrary non-zero Amount
+        e.set_param(0, 50.0); // arbitrary non-zero Amount (slot 0)
         let out = drive(&mut e, 4096, |_| 0.0);
         assert!(out.iter().all(|x| x.abs() < 1e-6));
     }

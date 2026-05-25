@@ -107,16 +107,6 @@ pub struct SpectralSmearEffect {
 impl SpectralSmearEffect {
     pub const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
-            name: "FFT",
-            min: 0.0,
-            max: 3.0,
-            default: 2.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Enum {
-                labels: &["512", "1024", "2048", "4096"],
-            },
-        },
-        ParamSpec {
             name: "Length",
             min: 10.0,
             max: 2000.0,
@@ -136,6 +126,17 @@ impl SpectralSmearEffect {
             format: ParamFormat::Number {
                 decimals: 0,
                 unit: " %",
+            },
+        },
+        // FFT in the LAST slot so it isn't the first dial users grab to modulate.
+        ParamSpec {
+            name: "FFT",
+            min: 0.0,
+            max: 3.0,
+            default: 2.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: &["512", "1024", "2048", "4096"],
             },
         },
     ];
@@ -190,14 +191,14 @@ impl Effect for SpectralSmearEffect {
     }
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => {
+            0 => self.params.length_ms = value.clamp(10.0, 2000.0),
+            1 => self.params.chaos_pct = value.clamp(0.0, 100.0),
+            2 => {
                 self.params.fft_param = value;
                 let fft_size = FFT_SIZES[value.round().clamp(0.0, 3.0) as usize];
                 self.engine_l.set_fft_size(fft_size);
                 self.engine_r.set_fft_size(fft_size);
             }
-            1 => self.params.length_ms = value.clamp(10.0, 2000.0),
-            2 => self.params.chaos_pct = value.clamp(0.0, 100.0),
             _ => {}
         }
     }
@@ -229,7 +230,7 @@ mod tests {
         // Note: smear holds magnitudes; for a clean test the smear state must
         // start zeroed. Default state is zeroed.
         let mut e = SpectralSmearEffect::default();
-        e.set_param(1, 500.0); // Length = 500 ms
+        e.set_param(0, 500.0); // Length = 500 ms (slot 0)
         let out = drive(&mut e, 8192, |_| 0.0);
         // After warm-up, with no input there should be no held magnitude.
         let tail = &out[2 * e.latency_samples()..];
@@ -243,8 +244,8 @@ mod tests {
         // drops to silence -- but the energy should be lower than the source.
         let sr = 48_000.0_f32;
         let mut e = SpectralSmearEffect::default();
-        e.set_param(0, 1.0); // FFT = 1024, latency = 512 samples
-        e.set_param(1, 500.0); // Length = 500 ms
+        e.set_param(2, 1.0); // FFT = 1024 (slot 2)
+        e.set_param(0, 500.0); // Length = 500 ms (slot 0)
         let burst_samples = (0.050 * sr) as usize;
         let tail_samples = (0.200 * sr) as usize;
         // Pre-generate noise into a buffer so the `drive` closure stays Fn.

@@ -143,16 +143,6 @@ pub struct SpectralScatterEffect {
 impl SpectralScatterEffect {
     pub const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
-            name: "FFT",
-            min: 0.0,
-            max: 3.0,
-            default: 2.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Enum {
-                labels: &["512", "1024", "2048", "4096"],
-            },
-        },
-        ParamSpec {
             name: "Length",
             min: 10.0,
             max: 2000.0,
@@ -181,6 +171,17 @@ impl SpectralScatterEffect {
             default: 1.0,
             scaling: ParamScaling::Log,
             format: ParamFormat::Hertz,
+        },
+        // FFT in the LAST slot so it isn't the first dial users grab to modulate.
+        ParamSpec {
+            name: "FFT",
+            min: 0.0,
+            max: 3.0,
+            default: 2.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: &["512", "1024", "2048", "4096"],
+            },
         },
     ];
 }
@@ -232,15 +233,15 @@ impl Effect for SpectralScatterEffect {
     }
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => {
+            0 => self.params.length_ms = value.clamp(10.0, 2000.0),
+            1 => self.params.feedback_pct = value.clamp(0.0, 95.0),
+            2 => self.params.rate_hz = value.clamp(0.1, 10.0),
+            3 => {
                 self.params.fft_param = value;
                 let fft_size = FFT_SIZES[value.round().clamp(0.0, 3.0) as usize];
                 self.engine_l.set_fft_size(fft_size);
                 self.engine_r.set_fft_size(fft_size);
             }
-            1 => self.params.length_ms = value.clamp(10.0, 2000.0),
-            2 => self.params.feedback_pct = value.clamp(0.0, 95.0),
-            3 => self.params.rate_hz = value.clamp(0.1, 10.0),
             _ => {}
         }
     }
@@ -270,7 +271,7 @@ mod tests {
     #[test]
     fn silence_in_silence_out() {
         let mut e = SpectralScatterEffect::default();
-        e.set_param(2, 50.0); // arbitrary feedback < 95
+        e.set_param(1, 50.0); // arbitrary Feedback < 95 (slot 1)
         let out = drive(&mut e, 8192, |_| 0.0);
         assert!(out.iter().all(|x| x.abs() < 1e-6));
     }

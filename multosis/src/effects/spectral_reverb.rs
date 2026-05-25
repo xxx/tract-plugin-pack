@@ -96,16 +96,6 @@ pub struct SpectralReverbEffect {
 impl SpectralReverbEffect {
     pub const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
-            name: "FFT",
-            min: 0.0,
-            max: 3.0,
-            default: 2.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Enum {
-                labels: &["512", "1024", "2048", "4096"],
-            },
-        },
-        ParamSpec {
             name: "Time",
             min: 0.1,
             max: 20.0,
@@ -125,6 +115,17 @@ impl SpectralReverbEffect {
             format: ParamFormat::Number {
                 decimals: 0,
                 unit: " %",
+            },
+        },
+        // FFT in the LAST slot so it isn't the first dial users grab to modulate.
+        ParamSpec {
+            name: "FFT",
+            min: 0.0,
+            max: 3.0,
+            default: 2.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: &["512", "1024", "2048", "4096"],
             },
         },
     ];
@@ -177,14 +178,14 @@ impl Effect for SpectralReverbEffect {
     }
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => {
+            0 => self.params.time_s = value.clamp(0.1, 20.0),
+            1 => self.params.tone_pct = value.clamp(0.0, 100.0),
+            2 => {
                 self.params.fft_param = value;
                 let fft_size = FFT_SIZES[value.round().clamp(0.0, 3.0) as usize];
                 self.engine_l.set_fft_size(fft_size);
                 self.engine_r.set_fft_size(fft_size);
             }
-            1 => self.params.time_s = value.clamp(0.1, 20.0),
-            2 => self.params.tone_pct = value.clamp(0.0, 100.0),
             _ => {}
         }
     }
@@ -219,9 +220,9 @@ mod tests {
         // (the minimum) and ~50 ms of "pulse" input, after ~1 s of silence
         // the tail should be very quiet.
         let mut e = SpectralReverbEffect::default();
-        e.set_param(0, 1.0); // FFT = 1024
-        e.set_param(1, 0.1); // Time = 100 ms (the shortest allowed)
-        e.set_param(2, 50.0); // Tone = neutral
+        e.set_param(2, 1.0); // FFT = 1024 (slot 2)
+        e.set_param(0, 0.1); // Time = 100 ms (slot 0)
+        e.set_param(1, 50.0); // Tone = neutral (slot 1)
         let sr = 48_000.0;
         let burst = (0.050 * sr) as usize;
         let tail = (1.0 * sr) as usize; // 1 s of silence
@@ -243,8 +244,8 @@ mod tests {
         // Drive a 50 ms burst at Time = 2 s; observe non-zero output 200 ms
         // after the burst ends.
         let mut e = SpectralReverbEffect::default();
-        e.set_param(0, 1.0); // FFT = 1024
-        e.set_param(1, 2.0); // Time = 2 s
+        e.set_param(2, 1.0); // FFT = 1024 (slot 2)
+        e.set_param(0, 2.0); // Time = 2 s (slot 0)
         let sr = 48_000.0_f32;
         let burst = (0.050 * sr) as usize;
         let tail = (0.200 * sr) as usize;

@@ -94,16 +94,6 @@ pub struct SpectralTwistEffect {
 impl SpectralTwistEffect {
     pub const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
-            name: "FFT",
-            min: 0.0,
-            max: 3.0,
-            default: 2.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Enum {
-                labels: &["512", "1024", "2048", "4096"],
-            },
-        },
-        ParamSpec {
             name: "Freq",
             min: 20.0,
             max: 20_000.0,
@@ -131,6 +121,17 @@ impl SpectralTwistEffect {
             format: ParamFormat::Number {
                 decimals: 2,
                 unit: " oct",
+            },
+        },
+        // FFT in the LAST slot so it isn't the first dial users grab to modulate.
+        ParamSpec {
+            name: "FFT",
+            min: 0.0,
+            max: 3.0,
+            default: 2.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: &["512", "1024", "2048", "4096"],
             },
         },
     ];
@@ -181,15 +182,15 @@ impl Effect for SpectralTwistEffect {
     }
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => {
+            0 => self.params.freq_hz = value.clamp(20.0, 20_000.0),
+            1 => self.params.twist_pct = value.clamp(-100.0, 100.0),
+            2 => self.params.bw_oct = value.clamp(0.1, 4.0),
+            3 => {
                 self.params.fft_param = value;
                 let fft_size = FFT_SIZES[value.round().clamp(0.0, 3.0) as usize];
                 self.engine_l.set_fft_size(fft_size);
                 self.engine_r.set_fft_size(fft_size);
             }
-            1 => self.params.freq_hz = value.clamp(20.0, 20_000.0),
-            2 => self.params.twist_pct = value.clamp(-100.0, 100.0),
-            3 => self.params.bw_oct = value.clamp(0.1, 4.0),
             _ => {}
         }
     }
@@ -219,8 +220,8 @@ mod tests {
     #[test]
     fn twist_zero_is_passthrough() {
         let mut e = SpectralTwistEffect::default();
-        e.set_param(0, 1.0); // FFT = 1024
-        e.set_param(2, 0.0); // Twist = 0 -> early return
+        e.set_param(3, 1.0); // FFT = 1024 (slot 3)
+        e.set_param(1, 0.0); // Twist = 0 -> early return (slot 1)
         let f = 1000.0;
         let sr = 48_000.0;
         let out = drive(&mut e, 4096, |i| {
@@ -233,7 +234,7 @@ mod tests {
     #[test]
     fn silence_in_silence_out() {
         let mut e = SpectralTwistEffect::default();
-        e.set_param(2, 50.0); // arbitrary twist
+        e.set_param(1, 50.0); // arbitrary twist (slot 1)
         let out = drive(&mut e, 4096, |_| 0.0);
         assert!(out.iter().all(|x| x.abs() < 1e-6));
     }

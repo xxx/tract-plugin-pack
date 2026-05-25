@@ -315,16 +315,6 @@ pub struct SpectralStretchEffect {
 impl SpectralStretchEffect {
     pub const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
-            name: "FFT",
-            min: 0.0,
-            max: 3.0,
-            default: 2.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Enum {
-                labels: &["512", "1024", "2048", "4096"],
-            },
-        },
-        ParamSpec {
             name: "Speed",
             min: 0.25,
             max: 4.0,
@@ -355,6 +345,17 @@ impl SpectralStretchEffect {
             format: ParamFormat::Number {
                 decimals: 0,
                 unit: " %",
+            },
+        },
+        // FFT in the LAST slot so it isn't the first dial users grab to modulate.
+        ParamSpec {
+            name: "FFT",
+            min: 0.0,
+            max: 3.0,
+            default: 2.0,
+            scaling: ParamScaling::Linear,
+            format: ParamFormat::Enum {
+                labels: &["512", "1024", "2048", "4096"],
             },
         },
     ];
@@ -399,15 +400,15 @@ impl Effect for SpectralStretchEffect {
     }
     fn set_param(&mut self, index: usize, value: f32) {
         match index {
-            0 => {
+            0 => self.params.speed = value.clamp(0.25, 4.0),
+            1 => self.params.tempo_pct = value.clamp(1.0, 100.0),
+            2 => self.params.chaos_pct = value.clamp(0.0, 100.0),
+            3 => {
                 self.params.fft_param = value;
                 let fft_size = FFT_SIZES[value.round().clamp(0.0, 3.0) as usize];
                 self.chan_l.set_fft_size(fft_size);
                 self.chan_r.set_fft_size(fft_size);
             }
-            1 => self.params.speed = value.clamp(0.25, 4.0),
-            2 => self.params.tempo_pct = value.clamp(1.0, 100.0),
-            3 => self.params.chaos_pct = value.clamp(0.0, 100.0),
             _ => {}
         }
     }
@@ -441,7 +442,7 @@ mod tests {
         // input is arbitrary because accumulated_output_phase starts at 0).
         let sr = 48_000.0_f32;
         let mut e = SpectralStretchEffect::default();
-        e.set_param(0, 1.0); // FFT = 1024
+        e.set_param(3, 1.0); // FFT = 1024 (slot 3)
         let f = 1000.0_f32;
         let n = 8192_usize;
         let out = drive(&mut e, n, |i| {
@@ -461,7 +462,7 @@ mod tests {
     #[test]
     fn silence_in_silence_out() {
         let mut e = SpectralStretchEffect::default();
-        e.set_param(0, 1.0);
+        e.set_param(3, 1.0); // FFT (slot 3)
         let out = drive(&mut e, 4096, |_| 0.0);
         assert!(out.iter().all(|x| x.abs() < 1e-6));
     }
@@ -473,8 +474,8 @@ mod tests {
         use rustfft::num_complex::Complex;
         let sr = 48_000.0_f32;
         let mut e = SpectralStretchEffect::default();
-        e.set_param(0, 1.0); // FFT = 1024
-        e.set_param(1, 0.5); // Speed = 0.5
+        e.set_param(3, 1.0); // FFT = 1024 (slot 3)
+        e.set_param(0, 0.5); // Speed = 0.5 (slot 0)
         let n = 8192_usize;
         let out = drive(&mut e, n, |i| {
             (2.0 * std::f32::consts::PI * 2000.0 * i as f32 / sr).sin()
