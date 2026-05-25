@@ -56,13 +56,16 @@ impl StftAnalyzer {
     /// Create an `fft_size`-point analyzer. `hop_size` is used only to compute
     /// the COLA synthesis window. `fft_size` must be an exact multiple of
     /// `hop_size` (the COLA sum is only constant across `fft_size / hop_size`
-    /// whole frames).
+    /// whole frames) and a power of two -- the ring-buffer wrap in `write`
+    /// and `analyze` is done via bitmask, which is only equivalent to modulo
+    /// for power-of-two sizes.
     pub fn new(fft_size: usize, hop_size: usize) -> Self {
         assert!(
             fft_size > 0
                 && hop_size > 0
                 && fft_size >= hop_size
                 && fft_size.is_multiple_of(hop_size)
+                && fft_size.is_power_of_two()
         );
 
         let mut planner = FftPlanner::new();
@@ -101,10 +104,11 @@ impl StftAnalyzer {
     }
 
     /// Write one input sample into the ring and advance. Skip this call to
-    /// hold the ring frozen (e.g. `warp-zone`'s freeze).
+    /// hold the ring frozen (e.g. `warp-zone`'s freeze). Wrap is a bitmask
+    /// (see the power-of-two contract in `new`).
     pub fn write(&mut self, input: f32) {
         self.input_ring[self.input_pos] = input;
-        self.input_pos = (self.input_pos + 1) % self.fft_size;
+        self.input_pos = (self.input_pos + 1) & (self.fft_size - 1);
     }
 
     /// Extract the latest `fft_size` samples (oldest-first, Hann-windowed) and
@@ -113,10 +117,17 @@ impl StftAnalyzer {
     /// `skip_fft`).
     pub fn analyze(&mut self) -> StftFrame<'_> {
         let n = self.fft_size;
-        for i in 0..n {
-            let idx = (self.input_pos + i) % n;
-            let windowed = self.input_ring[idx] * self.analysis_window[i];
-            self.fft_buf[i] = Complex::new(windowed, 0.0);
+        // Split the windowed copy into two contiguous segments at the ring
+        // wrap point so each inner loop is mod-free and LLVM can vectorise.
+        let first = n - self.input_pos;
+        let (ring_head, ring_tail) = self.input_ring.split_at(self.input_pos);
+        let (win_a, win_b) = self.analysis_window.split_at(first);
+        let (buf_a, buf_b) = self.fft_buf.split_at_mut(first);
+        for ((buf, &w), &samp) in buf_a.iter_mut().zip(win_a).zip(ring_tail) {
+            *buf = Complex::new(samp * w, 0.0);
+        }
+        for ((buf, &w), &samp) in buf_b.iter_mut().zip(win_b).zip(ring_head) {
+            *buf = Complex::new(samp * w, 0.0);
         }
         self.fft_forward
             .process_with_scratch(&mut self.fft_buf, &mut self.scratch);

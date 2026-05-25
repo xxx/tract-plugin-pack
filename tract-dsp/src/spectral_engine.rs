@@ -151,12 +151,13 @@ impl SpectralEngine {
     pub fn process_sample<T: SpectralTransform>(&mut self, input: f32, t: &mut T) -> f32 {
         let slot = &mut self.slots[self.active];
 
-        // Output read first — matches spectral_shifter and gives the engine
-        // its full latency = hop_size (the just-overlap-added samples sit in
-        // the ring until the read catches up).
+        // Output read first -- matches spectral_shifter and gives the engine
+        // its full latency = fft_size. The ring wrap is a bitmask: every
+        // entry in FFT_SIZES is a power of two, so `& (fft_size - 1)` is
+        // equivalent to `% fft_size` and avoids a per-sample modulo.
         let out = slot.output_ring[slot.output_pos];
         slot.output_ring[slot.output_pos] = 0.0;
-        slot.output_pos = (slot.output_pos + 1) % slot.fft_size;
+        slot.output_pos = (slot.output_pos + 1) & (slot.fft_size - 1);
 
         slot.analyzer.write(input);
         slot.hop_counter += 1;
@@ -176,15 +177,21 @@ impl SpectralEngine {
             slot.ifft
                 .process_with_scratch(&mut slot.spectrum_scratch, &mut slot.ifft_scratch);
 
-            // 1/N normalisation + window + overlap-add.
+            // 1/N normalisation + window + overlap-add. Split the ring at
+            // `pos` so each of the two contiguous halves is mod-free and
+            // LLVM can vectorise.
             let inv_n = 1.0 / fft_size as f32;
             let synth = frame.synthesis_window;
-            let ring = &mut slot.output_ring;
             let pos = slot.output_pos;
-            let n = slot.fft_size;
-            for (i, (&w, c)) in synth.iter().zip(slot.spectrum_scratch.iter()).enumerate() {
-                let ring_idx = (pos + i) % n;
-                ring[ring_idx] += c.re * inv_n * w;
+            let first = slot.fft_size - pos;
+            let (ring_head, ring_tail) = slot.output_ring.split_at_mut(pos);
+            let (synth_a, synth_b) = synth.split_at(first);
+            let (scratch_a, scratch_b) = slot.spectrum_scratch.split_at(first);
+            for ((dst, &w), c) in ring_tail.iter_mut().zip(synth_a).zip(scratch_a) {
+                *dst += c.re * inv_n * w;
+            }
+            for ((dst, &w), c) in ring_head.iter_mut().zip(synth_b).zip(scratch_b) {
+                *dst += c.re * inv_n * w;
             }
 
             // Apply pending FFT-size switch at hop boundary.

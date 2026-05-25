@@ -174,10 +174,11 @@ impl StretchChannel {
     fn process_sample(&mut self, input: f32, params: ParamsCache, _sample_rate: f32) -> f32 {
         let slot = &mut self.slots[self.active];
 
-        // Output read first.
+        // Output read first. `fft_size` is power-of-2 (one of FFT_SIZES) so
+        // the wrap is a bitmask -- avoids a per-sample modulo in the hot path.
         let out = slot.output_ring[slot.output_pos];
         slot.output_ring[slot.output_pos] = 0.0;
-        slot.output_pos = (slot.output_pos + 1) % slot.fft_size;
+        slot.output_pos = (slot.output_pos + 1) & (slot.fft_size - 1);
 
         slot.analyzer.write(input);
         slot.hop_counter += 1;
@@ -267,12 +268,20 @@ impl StretchChannel {
             slot.ifft
                 .process_with_scratch(&mut slot.spectrum_scratch, &mut slot.ifft_scratch);
 
-            // 1/N normalisation + synthesis window + overlap-add.
+            // 1/N normalisation + synthesis window + overlap-add. The write
+            // starts at `pos` and wraps; split the ring at `pos` so each of
+            // the two contiguous halves is mod-free and LLVM can vectorise.
             let synth = frame.synthesis_window;
             let pos = slot.output_pos;
-            for (i, (&w, c)) in synth.iter().zip(slot.spectrum_scratch.iter()).enumerate() {
-                let ring_idx = (pos + i) % n;
-                slot.output_ring[ring_idx] += c.re * inv_n * w;
+            let first = n - pos;
+            let (ring_head, ring_tail) = slot.output_ring.split_at_mut(pos);
+            let (synth_a, synth_b) = synth.split_at(first);
+            let (scratch_a, scratch_b) = slot.spectrum_scratch.split_at(first);
+            for ((dst, &w), c) in ring_tail.iter_mut().zip(synth_a).zip(scratch_a) {
+                *dst += c.re * inv_n * w;
+            }
+            for ((dst, &w), c) in ring_head.iter_mut().zip(synth_b).zip(scratch_b) {
+                *dst += c.re * inv_n * w;
             }
 
             // Apply pending FFT-size switch at hop boundary.
