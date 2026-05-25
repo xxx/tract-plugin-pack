@@ -133,11 +133,17 @@ impl SpectralEngine {
     }
 
     /// Zero all ring buffers in all four slots. Used by `Effect::reset`.
+    ///
+    /// `pending` and `active` are deliberately preserved -- they encode the
+    /// user's FFT-size selection (intent), not audio accumulator state. If a
+    /// host calls `Plugin::reset` while a switch is pending, clearing pending
+    /// here would let `latency_samples` swing back to the default slot's
+    /// size, which causes some hosts (Bitwig) to call reset *again* in a
+    /// feedback loop -- visible as MSEG phases zeroing many times per second.
     pub fn reset(&mut self) {
         for slot in &mut self.slots {
             slot.reset();
         }
-        self.pending = None;
     }
 
     /// Push one input sample, optionally drive an analysis + transform +
