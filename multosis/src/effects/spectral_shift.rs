@@ -1,9 +1,10 @@
 //! Spectral Shift: per-bin frequency translation and scaling.
 //!
 //! Translate moves bins by +/- 100% of Nyquist; out-of-range bins are zeroed
-//! (vs. SpectralRotate's wrap). Scale (expand/contract spectrum, 0.5..2.0)
-//! is declared but the Scale path is filled in by Task 14 -- this file
-//! handles only Translate. A flat translate=0 + scale=1 is identity.
+//! (vs. SpectralRotate's wrap). Scale (0.5..2.0) expands or contracts the
+//! spectrum around DC. The combined source position for destination bin k is
+//! `(k - translate_bins) / scale`, linearly interpolated between floor and
+//! ceil. Scale=1 + |Translate| < 0.5 bins short-circuits to identity.
 
 use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
 use rustfft::num_complex::Complex;
@@ -27,29 +28,47 @@ impl Default for ParamsCache {
 }
 
 struct TransformCtx {
-    // scale: f32, // TODO(Task 14): wire up the Scale path
+    scale: f32,
     translate_pct: f32,
 }
 
 impl SpectralTransform for TransformCtx {
     fn transform(&mut self, spectrum: &mut [Complex<f32>], fft_size: usize, _sample_rate: f32) {
         let half = fft_size as i32 / 2;
-        let translate_bins = ((self.translate_pct * 0.01) * half as f32).round() as i32;
-        if translate_bins == 0 {
+        let scale = self.scale.clamp(0.5, 2.0);
+        let translate_bins = (self.translate_pct * 0.01) * half as f32;
+        // Identity short-circuit: scale==1 and integer translate==0 -> no-op.
+        let identity = (scale - 1.0).abs() < 1e-6 && translate_bins.abs() < 0.5;
+        if identity {
             return;
         }
+
         // Stash positive half into negative-half slots so we can read them
         // while writing new positive-half values.
         for k in 1..half as usize {
             spectrum[fft_size - k] = spectrum[k];
         }
+        // For each destination bin k, the source position in the stashed
+        // positive half is (k - translate_bins) / scale. Linear-interpolate
+        // between floor and ceil. Out-of-range source -> zero.
         for k in 1..half {
-            let src = k - translate_bins;
-            spectrum[k as usize] = if (1..half).contains(&src) {
-                spectrum[fft_size - src as usize] // read from stash
-            } else {
-                Complex::default() // out of range -> zero
+            let src = (k as f32 - translate_bins) / scale;
+            let src_floor = src.floor() as i32;
+            let src_ceil = src.ceil() as i32;
+            let frac = src - src_floor as f32;
+            let read_stash = |s: i32| -> Complex<f32> {
+                if (1..half).contains(&s) {
+                    spectrum[fft_size - s as usize]
+                } else {
+                    Complex::default()
+                }
             };
+            let a = read_stash(src_floor);
+            let b = read_stash(src_ceil);
+            spectrum[k as usize] = Complex::new(
+                a.re * (1.0 - frac) + b.re * frac,
+                a.im * (1.0 - frac) + b.im * frac,
+            );
         }
         // Rebuild negative half from conjugates of (now-rewritten) positive half.
         for k in 1..half as usize {
@@ -117,10 +136,12 @@ impl Default for SpectralShiftEffect {
 impl Effect for SpectralShiftEffect {
     fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
         let mut ctx_l = TransformCtx {
+            scale: self.params.scale,
             translate_pct: self.params.translate_pct,
         };
         let lo = self.engine_l.process_sample(left, &mut ctx_l);
         let mut ctx_r = TransformCtx {
+            scale: self.params.scale,
             translate_pct: self.params.translate_pct,
         };
         let ro = self.engine_r.process_sample(right, &mut ctx_r);
@@ -243,22 +264,42 @@ mod tests {
     }
 
     #[test]
-    fn scale_is_accepted_but_ignored_in_this_task() {
-        // Task 5 only implements Translate. Scale != 1 is stored but the
-        // transform is identity if Translate = 0. Task 14 will fill in
-        // Scale's effect.
+    fn scale_2_doubles_frequency_content() {
+        // A 500 Hz sine fed through Scale=2 should produce most of its energy
+        // around 1 kHz (the source bin maps to destination = src * scale).
+        use rustfft::num_complex::Complex;
+        let sr = 48_000.0_f32;
         let mut e = SpectralShiftEffect::default();
-        e.set_param(1, 2.0); // Scale = 2 -- accepted, cached
+        e.set_param(0, 1.0); // FFT = 1024
+        e.set_param(1, 2.0); // Scale = 2
         e.set_param(2, 0.0); // Translate = 0
-        assert_eq!(e.params.scale, 2.0);
-        // Output should still be roughly passthrough since Translate=0 and
-        // Scale is currently a no-op.
-        let f = 1000.0;
-        let sr = 48_000.0;
-        let out = drive(&mut e, 4096, |i| {
-            (2.0 * std::f32::consts::PI * f * i as f32 / sr).sin()
-        });
-        let energy: f32 = out[2 * e.latency_samples()..].iter().map(|x| x * x).sum();
-        assert!(energy > 1.0);
+        let n = 8192_usize;
+        let out: Vec<f32> = (0..n)
+            .map(|i| {
+                let x = (2.0 * std::f32::consts::PI * 500.0 * i as f32 / sr).sin();
+                e.process_sample(x, x).0
+            })
+            .collect();
+        let tail_start = 2 * e.latency_samples();
+        let mut tail: Vec<Complex<f32>> = out[tail_start..tail_start + 2048]
+            .iter()
+            .map(|&x| Complex::new(x, 0.0))
+            .collect();
+        let mut planner = rustfft::FftPlanner::<f32>::new();
+        planner.plan_fft_forward(2048).process(&mut tail);
+        let bin_500 = (500.0 * 2048.0 / sr).round() as usize;
+        let bin_1k = (1000.0 * 2048.0 / sr).round() as usize;
+        let e_500: f32 = tail[bin_500.saturating_sub(2)..=bin_500 + 2]
+            .iter()
+            .map(|c| c.norm_sqr())
+            .sum();
+        let e_1k: f32 = tail[bin_1k.saturating_sub(2)..=bin_1k + 2]
+            .iter()
+            .map(|c| c.norm_sqr())
+            .sum();
+        assert!(
+            e_1k > e_500,
+            "expected energy at 1 kHz > 500 Hz; got 1k={e_1k} 500={e_500}"
+        );
     }
 }
