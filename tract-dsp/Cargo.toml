@@ -19,6 +19,7 @@ required-features = ["stft-analysis"]
 stft = ["dep:realfft", "dep:rustfft"]
 # Gates the `stft_analysis` module (rustfft only — complex transforms, no realfft).
 stft-analysis = ["dep:rustfft"]
+spectral-engine = ["stft-analysis"]
 
 [dependencies]
 realfft = { version = "3.3", optional = true }

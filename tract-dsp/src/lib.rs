@@ -18,6 +18,8 @@ pub mod fir;
 pub mod hilbert;
 #[cfg(feature = "stft-analysis")]
 pub mod spectral_clipper;
+#[cfg(feature = "spectral-engine")]
+pub mod spectral_engine;
 #[cfg(feature = "stft-analysis")]
 pub mod spectral_shifter;
 pub mod spsc;
