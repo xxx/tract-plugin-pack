@@ -31,7 +31,12 @@ pub fn color_control_bg() -> Color {
 }
 #[inline]
 pub fn color_border() -> Color {
-    Color::from_rgba8(0x40, 0x40, 0x40, 0xff)
+    // Lifted from 0x404040 -> 0x6e7180 to hit ~3.8:1 against color_bg()
+    // and ~3.1:1 against color_control_bg(). The old value sat at ~1.6:1
+    // against the page background, low enough that control outlines and
+    // section-header divider rules visually dissolved into the panel.
+    // The slight blue cast keeps it in family with the palette's cool tint.
+    Color::from_rgba8(0x6e, 0x71, 0x80, 0xff)
 }
 #[inline]
 pub fn color_edit_bg() -> Color {
