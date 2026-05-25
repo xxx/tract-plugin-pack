@@ -164,9 +164,9 @@ impl SpectralEngine {
             let ring = &mut slot.output_ring;
             let pos = slot.output_pos;
             let n = slot.fft_size;
-            for i in 0..n {
+            for (i, (&w, c)) in synth.iter().zip(slot.spectrum_scratch.iter()).enumerate() {
                 let ring_idx = (pos + i) % n;
-                ring[ring_idx] += slot.spectrum_scratch[i].re * inv_n * synth[i];
+                ring[ring_idx] += c.re * inv_n * w;
             }
 
             // Apply pending FFT-size switch at hop boundary.

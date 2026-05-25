@@ -267,6 +267,7 @@ mod repeat;
 mod reverb;
 mod ring;
 mod satch;
+mod spectral_rotate;
 mod stretch;
 mod svf;
 mod varispeed;
@@ -290,6 +291,7 @@ pub use repeat::RepeatEffect;
 pub use reverb::ReverbEffect;
 pub use ring::RingEffect;
 pub use satch::SatchEffect;
+pub use spectral_rotate::SpectralRotateEffect;
 pub use stretch::StretchEffect;
 pub use svf::SvfEffect;
 pub use varispeed::VarispeedEffect;
@@ -363,11 +365,16 @@ pub enum EffectKind {
     /// internally-generated Saw / Square / Noise carrier is shaped
     /// by the modulator's per-band amplitude envelope.
     Vocoder,
+    /// Circular spectrum rotation -- wraps the positive-half spectrum
+    /// modulo N/2 so no energy is discarded. Switchable FFT size
+    /// (512 / 1024 / 2048 / 4096); first effect in the Infiltrator-
+    /// inspired spectral family.
+    SpectralRotate,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 22] = [
+    pub const ALL: [EffectKind; 23] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -390,6 +397,7 @@ impl EffectKind {
         EffectKind::Downsample,
         EffectKind::Varispeed,
         EffectKind::Vocoder,
+        EffectKind::SpectralRotate,
     ];
 
     /// The kind's display name.
@@ -417,6 +425,7 @@ impl EffectKind {
             EffectKind::Downsample => "Downsample",
             EffectKind::Varispeed => "Varispeed",
             EffectKind::Vocoder => "Vocoder",
+            EffectKind::SpectralRotate => "Spectral Rotate",
         }
     }
 
@@ -431,7 +440,7 @@ impl EffectKind {
     /// `effect_kind_reports_latency_matches_instance_latency` test
     /// keeps this in sync with the trait impls.
     pub fn reports_latency(self) -> bool {
-        matches!(self, Self::Satch | Self::WarpZone)
+        matches!(self, Self::Satch | Self::WarpZone | Self::SpectralRotate)
     }
 }
 
@@ -522,6 +531,12 @@ pub enum EffectInstance {
     // floats; struct is ~940 B, past clippy's large-enum-variant
     // threshold.
     Vocoder(Box<VocoderEffect>),
+    // Boxed: SpectralRotateEffect carries two SpectralEngine instances,
+    // each pre-allocating all four FFT-size slots (analyzer ring + IFFT
+    // scratch + output ring per slot) -- the struct is large enough to
+    // trip clippy's large-enum-variant threshold. Allocation happens
+    // once per kind-switch from the GUI thread, never on the audio path.
+    SpectralRotate(Box<SpectralRotateEffect>),
 }
 
 impl EffectInstance {
@@ -550,6 +565,7 @@ impl EffectInstance {
             EffectKind::Downsample => EffectInstance::Downsample(DownsampleEffect::new()),
             EffectKind::Varispeed => EffectInstance::Varispeed(Box::default()),
             EffectKind::Vocoder => EffectInstance::Vocoder(Box::default()),
+            EffectKind::SpectralRotate => EffectInstance::SpectralRotate(Box::default()),
         }
     }
 
@@ -578,6 +594,7 @@ impl EffectInstance {
             EffectInstance::Downsample(_) => EffectKind::Downsample,
             EffectInstance::Varispeed(_) => EffectKind::Varispeed,
             EffectInstance::Vocoder(_) => EffectKind::Vocoder,
+            EffectInstance::SpectralRotate(_) => EffectKind::SpectralRotate,
         }
     }
 }
@@ -607,6 +624,7 @@ impl Effect for EffectInstance {
             EffectInstance::Downsample(e) => e.process_sample(left, right),
             EffectInstance::Varispeed(e) => e.process_sample(left, right),
             EffectInstance::Vocoder(e) => e.process_sample(left, right),
+            EffectInstance::SpectralRotate(e) => e.process_sample(left, right),
         }
     }
 
@@ -634,6 +652,7 @@ impl Effect for EffectInstance {
             EffectInstance::Downsample(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Varispeed(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Vocoder(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::SpectralRotate(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -661,6 +680,7 @@ impl Effect for EffectInstance {
             EffectInstance::Downsample(e) => e.reset(),
             EffectInstance::Varispeed(e) => e.reset(),
             EffectInstance::Vocoder(e) => e.reset(),
+            EffectInstance::SpectralRotate(e) => e.reset(),
         }
     }
 
@@ -688,6 +708,7 @@ impl Effect for EffectInstance {
             EffectInstance::Downsample(e) => e.parameters(),
             EffectInstance::Varispeed(e) => e.parameters(),
             EffectInstance::Vocoder(e) => e.parameters(),
+            EffectInstance::SpectralRotate(e) => e.parameters(),
         }
     }
 
@@ -715,6 +736,7 @@ impl Effect for EffectInstance {
             EffectInstance::Downsample(e) => e.set_param(index, value),
             EffectInstance::Varispeed(e) => e.set_param(index, value),
             EffectInstance::Vocoder(e) => e.set_param(index, value),
+            EffectInstance::SpectralRotate(e) => e.set_param(index, value),
         }
     }
 
@@ -742,6 +764,7 @@ impl Effect for EffectInstance {
             EffectInstance::Downsample(e) => e.set_bpm(bpm),
             EffectInstance::Varispeed(e) => e.set_bpm(bpm),
             EffectInstance::Vocoder(e) => e.set_bpm(bpm),
+            EffectInstance::SpectralRotate(e) => e.set_bpm(bpm),
         }
     }
 
@@ -769,6 +792,7 @@ impl Effect for EffectInstance {
             EffectInstance::Downsample(e) => e.param_dimmed(index),
             EffectInstance::Varispeed(e) => e.param_dimmed(index),
             EffectInstance::Vocoder(e) => e.param_dimmed(index),
+            EffectInstance::SpectralRotate(e) => e.param_dimmed(index),
         }
     }
 
@@ -796,6 +820,7 @@ impl Effect for EffectInstance {
             EffectInstance::Downsample(e) => e.latency_samples(),
             EffectInstance::Varispeed(e) => e.latency_samples(),
             EffectInstance::Vocoder(e) => e.latency_samples(),
+            EffectInstance::SpectralRotate(e) => e.latency_samples(),
         }
     }
 }
@@ -866,7 +891,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 22);
+        assert_eq!(EffectKind::ALL.len(), 23);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -889,6 +914,7 @@ mod tests {
         assert_eq!(EffectKind::Downsample.name(), "Downsample");
         assert_eq!(EffectKind::Varispeed.name(), "Varispeed");
         assert_eq!(EffectKind::Vocoder.name(), "Vocoder");
+        assert_eq!(EffectKind::SpectralRotate.name(), "Spectral Rotate");
     }
 
     #[test]
@@ -1313,6 +1339,7 @@ mod tests {
             EffectKind::Downsample,
             EffectKind::Varispeed,
             EffectKind::Vocoder,
+            EffectKind::SpectralRotate,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
