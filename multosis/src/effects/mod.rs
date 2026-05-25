@@ -279,6 +279,7 @@ mod spectral_scatter;
 mod spectral_shift;
 mod spectral_smear;
 mod spectral_spread;
+mod spectral_stretch;
 mod spectral_twist;
 mod stretch;
 mod svf;
@@ -315,6 +316,7 @@ pub use spectral_scatter::SpectralScatterEffect;
 pub use spectral_shift::SpectralShiftEffect;
 pub use spectral_smear::SpectralSmearEffect;
 pub use spectral_spread::SpectralSpreadEffect;
+pub use spectral_stretch::SpectralStretchEffect;
 pub use spectral_twist::SpectralTwistEffect;
 pub use stretch::StretchEffect;
 pub use svf::SvfEffect;
@@ -476,11 +478,20 @@ pub enum EffectKind {
     /// FFT size (512 / 1024 / 2048 / 4096); twelfth of the Infiltrator-
     /// inspired spectral effects.
     SpectralTwist,
+    /// Phase-vocoder time stretching with chaos. Unlike the other spectral
+    /// effects this owns its own analyzer per FFT size at 75% overlap
+    /// (`hop = fft_size / 4`) rather than the shared SpectralEngine's 50%.
+    /// Phase A scaffolding (this commit) is an identity passthrough; Phase B
+    /// adds the per-bin phase advance scaled by Speed, Tempo throttle on
+    /// re-analyze, and Chaos-injected random phase. Switchable FFT size
+    /// (512 / 1024 / 2048 / 4096); thirteenth of the Infiltrator-inspired
+    /// spectral effects.
+    SpectralStretch,
 }
 
 impl EffectKind {
     /// Every effect kind, in display / registry order.
-    pub const ALL: [EffectKind; 35] = [
+    pub const ALL: [EffectKind; 36] = [
         EffectKind::None,
         EffectKind::Svf,
         EffectKind::Bitcrush,
@@ -516,6 +527,7 @@ impl EffectKind {
         EffectKind::SpectralReverb,
         EffectKind::SpectralScatter,
         EffectKind::SpectralTwist,
+        EffectKind::SpectralStretch,
     ];
 
     /// The kind's display name.
@@ -556,6 +568,7 @@ impl EffectKind {
             EffectKind::SpectralReverb => "Spectral Reverb",
             EffectKind::SpectralScatter => "Spectral Scatter",
             EffectKind::SpectralTwist => "Spectral Twist",
+            EffectKind::SpectralStretch => "Spectral Stretch",
         }
     }
 
@@ -587,6 +600,7 @@ impl EffectKind {
                 | Self::SpectralReverb
                 | Self::SpectralScatter
                 | Self::SpectralTwist
+                | Self::SpectralStretch
         )
     }
 }
@@ -734,6 +748,12 @@ pub enum EffectInstance {
     // Boxed for the same reason as SpectralRotate: two SpectralEngine
     // instances with all four FFT-size slots pre-allocated.
     SpectralTwist(Box<SpectralTwistEffect>),
+    // Boxed: SpectralStretchEffect carries its own per-channel four-slot
+    // analyzer pool at 75% overlap (vs SpectralEngine's 50%), plus the
+    // per-slot phase-tracker vectors that Phase B will use. The struct
+    // metadata is past clippy's large-enum-variant threshold; the per-slot
+    // Vec heap data lives off-enum, so the variant footprint stays compact.
+    SpectralStretch(Box<SpectralStretchEffect>),
 }
 
 impl EffectInstance {
@@ -775,6 +795,7 @@ impl EffectInstance {
             EffectKind::SpectralReverb => EffectInstance::SpectralReverb(Box::default()),
             EffectKind::SpectralScatter => EffectInstance::SpectralScatter(Box::default()),
             EffectKind::SpectralTwist => EffectInstance::SpectralTwist(Box::default()),
+            EffectKind::SpectralStretch => EffectInstance::SpectralStretch(Box::default()),
         }
     }
 
@@ -816,6 +837,7 @@ impl EffectInstance {
             EffectInstance::SpectralReverb(_) => EffectKind::SpectralReverb,
             EffectInstance::SpectralScatter(_) => EffectKind::SpectralScatter,
             EffectInstance::SpectralTwist(_) => EffectKind::SpectralTwist,
+            EffectInstance::SpectralStretch(_) => EffectKind::SpectralStretch,
         }
     }
 }
@@ -858,6 +880,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralReverb(e) => e.process_sample(left, right),
             EffectInstance::SpectralScatter(e) => e.process_sample(left, right),
             EffectInstance::SpectralTwist(e) => e.process_sample(left, right),
+            EffectInstance::SpectralStretch(e) => e.process_sample(left, right),
         }
     }
 
@@ -898,6 +921,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralReverb(e) => e.set_sample_rate(sample_rate),
             EffectInstance::SpectralScatter(e) => e.set_sample_rate(sample_rate),
             EffectInstance::SpectralTwist(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::SpectralStretch(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -938,6 +962,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralReverb(e) => e.reset(),
             EffectInstance::SpectralScatter(e) => e.reset(),
             EffectInstance::SpectralTwist(e) => e.reset(),
+            EffectInstance::SpectralStretch(e) => e.reset(),
         }
     }
 
@@ -978,6 +1003,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralReverb(e) => e.parameters(),
             EffectInstance::SpectralScatter(e) => e.parameters(),
             EffectInstance::SpectralTwist(e) => e.parameters(),
+            EffectInstance::SpectralStretch(e) => e.parameters(),
         }
     }
 
@@ -1018,6 +1044,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralReverb(e) => e.set_param(index, value),
             EffectInstance::SpectralScatter(e) => e.set_param(index, value),
             EffectInstance::SpectralTwist(e) => e.set_param(index, value),
+            EffectInstance::SpectralStretch(e) => e.set_param(index, value),
         }
     }
 
@@ -1058,6 +1085,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralReverb(e) => e.set_bpm(bpm),
             EffectInstance::SpectralScatter(e) => e.set_bpm(bpm),
             EffectInstance::SpectralTwist(e) => e.set_bpm(bpm),
+            EffectInstance::SpectralStretch(e) => e.set_bpm(bpm),
         }
     }
 
@@ -1098,6 +1126,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralReverb(e) => e.param_dimmed(index),
             EffectInstance::SpectralScatter(e) => e.param_dimmed(index),
             EffectInstance::SpectralTwist(e) => e.param_dimmed(index),
+            EffectInstance::SpectralStretch(e) => e.param_dimmed(index),
         }
     }
 
@@ -1138,6 +1167,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralReverb(e) => e.latency_samples(),
             EffectInstance::SpectralScatter(e) => e.latency_samples(),
             EffectInstance::SpectralTwist(e) => e.latency_samples(),
+            EffectInstance::SpectralStretch(e) => e.latency_samples(),
         }
     }
 }
@@ -1208,7 +1238,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 35);
+        assert_eq!(EffectKind::ALL.len(), 36);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -1244,6 +1274,7 @@ mod tests {
         assert_eq!(EffectKind::SpectralReverb.name(), "Spectral Reverb");
         assert_eq!(EffectKind::SpectralScatter.name(), "Spectral Scatter");
         assert_eq!(EffectKind::SpectralTwist.name(), "Spectral Twist");
+        assert_eq!(EffectKind::SpectralStretch.name(), "Spectral Stretch");
     }
 
     #[test]
@@ -1681,6 +1712,7 @@ mod tests {
             EffectKind::SpectralReverb,
             EffectKind::SpectralScatter,
             EffectKind::SpectralTwist,
+            EffectKind::SpectralStretch,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
