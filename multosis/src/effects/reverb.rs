@@ -104,14 +104,16 @@ impl ReverbEffect {
     const REF_SR: f32 = 44_100.0;
     /// Largest comb buffer the engine must size for. At 192 kHz the
     /// longest right-channel delay is `(1617 + 23) × 192 / 44.1 ≈
-    /// 7141` samples; round up with headroom for modulation offsets.
-    const MAX_COMB_LEN: usize = 7_424;
+    /// 7141` samples; round up to the next power of two so the ring
+    /// wrap in `read_frac` and the per-sample write-index advance
+    /// become bitmasks instead of `%`.
+    const MAX_COMB_LEN: usize = 8_192;
     /// Largest allpass buffer. `(556 + 23) × 192 / 44.1 ≈ 2522`;
-    /// round up.
-    const MAX_AP_LEN: usize = 2_816;
+    /// round up to the next power of two.
+    const MAX_AP_LEN: usize = 4_096;
     /// Maximum pre-delay buffer length: 100 ms × 192 kHz = 19 200
-    /// samples; round up.
-    const MAX_PRE_DELAY: usize = 19_456;
+    /// samples; round up to the next power of two.
+    const MAX_PRE_DELAY: usize = 32_768;
 
     /// LFO modulation depth at Mod = 100 % (samples, one-sided).
     /// Small enough to not push the read tap close to the write
@@ -236,14 +238,18 @@ impl ReverbEffect {
     /// — the per-channel `delay_samples + mod_offset` math
     /// guarantees this in practice (min delay ≈ 1116 samples at
     /// 44.1 kHz, modulation ≤ 10 samples).
+    ///
+    /// `buf.len()` must be a power of two; the wrap is a bitmask
+    /// (`MAX_COMB_LEN`, `MAX_AP_LEN`, `MAX_PRE_DELAY` are all pow2).
     #[inline]
     fn read_frac(buf: &[f32], write_idx: usize, delay_samples: f32) -> f32 {
         let n = buf.len();
+        let mask = n - 1;
         let pos = write_idx as f32 + n as f32 - delay_samples;
         let i_floor = pos.floor();
         let frac = pos - i_floor;
-        let i0 = (i_floor as usize) % n;
-        let i1 = (i0 + 1) % n;
+        let i0 = (i_floor as usize) & mask;
+        let i1 = (i0 + 1) & mask;
         buf[i0] * (1.0 - frac) + buf[i1] * frac
     }
 }
@@ -276,7 +282,7 @@ impl Effect for ReverbEffect {
         // regardless of pre-delay setting.
         let in_l = Self::read_frac(&self.pre_buf_l, self.pre_write, pre_samples + 1.0);
         let in_r = Self::read_frac(&self.pre_buf_r, self.pre_write, pre_samples + 1.0);
-        self.pre_write = (self.pre_write + 1) % Self::MAX_PRE_DELAY;
+        self.pre_write = (self.pre_write + 1) & (Self::MAX_PRE_DELAY - 1);
 
         // ----- Bus: mono input into the reverb engine --------------
         // Standard Freeverb feeds (L + R) / 2 into every comb. The
@@ -308,7 +314,8 @@ impl Effect for ReverbEffect {
             self.comb_l[i].lp_state = (1.0 - damping) * tap_l + damping * self.comb_l[i].lp_state;
             self.comb_l[i].buf[self.comb_l[i].write_idx] =
                 input + self.comb_l[i].lp_state * feedback;
-            self.comb_l[i].write_idx = (self.comb_l[i].write_idx + 1) % self.comb_l[i].buf.len();
+            self.comb_l[i].write_idx =
+                (self.comb_l[i].write_idx + 1) & (self.comb_l[i].buf.len() - 1);
             sum_l += tap_l;
 
             // Right comb (stereo-spread delay) ---------------------
@@ -317,7 +324,8 @@ impl Effect for ReverbEffect {
             self.comb_r[i].lp_state = (1.0 - damping) * tap_r + damping * self.comb_r[i].lp_state;
             self.comb_r[i].buf[self.comb_r[i].write_idx] =
                 input + self.comb_r[i].lp_state * feedback;
-            self.comb_r[i].write_idx = (self.comb_r[i].write_idx + 1) % self.comb_r[i].buf.len();
+            self.comb_r[i].write_idx =
+                (self.comb_r[i].write_idx + 1) & (self.comb_r[i].buf.len() - 1);
             sum_r += tap_r;
         }
 
@@ -333,7 +341,8 @@ impl Effect for ReverbEffect {
             );
             let new_l = -Self::AP_FEEDBACK * y_l + tap_l;
             self.ap_l[i].buf[self.ap_l[i].write_idx] = y_l + Self::AP_FEEDBACK * new_l;
-            self.ap_l[i].write_idx = (self.ap_l[i].write_idx + 1) % self.ap_l[i].buf.len();
+            self.ap_l[i].write_idx =
+                (self.ap_l[i].write_idx + 1) & (self.ap_l[i].buf.len() - 1);
             y_l = new_l;
 
             let tap_r = Self::read_frac(
@@ -343,7 +352,8 @@ impl Effect for ReverbEffect {
             );
             let new_r = -Self::AP_FEEDBACK * y_r + tap_r;
             self.ap_r[i].buf[self.ap_r[i].write_idx] = y_r + Self::AP_FEEDBACK * new_r;
-            self.ap_r[i].write_idx = (self.ap_r[i].write_idx + 1) % self.ap_r[i].buf.len();
+            self.ap_r[i].write_idx =
+                (self.ap_r[i].write_idx + 1) & (self.ap_r[i].buf.len() - 1);
             y_r = new_r;
         }
 
