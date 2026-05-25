@@ -495,31 +495,37 @@ impl EffectKind {
     /// end so the kind-picker can render a single "Spectral" section header
     /// above them.
     pub const ALL: [EffectKind; 36] = [
-        // None stays first; the rest of this block is alphabetised by display
-        // name, then the Spectral family below is its own alphabetised block.
+        // `None` stays first as the only un-categorised kind. The remaining
+        // families are alphabetised by family name, with each block sorted
+        // alphabetically by display name. Spectral is kept last as the big
+        // FFT-based block.
         EffectKind::None,
+        // Distortion
         EffectKind::Bitcrush,
-        EffectKind::Chorus,
-        EffectKind::Comb,
-        EffectKind::Compressor,
-        EffectKind::Delay,
         EffectKind::Distortion,
         EffectKind::Downsample,
+        // Filter
+        EffectKind::Comb,
+        EffectKind::Svf,
+        // Misc
+        EffectKind::Compressor,
+        EffectKind::Vocoder,
+        // Modulation
+        EffectKind::Chorus,
         EffectKind::Flanger,
         EffectKind::Fm,
-        EffectKind::FrequencyShift,
         EffectKind::Phaser,
+        EffectKind::Ring,
+        // Pitch
+        EffectKind::FrequencyShift,
         EffectKind::PitchShift,
+        EffectKind::Varispeed,
+        // Time
+        EffectKind::Delay,
         EffectKind::Repeat,
         EffectKind::Reverb,
-        EffectKind::Ring,
         EffectKind::Stretch,
-        EffectKind::Svf,
-        EffectKind::Varispeed,
-        EffectKind::Vocoder,
-        // Spectral family, alphabetised by display name. `Satch` and
-        // `WarpZone` keep their own display names (no "Spectral" prefix);
-        // every `SpectralXxx` variant displays just its suffix.
+        // Spectral
         EffectKind::SpectralBandpass,
         EffectKind::SpectralCascade,
         EffectKind::SpectralCompress,
@@ -580,13 +586,22 @@ impl EffectKind {
         }
     }
 
-    /// The family this kind belongs to, or `None` for a stand-alone effect.
-    /// Drives the two-line track-listing label (family caption above
-    /// `name()`) and groups kinds in the effect-kind picker. `name()` returns
-    /// just the unique suffix for family kinds -- the family word lives only
-    /// here so each surface can decide how to present it.
+    /// The family this kind belongs to, or `None` for `EffectKind::None`
+    /// (the only un-categorised kind). Drives the two-line track-listing
+    /// label (family caption above `name()`) and groups kinds in the
+    /// effect-kind picker. `name()` returns just the unique suffix for
+    /// spectral kinds; family kinds elsewhere keep their natural name.
     pub fn family(self) -> Option<&'static str> {
         match self {
+            Self::None => None,
+            Self::Bitcrush | Self::Distortion | Self::Downsample => Some("Distortion"),
+            Self::Comb | Self::Svf => Some("Filter"),
+            Self::Compressor | Self::Vocoder => Some("Misc"),
+            Self::Chorus | Self::Flanger | Self::Fm | Self::Phaser | Self::Ring => {
+                Some("Modulation")
+            }
+            Self::FrequencyShift | Self::PitchShift | Self::Varispeed => Some("Pitch"),
+            Self::Delay | Self::Repeat | Self::Reverb | Self::Stretch => Some("Time"),
             Self::Satch
             | Self::WarpZone
             | Self::SpectralRotate
@@ -603,7 +618,6 @@ impl EffectKind {
             | Self::SpectralScatter
             | Self::SpectralTwist
             | Self::SpectralStretch => Some("Spectral"),
-            _ => None,
         }
     }
 
