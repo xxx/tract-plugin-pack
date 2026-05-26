@@ -14,6 +14,7 @@
 
 pub mod boxcar;
 pub mod db;
+pub mod fast_math;
 pub mod fir;
 pub mod hilbert;
 #[cfg(feature = "stft-analysis")]
