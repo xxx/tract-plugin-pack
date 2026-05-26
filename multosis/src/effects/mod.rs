@@ -434,12 +434,12 @@ pub enum EffectKind {
     /// rather than just copies). Switchable FFT size (512 / 1024 / 2048
     /// / 4096); third of the Infiltrator-inspired spectral effects.
     SpectralMirror,
-    /// Per-bin frequency translate -- moves the spectrum up or down by
-    /// +/- 100% of Nyquist; out-of-range bins are zeroed (unlike
-    /// SpectralRotate, which wraps). Scale parameter is declared but
-    /// the transform is currently Translate-only; Task 14 will fill in
-    /// the Scale path. Switchable FFT size (512 / 1024 / 2048 / 4096);
-    /// fourth of the Infiltrator-inspired spectral effects.
+    /// Per-bin frequency translate + scale. Translate moves bins up or
+    /// down by +/- 100% of Nyquist (out-of-range bins zeroed, unlike
+    /// SpectralRotate which wraps); Scale multiplies each bin's index by
+    /// 0.5..2.0 around DC. Both transforms apply together. Switchable
+    /// FFT size (512 / 1024 / 2048 / 4096); fourth of the Infiltrator-
+    /// inspired spectral effects.
     SpectralShift,
     /// Per-bin magnitude envelope hold with instant attack and a release
     /// tau equal to Length ms -- transients pass straight through, but the
