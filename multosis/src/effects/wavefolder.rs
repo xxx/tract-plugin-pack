@@ -26,13 +26,11 @@ pub struct WavefolderEffect {
     drive_db: f32,
     fold_pct: f32,
     bias_pct: f32,
-    out_db: f32,
     sample_rate: f32,
 
     drive_lin: f32,
     fold_scale: f32,
     bias_amt: f32,
-    out_lin: f32,
     /// One-pole DC-blocker coefficient (`R` in `y = x - x_n1 + R*y_n1`).
     dc_r: f32,
 
@@ -110,7 +108,7 @@ const MAX_BIAS: f32 = 2.0;
 const ADAA_EPS: f32 = 1e-5;
 
 impl WavefolderEffect {
-    const PARAMS: [ParamSpec; 4] = [
+    const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
             name: "Drive",
             min: 0.0,
@@ -135,14 +133,6 @@ impl WavefolderEffect {
             scaling: ParamScaling::Linear,
             format: ParamFormat::Number { decimals: 0, unit: "%" },
         },
-        ParamSpec {
-            name: "Out",
-            min: -24.0,
-            max: 24.0,
-            default: 0.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 1, unit: "dB" },
-        },
     ];
 
     pub fn new() -> Self {
@@ -150,12 +140,10 @@ impl WavefolderEffect {
             drive_db: Self::PARAMS[0].default,
             fold_pct: Self::PARAMS[1].default,
             bias_pct: Self::PARAMS[2].default,
-            out_db: Self::PARAMS[3].default,
             sample_rate: 48_000.0,
             drive_lin: 1.0,
             fold_scale: 0.0,
             bias_amt: 0.0,
-            out_lin: 1.0,
             dc_r: 0.0,
             x_n1: [0.0; 2],
             dc_in: [0.0; 2],
@@ -169,7 +157,6 @@ impl WavefolderEffect {
         self.drive_lin = 10.0_f32.powf(self.drive_db.clamp(0.0, 24.0) / 20.0);
         self.fold_scale = (self.fold_pct * 0.01).clamp(0.0, 1.0);
         self.bias_amt = (self.bias_pct * 0.01).clamp(-1.0, 1.0) * MAX_BIAS;
-        self.out_lin = 10.0_f32.powf(self.out_db.clamp(-24.0, 24.0) / 20.0);
         // One-pole HP at 10 Hz: y = x - x_n1 + R*y_n1, R = 1 - 2*pi*fc/sr.
         let fc = 10.0;
         let sr = self.sample_rate.max(1.0);
@@ -233,8 +220,7 @@ impl WavefolderEffect {
         // baseline gain is X_MIX; dividing here makes Drive = 0, Fold = 0
         // a transparent passthrough).
         let normalised = folded * (1.0 / X_MIX);
-        let dc_free = self.dc_block(ch, normalised);
-        dc_free * self.out_lin
+        self.dc_block(ch, normalised)
     }
 }
 
@@ -271,7 +257,6 @@ impl Effect for WavefolderEffect {
             0 => self.drive_db = value.clamp(Self::PARAMS[0].min, Self::PARAMS[0].max),
             1 => self.fold_pct = value.clamp(Self::PARAMS[1].min, Self::PARAMS[1].max),
             2 => self.bias_pct = value.clamp(Self::PARAMS[2].min, Self::PARAMS[2].max),
-            3 => self.out_db = value.clamp(Self::PARAMS[3].min, Self::PARAMS[3].max),
             _ => return,
         }
         self.recompute();
@@ -286,11 +271,10 @@ mod tests {
     fn parameters_are_declared() {
         let e = WavefolderEffect::new();
         let specs = e.parameters();
-        assert_eq!(specs.len(), 4);
+        assert_eq!(specs.len(), 3);
         assert_eq!(specs[0].name, "Drive");
         assert_eq!(specs[1].name, "Fold");
         assert_eq!(specs[2].name, "Bias");
-        assert_eq!(specs[3].name, "Out");
     }
 
     #[test]
@@ -318,7 +302,6 @@ mod tests {
         e.set_param(0, 0.0);
         e.set_param(1, 0.0);
         e.set_param(2, 0.0);
-        e.set_param(3, 0.0);
         for i in 0..2048 {
             let x = (i as f32 * 0.1).sin();
             e.process_sample(x, x);
@@ -406,7 +389,6 @@ mod tests {
         e.set_param(0, 24.0);
         e.set_param(1, 100.0);
         e.set_param(2, 100.0);
-        e.set_param(3, 24.0);
         for i in 0..16_384 {
             let x = (i as f32 * 0.05).sin();
             let (l, r) = e.process_sample(x, x);
