@@ -197,7 +197,11 @@ The curve canvas is the large area beneath the routing controls.
 - **Left-drag the tension handle** (small grip on the segment between two nodes) — bends the segment's curvature.
 - **Ctrl-drag on empty canvas** — marquee-adds enclosed nodes to the selection.
 - **Left-click empty canvas** — clears the selection.
-- **Right-click a selected node** — opens a Transform context menu with `Compress values`, `Expand values`, `Compress times`, `Expand times`.
+- **Right-click a selected node** — opens a Transform context menu that scales the selection 25 % around its mean. Each option leaves an existing selection in place; pick one repeatedly to compound the effect.
+    - **Compress values** — pulls each selected node's value 25 % toward the selection's mean value. Repeated picks flatten the selection toward its average.
+    - **Expand values** — pushes each selected node's value 25 % away from the selection's mean value. Clamps results to `[0, 1]` so nodes can't escape the canvas.
+    - **Compress times** — pulls each selected node's time 25 % toward the selection's mean time, so the selected nodes bunch up around their centre. The first and last nodes never move on the time axis (they're pinned to the canvas edges) and don't contribute to the mean.
+    - **Expand times** — pushes each selected node's time 25 % away from the mean time, spreading the selection out. Anchor nodes don't move; each result is clamped against its neighbours so node times stay strictly ascending.
 - **Right-click a segment, an unselected node, the canvas, or a tension handle** — toggles the `stepped` flag on the affected segment (drawn as a stair-step rather than a smoothed segment).
 - **Delete / Backspace** — deletes the currently selected node(s).
 - **Hovering a node** — shows a two-line tooltip with the node's time (as a percentage of the loop) and value (as a dB amount for `Amp`, or the parameter's formatted value for an assignable MSEG with a routed target).
