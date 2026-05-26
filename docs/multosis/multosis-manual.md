@@ -185,18 +185,19 @@ These controls appear in a strip above the curve canvas; some appear only condit
 - **Sync mode** — 2-tab `Time` / `Beat`. Sets whether the MSEG's loop length is given in seconds or in musical subdivisions.
 - **Length** — slider whose range depends on Sync mode. **Time** mode is continuous (0.05–32 s, log). **Beat** mode snaps to an 11-step ladder: `1/16` note, `1/8`, `1/4`, `1/2`, `1 bar`, `2 bars`, `4 bars`, `8 bars`, `16 bars`, `32 bars`, `64 bars`.
 
-The MSEG editor's curve canvas has a small strip of mode controls above it:
+A strip of mode controls runs along the bottom of the MSEG editor, beneath the curve canvas. Left to right:
 
-- **Randomize** button — re-rolls every node's time, value, tension, and stepped flag using the current Style and Time Grid. The current Time Grid drives the **node count**: denser grids generate more nodes (Stepped and Spiky styles fill the grid exactly, one node per cell; Smooth and Chaos take 60-100 % of the grid count; Ramps stays a little sparser at 35-60 %). Re-clicking with the same settings produces a different curve each time (seeded fresh). The curve's play mode, sync mode, length, hold mode, and grid settings are left alone — only the node shape changes.
-- **Polarity** toggle (`Unipolar` / `Bipolar`) — purely a viewing preference; the curve's stored values are always 0..1. **Unipolar** draws the canvas as 0..1 with the bottom as the zero reference. **Bipolar** draws 0..1 as -1..+1 with a midline marker at value 0.5 — useful for assignable MSEGs whose param target treats 0.5 as the no-modulation centre.
-- **Play Mode** toggle (`Cyclic` / `OneShot`) — **Cyclic** loops the curve continuously; one MSEG span = one cycle. **OneShot** runs the curve through once per trigger and stops at the last node. (Multosis MSEGs default to Cyclic and re-trigger from the row's Trigger source.)
-- **Time Grid** dropdown — sets the snap grid for node placement, shown as `T / V` where `T` is the number of time columns and `V` is the number of value rows. Multosis ships four presets: `4 / 4`, `8 / 8`, `16 / 8`, `32 / 16`. Finer grids let you place nodes more precisely but also feed the Randomizer more cells to fill.
-- **Style** dropdown — sets the character the **Randomize** button uses. Five options:
+- **Snap On / Snap Off** button — toggles node snapping to the Time Grid. When Snap is on, dragging or inserting a node snaps its time to the nearest grid column and its value to the nearest grid row; with Snap off, nodes land on whatever continuous (time, value) coordinate the cursor was at. Re-shaping an already-placed node still respects the snap setting at the moment you drag.
+- **Grid `T/V`** dropdown — sets the snap grid, shown as `Grid T/V` where `T` is the number of time columns and `V` is the number of value rows. Multosis ships four presets: `4/4`, `8/8`, `16/8`, `32/16`. Finer grids let you place nodes more precisely and feed the Randomizer more cells to fill.
+- **Style `{name}`** dropdown — sets the character the **Randomize** button uses. Five options:
     - **Smooth** — each node lands in the opposite half from its predecessor, no stepped segments, generous tension. Produces curves that always swing and use the full range.
     - **Ramps** — random values at each node, zero tension, no stepping. Straight-line ramps between nodes; sparser node count for a calmer feel.
     - **Stepped** — random values snapped to the value grid, no tension, every segment is stepped. Produces a staircase whose density matches the time grid exactly.
     - **Spiky** — alternates between low (0..0.15) and high (0.85..1) values with random tension and randomly stepped segments. Sharp peaks; density matches the time grid.
     - **Chaos** — fully random values, tension, and stepping per node. Anything goes.
+- **Unipolar / Bipolar** button (Polarity) — purely a viewing preference; the curve's stored values are always 0..1. **Unipolar** draws the canvas as 0..1 with the bottom as the zero reference. **Bipolar** draws 0..1 as -1..+1 with a midline marker at value 0.5 — useful for assignable MSEGs whose param target treats 0.5 as the no-modulation centre.
+- **Cyclic / One-shot** button (Play Mode) — **Cyclic** loops the curve continuously; one MSEG span = one cycle. **One-shot** runs the curve through once per trigger and stops at the last node. Multosis MSEGs default to Cyclic and re-trigger from the row's Trigger source.
+- **Randomize** button — re-rolls every node's time, value, tension, and stepped flag using the current Style and Time Grid. The current Time Grid drives the **node count**: denser grids generate more nodes (Stepped and Spiky styles fill the grid exactly, one node per cell; Smooth and Chaos take 60-100 % of the grid count; Ramps stays a little sparser at 35-60 %). Re-clicking with the same settings produces a different curve each time (seeded fresh). The curve's play mode, sync mode, length, hold mode, and grid settings are left alone — only the node shape changes.
 
 ### Drawing and editing curves
 
