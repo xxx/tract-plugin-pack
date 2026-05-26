@@ -255,6 +255,7 @@ mod chorus;
 mod comb;
 mod compressor;
 mod delay;
+mod diode;
 mod distortion;
 mod downsample;
 mod flanger;
@@ -294,6 +295,7 @@ pub use chorus::ChorusEffect;
 pub use comb::CombEffect;
 pub use compressor::CompressorEffect;
 pub use delay::DelayEffect;
+pub use diode::DiodeEffect;
 pub use distortion::DistortionEffect;
 pub use downsample::DownsampleEffect;
 pub use flanger::FlangerEffect;
@@ -504,6 +506,11 @@ pub enum EffectKind {
     /// resonance; Drive pushes harder into the tanh nonlinearity for
     /// the classic "growl".
     Ladder,
+    /// 4-pole diode ladder lowpass with TB-303-style HP in the feedback
+    /// path. Same parameter surface as `Ladder` but a different topology
+    /// and a sharper, squelchier character; sibling effect, port of
+    /// Matt Tytel's Vital DiodeFilter.
+    Diode,
 }
 
 impl EffectKind {
@@ -511,7 +518,7 @@ impl EffectKind {
     /// `family()` returns `Some("Spectral")` are grouped contiguously at the
     /// end so the kind-picker can render a single "Spectral" section header
     /// above them.
-    pub const ALL: [EffectKind; 38] = [
+    pub const ALL: [EffectKind; 39] = [
         // `None` stays first as the only un-categorised kind. The remaining
         // families are alphabetised by family name, with each block sorted
         // alphabetically by display name. Spectral is kept last as the big
@@ -523,6 +530,7 @@ impl EffectKind {
         EffectKind::Downsample,
         // Filter
         EffectKind::Comb,
+        EffectKind::Diode,
         EffectKind::Ladder,
         EffectKind::PhaserFilter,
         EffectKind::Svf,
@@ -604,6 +612,7 @@ impl EffectKind {
             EffectKind::SpectralStretch => "Stretch",
             EffectKind::PhaserFilter => "Phaser Filter",
             EffectKind::Ladder => "Ladder",
+            EffectKind::Diode => "Diode",
         }
     }
 
@@ -616,7 +625,9 @@ impl EffectKind {
         match self {
             Self::None => None,
             Self::Bitcrush | Self::Distortion | Self::Downsample => Some("Distortion"),
-            Self::Comb | Self::Ladder | Self::PhaserFilter | Self::Svf => Some("Filter"),
+            Self::Comb | Self::Diode | Self::Ladder | Self::PhaserFilter | Self::Svf => {
+                Some("Filter")
+            }
             Self::Compressor | Self::Vocoder => Some("Misc"),
             Self::Chorus | Self::Flanger | Self::Fm | Self::Phaser | Self::Ring => {
                 Some("Modulation")
@@ -830,6 +841,9 @@ pub enum EffectInstance {
     // Not boxed -- LadderEffect is tiny: 4 stages + 3 cached tanh + 4
     // delay + 2 phase-delay samples per channel, all inline (~22 floats).
     Ladder(LadderEffect),
+    // Not boxed -- DiodeEffect is tiny: 4 unsaturated + 4 saturated stage
+    // states + 1 HP feedback state per channel (~18 floats).
+    Diode(DiodeEffect),
 }
 
 impl EffectInstance {
@@ -874,6 +888,7 @@ impl EffectInstance {
             EffectKind::SpectralStretch => EffectInstance::SpectralStretch(Box::default()),
             EffectKind::PhaserFilter => EffectInstance::PhaserFilter(PhaserFilterEffect::new()),
             EffectKind::Ladder => EffectInstance::Ladder(LadderEffect::new()),
+            EffectKind::Diode => EffectInstance::Diode(DiodeEffect::new()),
         }
     }
 
@@ -918,6 +933,7 @@ impl EffectInstance {
             EffectInstance::SpectralStretch(_) => EffectKind::SpectralStretch,
             EffectInstance::PhaserFilter(_) => EffectKind::PhaserFilter,
             EffectInstance::Ladder(_) => EffectKind::Ladder,
+            EffectInstance::Diode(_) => EffectKind::Diode,
         }
     }
 }
@@ -963,6 +979,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralStretch(e) => e.process_sample(left, right),
             EffectInstance::PhaserFilter(e) => e.process_sample(left, right),
             EffectInstance::Ladder(e) => e.process_sample(left, right),
+            EffectInstance::Diode(e) => e.process_sample(left, right),
         }
     }
 
@@ -1006,6 +1023,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralStretch(e) => e.set_sample_rate(sample_rate),
             EffectInstance::PhaserFilter(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Ladder(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Diode(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -1049,6 +1067,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralStretch(e) => e.reset(),
             EffectInstance::PhaserFilter(e) => e.reset(),
             EffectInstance::Ladder(e) => e.reset(),
+            EffectInstance::Diode(e) => e.reset(),
         }
     }
 
@@ -1092,6 +1111,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralStretch(e) => e.parameters(),
             EffectInstance::PhaserFilter(e) => e.parameters(),
             EffectInstance::Ladder(e) => e.parameters(),
+            EffectInstance::Diode(e) => e.parameters(),
         }
     }
 
@@ -1135,6 +1155,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralStretch(e) => e.set_param(index, value),
             EffectInstance::PhaserFilter(e) => e.set_param(index, value),
             EffectInstance::Ladder(e) => e.set_param(index, value),
+            EffectInstance::Diode(e) => e.set_param(index, value),
         }
     }
 
@@ -1178,6 +1199,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralStretch(e) => e.set_bpm(bpm),
             EffectInstance::PhaserFilter(e) => e.set_bpm(bpm),
             EffectInstance::Ladder(e) => e.set_bpm(bpm),
+            EffectInstance::Diode(e) => e.set_bpm(bpm),
         }
     }
 
@@ -1221,6 +1243,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralStretch(e) => e.param_dimmed(index),
             EffectInstance::PhaserFilter(e) => e.param_dimmed(index),
             EffectInstance::Ladder(e) => e.param_dimmed(index),
+            EffectInstance::Diode(e) => e.param_dimmed(index),
         }
     }
 
@@ -1264,6 +1287,7 @@ impl Effect for EffectInstance {
             EffectInstance::SpectralStretch(e) => e.latency_samples(),
             EffectInstance::PhaserFilter(e) => e.latency_samples(),
             EffectInstance::Ladder(e) => e.latency_samples(),
+            EffectInstance::Diode(e) => e.latency_samples(),
         }
     }
 }
@@ -1334,7 +1358,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 38);
+        assert_eq!(EffectKind::ALL.len(), 39);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -1376,6 +1400,7 @@ mod tests {
         assert_eq!(EffectKind::SpectralStretch.name(), "Stretch");
         assert_eq!(EffectKind::PhaserFilter.name(), "Phaser Filter");
         assert_eq!(EffectKind::Ladder.name(), "Ladder");
+        assert_eq!(EffectKind::Diode.name(), "Diode");
     }
 
     #[test]
@@ -1816,6 +1841,7 @@ mod tests {
             EffectKind::SpectralStretch,
             EffectKind::PhaserFilter,
             EffectKind::Ladder,
+            EffectKind::Diode,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
