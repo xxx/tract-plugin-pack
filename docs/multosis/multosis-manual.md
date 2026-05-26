@@ -187,7 +187,7 @@ These controls appear in a strip above the curve canvas; some appear only condit
 
 A strip of mode controls runs along the bottom of the MSEG editor, beneath the curve canvas. Left to right:
 
-- **Snap On / Snap Off** button — toggles node snapping to the Time Grid. When Snap is on, dragging or inserting a node snaps its time to the nearest grid column and its value to the nearest grid row; with Snap off, nodes land on whatever continuous (time, value) coordinate the cursor was at. Re-shaping an already-placed node still respects the snap setting at the moment you drag.
+- **Snap On / Snap Off** button — toggles node snapping to the Time Grid. When Snap is on, dragging or inserting a node snaps its time to the nearest grid column and its value to the nearest grid row; with Snap off, nodes land on whatever continuous (time, value) coordinate the cursor was at. **Hold Shift while dragging to temporarily bypass Snap and place the node at the exact cursor position** — useful for nudging a snapped node off-grid without flipping the global Snap state.
 - **Grid `T/V`** dropdown — sets the snap grid, shown as `Grid T/V` where `T` is the number of time columns and `V` is the number of value rows. Multosis ships four presets: `4/4`, `8/8`, `16/8`, `32/16`. Finer grids let you place nodes more precisely and feed the Randomizer more cells to fill.
 - **Style `{name}`** dropdown — sets the character the **Randomize** button uses. Five options:
     - **Smooth** — each node lands in the opposite half from its predecessor, no stepped segments, generous tension. Produces curves that always swing and use the full range.
