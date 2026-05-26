@@ -14,7 +14,7 @@ colorlinks: true
 
 Multosis is a **16-row grid step sequencer where each row hosts a per-row audio effect driven by per-row MSEGs**. The active rows on each step form a **series chain** — row 1's output feeds row 2, which feeds row 3, and so on down through row 16. The playhead advances at a tempo-synced rate through up to 32 columns; on every step, only the rows whose cell is lit (and which aren't muted) contribute to the chain, with up to four MSEG curves per row shaping the effect's parameters in real time.
 
-50 effect kinds are bundled, organised into nine families plus the "None" passthrough: Distortion, Dynamics, Filter, Misc, Modulation, Pitch, Spatial, Time, Spectral. They span everything from a Moog ladder filter to a Dattorro plate reverb to fourteen FFT-based spectral effects.
+50 effect kinds are bundled, organised into nine families plus the "None" passthrough: Distortion, Dynamics, Filter, Misc, Modulation, Pitch, Spatial, Time, Spectral. They span everything from a Moog-inspired ladder filter to a Dattorro plate reverb to fourteen FFT-based spectral effects.
 
 ## Installation
 
