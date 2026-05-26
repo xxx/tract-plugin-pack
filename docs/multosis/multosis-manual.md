@@ -200,7 +200,7 @@ A gold-tinted vertical line shows the MSEG's current playback phase across the c
 
 ### Defaults
 
-On a fresh project, slot 1 is selected by default and the default trigger source is `Free run`. The `Amp` MSEG defaults to a flat line at 1.0. MSEG 1 ("1") defaults to a cyclic triangle routed to the effect's first parameter at depth 0.4; MSEG 2 ("2") is a flat-line spare with no target; MSEG 3 ("3") is a 5-node sine-approximating cycle with no target. All four MSEGs on a row share the same Beat-synced default loop length, which increases per row from 4 beats on row 1 to 34 beats on row 16, so independent rows visibly drift at their own rates.
+On a fresh project, slot 1 is selected by default and the default trigger source is `Free run`. The `Amp` MSEG defaults to a flat line at 1.0. MSEG 1 ("1") defaults to a cyclic triangle routed to the effect's first parameter at depth 0.4; MSEG 2 ("2") is a flat-line spare with no target; MSEG 3 ("3") is a 5-node sine-approximating cycle with no target. All four MSEGs on a row share the same Beat-synced default loop length, picked per-row so independent rows visibly drift at their own rates.
 
 ![MSEG assignment](mseg-assign.png){ width=60% }
 
@@ -680,7 +680,7 @@ The track-list row label shows a small **PDC** stripe (thin teal vertical bar on
 
 - **Use Hold for sustained-effect patches.** With Speed = Hold the playhead doesn't move, so whatever step pattern you've drawn applies continuously — the plugin becomes a fixed-routing multi-effect rack.
 - **Solo a row to audition it.** S on a single row mutes every other row, so you can dial in one effect cleanly. Click S again to release.
-- **Drive a MSEG with the host transport.** MSEGs default to **Beat-synced** with a per-row loop length (4 beats on row 1, growing by 2 per row to 34 beats on row 16) so independent rows visibly drift at their own rates. Switch to **Time** sync mode for a fixed-seconds loop, or set the MSEG's **Trigger** to `Free run`, `Cell light`, `Cell step`, `Free Hz`, or `Transient` to retrigger from sources other than the host transport.
+- **Drive a MSEG with the host transport.** MSEGs default to **Beat-synced** with a per-row loop length so independent rows visibly drift at their own rates. Switch to **Time** sync mode for a fixed-seconds loop, or set the MSEG's **Trigger** to `Free run`, `Cell light`, `Cell step`, `Free Hz`, or `Transient` to retrigger from sources other than the host transport.
 - **The wet-bus compressor is on by default at 4:1, -6 dB.** Drop Ratio to 1:1 to bypass if you'd rather catch peaks at the master output.
 
 # License
