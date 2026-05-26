@@ -12,7 +12,7 @@ colorlinks: true
 
 ## What is Multosis?
 
-Multosis is a **16-row grid step sequencer where each row hosts a per-row audio effect driven by per-row MSEGs**. The active rows on each step form a **series chain** — row 0's output feeds row 1, which feeds row 2, and so on through row 15. The playhead advances at a tempo-synced rate through up to 32 columns; on every step, only the rows whose cell is lit (and which aren't muted) contribute to the chain, with up to four MSEG curves per row shaping the effect's parameters in real time.
+Multosis is a **16-row grid step sequencer where each row hosts a per-row audio effect driven by per-row MSEGs**. The active rows on each step form a **series chain** — row 1's output feeds row 2, which feeds row 3, and so on down through row 16. The playhead advances at a tempo-synced rate through up to 32 columns; on every step, only the rows whose cell is lit (and which aren't muted) contribute to the chain, with up to four MSEG curves per row shaping the effect's parameters in real time.
 
 50 effect kinds are bundled, organised into nine families plus the "None" passthrough: Distortion, Dynamics, Filter, Misc, Modulation, Pitch, Spatial, Time, Spectral. They span everything from a Moog ladder filter to a Dattorro plate reverb to fourteen FFT-based spectral effects.
 
@@ -36,7 +36,7 @@ The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` bun
 2. Click cells in the **grid** to activate steps on whichever rows you want.
 3. Click a row in the **track list** on the left to open Effect view, then pick an effect from the **Kind** dropdown.
 4. Set the **Speed** in the top toolbar (e.g., `1/8`) to choose how fast the playhead steps. Default is **Hold** (playhead frozen).
-5. Hit play on your DAW transport. The playhead traverses the grid; on every step the active rows form a series chain (row 0 → row 15) processing the incoming audio.
+5. Hit play on your DAW transport. The playhead traverses the grid; on every step the active rows form a series chain (top-down: row 1 → row 16) processing the incoming audio.
 6. Back in Effect view, set parameter values on the row's dials and optionally draw **MSEGs** to modulate them over time.
 7. Adjust the per-row **Mix** dial (dry/wet for that effect) and the master **Output** to balance the overall signal.
 
@@ -99,7 +99,7 @@ The lower toolbar row holds four grid-mutating buttons and a step-counter readou
 
 ![grid](grid.png){ width=80% }
 
-The grid is **16 rows × 32 columns**, arranged in four groups of eight columns. Each cell is either inactive (dim) or active (lit). The playhead scans the **loop region**'s columns left to right and wraps at its right edge back to its left edge (not to grid column 0 — see Loop region below). As the playhead enters each column, the rows whose cell is active there (and which aren't muted) form a series chain in row order from top to bottom: row 0's output feeds row 1, then row 2, and so on through row 15. Rows with an inactive cell at the current column, rows outside the loop region's row span, and effectively muted rows are skipped.
+The grid is **16 rows × 32 columns**, arranged in four groups of eight columns. Each cell is either inactive (dim) or active (lit). The playhead scans the **loop region**'s columns left to right and wraps at its right edge back to its left edge (not to the leftmost grid column — see Loop region below). As the playhead enters each column, the rows whose cell is active there (and which aren't muted) form a series chain in row order from top to bottom: row 1's output feeds row 2, then row 3, and so on down through row 16. Rows with an inactive cell at the current column, rows outside the loop region's row span, and effectively muted rows are skipped.
 
 **Editing the grid:**
 
