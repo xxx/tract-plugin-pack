@@ -200,7 +200,7 @@ A gold-tinted vertical line shows the MSEG's current playback phase across the c
 
 ### Defaults
 
-On a fresh project, slot 1 is selected by default and the default trigger source is `Free run`. The `Amp` MSEG defaults to a flat line at 1.0. MSEG 1 ("1") defaults to a cyclic triangle routed to the effect's first parameter at depth 0.4; MSEG 2 ("2") is a flat-line spare with no target; MSEG 3 ("3") is a 5-node sine-approximating cycle with no target. All four MSEGs on a row share the same Beat-synced default loop length, picked per-row so independent rows visibly drift at their own rates.
+On a fresh project, slot 1 is selected by default and the default trigger source is `Free run`. The `Amp` MSEG defaults to a flat line at 1.0. MSEG 1 ("1") defaults to a cyclic triangle routed to the effect's first parameter at depth 0.4; MSEG 2 ("2") is a rising 0→1 ramp with no target; MSEG 3 ("3") is a 5-node sine-approximating cycle with no target. All four MSEGs on a row share the same Beat-synced default loop length, picked per-row so independent rows visibly drift at their own rates.
 
 ![MSEG assignment](mseg-assign.png){ width=60% }
 
