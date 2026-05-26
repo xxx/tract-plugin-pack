@@ -263,6 +263,7 @@ mod flanger;
 mod fm;
 mod frequency_shift;
 mod gate;
+mod haas;
 mod ladder;
 mod limiter;
 mod none;
@@ -289,6 +290,7 @@ mod spectral_smear;
 mod spectral_spread;
 mod spectral_stretch;
 mod spectral_twist;
+mod stereo_widener;
 mod stretch;
 mod svf;
 mod transient_shaper;
@@ -312,6 +314,7 @@ pub use flanger::FlangerEffect;
 pub use fm::FmEffect;
 pub use frequency_shift::FrequencyShiftEffect;
 pub use gate::GateEffect;
+pub use haas::HaasEffect;
 pub use ladder::LadderEffect;
 pub use limiter::LimiterEffect;
 pub use none::NoneEffect;
@@ -338,6 +341,7 @@ pub use spectral_smear::SpectralSmearEffect;
 pub use spectral_spread::SpectralSpreadEffect;
 pub use spectral_stretch::SpectralStretchEffect;
 pub use spectral_twist::SpectralTwistEffect;
+pub use stereo_widener::StereoWidenerEffect;
 pub use stretch::StretchEffect;
 pub use svf::SvfEffect;
 pub use transient_shaper::TransientShaperEffect;
@@ -567,6 +571,14 @@ pub enum EffectKind {
     /// envelope followers (fast vs slow); their ratio drives Attack
     /// and Sustain gain offsets at +/- 12 dB extremes.
     TransientShaper,
+    /// Single-knob stereo widener: scales the M/S "side" while
+    /// preserving "mid" (Ozone-style law). 0% = mono, 100% =
+    /// identity, 200% = double the side (wider-than-stereo image).
+    StereoWidener,
+    /// Haas / precedence-effect stereo delay: delays one channel up
+    /// to 25 ms to push the apparent source off-centre. Signed
+    /// Position knob (-25..+25 ms).
+    Haas,
 }
 
 impl EffectKind {
@@ -574,7 +586,7 @@ impl EffectKind {
     /// `family()` returns `Some("Spectral")` are grouped contiguously at the
     /// end so the kind-picker can render a single "Spectral" section header
     /// above them.
-    pub const ALL: [EffectKind; 48] = [
+    pub const ALL: [EffectKind; 50] = [
         // `None` stays first as the only un-categorised kind. The remaining
         // families are alphabetised by family name, with each block sorted
         // alphabetically by display name. Spectral is kept last as the big
@@ -612,6 +624,9 @@ impl EffectKind {
         EffectKind::FrequencyShift,
         EffectKind::PitchShift,
         EffectKind::Varispeed,
+        // Spatial
+        EffectKind::Haas,
+        EffectKind::StereoWidener,
         // Time
         EffectKind::Delay,
         EffectKind::Plate,
@@ -688,6 +703,8 @@ impl EffectKind {
             EffectKind::Limiter => "Limiter",
             EffectKind::Gate => "Gate",
             EffectKind::TransientShaper => "Transient Shaper",
+            EffectKind::StereoWidener => "Stereo Widener",
+            EffectKind::Haas => "Haas",
         }
     }
 
@@ -721,6 +738,7 @@ impl EffectKind {
             | Self::Tremolo
             | Self::Vibrato => Some("Modulation"),
             Self::FrequencyShift | Self::PitchShift | Self::Varispeed => Some("Pitch"),
+            Self::Haas | Self::StereoWidener => Some("Spatial"),
             Self::Delay | Self::Plate | Self::Repeat | Self::Reverb | Self::Stretch => {
                 Some("Time")
             }
@@ -963,6 +981,11 @@ pub enum EffectInstance {
     // Not boxed -- TransientShaperEffect has only two envelope
     // followers plus their coefficients.
     TransientShaper(TransientShaperEffect),
+    // Not boxed -- StereoWidenerEffect is stateless (a width knob).
+    StereoWidener(StereoWidenerEffect),
+    // Not boxed -- HaasEffect itself is small; the two Vec ring
+    // buffers it holds are already heap-allocated by Vec.
+    Haas(HaasEffect),
 }
 
 impl EffectInstance {
@@ -1019,6 +1042,8 @@ impl EffectInstance {
             EffectKind::TransientShaper => {
                 EffectInstance::TransientShaper(TransientShaperEffect::new())
             }
+            EffectKind::StereoWidener => EffectInstance::StereoWidener(StereoWidenerEffect::new()),
+            EffectKind::Haas => EffectInstance::Haas(HaasEffect::new()),
         }
     }
 
@@ -1073,6 +1098,8 @@ impl EffectInstance {
             EffectInstance::Limiter(_) => EffectKind::Limiter,
             EffectInstance::Gate(_) => EffectKind::Gate,
             EffectInstance::TransientShaper(_) => EffectKind::TransientShaper,
+            EffectInstance::StereoWidener(_) => EffectKind::StereoWidener,
+            EffectInstance::Haas(_) => EffectKind::Haas,
         }
     }
 }
@@ -1128,6 +1155,8 @@ impl Effect for EffectInstance {
             EffectInstance::Limiter(e) => e.process_sample(left, right),
             EffectInstance::Gate(e) => e.process_sample(left, right),
             EffectInstance::TransientShaper(e) => e.process_sample(left, right),
+            EffectInstance::StereoWidener(e) => e.process_sample(left, right),
+            EffectInstance::Haas(e) => e.process_sample(left, right),
         }
     }
 
@@ -1181,6 +1210,8 @@ impl Effect for EffectInstance {
             EffectInstance::Limiter(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Gate(e) => e.set_sample_rate(sample_rate),
             EffectInstance::TransientShaper(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::StereoWidener(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Haas(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -1234,6 +1265,8 @@ impl Effect for EffectInstance {
             EffectInstance::Limiter(e) => e.reset(),
             EffectInstance::Gate(e) => e.reset(),
             EffectInstance::TransientShaper(e) => e.reset(),
+            EffectInstance::StereoWidener(e) => e.reset(),
+            EffectInstance::Haas(e) => e.reset(),
         }
     }
 
@@ -1287,6 +1320,8 @@ impl Effect for EffectInstance {
             EffectInstance::Limiter(e) => e.parameters(),
             EffectInstance::Gate(e) => e.parameters(),
             EffectInstance::TransientShaper(e) => e.parameters(),
+            EffectInstance::StereoWidener(e) => e.parameters(),
+            EffectInstance::Haas(e) => e.parameters(),
         }
     }
 
@@ -1340,6 +1375,8 @@ impl Effect for EffectInstance {
             EffectInstance::Limiter(e) => e.set_param(index, value),
             EffectInstance::Gate(e) => e.set_param(index, value),
             EffectInstance::TransientShaper(e) => e.set_param(index, value),
+            EffectInstance::StereoWidener(e) => e.set_param(index, value),
+            EffectInstance::Haas(e) => e.set_param(index, value),
         }
     }
 
@@ -1393,6 +1430,8 @@ impl Effect for EffectInstance {
             EffectInstance::Limiter(e) => e.set_bpm(bpm),
             EffectInstance::Gate(e) => e.set_bpm(bpm),
             EffectInstance::TransientShaper(e) => e.set_bpm(bpm),
+            EffectInstance::StereoWidener(e) => e.set_bpm(bpm),
+            EffectInstance::Haas(e) => e.set_bpm(bpm),
         }
     }
 
@@ -1446,6 +1485,8 @@ impl Effect for EffectInstance {
             EffectInstance::Limiter(e) => e.param_dimmed(index),
             EffectInstance::Gate(e) => e.param_dimmed(index),
             EffectInstance::TransientShaper(e) => e.param_dimmed(index),
+            EffectInstance::StereoWidener(e) => e.param_dimmed(index),
+            EffectInstance::Haas(e) => e.param_dimmed(index),
         }
     }
 
@@ -1499,6 +1540,8 @@ impl Effect for EffectInstance {
             EffectInstance::Limiter(e) => e.latency_samples(),
             EffectInstance::Gate(e) => e.latency_samples(),
             EffectInstance::TransientShaper(e) => e.latency_samples(),
+            EffectInstance::StereoWidener(e) => e.latency_samples(),
+            EffectInstance::Haas(e) => e.latency_samples(),
         }
     }
 }
@@ -1569,7 +1612,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 48);
+        assert_eq!(EffectKind::ALL.len(), 50);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -1621,6 +1664,8 @@ mod tests {
         assert_eq!(EffectKind::Limiter.name(), "Limiter");
         assert_eq!(EffectKind::Gate.name(), "Gate");
         assert_eq!(EffectKind::TransientShaper.name(), "Transient Shaper");
+        assert_eq!(EffectKind::StereoWidener.name(), "Stereo Widener");
+        assert_eq!(EffectKind::Haas.name(), "Haas");
     }
 
     #[test]
@@ -2071,6 +2116,8 @@ mod tests {
             EffectKind::Limiter,
             EffectKind::Gate,
             EffectKind::TransientShaper,
+            EffectKind::StereoWidener,
+            EffectKind::Haas,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
