@@ -171,9 +171,15 @@ While editing one slot, the other three are drawn faintly behind it as ghost cur
 
 These controls appear in a strip above the curve canvas; some appear only conditionally:
 
-- **Trigger** — dropdown to the left of the slot selector. Picks what resets the MSEG's phase: `Free run`, `Cell light`, `Cell step`, `Free Hz`, or `Transient`. Applies to all four MSEGs on the row.
-- **Rate** (Free Hz trigger) / **Sens** (Transient trigger) — a small dial to the right of the Trigger dropdown, shown only when the relevant trigger source is selected.
-- **Hold** (Transient trigger only) — a second dial to the right of **Sens**, sets the post-trigger hold time.
+- **Trigger** — dropdown to the left of the slot selector. Picks what resets the MSEG's phase to zero. The setting is per-track and applies to all four MSEGs on the row at once:
+    - **Free run** (default) — phases never reset. The MSEGs cycle continuously, locked to the host transport (Beat sync) or to a fixed wall-clock rate (Time sync).
+    - **Cell light** — phases reset on the row's inactive → active edge: when the playhead enters an active cell on this row after a stretch of inactive cells. Use for one-shot envelope behaviour that re-arms per gesture.
+    - **Cell step** — phases reset on every step boundary where the row's cell is lit. Use when you want the same envelope shape to fire fresh on every active step.
+    - **Free Hz** — phases reset at a fixed rate, independent of the host transport. The rate is set by the **Rate** dial (see below).
+    - **Transient** — phases reset when an onset is detected in the plugin's input audio. Detection is a fast/slow envelope-follower ratio crossing a threshold; the **Sens** and **Hold** dials below tune it.
+- **Rate** (Free Hz trigger) — appears beside the Trigger dropdown only when **Free Hz** is selected. Sets the re-fire frequency in Hz.
+- **Sens** (Transient trigger) — appears beside the Trigger dropdown only when **Transient** is selected. Sets the onset detection threshold; right = more sensitive (lower threshold).
+- **Hold** (Transient trigger) — appears to the right of **Sens** when **Transient** is selected. Sets the post-fire refractory period (in ms) during which further onsets are ignored, so the transient's tail doesn't trigger repeated re-fires.
 - **Target** — dropdown shown for the three assignable MSEGs (`1` / `2` / `3`). Lists `(none)` plus the names of every parameter on the current effect. Picking one routes that MSEG to that param. Not shown for `Amp`.
 - **Depth** — bipolar `-1..+1` dial shown for the three assignable MSEGs. Double-click resets to 0. Drag-only (no text entry).
 - **Sync mode** — 2-tab `Time` / `Beat`. Sets whether the MSEG's loop length is given in seconds or in musical subdivisions.
