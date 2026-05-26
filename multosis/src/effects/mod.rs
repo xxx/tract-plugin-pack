@@ -262,7 +262,9 @@ mod downsample;
 mod flanger;
 mod fm;
 mod frequency_shift;
+mod gate;
 mod ladder;
+mod limiter;
 mod none;
 mod phaser;
 mod phaser_filter;
@@ -289,6 +291,7 @@ mod spectral_stretch;
 mod spectral_twist;
 mod stretch;
 mod svf;
+mod transient_shaper;
 mod tremolo;
 mod varispeed;
 mod vibrato;
@@ -308,7 +311,9 @@ pub use downsample::DownsampleEffect;
 pub use flanger::FlangerEffect;
 pub use fm::FmEffect;
 pub use frequency_shift::FrequencyShiftEffect;
+pub use gate::GateEffect;
 pub use ladder::LadderEffect;
+pub use limiter::LimiterEffect;
 pub use none::NoneEffect;
 pub use phaser::PhaserEffect;
 pub use phaser_filter::PhaserFilterEffect;
@@ -335,6 +340,7 @@ pub use spectral_stretch::SpectralStretchEffect;
 pub use spectral_twist::SpectralTwistEffect;
 pub use stretch::StretchEffect;
 pub use svf::SvfEffect;
+pub use transient_shaper::TransientShaperEffect;
 pub use tremolo::TremoloEffect;
 pub use varispeed::VarispeedEffect;
 pub use vibrato::VibratoEffect;
@@ -550,6 +556,17 @@ pub enum EffectKind {
     /// on the feedback summing node. LP / HP selectable. Port of Surge
     /// XT's K35Filter.
     SallenKey,
+    /// In-chain peak limiter. Zero-latency variant of tinylimit: soft-
+    /// knee gain computer + one-pole release envelope + safety clip
+    /// at the ceiling. Stereo-linked.
+    Limiter,
+    /// Noise gate. Peak follower + hysteresis-driven open/close state
+    /// + smoothed attack/release ramps. Stereo-linked.
+    Gate,
+    /// SPL Transient Designer-style transient shaper. Two parallel
+    /// envelope followers (fast vs slow); their ratio drives Attack
+    /// and Sustain gain offsets at +/- 12 dB extremes.
+    TransientShaper,
 }
 
 impl EffectKind {
@@ -557,7 +574,7 @@ impl EffectKind {
     /// `family()` returns `Some("Spectral")` are grouped contiguously at the
     /// end so the kind-picker can render a single "Spectral" section header
     /// above them.
-    pub const ALL: [EffectKind; 45] = [
+    pub const ALL: [EffectKind; 48] = [
         // `None` stays first as the only un-categorised kind. The remaining
         // families are alphabetised by family name, with each block sorted
         // alphabetically by display name. Spectral is kept last as the big
@@ -568,6 +585,11 @@ impl EffectKind {
         EffectKind::Distortion,
         EffectKind::Downsample,
         EffectKind::Wavefolder,
+        // Dynamics
+        EffectKind::Compressor,
+        EffectKind::Gate,
+        EffectKind::Limiter,
+        EffectKind::TransientShaper,
         // Filter
         EffectKind::Comb,
         EffectKind::Diode,
@@ -576,7 +598,6 @@ impl EffectKind {
         EffectKind::SallenKey,
         EffectKind::Svf,
         // Misc
-        EffectKind::Compressor,
         EffectKind::Vocoder,
         // Modulation
         EffectKind::AutoPan,
@@ -664,6 +685,9 @@ impl EffectKind {
             EffectKind::Wavefolder => "Wavefolder",
             EffectKind::Plate => "Plate",
             EffectKind::SallenKey => "Sallen-Key",
+            EffectKind::Limiter => "Limiter",
+            EffectKind::Gate => "Gate",
+            EffectKind::TransientShaper => "Transient Shaper",
         }
     }
 
@@ -684,7 +708,10 @@ impl EffectKind {
             | Self::PhaserFilter
             | Self::SallenKey
             | Self::Svf => Some("Filter"),
-            Self::Compressor | Self::Vocoder => Some("Misc"),
+            Self::Compressor | Self::Gate | Self::Limiter | Self::TransientShaper => {
+                Some("Dynamics")
+            }
+            Self::Vocoder => Some("Misc"),
             Self::AutoPan
             | Self::Chorus
             | Self::Flanger
@@ -927,6 +954,15 @@ pub enum EffectInstance {
     // Not boxed -- SallenKeyEffect is tiny: 3 z-1 values + 7 cached
     // coefficients per channel (~13 floats).
     SallenKey(SallenKeyEffect),
+    // Not boxed -- LimiterEffect has only the envelope state and a
+    // handful of cached coefficients.
+    Limiter(LimiterEffect),
+    // Not boxed -- GateEffect has the envelope, gain, and open-state
+    // flag plus coefficients.
+    Gate(GateEffect),
+    // Not boxed -- TransientShaperEffect has only two envelope
+    // followers plus their coefficients.
+    TransientShaper(TransientShaperEffect),
 }
 
 impl EffectInstance {
@@ -978,6 +1014,11 @@ impl EffectInstance {
             EffectKind::Wavefolder => EffectInstance::Wavefolder(WavefolderEffect::new()),
             EffectKind::Plate => EffectInstance::Plate(Box::default()),
             EffectKind::SallenKey => EffectInstance::SallenKey(SallenKeyEffect::new()),
+            EffectKind::Limiter => EffectInstance::Limiter(LimiterEffect::new()),
+            EffectKind::Gate => EffectInstance::Gate(GateEffect::new()),
+            EffectKind::TransientShaper => {
+                EffectInstance::TransientShaper(TransientShaperEffect::new())
+            }
         }
     }
 
@@ -1029,6 +1070,9 @@ impl EffectInstance {
             EffectInstance::Wavefolder(_) => EffectKind::Wavefolder,
             EffectInstance::Plate(_) => EffectKind::Plate,
             EffectInstance::SallenKey(_) => EffectKind::SallenKey,
+            EffectInstance::Limiter(_) => EffectKind::Limiter,
+            EffectInstance::Gate(_) => EffectKind::Gate,
+            EffectInstance::TransientShaper(_) => EffectKind::TransientShaper,
         }
     }
 }
@@ -1081,6 +1125,9 @@ impl Effect for EffectInstance {
             EffectInstance::Wavefolder(e) => e.process_sample(left, right),
             EffectInstance::Plate(e) => e.process_sample(left, right),
             EffectInstance::SallenKey(e) => e.process_sample(left, right),
+            EffectInstance::Limiter(e) => e.process_sample(left, right),
+            EffectInstance::Gate(e) => e.process_sample(left, right),
+            EffectInstance::TransientShaper(e) => e.process_sample(left, right),
         }
     }
 
@@ -1131,6 +1178,9 @@ impl Effect for EffectInstance {
             EffectInstance::Wavefolder(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Plate(e) => e.set_sample_rate(sample_rate),
             EffectInstance::SallenKey(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Limiter(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Gate(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::TransientShaper(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -1181,6 +1231,9 @@ impl Effect for EffectInstance {
             EffectInstance::Wavefolder(e) => e.reset(),
             EffectInstance::Plate(e) => e.reset(),
             EffectInstance::SallenKey(e) => e.reset(),
+            EffectInstance::Limiter(e) => e.reset(),
+            EffectInstance::Gate(e) => e.reset(),
+            EffectInstance::TransientShaper(e) => e.reset(),
         }
     }
 
@@ -1231,6 +1284,9 @@ impl Effect for EffectInstance {
             EffectInstance::Wavefolder(e) => e.parameters(),
             EffectInstance::Plate(e) => e.parameters(),
             EffectInstance::SallenKey(e) => e.parameters(),
+            EffectInstance::Limiter(e) => e.parameters(),
+            EffectInstance::Gate(e) => e.parameters(),
+            EffectInstance::TransientShaper(e) => e.parameters(),
         }
     }
 
@@ -1281,6 +1337,9 @@ impl Effect for EffectInstance {
             EffectInstance::Wavefolder(e) => e.set_param(index, value),
             EffectInstance::Plate(e) => e.set_param(index, value),
             EffectInstance::SallenKey(e) => e.set_param(index, value),
+            EffectInstance::Limiter(e) => e.set_param(index, value),
+            EffectInstance::Gate(e) => e.set_param(index, value),
+            EffectInstance::TransientShaper(e) => e.set_param(index, value),
         }
     }
 
@@ -1331,6 +1390,9 @@ impl Effect for EffectInstance {
             EffectInstance::Wavefolder(e) => e.set_bpm(bpm),
             EffectInstance::Plate(e) => e.set_bpm(bpm),
             EffectInstance::SallenKey(e) => e.set_bpm(bpm),
+            EffectInstance::Limiter(e) => e.set_bpm(bpm),
+            EffectInstance::Gate(e) => e.set_bpm(bpm),
+            EffectInstance::TransientShaper(e) => e.set_bpm(bpm),
         }
     }
 
@@ -1381,6 +1443,9 @@ impl Effect for EffectInstance {
             EffectInstance::Wavefolder(e) => e.param_dimmed(index),
             EffectInstance::Plate(e) => e.param_dimmed(index),
             EffectInstance::SallenKey(e) => e.param_dimmed(index),
+            EffectInstance::Limiter(e) => e.param_dimmed(index),
+            EffectInstance::Gate(e) => e.param_dimmed(index),
+            EffectInstance::TransientShaper(e) => e.param_dimmed(index),
         }
     }
 
@@ -1431,6 +1496,9 @@ impl Effect for EffectInstance {
             EffectInstance::Wavefolder(e) => e.latency_samples(),
             EffectInstance::Plate(e) => e.latency_samples(),
             EffectInstance::SallenKey(e) => e.latency_samples(),
+            EffectInstance::Limiter(e) => e.latency_samples(),
+            EffectInstance::Gate(e) => e.latency_samples(),
+            EffectInstance::TransientShaper(e) => e.latency_samples(),
         }
     }
 }
@@ -1501,7 +1569,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 45);
+        assert_eq!(EffectKind::ALL.len(), 48);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -1550,6 +1618,9 @@ mod tests {
         assert_eq!(EffectKind::Wavefolder.name(), "Wavefolder");
         assert_eq!(EffectKind::Plate.name(), "Plate");
         assert_eq!(EffectKind::SallenKey.name(), "Sallen-Key");
+        assert_eq!(EffectKind::Limiter.name(), "Limiter");
+        assert_eq!(EffectKind::Gate.name(), "Gate");
+        assert_eq!(EffectKind::TransientShaper.name(), "Transient Shaper");
     }
 
     #[test]
@@ -1997,6 +2068,9 @@ mod tests {
             EffectKind::Wavefolder,
             EffectKind::Plate,
             EffectKind::SallenKey,
+            EffectKind::Limiter,
+            EffectKind::Gate,
+            EffectKind::TransientShaper,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
