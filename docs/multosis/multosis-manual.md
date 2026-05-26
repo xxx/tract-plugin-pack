@@ -231,7 +231,60 @@ On a fresh project, slot 1 is selected by default and the default trigger source
 
 # Effect reference
 
-50 effect kinds, organised by family. Defaults shown in parentheses where useful.
+50 effect kinds, organised by family below. Defaults shown in parentheses where useful.
+
+## Alphabetical index
+
+- [Auto Pan](#auto-pan)
+- [Bitcrush](#bitcrush)
+- [Chorus](#chorus)
+- [Comb](#comb)
+- [Compressor](#compressor)
+- [Delay](#delay)
+- [Diode](#diode)
+- [Distortion](#distortion)
+- [Downsample](#downsample)
+- [Flanger](#flanger)
+- [FM](#fm)
+- [Freq Shift](#freq-shift)
+- [Gate](#gate)
+- [Haas](#haas)
+- [Ladder](#ladder)
+- [Limiter](#limiter)
+- [None](#none)
+- [Phaser](#phaser)
+- [Phaser Filter](#phaser-filter)
+- [Pitch Shift](#pitch-shift)
+- [Plate](#plate)
+- [Repeat](#repeat)
+- [Reverb](#reverb)
+- [Ring](#ring)
+- [Sallen-Key](#sallen-key)
+- [Satch](#satch)
+- [Spectral Bandpass](#spectral-bandpass)
+- [Spectral Cascade](#spectral-cascade)
+- [Spectral Compress](#spectral-compress)
+- [Spectral Corrupt](#spectral-corrupt)
+- [Spectral Lofi](#spectral-lofi)
+- [Spectral Mirror](#spectral-mirror)
+- [Spectral Reverb](#spectral-reverb)
+- [Spectral Rotate](#spectral-rotate)
+- [Spectral Scatter](#spectral-scatter)
+- [Spectral Shift](#spectral-shift)
+- [Spectral Smear](#spectral-smear)
+- [Spectral Spread](#spectral-spread)
+- [Spectral Stretch](#spectral-stretch)
+- [Spectral Twist](#spectral-twist)
+- [Stereo Widener](#stereo-widener)
+- [Stretch](#stretch)
+- [SVF](#svf)
+- [Transient Shaper](#transient-shaper)
+- [Tremolo](#tremolo)
+- [Varispeed](#varispeed)
+- [Vibrato](#vibrato)
+- [Vocoder](#vocoder)
+- [Warp Zone](#warp-zone)
+- [Wavefolder](#wavefolder)
 
 ## None
 
@@ -548,9 +601,9 @@ All Spectral-family effects share a switchable FFT analyser. The **FFT** selecto
 
 The two FFT-fixed effects in this category — **Satch** (2048-pt) and **Warp Zone** (4096-pt) — pre-date the switchable family but share its character.
 
-### Satch (Distortion-adjacent, FFT-fixed)
+### Satch
 
-Detail-preserving spectral saturator. Per-bin magnitude saturation: detail bins pass through clipping unaffected so highs survive.
+Distortion-adjacent, FFT-fixed at 2048-pt. Detail-preserving spectral saturator. Per-bin magnitude saturation: detail bins pass through clipping unaffected so highs survive.
 
 - **Gain** (0..24 dB, default 0) — input gain into the saturator.
 - **Threshold** (-24..0 dB, default 0) — saturation onset.
