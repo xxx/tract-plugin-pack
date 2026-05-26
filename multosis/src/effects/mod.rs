@@ -292,6 +292,7 @@ mod varispeed;
 mod vibrato;
 mod vocoder;
 mod warp_zone;
+mod wavefolder;
 
 pub use auto_pan::AutoPanEffect;
 pub use bitcrush::BitcrushEffect;
@@ -335,6 +336,7 @@ pub use varispeed::VarispeedEffect;
 pub use vibrato::VibratoEffect;
 pub use vocoder::VocoderEffect;
 pub use warp_zone::WarpZoneEffect;
+pub use wavefolder::WavefolderEffect;
 
 /// The effect registry — which effects exist. `Copy`, serde-derivable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
@@ -528,6 +530,12 @@ pub enum EffectKind {
     /// Output is the delayed (pitch-wobbled) signal only; no dry
     /// blend, distinguishing it from `Chorus` / `Flanger`.
     Vibrato,
+    /// Buchla 259-style west-coast wavefolder with ADAA1 anti-aliasing.
+    /// Five-cell Lockhart-style cascade produces bell-like harmonic
+    /// redistribution rather than the odd-harmonic emphasis of the
+    /// existing Distortion Fold shape. Port of ChowDSP's
+    /// WestCoastWavefolder.
+    Wavefolder,
 }
 
 impl EffectKind {
@@ -535,7 +543,7 @@ impl EffectKind {
     /// `family()` returns `Some("Spectral")` are grouped contiguously at the
     /// end so the kind-picker can render a single "Spectral" section header
     /// above them.
-    pub const ALL: [EffectKind; 42] = [
+    pub const ALL: [EffectKind; 43] = [
         // `None` stays first as the only un-categorised kind. The remaining
         // families are alphabetised by family name, with each block sorted
         // alphabetically by display name. Spectral is kept last as the big
@@ -545,6 +553,7 @@ impl EffectKind {
         EffectKind::Bitcrush,
         EffectKind::Distortion,
         EffectKind::Downsample,
+        EffectKind::Wavefolder,
         // Filter
         EffectKind::Comb,
         EffectKind::Diode,
@@ -636,6 +645,7 @@ impl EffectKind {
             EffectKind::Tremolo => "Tremolo",
             EffectKind::AutoPan => "Auto Pan",
             EffectKind::Vibrato => "Vibrato",
+            EffectKind::Wavefolder => "Wavefolder",
         }
     }
 
@@ -647,7 +657,9 @@ impl EffectKind {
     pub fn family(self) -> Option<&'static str> {
         match self {
             Self::None => None,
-            Self::Bitcrush | Self::Distortion | Self::Downsample => Some("Distortion"),
+            Self::Bitcrush | Self::Distortion | Self::Downsample | Self::Wavefolder => {
+                Some("Distortion")
+            }
             Self::Comb | Self::Diode | Self::Ladder | Self::PhaserFilter | Self::Svf => {
                 Some("Filter")
             }
@@ -879,6 +891,9 @@ pub enum EffectInstance {
     // Not boxed -- VibratoEffect itself is small; the two Vec delay
     // buffers it holds are already heap-allocated by Vec.
     Vibrato(VibratoEffect),
+    // Not boxed -- WavefolderEffect is tiny: previous-input + DC blocker
+    // state per channel (~6 floats).
+    Wavefolder(WavefolderEffect),
 }
 
 impl EffectInstance {
@@ -927,6 +942,7 @@ impl EffectInstance {
             EffectKind::Tremolo => EffectInstance::Tremolo(TremoloEffect::new()),
             EffectKind::AutoPan => EffectInstance::AutoPan(AutoPanEffect::new()),
             EffectKind::Vibrato => EffectInstance::Vibrato(VibratoEffect::new()),
+            EffectKind::Wavefolder => EffectInstance::Wavefolder(WavefolderEffect::new()),
         }
     }
 
@@ -975,6 +991,7 @@ impl EffectInstance {
             EffectInstance::Tremolo(_) => EffectKind::Tremolo,
             EffectInstance::AutoPan(_) => EffectKind::AutoPan,
             EffectInstance::Vibrato(_) => EffectKind::Vibrato,
+            EffectInstance::Wavefolder(_) => EffectKind::Wavefolder,
         }
     }
 }
@@ -1024,6 +1041,7 @@ impl Effect for EffectInstance {
             EffectInstance::Tremolo(e) => e.process_sample(left, right),
             EffectInstance::AutoPan(e) => e.process_sample(left, right),
             EffectInstance::Vibrato(e) => e.process_sample(left, right),
+            EffectInstance::Wavefolder(e) => e.process_sample(left, right),
         }
     }
 
@@ -1071,6 +1089,7 @@ impl Effect for EffectInstance {
             EffectInstance::Tremolo(e) => e.set_sample_rate(sample_rate),
             EffectInstance::AutoPan(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Vibrato(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Wavefolder(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -1118,6 +1137,7 @@ impl Effect for EffectInstance {
             EffectInstance::Tremolo(e) => e.reset(),
             EffectInstance::AutoPan(e) => e.reset(),
             EffectInstance::Vibrato(e) => e.reset(),
+            EffectInstance::Wavefolder(e) => e.reset(),
         }
     }
 
@@ -1165,6 +1185,7 @@ impl Effect for EffectInstance {
             EffectInstance::Tremolo(e) => e.parameters(),
             EffectInstance::AutoPan(e) => e.parameters(),
             EffectInstance::Vibrato(e) => e.parameters(),
+            EffectInstance::Wavefolder(e) => e.parameters(),
         }
     }
 
@@ -1212,6 +1233,7 @@ impl Effect for EffectInstance {
             EffectInstance::Tremolo(e) => e.set_param(index, value),
             EffectInstance::AutoPan(e) => e.set_param(index, value),
             EffectInstance::Vibrato(e) => e.set_param(index, value),
+            EffectInstance::Wavefolder(e) => e.set_param(index, value),
         }
     }
 
@@ -1259,6 +1281,7 @@ impl Effect for EffectInstance {
             EffectInstance::Tremolo(e) => e.set_bpm(bpm),
             EffectInstance::AutoPan(e) => e.set_bpm(bpm),
             EffectInstance::Vibrato(e) => e.set_bpm(bpm),
+            EffectInstance::Wavefolder(e) => e.set_bpm(bpm),
         }
     }
 
@@ -1306,6 +1329,7 @@ impl Effect for EffectInstance {
             EffectInstance::Tremolo(e) => e.param_dimmed(index),
             EffectInstance::AutoPan(e) => e.param_dimmed(index),
             EffectInstance::Vibrato(e) => e.param_dimmed(index),
+            EffectInstance::Wavefolder(e) => e.param_dimmed(index),
         }
     }
 
@@ -1353,6 +1377,7 @@ impl Effect for EffectInstance {
             EffectInstance::Tremolo(e) => e.latency_samples(),
             EffectInstance::AutoPan(e) => e.latency_samples(),
             EffectInstance::Vibrato(e) => e.latency_samples(),
+            EffectInstance::Wavefolder(e) => e.latency_samples(),
         }
     }
 }
@@ -1423,7 +1448,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 42);
+        assert_eq!(EffectKind::ALL.len(), 43);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -1469,6 +1494,7 @@ mod tests {
         assert_eq!(EffectKind::Tremolo.name(), "Tremolo");
         assert_eq!(EffectKind::AutoPan.name(), "Auto Pan");
         assert_eq!(EffectKind::Vibrato.name(), "Vibrato");
+        assert_eq!(EffectKind::Wavefolder.name(), "Wavefolder");
     }
 
     #[test]
@@ -1913,6 +1939,7 @@ mod tests {
             EffectKind::Tremolo,
             EffectKind::AutoPan,
             EffectKind::Vibrato,
+            EffectKind::Wavefolder,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
