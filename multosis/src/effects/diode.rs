@@ -1,4 +1,5 @@
 use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
+use tract_dsp::fast_math::tanh_pade;
 
 /// 4-pole diode ladder lowpass with TB-303-style HP in the feedback path.
 /// Sibling of the Moog `Ladder` effect: same family, same parameter
@@ -168,9 +169,9 @@ impl DiodeEffect {
     fn tick_tanh(s: &mut f32, sat: &mut f32, input: f32, coef: f32) -> f32 {
         let delta = coef * (input - *sat);
         *s += delta;
-        let out = s.tanh();
+        let out = tanh_pade(*s);
         *s += delta;
-        *sat = s.tanh();
+        *sat = tanh_pade(*s);
         out
     }
 
@@ -196,7 +197,7 @@ impl DiodeEffect {
         // Previous-sample stage 4 saturated state closes the resonance loop.
         let prev_stage4_sat = self.stage_sat[ch][3];
         let filter_input = (self.drive_lin * dry - self.resonance * prev_stage4_sat) * 0.5;
-        let sat_input = filter_input.tanh();
+        let sat_input = tanh_pade(filter_input);
 
         // HP-in-feedback: feedback_input = sat_input + stage2's previous
         // saturated state. Subtract the LP of that to get the HP of it --

@@ -1,4 +1,5 @@
 use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
+use tract_dsp::fast_math::tanh_pade;
 
 /// Sallen-Key 2-pole filter in the Korg-35 / MS-20 lineage. Distinct
 /// topology from the existing SVF (state-variable), Ladder (Moog), and
@@ -181,8 +182,17 @@ impl SallenKeyEffect {
         let s35 = self.coef_lb * self.z2[ch] + self.coef_hb * self.hz[ch];
         // Loop close: alpha resolves the algebraic feedback path.
         let u_clean = self.coef_alpha * (y1 + s35);
-        let u_driven = (u_clean * self.coef_saturation).tanh();
-        let u = u_clean * self.coef_sat_blend_inv + u_driven * self.coef_sat_blend;
+        // Short-circuit when Drive = 0 (the common case): the tanh result
+        // would be multiplied by `sat_blend = 0` and discarded. Avoiding
+        // the polynomial evaluation entirely is a 2x win on the default
+        // path. The branch is well-predicted because `sat_blend` only
+        // changes when Drive does.
+        let u = if self.coef_sat_blend > 0.0 {
+            let u_driven = tanh_pade(u_clean * self.coef_saturation);
+            u_clean * self.coef_sat_blend_inv + u_driven * self.coef_sat_blend
+        } else {
+            u_clean
+        };
         // Second-stage LPF on the saturated feedback signal.
         let lp2 = Self::do_lpf(g, u, &mut self.z2[ch]);
         let y = self.coef_k * lp2;
@@ -201,8 +211,14 @@ impl SallenKeyEffect {
         let s35 = self.coef_lb * self.lz[ch] + self.coef_hb * self.z2[ch];
         let u = self.coef_alpha * (y1 + s35);
         let y_clean = self.coef_k * u;
-        let y_driven = (y_clean * self.coef_saturation).tanh();
-        let y = y_clean * self.coef_sat_blend_inv + y_driven * self.coef_sat_blend;
+        // Same short-circuit as `process_channel_lp` -- avoid the tanh
+        // when Drive = 0.
+        let y = if self.coef_sat_blend > 0.0 {
+            let y_driven = tanh_pade(y_clean * self.coef_saturation);
+            y_clean * self.coef_sat_blend_inv + y_driven * self.coef_sat_blend
+        } else {
+            y_clean
+        };
         // doLpf(G, doHpf(G, y, z2), lz): the inner doHpf updates z2
         // and emits y - doLpf(G, y, z2); the outer doLpf updates lz.
         let lp_inner = Self::do_lpf(g, y, &mut self.z2[ch]);

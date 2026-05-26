@@ -1,4 +1,5 @@
 use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
+use tract_dsp::fast_math::tanh_pade;
 
 /// 24 dB/oct Moog ladder lowpass with transistor-style saturation. Port of
 /// the Huovilainen (2004) model -- five `tanh()` nonlinearities per inner
@@ -146,7 +147,7 @@ impl LadderEffect {
         let input = sample_in - self.res_quad * phase_delay[0];
         // Stage 0: integrator with input-side tanh and the cached output-
         // side tanh from the previous tick (`stage_tanh[0]`).
-        stage[0] = delay[0] + self.tune * ((input * Self::THERMAL).tanh() - stage_tanh[0]);
+        stage[0] = delay[0] + self.tune * (tanh_pade(input * Self::THERMAL) - stage_tanh[0]);
         delay[0] = stage[0];
         // Stages 1..3: each step writes its own input-side tanh into
         // `stage_tanh[k-1]` for the next iteration; the output-side tanh
@@ -155,11 +156,11 @@ impl LadderEffect {
         // delay sample.
         for k in 1..4 {
             let in_k = stage[k - 1];
-            stage_tanh[k - 1] = (in_k * Self::THERMAL).tanh();
+            stage_tanh[k - 1] = tanh_pade(in_k * Self::THERMAL);
             let out_tanh = if k != 3 {
                 stage_tanh[k]
             } else {
-                (delay[k] * Self::THERMAL).tanh()
+                tanh_pade(delay[k] * Self::THERMAL)
             };
             stage[k] = delay[k] + self.tune * (stage_tanh[k - 1] - out_tanh);
             delay[k] = stage[k];
