@@ -267,6 +267,7 @@ mod none;
 mod phaser;
 mod phaser_filter;
 mod pitch_shift;
+mod plate;
 mod repeat;
 mod reverb;
 mod ring;
@@ -311,6 +312,7 @@ pub use none::NoneEffect;
 pub use phaser::PhaserEffect;
 pub use phaser_filter::PhaserFilterEffect;
 pub use pitch_shift::PitchShiftEffect;
+pub use plate::PlateEffect;
 pub use repeat::RepeatEffect;
 pub use reverb::ReverbEffect;
 pub use ring::RingEffect;
@@ -536,6 +538,11 @@ pub enum EffectKind {
     /// existing Distortion Fold shape. Port of ChowDSP's
     /// WestCoastWavefolder.
     Wavefolder,
+    /// Dattorro 1997 plate reverb: bright, dense, no early reflections.
+    /// Distinct from the Schroeder-Moorer `Reverb` -- different topology
+    /// (4 input diffusers + cross-coupled figure-8 tank with modulated
+    /// allpasses), different character (EMT 140 / Lexicon 224 family).
+    Plate,
 }
 
 impl EffectKind {
@@ -543,7 +550,7 @@ impl EffectKind {
     /// `family()` returns `Some("Spectral")` are grouped contiguously at the
     /// end so the kind-picker can render a single "Spectral" section header
     /// above them.
-    pub const ALL: [EffectKind; 43] = [
+    pub const ALL: [EffectKind; 44] = [
         // `None` stays first as the only un-categorised kind. The remaining
         // families are alphabetised by family name, with each block sorted
         // alphabetically by display name. Spectral is kept last as the big
@@ -578,6 +585,7 @@ impl EffectKind {
         EffectKind::Varispeed,
         // Time
         EffectKind::Delay,
+        EffectKind::Plate,
         EffectKind::Repeat,
         EffectKind::Reverb,
         EffectKind::Stretch,
@@ -646,6 +654,7 @@ impl EffectKind {
             EffectKind::AutoPan => "Auto Pan",
             EffectKind::Vibrato => "Vibrato",
             EffectKind::Wavefolder => "Wavefolder",
+            EffectKind::Plate => "Plate",
         }
     }
 
@@ -673,7 +682,9 @@ impl EffectKind {
             | Self::Tremolo
             | Self::Vibrato => Some("Modulation"),
             Self::FrequencyShift | Self::PitchShift | Self::Varispeed => Some("Pitch"),
-            Self::Delay | Self::Repeat | Self::Reverb | Self::Stretch => Some("Time"),
+            Self::Delay | Self::Plate | Self::Repeat | Self::Reverb | Self::Stretch => {
+                Some("Time")
+            }
             Self::Satch
             | Self::WarpZone
             | Self::SpectralRotate
@@ -894,6 +905,13 @@ pub enum EffectInstance {
     // Not boxed -- WavefolderEffect is tiny: previous-input + DC blocker
     // state per channel (~6 floats).
     Wavefolder(WavefolderEffect),
+    // Boxed: PlateEffect carries 11 delay rings of 65 KB each (~720 KB
+    // total) sized for 192 kHz operation. The struct metadata alone
+    // (the Vec pointers/lens/caps and cached coefficient arrays) is
+    // well past clippy's large-enum-variant threshold; boxing keeps
+    // the EffectInstance enum compact. The Vec heap data lives off-
+    // enum either way.
+    Plate(Box<PlateEffect>),
 }
 
 impl EffectInstance {
@@ -943,6 +961,7 @@ impl EffectInstance {
             EffectKind::AutoPan => EffectInstance::AutoPan(AutoPanEffect::new()),
             EffectKind::Vibrato => EffectInstance::Vibrato(VibratoEffect::new()),
             EffectKind::Wavefolder => EffectInstance::Wavefolder(WavefolderEffect::new()),
+            EffectKind::Plate => EffectInstance::Plate(Box::default()),
         }
     }
 
@@ -992,6 +1011,7 @@ impl EffectInstance {
             EffectInstance::AutoPan(_) => EffectKind::AutoPan,
             EffectInstance::Vibrato(_) => EffectKind::Vibrato,
             EffectInstance::Wavefolder(_) => EffectKind::Wavefolder,
+            EffectInstance::Plate(_) => EffectKind::Plate,
         }
     }
 }
@@ -1042,6 +1062,7 @@ impl Effect for EffectInstance {
             EffectInstance::AutoPan(e) => e.process_sample(left, right),
             EffectInstance::Vibrato(e) => e.process_sample(left, right),
             EffectInstance::Wavefolder(e) => e.process_sample(left, right),
+            EffectInstance::Plate(e) => e.process_sample(left, right),
         }
     }
 
@@ -1090,6 +1111,7 @@ impl Effect for EffectInstance {
             EffectInstance::AutoPan(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Vibrato(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Wavefolder(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Plate(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -1138,6 +1160,7 @@ impl Effect for EffectInstance {
             EffectInstance::AutoPan(e) => e.reset(),
             EffectInstance::Vibrato(e) => e.reset(),
             EffectInstance::Wavefolder(e) => e.reset(),
+            EffectInstance::Plate(e) => e.reset(),
         }
     }
 
@@ -1186,6 +1209,7 @@ impl Effect for EffectInstance {
             EffectInstance::AutoPan(e) => e.parameters(),
             EffectInstance::Vibrato(e) => e.parameters(),
             EffectInstance::Wavefolder(e) => e.parameters(),
+            EffectInstance::Plate(e) => e.parameters(),
         }
     }
 
@@ -1234,6 +1258,7 @@ impl Effect for EffectInstance {
             EffectInstance::AutoPan(e) => e.set_param(index, value),
             EffectInstance::Vibrato(e) => e.set_param(index, value),
             EffectInstance::Wavefolder(e) => e.set_param(index, value),
+            EffectInstance::Plate(e) => e.set_param(index, value),
         }
     }
 
@@ -1282,6 +1307,7 @@ impl Effect for EffectInstance {
             EffectInstance::AutoPan(e) => e.set_bpm(bpm),
             EffectInstance::Vibrato(e) => e.set_bpm(bpm),
             EffectInstance::Wavefolder(e) => e.set_bpm(bpm),
+            EffectInstance::Plate(e) => e.set_bpm(bpm),
         }
     }
 
@@ -1330,6 +1356,7 @@ impl Effect for EffectInstance {
             EffectInstance::AutoPan(e) => e.param_dimmed(index),
             EffectInstance::Vibrato(e) => e.param_dimmed(index),
             EffectInstance::Wavefolder(e) => e.param_dimmed(index),
+            EffectInstance::Plate(e) => e.param_dimmed(index),
         }
     }
 
@@ -1378,6 +1405,7 @@ impl Effect for EffectInstance {
             EffectInstance::AutoPan(e) => e.latency_samples(),
             EffectInstance::Vibrato(e) => e.latency_samples(),
             EffectInstance::Wavefolder(e) => e.latency_samples(),
+            EffectInstance::Plate(e) => e.latency_samples(),
         }
     }
 }
@@ -1448,7 +1476,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 43);
+        assert_eq!(EffectKind::ALL.len(), 44);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -1495,6 +1523,7 @@ mod tests {
         assert_eq!(EffectKind::AutoPan.name(), "Auto Pan");
         assert_eq!(EffectKind::Vibrato.name(), "Vibrato");
         assert_eq!(EffectKind::Wavefolder.name(), "Wavefolder");
+        assert_eq!(EffectKind::Plate.name(), "Plate");
     }
 
     #[test]
@@ -1940,6 +1969,7 @@ mod tests {
             EffectKind::AutoPan,
             EffectKind::Vibrato,
             EffectKind::Wavefolder,
+            EffectKind::Plate,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
