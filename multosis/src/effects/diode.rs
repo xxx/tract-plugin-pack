@@ -32,7 +32,6 @@ pub struct DiodeEffect {
     /// gain. Self-oscillation kicks in around user-resonance >= 0.97.
     user_resonance: f32,
     drive_db: f32,
-    mix: f32,
     sample_rate: f32,
     /// Pre-multiplied drive (linear, derived from `drive_db`).
     drive_lin: f32,
@@ -70,7 +69,7 @@ impl DiodeEffect {
     /// useful self-oscillation region near the top of the knob.
     const MAX_RES: f32 = 17.0;
 
-    const PARAMS: [ParamSpec; 4] = [
+    const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
             name: "Cutoff",
             min: 20.0,
@@ -101,17 +100,6 @@ impl DiodeEffect {
                 unit: "dB",
             },
         },
-        ParamSpec {
-            name: "Mix",
-            min: 0.0,
-            max: 1.0,
-            default: 1.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Number {
-                decimals: 2,
-                unit: "",
-            },
-        },
     ];
 
     pub fn new() -> Self {
@@ -119,7 +107,6 @@ impl DiodeEffect {
             cutoff: Self::PARAMS[0].default,
             user_resonance: Self::PARAMS[1].default,
             drive_db: Self::PARAMS[2].default,
-            mix: Self::PARAMS[3].default,
             sample_rate: 48_000.0,
             drive_lin: 1.0,
             resonance: 0.0,
@@ -266,10 +253,7 @@ impl Effect for DiodeEffect {
     fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
         let wet_l = self.process_channel(0, left);
         let wet_r = self.process_channel(1, right);
-        let mix = self.mix.clamp(0.0, 1.0);
-        let l = left + (wet_l - left) * mix;
-        let r = right + (wet_r - right) * mix;
-        (l, r)
+        (wet_l, wet_r)
     }
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -292,10 +276,6 @@ impl Effect for DiodeEffect {
             0 => self.cutoff = value.clamp(Self::PARAMS[0].min, Self::PARAMS[0].max),
             1 => self.user_resonance = value.clamp(Self::PARAMS[1].min, Self::PARAMS[1].max),
             2 => self.drive_db = value.clamp(Self::PARAMS[2].min, Self::PARAMS[2].max),
-            3 => {
-                self.mix = value.clamp(Self::PARAMS[3].min, Self::PARAMS[3].max);
-                return;
-            }
             _ => return,
         }
         self.recompute();
@@ -310,11 +290,10 @@ mod tests {
     fn parameters_are_declared() {
         let e = DiodeEffect::new();
         let specs = e.parameters();
-        assert_eq!(specs.len(), 4);
+        assert_eq!(specs.len(), 3);
         assert_eq!(specs[0].name, "Cutoff");
         assert_eq!(specs[1].name, "Resonance");
         assert_eq!(specs[2].name, "Drive");
-        assert_eq!(specs[3].name, "Mix");
     }
 
     #[test]
@@ -326,19 +305,6 @@ mod tests {
             let (l, r) = e.process_sample(0.0, 0.0);
             assert_eq!(l, 0.0);
             assert_eq!(r, 0.0);
-        }
-    }
-
-    #[test]
-    fn mix_zero_is_dry() {
-        let mut e = DiodeEffect::new();
-        e.set_sample_rate(48_000.0);
-        e.set_param(3, 0.0);
-        for i in 0..256 {
-            let x = (i as f32 * 0.01).sin();
-            let (l, r) = e.process_sample(x, -x);
-            assert!((l - x).abs() < 1e-6);
-            assert!((r - -x).abs() < 1e-6);
         }
     }
 

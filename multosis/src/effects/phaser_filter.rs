@@ -23,7 +23,6 @@ pub struct PhaserFilterEffect {
     resonance: f32,
     /// 0..1; mapped to Vital's `pass_blend` 0..2 internally.
     blend: f32,
-    mix: f32,
     sample_rate: f32,
     /// Smoothed one-pole TPT coefficient `tan(pi*f/sr) / (1 + tan(pi*f/sr))`.
     coef: f32,
@@ -49,7 +48,7 @@ impl PhaserFilterEffect {
     /// Vital's `kClearRatio`.
     const CLEAR_RATIO: f32 = 20.0;
 
-    const PARAMS: [ParamSpec; 4] = [
+    const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
             name: "Cutoff",
             min: 20.0,
@@ -80,17 +79,6 @@ impl PhaserFilterEffect {
                 unit: "",
             },
         },
-        ParamSpec {
-            name: "Mix",
-            min: 0.0,
-            max: 1.0,
-            default: 1.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Number {
-                decimals: 2,
-                unit: "",
-            },
-        },
     ];
 
     /// A `PhaserFilterEffect` at its default parameters; call
@@ -100,7 +88,6 @@ impl PhaserFilterEffect {
             cutoff: Self::PARAMS[0].default,
             resonance: Self::PARAMS[1].default,
             blend: Self::PARAMS[2].default,
-            mix: Self::PARAMS[3].default,
             sample_rate: 48_000.0,
             coef: 0.0,
             stages: [[0.0; Self::N_STAGES]; 2],
@@ -198,10 +185,7 @@ impl Effect for PhaserFilterEffect {
     fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
         let wet_l = self.process_channel(0, left);
         let wet_r = self.process_channel(1, right);
-        let mix = self.mix.clamp(0.0, 1.0);
-        let l = left + (wet_l - left) * mix;
-        let r = right + (wet_r - right) * mix;
-        (l, r)
+        (wet_l, wet_r)
     }
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -228,7 +212,6 @@ impl Effect for PhaserFilterEffect {
             }
             1 => self.resonance = value.clamp(Self::PARAMS[1].min, Self::PARAMS[1].max),
             2 => self.blend = value.clamp(Self::PARAMS[2].min, Self::PARAMS[2].max),
-            3 => self.mix = value.clamp(Self::PARAMS[3].min, Self::PARAMS[3].max),
             _ => {}
         }
     }
@@ -242,11 +225,10 @@ mod tests {
     fn parameters_are_declared() {
         let e = PhaserFilterEffect::new();
         let specs = e.parameters();
-        assert_eq!(specs.len(), 4);
+        assert_eq!(specs.len(), 3);
         assert_eq!(specs[0].name, "Cutoff");
         assert_eq!(specs[1].name, "Resonance");
         assert_eq!(specs[2].name, "Blend");
-        assert_eq!(specs[3].name, "Mix");
     }
 
     #[test]
@@ -258,19 +240,6 @@ mod tests {
             let (l, r) = e.process_sample(0.0, 0.0);
             assert_eq!(l, 0.0);
             assert_eq!(r, 0.0);
-        }
-    }
-
-    #[test]
-    fn mix_zero_is_dry() {
-        let mut e = PhaserFilterEffect::new();
-        e.set_sample_rate(48_000.0);
-        e.set_param(3, 0.0); // mix = 0
-        for i in 0..256 {
-            let x = (i as f32 * 0.01).sin();
-            let (l, r) = e.process_sample(x, -x);
-            assert!((l - x).abs() < 1e-6);
-            assert!((r - -x).abs() < 1e-6);
         }
     }
 
