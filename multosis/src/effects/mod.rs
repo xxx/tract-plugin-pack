@@ -271,6 +271,7 @@ mod plate;
 mod repeat;
 mod reverb;
 mod ring;
+mod sallen_key;
 mod satch;
 mod spectral_bandpass;
 mod spectral_cascade;
@@ -316,6 +317,7 @@ pub use plate::PlateEffect;
 pub use repeat::RepeatEffect;
 pub use reverb::ReverbEffect;
 pub use ring::RingEffect;
+pub use sallen_key::SallenKeyEffect;
 pub use satch::SatchEffect;
 pub use spectral_bandpass::SpectralBandpassEffect;
 pub use spectral_cascade::SpectralCascadeEffect;
@@ -543,6 +545,11 @@ pub enum EffectKind {
     /// (4 input diffusers + cross-coupled figure-8 tank with modulated
     /// allpasses), different character (EMT 140 / Lexicon 224 family).
     Plate,
+    /// Sallen-Key 2-pole filter (Korg-35 / MS-20 lineage). Two TPT one-
+    /// poles cross-coupled with positive feedback and a tanh saturator
+    /// on the feedback summing node. LP / HP selectable. Port of Surge
+    /// XT's K35Filter.
+    SallenKey,
 }
 
 impl EffectKind {
@@ -550,7 +557,7 @@ impl EffectKind {
     /// `family()` returns `Some("Spectral")` are grouped contiguously at the
     /// end so the kind-picker can render a single "Spectral" section header
     /// above them.
-    pub const ALL: [EffectKind; 44] = [
+    pub const ALL: [EffectKind; 45] = [
         // `None` stays first as the only un-categorised kind. The remaining
         // families are alphabetised by family name, with each block sorted
         // alphabetically by display name. Spectral is kept last as the big
@@ -566,6 +573,7 @@ impl EffectKind {
         EffectKind::Diode,
         EffectKind::Ladder,
         EffectKind::PhaserFilter,
+        EffectKind::SallenKey,
         EffectKind::Svf,
         // Misc
         EffectKind::Compressor,
@@ -655,6 +663,7 @@ impl EffectKind {
             EffectKind::Vibrato => "Vibrato",
             EffectKind::Wavefolder => "Wavefolder",
             EffectKind::Plate => "Plate",
+            EffectKind::SallenKey => "Sallen-Key",
         }
     }
 
@@ -669,9 +678,12 @@ impl EffectKind {
             Self::Bitcrush | Self::Distortion | Self::Downsample | Self::Wavefolder => {
                 Some("Distortion")
             }
-            Self::Comb | Self::Diode | Self::Ladder | Self::PhaserFilter | Self::Svf => {
-                Some("Filter")
-            }
+            Self::Comb
+            | Self::Diode
+            | Self::Ladder
+            | Self::PhaserFilter
+            | Self::SallenKey
+            | Self::Svf => Some("Filter"),
             Self::Compressor | Self::Vocoder => Some("Misc"),
             Self::AutoPan
             | Self::Chorus
@@ -912,6 +924,9 @@ pub enum EffectInstance {
     // the EffectInstance enum compact. The Vec heap data lives off-
     // enum either way.
     Plate(Box<PlateEffect>),
+    // Not boxed -- SallenKeyEffect is tiny: 3 z-1 values + 7 cached
+    // coefficients per channel (~13 floats).
+    SallenKey(SallenKeyEffect),
 }
 
 impl EffectInstance {
@@ -962,6 +977,7 @@ impl EffectInstance {
             EffectKind::Vibrato => EffectInstance::Vibrato(VibratoEffect::new()),
             EffectKind::Wavefolder => EffectInstance::Wavefolder(WavefolderEffect::new()),
             EffectKind::Plate => EffectInstance::Plate(Box::default()),
+            EffectKind::SallenKey => EffectInstance::SallenKey(SallenKeyEffect::new()),
         }
     }
 
@@ -1012,6 +1028,7 @@ impl EffectInstance {
             EffectInstance::Vibrato(_) => EffectKind::Vibrato,
             EffectInstance::Wavefolder(_) => EffectKind::Wavefolder,
             EffectInstance::Plate(_) => EffectKind::Plate,
+            EffectInstance::SallenKey(_) => EffectKind::SallenKey,
         }
     }
 }
@@ -1063,6 +1080,7 @@ impl Effect for EffectInstance {
             EffectInstance::Vibrato(e) => e.process_sample(left, right),
             EffectInstance::Wavefolder(e) => e.process_sample(left, right),
             EffectInstance::Plate(e) => e.process_sample(left, right),
+            EffectInstance::SallenKey(e) => e.process_sample(left, right),
         }
     }
 
@@ -1112,6 +1130,7 @@ impl Effect for EffectInstance {
             EffectInstance::Vibrato(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Wavefolder(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Plate(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::SallenKey(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -1161,6 +1180,7 @@ impl Effect for EffectInstance {
             EffectInstance::Vibrato(e) => e.reset(),
             EffectInstance::Wavefolder(e) => e.reset(),
             EffectInstance::Plate(e) => e.reset(),
+            EffectInstance::SallenKey(e) => e.reset(),
         }
     }
 
@@ -1210,6 +1230,7 @@ impl Effect for EffectInstance {
             EffectInstance::Vibrato(e) => e.parameters(),
             EffectInstance::Wavefolder(e) => e.parameters(),
             EffectInstance::Plate(e) => e.parameters(),
+            EffectInstance::SallenKey(e) => e.parameters(),
         }
     }
 
@@ -1259,6 +1280,7 @@ impl Effect for EffectInstance {
             EffectInstance::Vibrato(e) => e.set_param(index, value),
             EffectInstance::Wavefolder(e) => e.set_param(index, value),
             EffectInstance::Plate(e) => e.set_param(index, value),
+            EffectInstance::SallenKey(e) => e.set_param(index, value),
         }
     }
 
@@ -1308,6 +1330,7 @@ impl Effect for EffectInstance {
             EffectInstance::Vibrato(e) => e.set_bpm(bpm),
             EffectInstance::Wavefolder(e) => e.set_bpm(bpm),
             EffectInstance::Plate(e) => e.set_bpm(bpm),
+            EffectInstance::SallenKey(e) => e.set_bpm(bpm),
         }
     }
 
@@ -1357,6 +1380,7 @@ impl Effect for EffectInstance {
             EffectInstance::Vibrato(e) => e.param_dimmed(index),
             EffectInstance::Wavefolder(e) => e.param_dimmed(index),
             EffectInstance::Plate(e) => e.param_dimmed(index),
+            EffectInstance::SallenKey(e) => e.param_dimmed(index),
         }
     }
 
@@ -1406,6 +1430,7 @@ impl Effect for EffectInstance {
             EffectInstance::Vibrato(e) => e.latency_samples(),
             EffectInstance::Wavefolder(e) => e.latency_samples(),
             EffectInstance::Plate(e) => e.latency_samples(),
+            EffectInstance::SallenKey(e) => e.latency_samples(),
         }
     }
 }
@@ -1476,7 +1501,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 44);
+        assert_eq!(EffectKind::ALL.len(), 45);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -1524,6 +1549,7 @@ mod tests {
         assert_eq!(EffectKind::Vibrato.name(), "Vibrato");
         assert_eq!(EffectKind::Wavefolder.name(), "Wavefolder");
         assert_eq!(EffectKind::Plate.name(), "Plate");
+        assert_eq!(EffectKind::SallenKey.name(), "Sallen-Key");
     }
 
     #[test]
@@ -1970,6 +1996,7 @@ mod tests {
             EffectKind::Vibrato,
             EffectKind::Wavefolder,
             EffectKind::Plate,
+            EffectKind::SallenKey,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
