@@ -250,6 +250,7 @@ pub trait Effect {
     }
 }
 
+mod auto_pan;
 mod bitcrush;
 mod chorus;
 mod comb;
@@ -286,10 +287,13 @@ mod spectral_stretch;
 mod spectral_twist;
 mod stretch;
 mod svf;
+mod tremolo;
 mod varispeed;
+mod vibrato;
 mod vocoder;
 mod warp_zone;
 
+pub use auto_pan::AutoPanEffect;
 pub use bitcrush::BitcrushEffect;
 pub use chorus::ChorusEffect;
 pub use comb::CombEffect;
@@ -326,7 +330,9 @@ pub use spectral_stretch::SpectralStretchEffect;
 pub use spectral_twist::SpectralTwistEffect;
 pub use stretch::StretchEffect;
 pub use svf::SvfEffect;
+pub use tremolo::TremoloEffect;
 pub use varispeed::VarispeedEffect;
+pub use vibrato::VibratoEffect;
 pub use vocoder::VocoderEffect;
 pub use warp_zone::WarpZoneEffect;
 
@@ -511,6 +517,17 @@ pub enum EffectKind {
     /// and a sharper, squelchier character; sibling effect, port of
     /// Matt Tytel's Vital DiodeFilter.
     Diode,
+    /// Amplitude-modulation tremolo. Single LFO multiplies both channels'
+    /// gain in unison; Depth = 0 is bypass, Depth = 100 is full chop.
+    Tremolo,
+    /// Stereo auto-panner: LFO drives a balance between L and R. Depth
+    /// = 0 leaves both channels untouched (transparent); Depth = 100
+    /// sweeps to silence on each side at the LFO extremes.
+    AutoPan,
+    /// Pitch-modulating vibrato via a short modulated delay line.
+    /// Output is the delayed (pitch-wobbled) signal only; no dry
+    /// blend, distinguishing it from `Chorus` / `Flanger`.
+    Vibrato,
 }
 
 impl EffectKind {
@@ -518,7 +535,7 @@ impl EffectKind {
     /// `family()` returns `Some("Spectral")` are grouped contiguously at the
     /// end so the kind-picker can render a single "Spectral" section header
     /// above them.
-    pub const ALL: [EffectKind; 39] = [
+    pub const ALL: [EffectKind; 42] = [
         // `None` stays first as the only un-categorised kind. The remaining
         // families are alphabetised by family name, with each block sorted
         // alphabetically by display name. Spectral is kept last as the big
@@ -538,11 +555,14 @@ impl EffectKind {
         EffectKind::Compressor,
         EffectKind::Vocoder,
         // Modulation
+        EffectKind::AutoPan,
         EffectKind::Chorus,
         EffectKind::Flanger,
         EffectKind::Fm,
         EffectKind::Phaser,
         EffectKind::Ring,
+        EffectKind::Tremolo,
+        EffectKind::Vibrato,
         // Pitch
         EffectKind::FrequencyShift,
         EffectKind::PitchShift,
@@ -613,6 +633,9 @@ impl EffectKind {
             EffectKind::PhaserFilter => "Phaser Filter",
             EffectKind::Ladder => "Ladder",
             EffectKind::Diode => "Diode",
+            EffectKind::Tremolo => "Tremolo",
+            EffectKind::AutoPan => "Auto Pan",
+            EffectKind::Vibrato => "Vibrato",
         }
     }
 
@@ -629,9 +652,14 @@ impl EffectKind {
                 Some("Filter")
             }
             Self::Compressor | Self::Vocoder => Some("Misc"),
-            Self::Chorus | Self::Flanger | Self::Fm | Self::Phaser | Self::Ring => {
-                Some("Modulation")
-            }
+            Self::AutoPan
+            | Self::Chorus
+            | Self::Flanger
+            | Self::Fm
+            | Self::Phaser
+            | Self::Ring
+            | Self::Tremolo
+            | Self::Vibrato => Some("Modulation"),
             Self::FrequencyShift | Self::PitchShift | Self::Varispeed => Some("Pitch"),
             Self::Delay | Self::Repeat | Self::Reverb | Self::Stretch => Some("Time"),
             Self::Satch
@@ -844,6 +872,13 @@ pub enum EffectInstance {
     // Not boxed -- DiodeEffect is tiny: 4 unsaturated + 4 saturated stage
     // states + 1 HP feedback state per channel (~18 floats).
     Diode(DiodeEffect),
+    // Not boxed -- TremoloEffect is tiny: one phase accumulator + params.
+    Tremolo(TremoloEffect),
+    // Not boxed -- AutoPanEffect is tiny: one phase accumulator + params.
+    AutoPan(AutoPanEffect),
+    // Not boxed -- VibratoEffect itself is small; the two Vec delay
+    // buffers it holds are already heap-allocated by Vec.
+    Vibrato(VibratoEffect),
 }
 
 impl EffectInstance {
@@ -889,6 +924,9 @@ impl EffectInstance {
             EffectKind::PhaserFilter => EffectInstance::PhaserFilter(PhaserFilterEffect::new()),
             EffectKind::Ladder => EffectInstance::Ladder(LadderEffect::new()),
             EffectKind::Diode => EffectInstance::Diode(DiodeEffect::new()),
+            EffectKind::Tremolo => EffectInstance::Tremolo(TremoloEffect::new()),
+            EffectKind::AutoPan => EffectInstance::AutoPan(AutoPanEffect::new()),
+            EffectKind::Vibrato => EffectInstance::Vibrato(VibratoEffect::new()),
         }
     }
 
@@ -934,6 +972,9 @@ impl EffectInstance {
             EffectInstance::PhaserFilter(_) => EffectKind::PhaserFilter,
             EffectInstance::Ladder(_) => EffectKind::Ladder,
             EffectInstance::Diode(_) => EffectKind::Diode,
+            EffectInstance::Tremolo(_) => EffectKind::Tremolo,
+            EffectInstance::AutoPan(_) => EffectKind::AutoPan,
+            EffectInstance::Vibrato(_) => EffectKind::Vibrato,
         }
     }
 }
@@ -980,6 +1021,9 @@ impl Effect for EffectInstance {
             EffectInstance::PhaserFilter(e) => e.process_sample(left, right),
             EffectInstance::Ladder(e) => e.process_sample(left, right),
             EffectInstance::Diode(e) => e.process_sample(left, right),
+            EffectInstance::Tremolo(e) => e.process_sample(left, right),
+            EffectInstance::AutoPan(e) => e.process_sample(left, right),
+            EffectInstance::Vibrato(e) => e.process_sample(left, right),
         }
     }
 
@@ -1024,6 +1068,9 @@ impl Effect for EffectInstance {
             EffectInstance::PhaserFilter(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Ladder(e) => e.set_sample_rate(sample_rate),
             EffectInstance::Diode(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Tremolo(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::AutoPan(e) => e.set_sample_rate(sample_rate),
+            EffectInstance::Vibrato(e) => e.set_sample_rate(sample_rate),
         }
     }
 
@@ -1068,6 +1115,9 @@ impl Effect for EffectInstance {
             EffectInstance::PhaserFilter(e) => e.reset(),
             EffectInstance::Ladder(e) => e.reset(),
             EffectInstance::Diode(e) => e.reset(),
+            EffectInstance::Tremolo(e) => e.reset(),
+            EffectInstance::AutoPan(e) => e.reset(),
+            EffectInstance::Vibrato(e) => e.reset(),
         }
     }
 
@@ -1112,6 +1162,9 @@ impl Effect for EffectInstance {
             EffectInstance::PhaserFilter(e) => e.parameters(),
             EffectInstance::Ladder(e) => e.parameters(),
             EffectInstance::Diode(e) => e.parameters(),
+            EffectInstance::Tremolo(e) => e.parameters(),
+            EffectInstance::AutoPan(e) => e.parameters(),
+            EffectInstance::Vibrato(e) => e.parameters(),
         }
     }
 
@@ -1156,6 +1209,9 @@ impl Effect for EffectInstance {
             EffectInstance::PhaserFilter(e) => e.set_param(index, value),
             EffectInstance::Ladder(e) => e.set_param(index, value),
             EffectInstance::Diode(e) => e.set_param(index, value),
+            EffectInstance::Tremolo(e) => e.set_param(index, value),
+            EffectInstance::AutoPan(e) => e.set_param(index, value),
+            EffectInstance::Vibrato(e) => e.set_param(index, value),
         }
     }
 
@@ -1200,6 +1256,9 @@ impl Effect for EffectInstance {
             EffectInstance::PhaserFilter(e) => e.set_bpm(bpm),
             EffectInstance::Ladder(e) => e.set_bpm(bpm),
             EffectInstance::Diode(e) => e.set_bpm(bpm),
+            EffectInstance::Tremolo(e) => e.set_bpm(bpm),
+            EffectInstance::AutoPan(e) => e.set_bpm(bpm),
+            EffectInstance::Vibrato(e) => e.set_bpm(bpm),
         }
     }
 
@@ -1244,6 +1303,9 @@ impl Effect for EffectInstance {
             EffectInstance::PhaserFilter(e) => e.param_dimmed(index),
             EffectInstance::Ladder(e) => e.param_dimmed(index),
             EffectInstance::Diode(e) => e.param_dimmed(index),
+            EffectInstance::Tremolo(e) => e.param_dimmed(index),
+            EffectInstance::AutoPan(e) => e.param_dimmed(index),
+            EffectInstance::Vibrato(e) => e.param_dimmed(index),
         }
     }
 
@@ -1288,6 +1350,9 @@ impl Effect for EffectInstance {
             EffectInstance::PhaserFilter(e) => e.latency_samples(),
             EffectInstance::Ladder(e) => e.latency_samples(),
             EffectInstance::Diode(e) => e.latency_samples(),
+            EffectInstance::Tremolo(e) => e.latency_samples(),
+            EffectInstance::AutoPan(e) => e.latency_samples(),
+            EffectInstance::Vibrato(e) => e.latency_samples(),
         }
     }
 }
@@ -1358,7 +1423,7 @@ mod tests {
 
     #[test]
     fn effect_kind_registry() {
-        assert_eq!(EffectKind::ALL.len(), 39);
+        assert_eq!(EffectKind::ALL.len(), 42);
         assert_eq!(EffectKind::None.name(), "None");
         assert_eq!(EffectKind::Svf.name(), "SVF");
         assert_eq!(EffectKind::Bitcrush.name(), "Bitcrush");
@@ -1401,6 +1466,9 @@ mod tests {
         assert_eq!(EffectKind::PhaserFilter.name(), "Phaser Filter");
         assert_eq!(EffectKind::Ladder.name(), "Ladder");
         assert_eq!(EffectKind::Diode.name(), "Diode");
+        assert_eq!(EffectKind::Tremolo.name(), "Tremolo");
+        assert_eq!(EffectKind::AutoPan.name(), "Auto Pan");
+        assert_eq!(EffectKind::Vibrato.name(), "Vibrato");
     }
 
     #[test]
@@ -1842,6 +1910,9 @@ mod tests {
             EffectKind::PhaserFilter,
             EffectKind::Ladder,
             EffectKind::Diode,
+            EffectKind::Tremolo,
+            EffectKind::AutoPan,
+            EffectKind::Vibrato,
         ] {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
