@@ -33,7 +33,6 @@ pub struct DistortionEffect {
     type_idx: f32,
     bias_pct: f32,
     tone_pct: f32,
-    out_db: f32,
     sample_rate: f32,
     /// One-pole LP coefficient for the tilt EQ, computed in
     /// `set_sample_rate` from `TILT_PIVOT_HZ` and the active SR.
@@ -42,16 +41,15 @@ pub struct DistortionEffect {
     tilt_a: f32,
     tilt_state_l: f32,
     tilt_state_r: f32,
-    /// Cached linear gain corresponding to `drive_db` / `out_db` /
-    /// `tone_pct`. Recomputed in `set_param` when the source value
-    /// changes so the per-sample path is free of `powf`/`exp` calls
-    /// — important because MSEG modulation calls `set_param` once
-    /// per sample for modulated targets, but only for those targets.
+    /// Cached linear gain corresponding to `drive_db` / `tone_pct`.
+    /// Recomputed in `set_param` when the source value changes so the
+    /// per-sample path is free of `powf`/`exp` calls — important
+    /// because MSEG modulation calls `set_param` once per sample for
+    /// modulated targets, but only for those targets.
     /// `tone_gain_high` is the post-distortion tilt-EQ HP weight
     /// (`2^tone`); the LP weight is its reciprocal, computed once
     /// per sample with a divide (still cheap).
     drive_gain: f32,
-    out_gain: f32,
     tone_gain_high: f32,
 }
 
@@ -68,7 +66,7 @@ impl DistortionEffect {
     /// boundary across the most-audible band.
     const TILT_PIVOT_HZ: f32 = 700.0;
 
-    const PARAMS: [ParamSpec; 5] = [
+    const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Drive",
             min: 0.0,
@@ -112,29 +110,16 @@ impl DistortionEffect {
                 unit: "%",
             },
         },
-        ParamSpec {
-            name: "Out",
-            min: -24.0,
-            max: 12.0,
-            default: 0.0,
-            scaling: ParamScaling::Linear,
-            format: ParamFormat::Number {
-                decimals: 1,
-                unit: "dB",
-            },
-        },
     ];
 
     pub fn new() -> Self {
         let drive_db = Self::PARAMS[0].default;
         let tone_pct = Self::PARAMS[3].default;
-        let out_db = Self::PARAMS[4].default;
         let mut me = Self {
             drive_db,
             type_idx: Self::PARAMS[1].default,
             bias_pct: Self::PARAMS[2].default,
             tone_pct,
-            out_db,
             sample_rate: 48_000.0,
             tilt_a: 0.0,
             tilt_state_l: 0.0,
@@ -142,7 +127,6 @@ impl DistortionEffect {
             // Seed the cached gains from the defaults. Subsequent
             // `set_param` calls keep these in sync.
             drive_gain: tract_dsp::db::db_to_linear_fast(drive_db),
-            out_gain: tract_dsp::db::db_to_linear_fast(out_db),
             tone_gain_high: (tone_pct * 0.01).exp2(),
         };
         me.set_sample_rate(me.sample_rate);
@@ -213,7 +197,6 @@ impl Effect for DistortionEffect {
         // per modulated param when they are.
         let drive_gain = self.drive_gain;
         let bias = (self.bias_pct * 0.01).clamp(-1.0, 1.0);
-        let out_gain = self.out_gain;
         let type_idx = (self.type_idx.round() as usize).min(Self::TYPE_LABELS.len() - 1);
         // The DC value the clipper outputs at x = 0 with the current
         // bias offset. Subtracting it post-clip AC-couples the output
@@ -252,8 +235,7 @@ impl Effect for DistortionEffect {
         let hp_r = dr - lp_r;
         let tilt_r = lp_r * gain_low + hp_r * gain_high;
 
-        // Stage 5: output trim.
-        (tilt_l * out_gain, tilt_r * out_gain)
+        (tilt_l, tilt_r)
     }
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -288,10 +270,6 @@ impl Effect for DistortionEffect {
                 self.tone_pct = value.clamp(Self::PARAMS[3].min, Self::PARAMS[3].max);
                 self.tone_gain_high = (self.tone_pct * 0.01).exp2();
             }
-            4 => {
-                self.out_db = value.clamp(Self::PARAMS[4].min, Self::PARAMS[4].max);
-                self.out_gain = tract_dsp::db::db_to_linear_fast(self.out_db);
-            }
             _ => {}
         }
     }
@@ -303,10 +281,10 @@ mod tests {
     use crate::effects::{Effect, ParamFormat};
 
     #[test]
-    fn distortion_lists_five_parameters_with_the_expected_specs() {
+    fn distortion_lists_four_parameters_with_the_expected_specs() {
         let d = DistortionEffect::new();
         let specs = d.parameters();
-        assert_eq!(specs.len(), 5);
+        assert_eq!(specs.len(), 4);
         assert_eq!(specs[0].name, "Drive");
         assert_eq!(specs[0].min, 0.0);
         assert_eq!(specs[0].max, 48.0);
@@ -321,13 +299,6 @@ mod tests {
         assert_eq!(specs[2].min, -100.0);
         assert_eq!(specs[2].max, 100.0);
         assert_eq!(specs[3].name, "Tone");
-        assert_eq!(specs[4].name, "Out");
-        assert_eq!(specs[4].min, -24.0);
-        assert_eq!(specs[4].max, 12.0);
-        assert!(matches!(
-            specs[4].format,
-            ParamFormat::Number { unit: "dB", .. }
-        ));
     }
 
     #[test]
@@ -345,10 +316,6 @@ mod tests {
         assert_eq!(d.bias_pct, 100.0);
         d.set_param(3, -999.0);
         assert_eq!(d.tone_pct, -100.0);
-        d.set_param(4, 999.0);
-        assert_eq!(d.out_db, 12.0);
-        d.set_param(4, -999.0);
-        assert_eq!(d.out_db, -24.0);
     }
 
     #[test]
@@ -363,7 +330,6 @@ mod tests {
         d.set_param(1, 0.0); // Hard
         d.set_param(2, 0.0);
         d.set_param(3, 0.0);
-        d.set_param(4, 0.0);
         for i in 0..1_024 {
             let t = i as f32 / 48_000.0;
             let x = 0.5 * (2.0 * std::f32::consts::PI * 220.0 * t).sin();
@@ -387,7 +353,6 @@ mod tests {
             d.set_param(1, type_idx as f32);
             d.set_param(2, 0.0);
             d.set_param(3, 0.0);
-            d.set_param(4, 0.0);
             for i in 0..2_000 {
                 let t = i as f32 / 48_000.0;
                 let x = (2.0 * std::f32::consts::PI * 220.0 * t).sin();
@@ -413,7 +378,6 @@ mod tests {
             d.set_param(1, type_idx);
             d.set_param(2, 0.0);
             d.set_param(3, 0.0);
-            d.set_param(4, 0.0);
             let mut prev = 0.0_f32;
             let mut prev2 = 0.0_f32;
             let mut roughness = 0.0_f32;
@@ -479,7 +443,6 @@ mod tests {
                 d.set_param(1, type_idx as f32);
                 d.set_param(2, bias);
                 d.set_param(3, 0.0);
-                d.set_param(4, 0.0);
                 // Settle the tilt-LP a bit (it's already at 0 → 0,
                 // so this is just defensive).
                 for _ in 0..100 {
@@ -506,7 +469,6 @@ mod tests {
             d.set_param(1, 0.0); // Hard
             d.set_param(2, bias);
             d.set_param(3, 0.0);
-            d.set_param(4, 0.0);
             let mut max_pos = 0.0_f32;
             let mut min_neg = 0.0_f32;
             for i in 0..4_800 {
@@ -550,7 +512,6 @@ mod tests {
             d.set_param(1, 1.0); // Soft
             d.set_param(2, 0.0);
             d.set_param(3, tone);
-            d.set_param(4, 0.0);
             let mut prng: u32 = 1;
             let mut prev = 0.0_f32;
             let mut deriv = 0.0_f32;
@@ -577,38 +538,6 @@ mod tests {
     }
 
     #[test]
-    fn distortion_out_gain_scales_output_linearly() {
-        // Drive=0 Hard, Bias=0, Tone=0: out_db on top of dry pass-
-        // through means output = dry × 10^(out_db/20). Compare two
-        // settings: 0 dB and +6 dB.
-        let test = |out_db: f32| {
-            let mut d = DistortionEffect::new();
-            d.set_sample_rate(48_000.0);
-            d.set_param(0, 0.0);
-            d.set_param(1, 0.0);
-            d.set_param(2, 0.0);
-            d.set_param(3, 0.0);
-            d.set_param(4, out_db);
-            let mut peak = 0.0_f32;
-            for i in 0..1_024 {
-                let t = i as f32 / 48_000.0;
-                let x = 0.3 * (2.0 * std::f32::consts::PI * 220.0 * t).sin();
-                let (l, _) = d.process_sample(x, x);
-                peak = peak.max(l.abs());
-            }
-            peak
-        };
-        let unity = test(0.0);
-        let plus_six = test(6.0);
-        // +6 dB ≈ × 1.995
-        let ratio = plus_six / unity;
-        assert!(
-            (ratio - 1.995).abs() < 0.05,
-            "Out=+6 dB should ~double output; ratio={ratio}"
-        );
-    }
-
-    #[test]
     fn distortion_stays_bounded_under_aggressive_sweep() {
         let mut d = DistortionEffect::new();
         d.set_sample_rate(48_000.0);
@@ -617,14 +546,13 @@ mod tests {
             d.set_param(1, (i as f32 / 1_000.0).fract() * 4.99);
             d.set_param(2, (i as f32 / 3_000.0).fract() * 200.0 - 100.0);
             d.set_param(3, (i as f32 / 5_000.0).fract() * 200.0 - 100.0);
-            d.set_param(4, (i as f32 / 7_000.0).fract() * 36.0 - 24.0);
             let x = 0.5 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48_000.0).sin();
             let (l, r) = d.process_sample(x, x);
             assert!(l.is_finite() && r.is_finite(), "sample {i} not finite");
-            // Worst case: Hard clip at +1 → ±1, × +12 dB Out (4×) ×
-            // Tone=±100 % which doubles the HP or LP weight (2×) =
-            // 8× the clip output. Allow generous headroom for the
-            // tilt-LP transient overshoot at sweep boundaries.
+            // Worst case: Hard clip at +1 → ±1, × Tone=±100 % which
+            // doubles the HP or LP weight (2×). Allow generous
+            // headroom for tilt-LP transient overshoot at sweep
+            // boundaries.
             assert!(
                 l.abs() < 16.0 && r.abs() < 16.0,
                 "sample {i} blew up: ({l},{r})"
