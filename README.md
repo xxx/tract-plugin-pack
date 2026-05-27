@@ -51,6 +51,18 @@ A convolution filter whose FIR kernel you draw by hand with an MSEG editor — a
 - A flat default curve bakes to an all-zero kernel — a fresh instance is clean dry passthrough
 - CPU-rendered GUI (tiny-skia + softbuffer), freely resizable
 
+### Multosis
+
+A 16-row grid sequencer where each row runs a different audio effect driven by per-row MSEG modulators. Effects process serially — row 1's output feeds row 2 and so on — so the grid composes a programmable chain whose parameters sweep in time with the host.
+
+- 50 effect kinds across 9 families: Filter (SVF, Comb, Ladder, Diode, Sallen-Key, Phaser Filter), Distortion (Bitcrush, Distortion, Downsample, Wavefolder), Dynamics (Compressor, Gate, Limiter, Transient Shaper), Modulation (Auto Pan, Chorus, Flanger, FM, Phaser, Ring, Tremolo, Vibrato), Pitch (Frequency Shift, Pitch Shift, Varispeed), Spatial (Haas, Stereo Widener), Time (Delay, Plate, Repeat, Reverb, Stretch), Misc (Vocoder), and a 14-effect Spectral family sharing a switchable-FFT-size phase vocoder
+- 16 rows × 32 columns, with a draggable loop region and free / beat-synced playback
+- 4 MSEGs per row (3 assignable + always-on Amp) with Bipolar/Unipolar polarity, Beat-synced or Time-synced loop length, Snap-to-grid with Shift-to-bypass, six randomizer styles, and right-click Transform menu for compress/expand on values or times
+- Trigger sources include free Hz, beat divisions, and audio-driven transient detection
+- Wet-bus compressor between the chain output and the global dry/wet blend
+- Per-row mute/solo and a PDC (plugin delay compensation) stripe that lights only on active rows carrying latency
+- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable
+
 ### Pope Scope
 
 A multichannel real-time oscilloscope with beat sync. Multiple instances share audio data through a global store, allowing one window to display waveforms from up to 16 tracks simultaneously.
@@ -153,6 +165,7 @@ cargo nih-plug bundle gain-brain --release
 cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle imagine --release
 cargo nih-plug bundle miff --release
+cargo nih-plug bundle multosis --release
 cargo nih-plug bundle pope-scope --release
 cargo nih-plug bundle satch --release
 cargo nih-plug bundle six-pack --release
@@ -165,6 +178,7 @@ cargo build --bin gain-brain --release
 cargo build --bin gs-meter --release
 cargo build --bin imagine --release
 cargo build --bin miff --release
+cargo build --bin multosis --release
 cargo build --bin pope-scope --release
 cargo build --bin satch --release
 cargo build --bin six-pack --release
@@ -198,6 +212,7 @@ tract-plugin-pack/
 ├── gs-meter/               # Loudness meter + gain utility
 ├── imagine/                # Multiband stereo imager modeled on Ozone Imager
 ├── miff/                   # MSEG hand-drawn FIR convolution filter
+├── multosis/               # 16-row grid sequencer with per-row effects + MSEGs
 ├── pope-scope/             # Multichannel real-time oscilloscope
 ├── satch/                  # Spectral saturator with detail preservation
 ├── six-pack/               # Six-band parallel multiband saturator
@@ -212,6 +227,7 @@ tract-plugin-pack/
 │   ├── gs-meter/
 │   ├── imagine/
 │   ├── miff/
+│   ├── multosis/
 │   ├── pope-scope/
 │   ├── satch/
 │   ├── six-pack/
@@ -236,6 +252,7 @@ Install nextest via `cargo install cargo-nextest --locked`. Config lives in `.co
 - [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
 - [Imagine Manual](docs/imagine/imagine-manual.md)
 - [Miff Manual](docs/miff/miff-manual.md)
+- [Multosis Manual](docs/multosis/multosis-manual.md)
 - [Pope Scope Manual](docs/pope-scope/pope-scope-manual.md)
 - [Satch Manual](docs/satch/satch-manual.md)
 - [Six Pack Manual](docs/six-pack/six-pack-manual.md)
