@@ -708,6 +708,70 @@ impl EffectKind {
         }
     }
 
+    /// Short label used by the track-list row.
+    ///
+    /// The track panel is narrow (62 px logical between the row number and
+    /// the M/S buttons), so the full `name()` overflows under the buttons
+    /// for the longer kinds. This returns an abbreviated form (target <=7
+    /// chars) suitable for rendering as the suffix below the family caption.
+    /// Anywhere with more room (effect-editor title, Kind dropdown) keeps
+    /// the full `name()`.
+    pub fn track_label(self) -> &'static str {
+        match self {
+            EffectKind::None => "None",
+            EffectKind::Svf => "SVF",
+            EffectKind::Comb => "Comb",
+            EffectKind::Diode => "Diode",
+            EffectKind::Ladder => "Ladder",
+            EffectKind::PhaserFilter => "Phaser",
+            EffectKind::SallenKey => "SK",
+            EffectKind::Compressor => "Comp",
+            EffectKind::Gate => "Gate",
+            EffectKind::Limiter => "Limiter",
+            EffectKind::TransientShaper => "Shaper",
+            EffectKind::Bitcrush => "Crush",
+            EffectKind::Distortion => "Distort",
+            EffectKind::Downsample => "Down",
+            EffectKind::Wavefolder => "Folder",
+            EffectKind::AutoPan => "AutoPan",
+            EffectKind::Chorus => "Chorus",
+            EffectKind::Flanger => "Flanger",
+            EffectKind::Fm => "FM",
+            EffectKind::Phaser => "Phaser",
+            EffectKind::Ring => "Ring",
+            EffectKind::Tremolo => "Tremolo",
+            EffectKind::Vibrato => "Vibrato",
+            EffectKind::FrequencyShift => "FreqSh",
+            EffectKind::PitchShift => "Shift",
+            EffectKind::Varispeed => "Varispd",
+            EffectKind::Haas => "Haas",
+            EffectKind::StereoWidener => "Widen",
+            EffectKind::Delay => "Delay",
+            EffectKind::Plate => "Plate",
+            EffectKind::Repeat => "Repeat",
+            EffectKind::Reverb => "Reverb",
+            EffectKind::Stretch => "Stretch",
+            EffectKind::Vocoder => "Vocoder",
+            EffectKind::Satch => "Satch",
+            EffectKind::WarpZone => "Warp",
+            EffectKind::SpectralBandpass => "Bpass",
+            EffectKind::SpectralCompress => "Comp",
+            // Remaining spectral suffixes already fit the 7-char budget.
+            EffectKind::SpectralRotate
+            | EffectKind::SpectralMirror
+            | EffectKind::SpectralShift
+            | EffectKind::SpectralSmear
+            | EffectKind::SpectralSpread
+            | EffectKind::SpectralLofi
+            | EffectKind::SpectralCorrupt
+            | EffectKind::SpectralCascade
+            | EffectKind::SpectralReverb
+            | EffectKind::SpectralScatter
+            | EffectKind::SpectralTwist
+            | EffectKind::SpectralStretch => self.name(),
+        }
+    }
+
     /// The family this kind belongs to, or `None` for `EffectKind::None`
     /// (the only un-categorised kind). Drives the two-line track-listing
     /// label (family caption above `name()`) and groups kinds in the
@@ -1666,6 +1730,24 @@ mod tests {
         assert_eq!(EffectKind::TransientShaper.name(), "Transient Shaper");
         assert_eq!(EffectKind::StereoWidener.name(), "Stereo Widener");
         assert_eq!(EffectKind::Haas.name(), "Haas");
+    }
+
+    #[test]
+    fn track_label_fits_track_panel() {
+        // The track panel allots ~62 px logical to the suffix line (between
+        // the row number and the M/S buttons). At the 15 px font, that's
+        // about 7 chars of headroom -- enforce the budget so a new kind
+        // can't silently overflow under the Solo button again.
+        for &kind in &EffectKind::ALL {
+            let label = kind.track_label();
+            assert!(
+                label.chars().count() <= 7,
+                "{:?}: track_label() = {:?} ({} chars) exceeds 7-char budget",
+                kind,
+                label,
+                label.chars().count(),
+            );
+        }
     }
 
     #[test]

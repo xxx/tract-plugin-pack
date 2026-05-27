@@ -259,7 +259,7 @@ pub fn draw_track_list(
         // else uses the original vertically-centred line. `name()` already
         // returns just the suffix for spectral kinds; the family caption is
         // sourced from `EffectKind::family()`.
-        let name = kind.name();
+        let name = kind.track_label();
         let name_x = x + 30.0 * scale;
         if let Some(fam) = kind.family() {
             let caption_ty = y + 14.0 * scale;
