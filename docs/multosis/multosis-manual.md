@@ -120,6 +120,8 @@ The track list is the 16-row strip on the left of the window, present in both Gr
 
 - **Row number** — "1"-"16" at the left edge.
 - **PDC** (plugin delay compensation) **stripe** — a thin teal vertical bar at the very left edge, shown only for rows whose effect adds latency (see [Latency](#latency)) and that aren't muted.
+
+  ![PDC stripe](pdc-stripe.png){ width=40% }
 - **Effect name** — the current effect, shown with a small warm-grey family caption (e.g. "Filter") above the unique suffix (e.g. "Ladder"). The family caption disambiguates similarly-named effects (Modulation `Phaser` vs Filter `Phaser Filter`). The `None` kind is shown as a single line with no caption.
 - **M button** (Mute) — small square; lights red when active. Bypasses this row's effect; the dry signal passes through unchanged.
 - **S button** (Solo) — small square directly below **M**; lights yellow when active. When any row is soloed, every non-soloed row is muted. A row that is BOTH muted and soloed stays muted (your mute intent wins).

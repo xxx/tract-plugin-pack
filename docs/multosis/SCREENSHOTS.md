@@ -26,7 +26,8 @@ next `pandoc` build.
 
 | Filename | What it shows |
 |---|---|
-| `track-row.png` | A close-up of two or three adjacent track rows on the left of the window. The frame should cover: the row number ("1"-"16"), the family caption (e.g. "Filter") above the unique suffix ("Ladder") on at least one row, the stacked M and S buttons on the right of each row, and the sounding dot at the far right. **Include at least one row whose effect adds latency (any Spectral effect, Satch, or Warp Zone)** so the teal PDC stripe at the very left edge is visible. Optionally show one row with M lit (muted) and one with S lit (soloed) to demonstrate the colour treatment. |
+| `track-row.png` | A close-up of two or three adjacent track rows on the left of the window. The frame should cover: the row number ("1"-"16"), the family caption (e.g. "Filter") above the unique suffix ("Ladder") on at least one row, the stacked M and S buttons on the right of each row, and the sounding dot at the far right. Optionally show one row with M lit (muted) and one with S lit (soloed) to demonstrate the colour treatment. |
+| `pdc-stripe.png` | Tight close-up of a single track row whose effect adds latency (any Spectral effect, Satch, or Warp Zone) so the thin teal PDC stripe at the very left edge of the row entry is clearly visible. Pair it with an adjacent row that doesn't have the stripe (e.g. a None or non-Spectral kind) so the contrast is obvious. |
 
 ## Effect editor
 
