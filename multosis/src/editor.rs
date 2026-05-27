@@ -81,6 +81,23 @@ enum EffectAction {
 }
 
 /// Clamp a candidate selected-track index into `0..ROWS`.
+/// Non-deterministic starting seed for the editor's `rng_seed` counter.
+///
+/// The counter advances by 1 per Randomize click, but if it always started
+/// at the same value, every plugin re-add would replay the same sequence of
+/// effect kinds picked by per-row Randomize on an empty grid. Seeding from
+/// wall-clock nanoseconds gives a fresh starting point per editor open while
+/// still keeping `randomize_track_effect` itself deterministic in its seed
+/// argument (so tests keep working).
+fn fresh_rng_seed() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(1)
+        .max(1)
+}
+
 fn clamp_track(row: usize) -> usize {
     row.min(crate::grid::ROWS - 1)
 }
@@ -254,7 +271,7 @@ impl MultosisWindow {
             reset_request,
             toolbar_drag: widgets::DragState::new(),
             clipboard: None,
-            rng_seed: 1,
+            rng_seed: fresh_rng_seed(),
             left_gesture: None,
             grid_cache: grid_view::GridCache::new(pw, ph),
             view: View::Grid,
