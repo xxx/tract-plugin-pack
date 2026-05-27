@@ -75,25 +75,30 @@ pub fn effect_layout(scale: f32) -> EffectLayout {
     let back = l(ox, oy + 4.0, 90.0, 30.0);
     // EFFECT section — a header band, then the controls shifted down to clear it.
     let effect_header = l(ox, oy + 36.0, mw - inset, 16.0);
-    let kind = l(ox, oy + 66.0, 150.0, 34.0);
-    // Randomize button: sits directly below the kind dropdown, in
-    // the empty column the dial row doesn't use (dial slot 0 starts
-    // at ox+180 logical, so x=0..150 below the kind is free).
-    let randomize = l(ox, oy + 108.0, 150.0, 30.0);
+    // Kind dropdown sized to fit the longest effect name ("Transient Shaper")
+    // at the trigger's text size. 200 px gives ~165 px label region after
+    // the 6 px pad + ~20 px chevron at h=34, which clears the longest name
+    // without truncation. The dial row below is shifted right by the same
+    // amount so the historical ~30 px gap between kind and dial slot 0
+    // (formerly at ox+180) is preserved -- new dial slot 0 sits at ox+230.
+    let kind = l(ox, oy + 66.0, 200.0, 34.0);
+    // Randomize button: sits directly below the kind dropdown, matching its
+    // width so the two stack as a single column.
+    let randomize = l(ox, oy + 108.0, 200.0, 30.0);
     let dials = std::array::from_fn(|i| {
         // Slots 0..3 sit in the standard 96-px-spaced dial row; slot 4 sits
-        // in the dial column immediately to its right at ox+580.
+        // in the dial column immediately to its right at ox+630.
         if i < 4 {
-            l(ox + 180.0 + i as f32 * 96.0, oy + 60.0, 88.0, 88.0)
+            l(ox + 230.0 + i as f32 * 96.0, oy + 60.0, 88.0, 88.0)
         } else {
-            l(ox + 580.0, oy + 60.0, 88.0, 88.0)
+            l(ox + 630.0, oy + 60.0, 88.0, 88.0)
         }
     });
     // Per-track Mix dial: anchored at the right end of the dial row across
     // every effect, regardless of how many params the effect declares. Sits
     // 16 px past slot 4 so its column stays put whether or not slot 4 is in
     // use.
-    let mix = l(ox + 684.0, oy + 60.0, 88.0, 88.0);
+    let mix = l(ox + 734.0, oy + 60.0, 88.0, 88.0);
     // MODULATION section — its own header band, then the controls. The trigger
     // and rate are PER-TRACK (govern all 3 MSEGs).
     let modulation_header = l(ox, oy + 152.0, mw - inset, 16.0);
