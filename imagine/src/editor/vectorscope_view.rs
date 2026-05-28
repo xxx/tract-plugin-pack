@@ -8,8 +8,8 @@ use crate::vectorscope::VectorConsumer;
 use crate::ImagineParams;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tiny_skia::{Color, Paint, PathBuilder, Pixmap, PixmapMut, Rect, Transform};
-use tiny_skia_widgets::TextRenderer;
+use tiny_skia::{Color, Paint, PathBuilder, Pixmap, PixmapMut, Transform};
+use tiny_skia_widgets::{fill_rect_i, stroke_rect_i, TextRenderer};
 
 /// Per-frame audio history snapshot fed to the dot-cloud modes
 /// (HalfPolar / Polar / Lissajous). Sized for ~800 ms at 48 kHz so the
@@ -75,31 +75,6 @@ impl VectorMode {
             VectorMode::Lissajous => "Lissajous",
         }
     }
-}
-
-/// Local fill helper using PixmapMut::fill_rect with opaque BlendMode::Source.
-fn fill_rect_i(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: i32, h: i32, color: Color) {
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    let mut paint = Paint::default();
-    paint.set_color(color);
-    paint.anti_alias = false;
-    paint.blend_mode = if color.is_opaque() {
-        tiny_skia::BlendMode::Source
-    } else {
-        tiny_skia::BlendMode::SourceOver
-    };
-    if let Some(rect) = Rect::from_xywh(x as f32, y as f32, w as f32, h as f32) {
-        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-    }
-}
-
-fn stroke_rect_i(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: i32, h: i32, color: Color) {
-    fill_rect_i(pixmap, x, y, w, 1, color);
-    fill_rect_i(pixmap, x, y + h - 1, w, 1, color);
-    fill_rect_i(pixmap, x, y, 1, h, color);
-    fill_rect_i(pixmap, x + w - 1, y, 1, h, color);
 }
 
 /// Direct-pixel fill for a single 1×1 dot. Bounds-checked.

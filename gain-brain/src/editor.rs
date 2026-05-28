@@ -182,12 +182,11 @@ impl GainBrainWindow {
             slider_h,
             widgets::color_control_bg(),
         );
-        let group_text_w = tr.text_width(&group_text, font_size);
-        let group_text_x = val_x + (value_w_group - group_text_w) * 0.5;
+        let group_text_cx = val_x + value_w_group * 0.5;
         let group_text_y = stepper_y + (slider_h + font_size) * 0.5 - 2.0;
-        tr.draw_text(
+        tr.draw_text_centered(
             &mut self.surface.pixmap,
-            group_text_x,
+            group_text_cx,
             group_text_y,
             &group_text,
             font_size,
@@ -456,27 +455,21 @@ impl GainBrainWindow {
     }
 
     fn resize_buffers(&mut self) {
-        let pw = self.physical_width.max(1);
-        let ph = self.physical_height.max(1);
-        self.surface.resize(pw, ph);
-        self.params.editor_state.store_size(pw, ph);
+        self.surface.resize_and_persist(
+            self.physical_width,
+            self.physical_height,
+            &self.params.editor_state,
+        );
     }
 }
 
 impl baseview::WindowHandler for GainBrainWindow {
     fn on_frame(&mut self, window: &mut baseview::Window) {
-        // Check for pending host-initiated resize
-        let packed = self.pending_resize.swap(0, Ordering::Relaxed);
-        if packed != 0 {
-            let new_w = (packed >> 32) as u32;
-            let new_h = (packed & 0xFFFF_FFFF) as u32;
-            if new_w > 0
-                && new_h > 0
-                && (new_w != self.physical_width || new_h != self.physical_height)
-            {
-                window.resize(baseview::Size::new(new_w as f64, new_h as f64));
-            }
-        }
+        widgets::consume_pending_resize(
+            &self.pending_resize,
+            (self.physical_width, self.physical_height),
+            window,
+        );
         self.draw();
         self.surface.present();
     }

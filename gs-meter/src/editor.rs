@@ -658,10 +658,11 @@ impl GsMeterWindow {
     }
 
     fn resize_buffers(&mut self) {
-        let pw = self.physical_width.max(1);
-        let ph = self.physical_height.max(1);
-        self.surface.resize(pw, ph);
-        self.params.editor_state.store_size(pw, ph);
+        self.surface.resize_and_persist(
+            self.physical_width,
+            self.physical_height,
+            &self.params.editor_state,
+        );
     }
 }
 
@@ -762,18 +763,11 @@ fn format_lu(val: f32) -> String {
 
 impl baseview::WindowHandler for GsMeterWindow {
     fn on_frame(&mut self, window: &mut baseview::Window) {
-        // Check for pending host-initiated resize
-        let packed = self.pending_resize.swap(0, Ordering::Relaxed);
-        if packed != 0 {
-            let new_w = (packed >> 32) as u32;
-            let new_h = (packed & 0xFFFF_FFFF) as u32;
-            if new_w > 0
-                && new_h > 0
-                && (new_w != self.physical_width || new_h != self.physical_height)
-            {
-                window.resize(baseview::Size::new(new_w as f64, new_h as f64));
-            }
-        }
+        widgets::consume_pending_resize(
+            &self.pending_resize,
+            (self.physical_width, self.physical_height),
+            window,
+        );
         self.draw();
         self.surface.present();
     }

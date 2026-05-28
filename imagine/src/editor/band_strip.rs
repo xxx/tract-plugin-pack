@@ -4,8 +4,8 @@
 use crate::theme;
 use crate::ImagineParams;
 use std::sync::Arc;
-use tiny_skia::{Color, Paint, Pixmap, PixmapMut, Rect, Transform};
-use tiny_skia_widgets::TextRenderer;
+use tiny_skia::{Color, Paint, Pixmap, PixmapMut, Transform};
+use tiny_skia_widgets::{fill_rect_i, stroke_rect_i, TextRenderer};
 
 /// Reserved height for the band header row ("B1"–"B4") at the top of each panel.
 pub const HEADER_H: i32 = 14;
@@ -116,30 +116,6 @@ pub fn compute_layout(x: i32, y: i32, w: i32, h: i32, scale_factor: f32) -> Band
         mode_rect,
         solo_rect,
     }
-}
-
-fn fill_rect_i(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: i32, h: i32, color: Color) {
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    let mut paint = Paint::default();
-    paint.set_color(color);
-    paint.anti_alias = false;
-    paint.blend_mode = if color.is_opaque() {
-        tiny_skia::BlendMode::Source
-    } else {
-        tiny_skia::BlendMode::SourceOver
-    };
-    if let Some(rect) = Rect::from_xywh(x as f32, y as f32, w as f32, h as f32) {
-        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-    }
-}
-
-fn stroke_rect_i(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: i32, h: i32, color: Color) {
-    fill_rect_i(pixmap, x, y, w, 1, color);
-    fill_rect_i(pixmap, x, y + h - 1, w, 1, color);
-    fill_rect_i(pixmap, x, y, 1, h, color);
-    fill_rect_i(pixmap, x + w - 1, y, 1, h, color);
 }
 
 #[allow(clippy::too_many_arguments)]

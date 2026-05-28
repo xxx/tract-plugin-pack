@@ -6,6 +6,7 @@
 //! onto the Nyquist range — no cutoff-frequency remapping is needed.
 
 use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia_widgets as widgets;
 use tiny_skia_widgets::TextRenderer;
 
 const FREQ_MIN: f32 = 20.0;
@@ -16,7 +17,7 @@ const DB_RANGE: f32 = DB_CEIL - DB_FLOOR; // 48.0
 
 /// Map a frequency in Hz to a normalised [0, 1] x position on the log axis.
 fn freq_to_x_norm(freq_hz: f32) -> f32 {
-    ((freq_hz.max(FREQ_MIN).ln() - FREQ_MIN.ln()) / (FREQ_MAX.ln() - FREQ_MIN.ln())).clamp(0.0, 1.0)
+    widgets::freq_to_norm_x(freq_hz, FREQ_MIN, FREQ_MAX)
 }
 
 fn stroke_line(
@@ -161,7 +162,7 @@ pub fn draw_response(
                 input_mags[lo] * (1.0 - frac) + input_mags[lo + 1] * frac
             };
             let db = 20.0 * mag.max(1e-6).log10();
-            let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
+            let y_norm = widgets::db_to_norm_y(db, DB_FLOOR, DB_CEIL);
             let xx = x0 + (i as f32 / num_points as f32) * width;
             pb.line_to(xx, y0 + height - y_norm * height);
         }
@@ -208,7 +209,7 @@ pub fn draw_response(
                 kernel_mags[lo] * (1.0 - frac) + kernel_mags[lo + 1] * frac
             };
             let db = 20.0 * mag.max(1e-6).log10();
-            let y_norm = ((db - DB_FLOOR) / DB_RANGE).clamp(0.0, 1.0);
+            let y_norm = widgets::db_to_norm_y(db, DB_FLOOR, DB_CEIL);
             let xx = x0 + (i as f32 / num_points as f32) * width;
             let yy = y0 + height - y_norm * height;
             if i == 0 {
@@ -261,11 +262,10 @@ pub fn draw_response(
         (5000.0, "5k"),
         (20000.0, "20k"),
     ] {
-        let tw = text_renderer.text_width(label, text_size);
-        let tx = x0 + freq_to_x_norm(freq) * width - tw * 0.5;
-        text_renderer.draw_text(
+        let cx = x0 + freq_to_x_norm(freq) * width;
+        text_renderer.draw_text_centered(
             pixmap,
-            tx,
+            cx,
             labels_y,
             label,
             text_size,

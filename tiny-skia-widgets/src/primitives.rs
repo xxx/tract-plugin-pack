@@ -1,6 +1,6 @@
 //! Color helpers and primitive drawing functions.
 
-use tiny_skia::{Color, Paint, Pixmap, PremultipliedColorU8, Rect, Transform};
+use tiny_skia::{Color, Paint, Pixmap, PixmapMut, PremultipliedColorU8, Rect, Transform};
 
 // ---------------------------------------------------------------------------
 // Color constants — dark theme matching the vizia CSS in style.css
@@ -211,6 +211,51 @@ pub fn draw_rect_outline(
 }
 
 // ---------------------------------------------------------------------------
+// Integer-coordinate rect fills on a borrowed PixmapMut
+// ---------------------------------------------------------------------------
+
+/// Fill an integer-coordinate rectangle on a borrowed [`PixmapMut`] sub-view.
+///
+/// The [`Pixmap`]-targeting [`draw_rect`] can't be used when the caller only
+/// holds a `PixmapMut` (e.g. a clipped sub-region obtained via
+/// `pixmap.as_mut()`), which is common in editors that composite into a slice
+/// of the frame. Opaque colors take the `BlendMode::Source` fast path; AA is
+/// disabled (axis-aligned integer rects have no fractional edges). No-ops for
+/// non-positive width/height.
+pub fn fill_rect_i(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: i32, h: i32, color: Color) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let Some(rect) = Rect::from_xywh(x as f32, y as f32, w as f32, h as f32) else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = false;
+    if color.is_opaque() {
+        paint.blend_mode = tiny_skia::BlendMode::Source;
+    }
+    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+}
+
+/// Stroke a 1px integer-coordinate rectangle outline on a borrowed
+/// [`PixmapMut`] using [`fill_rect_i`] for each edge.
+///
+/// The left/right edges are inset 1px vertically so the corner pixels aren't
+/// drawn twice. For opaque colors this is pixel-identical to drawing full-height
+/// side edges (overwrite is idempotent); for translucent colors it avoids the
+/// corners compositing twice and darkening.
+pub fn stroke_rect_i(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: i32, h: i32, color: Color) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    fill_rect_i(pixmap, x, y, w, 1, color);
+    fill_rect_i(pixmap, x, y + h - 1, w, 1, color);
+    fill_rect_i(pixmap, x, y + 1, 1, (h - 2).max(0), color);
+    fill_rect_i(pixmap, x + w - 1, y + 1, 1, (h - 2).max(0), color);
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -249,5 +294,33 @@ mod tests {
         draw_rect(&mut pm, 0.0, 0.0, 0.0, 0.0, color_bg());
         draw_rect(&mut pm, 0.0, 0.0, -5.0, 10.0, color_bg());
         draw_rect_outline(&mut pm, 0.0, 0.0, 0.0, 0.0, color_border(), 1.0);
+    }
+
+    #[test]
+    fn test_fill_rect_i_basic() {
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        fill_rect_i(&mut pm.as_mut(), 10, 10, 20, 20, color_accent());
+        let px = pixel_at(&pm, 15, 15);
+        assert!(px.alpha() > 0, "rect should have been drawn");
+        let outside = pixel_at(&pm, 5, 5);
+        assert_eq!(outside.alpha(), 0, "outside the rect should be empty");
+    }
+
+    #[test]
+    fn test_stroke_rect_i_outline_only() {
+        let mut pm = Pixmap::new(100, 100).unwrap();
+        stroke_rect_i(&mut pm.as_mut(), 10, 10, 30, 30, color_border());
+        let corner = pixel_at(&pm, 10, 10);
+        assert!(corner.alpha() > 0, "outline corner should be drawn");
+        let centre = pixel_at(&pm, 25, 25);
+        assert_eq!(centre.alpha(), 0, "outline interior should be empty");
+    }
+
+    #[test]
+    fn test_fill_rect_i_zero_size() {
+        let mut pm = Pixmap::new(50, 50).unwrap();
+        fill_rect_i(&mut pm.as_mut(), 0, 0, 0, 0, color_bg());
+        fill_rect_i(&mut pm.as_mut(), 0, 0, -5, 10, color_bg());
+        stroke_rect_i(&mut pm.as_mut(), 0, 0, 0, 0, color_border());
     }
 }

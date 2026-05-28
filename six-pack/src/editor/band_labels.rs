@@ -190,10 +190,9 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
                     );
                 }
             } else {
-                let vw = win.text_renderer.text_width(&cell.value_text, value_size);
-                win.text_renderer.draw_text(
+                win.text_renderer.draw_text_centered(
                     &mut win.surface.pixmap,
-                    cx + cw * 0.5 - vw * 0.5,
+                    cx + cw * 0.5,
                     value_y,
                     &cell.value_text,
                     value_size,

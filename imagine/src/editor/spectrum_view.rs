@@ -4,8 +4,9 @@ use crate::spectrum::NUM_LOG_BINS;
 use crate::theme;
 use crate::ImagineParams;
 use std::sync::Arc;
-use tiny_skia::{BlendMode, Color, Paint, Pixmap, PixmapMut, Rect, Transform};
-use tiny_skia_widgets::TextRenderer;
+use tiny_skia::Pixmap;
+use tiny_skia_widgets as widgets;
+use tiny_skia_widgets::{fill_rect_i, stroke_rect_i, TextRenderer};
 
 /// Format a frequency in Hz as a short display string.
 /// Examples: 80 -> "80 Hz", 1000 -> "1.0 kHz", 8400 -> "8.4 kHz".
@@ -25,17 +26,12 @@ const F_MAX: f32 = 20_000.0;
 /// Inverse of [`hz_to_x`]. Used by Task 17's hit-testing for split drags.
 #[allow(dead_code)]
 pub fn x_to_hz(x_norm: f32) -> f32 {
-    let log_min = F_MIN.ln();
-    let log_max = F_MAX.ln();
-    (log_min + (log_max - log_min) * x_norm.clamp(0.0, 1.0)).exp()
+    widgets::norm_x_to_freq(x_norm, F_MIN, F_MAX)
 }
 
 /// Map frequency in Hz to normalized x ∈ [0, 1].
 pub fn hz_to_x(hz: f32) -> f32 {
-    let log_min = F_MIN.ln();
-    let log_max = F_MAX.ln();
-    let log_hz = hz.clamp(F_MIN, F_MAX).ln();
-    ((log_hz - log_min) / (log_max - log_min)).clamp(0.0, 1.0)
+    widgets::freq_to_norm_x(hz, F_MIN, F_MAX)
 }
 
 /// Reserved height at the top of the spectrum panel for frequency labels above
@@ -51,34 +47,6 @@ fn scaled(v: i32, s: f32) -> i32 {
 /// Pixel x for a split at given frequency, given the panel's left edge and width.
 pub fn split_pixel_x(panel_x: i32, panel_w: i32, hz: f32) -> i32 {
     panel_x + (hz_to_x(hz) * panel_w as f32) as i32
-}
-
-// ── Local helpers: integer-rect fills on a PixmapMut ────────────────────
-
-fn fill_rect_i(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: i32, h: i32, color: Color) {
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    let Some(rect) = Rect::from_xywh(x as f32, y as f32, w as f32, h as f32) else {
-        return;
-    };
-    let mut paint = Paint::default();
-    paint.set_color(color);
-    paint.anti_alias = false;
-    if color.alpha() >= 1.0 {
-        paint.blend_mode = BlendMode::Source;
-    }
-    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
-}
-
-fn stroke_rect_i(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: i32, h: i32, color: Color) {
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    fill_rect_i(pixmap, x, y, w, 1, color);
-    fill_rect_i(pixmap, x, y + h - 1, w, 1, color);
-    fill_rect_i(pixmap, x, y + 1, 1, (h - 2).max(0), color);
-    fill_rect_i(pixmap, x + w - 1, y + 1, 1, (h - 2).max(0), color);
 }
 
 #[allow(clippy::too_many_arguments)]

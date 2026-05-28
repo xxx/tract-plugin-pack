@@ -198,6 +198,24 @@ impl TextRenderer {
         }
     }
 
+    /// Draw `text` horizontally centred on `cx`, with its baseline at `y`.
+    ///
+    /// Collapses the `measure → offset by half-width → draw` triad that editor
+    /// code would otherwise repeat at every centred label. To centre within a
+    /// rect, pass `cx = rect_x + rect_w * 0.5`.
+    pub fn draw_text_centered(
+        &mut self,
+        pixmap: &mut Pixmap,
+        cx: f32,
+        y: f32,
+        text: &str,
+        size: f32,
+        color: Color,
+    ) {
+        let w = self.text_width(text, size);
+        self.draw_text(pixmap, cx - w * 0.5, y, text, size, color);
+    }
+
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------
@@ -257,6 +275,26 @@ mod tests {
         let mut renderer = TextRenderer::new(&data);
         let mut pm = Pixmap::new(200, 50).unwrap();
         renderer.draw_text(&mut pm, 5.0, 30.0, "Hello!", 14.0, color_text());
+    }
+
+    #[test]
+    fn test_draw_text_centered_offsets_by_half_width() {
+        let data = test_font_data();
+        let mut renderer = TextRenderer::new(&data);
+        let mut pm = Pixmap::new(200, 50).unwrap();
+        // Centring on cx draws starting at cx - width/2; verify it doesn't
+        // panic and that the helper agrees with the manual computation.
+        let text = "AB";
+        let w = renderer.text_width(text, 14.0);
+        renderer.draw_text_centered(&mut pm, 100.0, 30.0, text, 14.0, color_text());
+        // Manual-centre reference into a fresh pixmap.
+        let mut pm_ref = Pixmap::new(200, 50).unwrap();
+        renderer.draw_text(&mut pm_ref, 100.0 - w * 0.5, 30.0, text, 14.0, color_text());
+        assert_eq!(
+            pm.data(),
+            pm_ref.data(),
+            "draw_text_centered must match manual half-width offset"
+        );
     }
 
     #[test]

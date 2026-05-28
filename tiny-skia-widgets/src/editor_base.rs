@@ -14,7 +14,7 @@ use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
 use serde::{Deserialize, Serialize};
 use std::num::{NonZeroIsize, NonZeroU32};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 // ── Editor State (persisted by the host) ────────────────────────────────
@@ -97,6 +97,35 @@ impl Drop for EditorHandle {
         self.state.set_open(false);
         self.window.close();
     }
+}
+
+// ── Pending-resize plumbing ─────────────────────────────────────────────
+
+/// Consume a packed pending-resize request and forward it to the window.
+///
+/// Plugins stash a host-requested resize as a packed `AtomicU64`
+/// (`width << 32 | height`) and apply it on the next frame, because baseview
+/// requires `window.resize()` to run on the GUI thread. This swaps the pending
+/// value out and—when it names a size different from `current_physical`—calls
+/// `window.resize()`. Returns `true` if a resize was dispatched.
+///
+/// Call once at the top of `WindowHandler::on_frame`, before drawing.
+pub fn consume_pending_resize(
+    pending: &AtomicU64,
+    current_physical: (u32, u32),
+    window: &mut baseview::Window<'_>,
+) -> bool {
+    let packed = pending.swap(0, Ordering::Relaxed);
+    if packed == 0 {
+        return false;
+    }
+    let new_w = (packed >> 32) as u32;
+    let new_h = (packed & 0xFFFF_FFFF) as u32;
+    if new_w > 0 && new_h > 0 && (new_w, new_h) != current_physical {
+        window.resize(baseview::Size::new(new_w as f64, new_h as f64));
+        return true;
+    }
+    false
 }
 
 // ── Raw window handle adapters ──────────────────────────────────────────
@@ -258,6 +287,16 @@ impl SoftbufferSurface {
             sb_surface,
             pixmap,
         }
+    }
+
+    /// Resize the surface to new physical dimensions and persist the size into
+    /// `editor_state` so the host restores it on reopen. Collapses the
+    /// `resize_buffers` method every plugin's `WindowHandler` would repeat.
+    pub fn resize_and_persist(&mut self, pw: u32, ph: u32, editor_state: &EditorState) {
+        let pw = pw.max(1);
+        let ph = ph.max(1);
+        self.resize(pw, ph);
+        editor_state.store_size(pw, ph);
     }
 
     /// Resize the pixmap and softbuffer surface to new physical dimensions.

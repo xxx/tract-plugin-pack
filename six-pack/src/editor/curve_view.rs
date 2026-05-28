@@ -16,23 +16,17 @@ const DB_MAX: f32 = 21.0;
 
 #[inline]
 pub(crate) fn norm_x_to_freq(xnorm: f32) -> f32 {
-    let log_min = FREQ_MIN.ln();
-    let log_max = FREQ_MAX.ln();
-    let t = xnorm.clamp(0.0, 1.0);
-    (log_min + t * (log_max - log_min)).exp()
+    widgets::norm_x_to_freq(xnorm, FREQ_MIN, FREQ_MAX)
 }
 
 #[inline]
 fn freq_to_norm_x(freq: f32) -> f32 {
-    let log_min = FREQ_MIN.ln();
-    let log_max = FREQ_MAX.ln();
-    let t = (freq.max(FREQ_MIN).ln() - log_min) / (log_max - log_min);
-    t.clamp(0.0, 1.0)
+    widgets::freq_to_norm_x(freq, FREQ_MIN, FREQ_MAX)
 }
 
 #[inline]
 fn db_to_norm_y(db: f32) -> f32 {
-    ((db - DB_MIN) / (DB_MAX - DB_MIN)).clamp(0.0, 1.0)
+    widgets::db_to_norm_y(db, DB_MIN, DB_MAX)
 }
 
 /// Analytic peaking-EQ magnitude (RBJ cookbook style) at frequency `f` for a
@@ -275,10 +269,9 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
     for &(freq, label) in &[(100.0_f32, "100"), (1000.0, "1k"), (10000.0, "10k")] {
         let xnorm = freq_to_norm_x(freq);
         let gx = plot_x + xnorm * plot_w;
-        let lw = tr.text_width(label, label_size);
-        tr.draw_text(
+        tr.draw_text_centered(
             &mut win.surface.pixmap,
-            gx - lw * 0.5,
+            gx,
             y + h - 4.0 * s,
             label,
             label_size,
@@ -360,10 +353,9 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
         // Small numeric label inside the dot.
         let lbl_size = (8.0 * s).max(7.0);
         let label = format!("{}", i + 1);
-        let lw = win.text_renderer.text_width(&label, lbl_size);
-        win.text_renderer.draw_text(
+        win.text_renderer.draw_text_centered(
             &mut win.surface.pixmap,
-            cx - lw * 0.5,
+            cx,
             cy + lbl_size * 0.4,
             &label,
             lbl_size,

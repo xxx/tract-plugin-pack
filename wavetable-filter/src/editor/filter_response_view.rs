@@ -191,7 +191,7 @@ fn ensure_response_ys(cache: &mut FftCache, cutoff_hz: f32, resonance: f32, heig
 }
 
 fn freq_to_x(freq_hz: f32) -> f32 {
-    ((freq_hz.max(FREQ_MIN).ln() - FREQ_MIN.ln()) / (FREQ_MAX.ln() - FREQ_MIN.ln())).clamp(0.0, 1.0)
+    tiny_skia_widgets::freq_to_norm_x(freq_hz, FREQ_MIN, FREQ_MAX)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -373,11 +373,10 @@ pub(crate) fn draw_filter_response(
         (5000.0, "5k"),
         (20000.0, "20k"),
     ] {
-        let tw = text_renderer.text_width(label, text_size);
-        let tx = x0 + freq_to_x(freq) * width - tw * 0.5;
-        text_renderer.draw_text(
+        let cx = x0 + freq_to_x(freq) * width;
+        text_renderer.draw_text_centered(
             pixmap,
-            tx,
+            cx,
             labels_y,
             label,
             text_size,

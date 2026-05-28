@@ -425,28 +425,25 @@ impl TinylimitWindow {
 
         // Input meter labels
         let in_label = "IN";
-        let in_label_w = tr.text_width(in_label, font_size);
-        tr.draw_text(
+        tr.draw_text_centered(
             &mut self.surface.pixmap,
-            in_label_x - in_label_w / 2.0,
+            in_label_x,
             meter_top - 4.0 * s,
             in_label,
             font_size,
             widgets::color_muted(),
         );
-        let l_label_w = tr.text_width(l_label, small_font);
-        tr.draw_text(
+        tr.draw_text_centered(
             &mut self.surface.pixmap,
-            in_l_x + (meter_bar_w - l_label_w) / 2.0,
+            in_l_x + meter_bar_w / 2.0,
             meter_top - 4.0 * s - font_size - 2.0 * s,
             l_label,
             small_font,
             widgets::color_muted(),
         );
-        let r_label_w = tr.text_width(r_label, small_font);
-        tr.draw_text(
+        tr.draw_text_centered(
             &mut self.surface.pixmap,
-            in_r_x + (meter_bar_w - r_label_w) / 2.0,
+            in_r_x + meter_bar_w / 2.0,
             meter_top - 4.0 * s - font_size - 2.0 * s,
             r_label,
             small_font,
@@ -457,19 +454,17 @@ impl TinylimitWindow {
         let in_peak_text_l = format_db(in_peak_l);
         let in_peak_text_r = format_db(in_peak_r);
         let peak_text_y = meter_bottom + font_size + 4.0 * s;
-        let peak_lw = tr.text_width(&in_peak_text_l, small_font);
-        tr.draw_text(
+        tr.draw_text_centered(
             &mut self.surface.pixmap,
-            in_l_x + (meter_bar_w - peak_lw) / 2.0,
+            in_l_x + meter_bar_w / 2.0,
             peak_text_y,
             &in_peak_text_l,
             small_font,
             widgets::color_muted(),
         );
-        let peak_rw = tr.text_width(&in_peak_text_r, small_font);
-        tr.draw_text(
+        tr.draw_text_centered(
             &mut self.surface.pixmap,
-            in_r_x + (meter_bar_w - peak_rw) / 2.0,
+            in_r_x + meter_bar_w / 2.0,
             peak_text_y,
             &in_peak_text_r,
             small_font,
@@ -478,28 +473,25 @@ impl TinylimitWindow {
 
         // Output meter labels
         let out_label = "OUT";
-        let out_label_w = tr.text_width(out_label, font_size);
-        tr.draw_text(
+        tr.draw_text_centered(
             &mut self.surface.pixmap,
-            out_label_x - out_label_w / 2.0,
+            out_label_x,
             meter_top - 4.0 * s,
             out_label,
             font_size,
             widgets::color_muted(),
         );
-        let out_l_label_w = tr.text_width(l_label, small_font);
-        tr.draw_text(
+        tr.draw_text_centered(
             &mut self.surface.pixmap,
-            out_l_x + (meter_bar_w - out_l_label_w) / 2.0,
+            out_l_x + meter_bar_w / 2.0,
             meter_top - 4.0 * s - font_size - 2.0 * s,
             l_label,
             small_font,
             widgets::color_muted(),
         );
-        let out_r_label_w = tr.text_width(r_label, small_font);
-        tr.draw_text(
+        tr.draw_text_centered(
             &mut self.surface.pixmap,
-            out_r_x + (meter_bar_w - out_r_label_w) / 2.0,
+            out_r_x + meter_bar_w / 2.0,
             meter_top - 4.0 * s - font_size - 2.0 * s,
             r_label,
             small_font,
@@ -509,19 +501,17 @@ impl TinylimitWindow {
         // Output peak text below meters
         let out_peak_text_l = format_db(out_peak_l);
         let out_peak_text_r = format_db(out_peak_r);
-        let out_peak_lw = tr.text_width(&out_peak_text_l, small_font);
-        tr.draw_text(
+        tr.draw_text_centered(
             &mut self.surface.pixmap,
-            out_l_x + (meter_bar_w - out_peak_lw) / 2.0,
+            out_l_x + meter_bar_w / 2.0,
             peak_text_y,
             &out_peak_text_l,
             small_font,
             widgets::color_muted(),
         );
-        let out_peak_rw = tr.text_width(&out_peak_text_r, small_font);
-        tr.draw_text(
+        tr.draw_text_centered(
             &mut self.surface.pixmap,
-            out_r_x + (meter_bar_w - out_peak_rw) / 2.0,
+            out_r_x + meter_bar_w / 2.0,
             peak_text_y,
             &out_peak_text_r,
             small_font,
@@ -688,10 +678,9 @@ impl TinylimitWindow {
             format!("GR: {:.1} dB", gr_db.abs())
         };
         let gr_y = btn_row_y + btn_h + 10.0 * s;
-        let gr_w = tr.text_width(&gr_text, font_size);
-        tr.draw_text(
+        tr.draw_text_centered(
             &mut self.surface.pixmap,
-            center_mid - gr_w / 2.0,
+            center_mid,
             gr_y + font_size,
             &gr_text,
             font_size,
@@ -709,10 +698,11 @@ impl TinylimitWindow {
     }
 
     fn resize_buffers(&mut self) {
-        let pw = self.physical_width.max(1);
-        let ph = self.physical_height.max(1);
-        self.surface.resize(pw, ph);
-        self.params.editor_state.store_size(pw, ph);
+        self.surface.resize_and_persist(
+            self.physical_width,
+            self.physical_height,
+            &self.params.editor_state,
+        );
     }
 }
 
@@ -762,17 +752,11 @@ fn format_db(db: f32) -> String {
 
 impl baseview::WindowHandler for TinylimitWindow {
     fn on_frame(&mut self, window: &mut baseview::Window) {
-        let packed = self.pending_resize.swap(0, Ordering::Relaxed);
-        if packed != 0 {
-            let new_w = (packed >> 32) as u32;
-            let new_h = (packed & 0xFFFF_FFFF) as u32;
-            if new_w > 0
-                && new_h > 0
-                && (new_w != self.physical_width || new_h != self.physical_height)
-            {
-                window.resize(baseview::Size::new(new_w as f64, new_h as f64));
-            }
-        }
+        widgets::consume_pending_resize(
+            &self.pending_resize,
+            (self.physical_width, self.physical_height),
+            window,
+        );
 
         self.draw();
         self.surface.present();

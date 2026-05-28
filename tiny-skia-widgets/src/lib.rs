@@ -4,6 +4,7 @@
 //! the caller is responsible for DPI scaling. No event handling lives here — only
 //! pure drawing functions.
 
+pub mod axis;
 pub mod controls;
 pub mod drag;
 pub mod dropdown;
@@ -18,6 +19,7 @@ pub mod text_edit;
 #[cfg(test)]
 mod test_font;
 
+pub use axis::*;
 pub use controls::*;
 pub use drag::*;
 pub use dropdown::*;

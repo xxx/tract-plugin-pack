@@ -285,26 +285,10 @@ pub fn draw_track_list(
         widgets::draw_rect(pixmap, mx, my, mw, mh, m_bg);
         widgets::draw_rect(pixmap, sx_, sy_, sw, sh, s_bg);
         // Centre the M/S glyphs in their buttons.
-        let m_w = tr.text_width("M", btn_text_size);
-        let s_w = tr.text_width("S", btn_text_size);
         let m_ty = my + (mh + btn_text_size) * 0.5 - 2.0;
         let s_ty = sy_ + (sh + btn_text_size) * 0.5 - 2.0;
-        tr.draw_text(
-            pixmap,
-            mx + (mw - m_w) * 0.5,
-            m_ty,
-            "M",
-            btn_text_size,
-            m_fg,
-        );
-        tr.draw_text(
-            pixmap,
-            sx_ + (sw - s_w) * 0.5,
-            s_ty,
-            "S",
-            btn_text_size,
-            s_fg,
-        );
+        tr.draw_text_centered(pixmap, mx + mw * 0.5, m_ty, "M", btn_text_size, m_fg);
+        tr.draw_text_centered(pixmap, sx_ + sw * 0.5, s_ty, "S", btn_text_size, s_fg);
 
         // "sounding" dot — a small square at the right edge. Moved 8 px to
         // the right of its previous position to clear the new S button.

@@ -425,10 +425,9 @@ pub fn draw_effect_section(
             // Centre a labelled dropdown trigger in the dial slot. The label
             // sits above the trigger like a dial's name above its dial face.
             let label_size = (dh * 0.18).max(11.0 * scale);
-            let label_w = tr.text_width(spec.name, label_size);
-            tr.draw_text(
+            tr.draw_text_centered(
                 pixmap,
-                dx + (dw - label_w) * 0.5,
+                dx + dw * 0.5,
                 dy + dh * 0.22,
                 spec.name,
                 label_size,
