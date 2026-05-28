@@ -259,8 +259,15 @@ impl Plugin for Multosis {
     }
 
     fn reset(&mut self) {
-        self.engine.reset();
-        self.was_playing = false;
+        // Flush DSP buffers only -- preserve playhead, clock, and MSEG phases.
+        // A host's reset means "audio alignment changed, drop stale buffers",
+        // not "restart the musical sequence"; the transport stopped->playing
+        // edge in `process` is what restarts the sequence. Keeping MSEG timing
+        // here also makes multosis robust to hosts that call reset() mid-
+        // playback (e.g. Bitwig on PDC realignment) without retriggering every
+        // MSEG. `was_playing` is left alone so the next block doesn't see a
+        // false stopped->playing edge and trip the full sequence restart.
+        self.engine.flush_dsp();
     }
 
     fn process(

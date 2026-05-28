@@ -154,15 +154,35 @@ impl StretchChannel {
         }
     }
 
+    /// Algorithmic latency in samples -- one full FFT window (the STFT-OLA
+    /// standard), reported for the slot the engine *will* be using once a
+    /// pending switch settles. Mirrors `tract_dsp::SpectralEngine`:
+    ///
+    /// * report `fft_size`, not `hop_size` -- the OLA output ring is a full
+    ///   window deep (the old `hop_size` under-reported PDC by 4x);
+    /// * report the *pending* slot when a switch is latched, so the host gets
+    ///   the final latency immediately instead of the pre-switch value;
+    ///
+    /// Both matter because the channel constructs at the default slot
+    /// (`active = 2`) and `set_effects` then latches the user's saved FFT as a
+    /// `pending` switch. Reporting `active.hop_size` made `latency_samples`
+    /// change the moment the switch applied at the next hop -- a moving PDC
+    /// value that Bitwig chased with repeated `Plugin::reset` / transport
+    /// re-aligns, zeroing every MSEG phase many times a second.
     fn latency_samples(&self) -> usize {
-        self.slots[self.active].hop_size
+        let idx = self.pending.unwrap_or(self.active);
+        self.slots[idx].fft_size
     }
 
     fn reset(&mut self) {
         for slot in &mut self.slots {
             slot.reset();
         }
-        self.pending = None;
+        // `pending` / `active` encode the user's FFT-size selection (intent),
+        // not audio accumulator state, so they survive a reset. Clearing
+        // `pending` here would let `latency_samples` swing back to the default
+        // slot whenever the host calls reset -- the Bitwig PDC feedback loop
+        // (see tract-dsp SpectralEngine::reset, f6d92f5).
     }
 
     /// Drive one sample through the active slot. PHASE B: target-bin magnitude
@@ -441,6 +461,47 @@ mod tests {
     #[test]
     fn parameters_count_is_four() {
         assert_eq!(SpectralStretchEffect::default().parameters().len(), 4);
+    }
+
+    #[test]
+    fn latency_reports_target_fft_immediately_and_is_stable() {
+        // Regression for the Bitwig PDC feedback loop. latency_samples must:
+        //  1. report one full FFT window (not hop_size),
+        //  2. report the TARGET size the instant the FFT param is set (the
+        //     channel constructs at the 2048 default, so a saved non-default
+        //     FFT is a pending switch that hasn't applied yet), and
+        //  3. NOT move when that pending switch later applies at a hop
+        //     boundary, nor when reset() is called.
+        // A moving latency made the host re-align repeatedly, firing
+        // Plugin::reset / transport edges that zeroed every MSEG phase.
+        let mut e = SpectralStretchEffect::default();
+        for (v, expected) in [(0.0, 512), (1.0, 1024), (2.0, 2048), (3.0, 4096)] {
+            e.set_param(3, v); // FFT is the last param (index 3)
+            assert_eq!(
+                e.latency_samples(),
+                expected,
+                "latency must report the target FFT window size immediately"
+            );
+        }
+
+        // FFT = 1024 (slot 1) while the channel is constructed at slot 2:
+        // the value must hold across the hop-boundary switch and a reset.
+        let mut e = SpectralStretchEffect::default();
+        e.set_param(3, 1.0);
+        let reported = e.latency_samples();
+        assert_eq!(reported, 1024);
+        let _ = drive(&mut e, 4096, |_| 0.1); // past several hop boundaries
+        assert_eq!(
+            e.latency_samples(),
+            reported,
+            "latency must not move when the pending FFT switch applies"
+        );
+        e.reset();
+        assert_eq!(
+            e.latency_samples(),
+            reported,
+            "reset must preserve the selected FFT latency (no swing to the default slot)"
+        );
     }
 
     #[test]

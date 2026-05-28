@@ -137,18 +137,35 @@ impl AudioEngine {
         self.compressor.set_params(threshold_db, ratio);
     }
 
-    /// Reset the sequence, clock, and filter state. Called on the transport
-    /// stopped→playing edge and on the host's `reset()`.
+    /// Restart the sequence end-to-end: playhead at the loop start, step
+    /// counter zeroed, clock and MSEG phases zeroed, every effect and the
+    /// wet-bus compressor flushed. Called on the transport stopped→playing
+    /// edge and from the editor's Reset button — the user-visible "play
+    /// from the top" reset. NOT the target of `Plugin::reset` from the
+    /// host; that calls the narrower `flush_dsp` so a mid-playback PDC
+    /// realignment in Bitwig does not retrigger every MSEG.
     pub fn reset(&mut self) {
         self.playhead.reset();
         self.step = 0;
         self.clock.reset();
+        self.flush_dsp();
+        self.modulation.reset();
+        self.last_active = 0;
+    }
+
+    /// Flush DSP buffer state — every per-row effect and the wet-bus
+    /// compressor. Sequence and modulation timing (playhead, step counter,
+    /// clock, MSEG phases, last-active mirror) are deliberately preserved.
+    /// This is the audio-thread target of `Plugin::reset`: Bitwig (and
+    /// other hosts) call `Plugin::reset` mid-playback on PDC realignment,
+    /// and clearing MSEG state there is audible as every MSEG on every
+    /// track restarting in lockstep. The transport stopped→playing edge in
+    /// `process` still drives the full sequence restart via [`reset`].
+    pub fn flush_dsp(&mut self) {
         for e in &mut self.effects {
             e.reset();
         }
-        self.modulation.reset();
         self.compressor.reset();
-        self.last_active = 0;
     }
 
     /// Steps since the last reset — exposed for the editor's status readout.
@@ -841,6 +858,78 @@ mod tests {
         engine.process(&mut left, &mut right, false, 10.0, 120.0, 1.0, &grid);
         assert!(left.iter().all(|&s| (s - 0.05).abs() < 1e-6));
         assert!(right.iter().all(|&s| (s - 0.05).abs() < 1e-6));
+    }
+
+    #[test]
+    fn flush_dsp_preserves_modulation_phases_and_sequence_position() {
+        // `Plugin::reset` (the host's "flush your state" callback) maps to
+        // `flush_dsp`, not `reset`. Bitwig calls Plugin::reset mid-playback
+        // in response to its own PDC bookkeeping, and clearing MSEG state
+        // there is audible as every MSEG on every track restarting in
+        // lockstep on any parameter edit that nudges chain latency. Guard
+        // against regression: flush_dsp must keep the playhead, step
+        // counter, and every MSEG phase exactly where they were.
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48_000.0);
+
+        // Free-running MSEGs on every row so no CellLight/CellStep fires
+        // mid-block can mask a regression by zeroing phases for legitimate
+        // sequencer reasons.
+        let mut mod_cfg: [crate::modulation::TrackModulation; ROWS] =
+            std::array::from_fn(crate::modulation::TrackModulation::default_for_row);
+        for row in mod_cfg.iter_mut() {
+            row.trigger = crate::modulation::TriggerSource::Free;
+        }
+        engine.set_modulation(&mod_cfg);
+
+        // Run a playing block long enough to advance several step
+        // boundaries (sps=10 + 256-sample block crosses ~25 steps) so
+        // every piece of state we want to preserve has moved off zero.
+        let grid = Grid::default();
+        let mut left = [0.3_f32; 256];
+        let mut right = [0.3_f32; 256];
+        engine.process(&mut left, &mut right, true, 10.0, 120.0, 1.0, &grid);
+
+        let playhead_before = engine.playhead_column();
+        let step_before = engine.step();
+        let mut phases_before = Vec::with_capacity(ROWS * 4);
+        for r in 0..ROWS {
+            for k in 0..4 {
+                phases_before.push(engine.modulation_phase(r, k));
+            }
+        }
+        assert!(
+            step_before > 0,
+            "step counter must advance off zero for the preserve-check to be meaningful"
+        );
+        assert!(
+            phases_before.iter().any(|&p| p > 0.0),
+            "at least one MSEG phase must advance off zero for the preserve-check to mean something"
+        );
+
+        // The audio-thread target of `Plugin::reset` from the host.
+        engine.flush_dsp();
+
+        assert_eq!(
+            engine.playhead_column(),
+            playhead_before,
+            "flush_dsp must preserve the playhead column"
+        );
+        assert_eq!(
+            engine.step(),
+            step_before,
+            "flush_dsp must preserve the step counter"
+        );
+        let mut phases_after = Vec::with_capacity(ROWS * 4);
+        for r in 0..ROWS {
+            for k in 0..4 {
+                phases_after.push(engine.modulation_phase(r, k));
+            }
+        }
+        assert_eq!(
+            phases_after, phases_before,
+            "flush_dsp must preserve every MSEG phase (any zeroing is audible as all-tracks restart)"
+        );
     }
 
     #[test]

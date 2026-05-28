@@ -109,11 +109,18 @@ impl<S: PartialEq> Default for UndoHistory<S> {
 }
 
 /// A snapshot of the three DAW-opaque persisted config structs.
+///
+/// `modulation` is boxed: `[TrackModulation; ROWS]` is ~138 KB
+/// (`[MsegNode; 128]` x 4 MSEGs x 16 rows). Held inline, a `ConfigSnapshot`
+/// move would push that whole array across the stack; release builds elide
+/// the copy but debug builds do not, overflowing the editor thread's stack
+/// the moment the editor snapshots for undo. Boxing keeps the bulk on the
+/// heap so only a pointer moves.
 #[derive(Clone, PartialEq, Debug)]
 pub struct ConfigSnapshot {
     pub grid: Grid,
     pub effects: [TrackEffect; ROWS],
-    pub modulation: [TrackModulation; ROWS],
+    pub modulation: Box<[TrackModulation; ROWS]>,
 }
 
 impl ConfigSnapshot {
@@ -127,11 +134,21 @@ impl ConfigSnapshot {
             .track_effects
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let modulation = params
+        // Clone the modulation array straight onto the heap. Collecting into a
+        // Vec clones element by element into a heap buffer, then the
+        // boxed-slice -> boxed-array conversion is a pointer cast (no realloc).
+        // This avoids ever materialising the full ~138 KB array as a stack
+        // temporary, which a debug build would not elide.
+        let modulation: Box<[TrackModulation; ROWS]> = params
             .track_modulation
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+            .try_into()
+            .expect("track_modulation always has exactly ROWS entries");
         Self {
             grid,
             effects,
@@ -146,10 +163,13 @@ impl ConfigSnapshot {
             .track_effects
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = self.effects;
-        *params
+        // Clone element-by-element into the live array rather than cloning the
+        // whole ~138 KB array onto the stack first (see `capture`).
+        params
             .track_modulation
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = self.modulation.clone();
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone_from_slice(&self.modulation[..]);
     }
 }
 
