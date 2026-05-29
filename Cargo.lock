@@ -1294,6 +1294,7 @@ name = "nap"
 version = "0.1.0"
 dependencies = [
  "baseview",
+ "criterion",
  "crossbeam",
  "keyboard-types",
  "nih_plug",

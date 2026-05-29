@@ -358,7 +358,7 @@ mod tests {
 
         let mut s = VelvetSequence::new();
         generate(&mut s, &p, &decay, &flat(0.0), &flat(0.5));
-        let l = (p.size_s * p.sample_rate) as f32;
+        let l = p.size_s * p.sample_rate;
         for m in 0..s.count {
             let phase = s.location[m] as f32 / l;
             if phase > 0.6 {
