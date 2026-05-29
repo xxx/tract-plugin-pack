@@ -3,5 +3,6 @@
 
 pub mod coloration;
 pub mod engine;
+pub mod handoff;
 pub mod rng;
 pub mod sequence;
