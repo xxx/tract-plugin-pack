@@ -36,7 +36,11 @@ fn curve_value(data: &MsegData, phase: f32, seg: &mut usize) -> f32 {
         return n0.value;
     }
     let span = n1.time - n0.time;
-    let t = if span > 1e-9 { (phase - n0.time) / span } else { 0.0 };
+    let t = if span > 1e-9 {
+        (phase - n0.time) / span
+    } else {
+        0.0
+    };
     n0.value + (n1.value - n0.value) * warp(t, n0.tension)
 }
 
@@ -105,7 +109,11 @@ pub fn generate(
     }
 
     out.count = m_count;
-    out.tail_len = if m_count == 0 { 0 } else { (max_loc as usize) + 1 };
+    out.tail_len = if m_count == 0 {
+        0
+    } else {
+        (max_loc as usize) + 1
+    };
 }
 
 /// Hard upper bound on pulse count: max Size (10 s) × max Density (4000/s) at
@@ -163,8 +171,18 @@ impl Default for VelvetSequence {
 /// exponential-ish fall via positive tension. Unipolar.
 pub fn default_decay_curve() -> MsegData {
     let mut d = MsegData::default();
-    d.nodes[0] = MsegNode { time: 0.0, value: 1.0, tension: 0.6, stepped: false };
-    d.nodes[1] = MsegNode { time: 1.0, value: 0.0, tension: 0.0, stepped: false };
+    d.nodes[0] = MsegNode {
+        time: 0.0,
+        value: 1.0,
+        tension: 0.6,
+        stepped: false,
+    };
+    d.nodes[1] = MsegNode {
+        time: 1.0,
+        value: 0.0,
+        tension: 0.0,
+        stepped: false,
+    };
     d.polarity = Polarity::Unipolar;
     d.debug_assert_valid();
     d
@@ -173,8 +191,18 @@ pub fn default_decay_curve() -> MsegData {
 /// Default Width curve: a moderate, constant 0.5 width across the tail.
 pub fn default_width_curve() -> MsegData {
     let mut d = MsegData::default();
-    d.nodes[0] = MsegNode { time: 0.0, value: 0.5, tension: 0.0, stepped: false };
-    d.nodes[1] = MsegNode { time: 1.0, value: 0.5, tension: 0.0, stepped: false };
+    d.nodes[0] = MsegNode {
+        time: 0.0,
+        value: 0.5,
+        tension: 0.0,
+        stepped: false,
+    };
+    d.nodes[1] = MsegNode {
+        time: 1.0,
+        value: 0.5,
+        tension: 0.0,
+        stepped: false,
+    };
     d.polarity = Polarity::Unipolar;
     d.debug_assert_valid();
     d
@@ -184,8 +212,18 @@ pub fn default_width_curve() -> MsegData {
 /// absorption). Value 1.0 = brightest dictionary filter, 0.0 = darkest.
 pub fn default_tone_curve() -> MsegData {
     let mut d = MsegData::default();
-    d.nodes[0] = MsegNode { time: 0.0, value: 0.85, tension: 0.0, stepped: false };
-    d.nodes[1] = MsegNode { time: 1.0, value: 0.25, tension: 0.0, stepped: false };
+    d.nodes[0] = MsegNode {
+        time: 0.0,
+        value: 0.85,
+        tension: 0.0,
+        stepped: false,
+    };
+    d.nodes[1] = MsegNode {
+        time: 1.0,
+        value: 0.25,
+        tension: 0.0,
+        stepped: false,
+    };
     d.polarity = Polarity::Unipolar;
     d.debug_assert_valid();
     d
@@ -198,14 +236,30 @@ mod tests {
 
     fn flat(value: f32) -> MsegData {
         let mut d = MsegData::default();
-        d.nodes[0] = MsegNode { time: 0.0, value, tension: 0.0, stepped: false };
-        d.nodes[1] = MsegNode { time: 1.0, value, tension: 0.0, stepped: false };
+        d.nodes[0] = MsegNode {
+            time: 0.0,
+            value,
+            tension: 0.0,
+            stepped: false,
+        };
+        d.nodes[1] = MsegNode {
+            time: 1.0,
+            value,
+            tension: 0.0,
+            stepped: false,
+        };
         d.debug_assert_valid();
         d
     }
 
     fn test_params() -> GenParams {
-        GenParams { sample_rate: 48_000.0, size_s: 1.0, density: 1500.0, width_ms: 5.0, seed: 1 }
+        GenParams {
+            sample_rate: 48_000.0,
+            size_s: 1.0,
+            density: 1500.0,
+            width_ms: 5.0,
+            seed: 1,
+        }
     }
 
     #[test]
@@ -237,7 +291,11 @@ mod tests {
     #[test]
     fn deterministic_for_same_inputs() {
         let p = test_params();
-        let (d, w, t) = (default_decay_curve(), default_width_curve(), default_tone_curve());
+        let (d, w, t) = (
+            default_decay_curve(),
+            default_width_curve(),
+            default_tone_curve(),
+        );
         let mut a = VelvetSequence::new();
         let mut b = VelvetSequence::new();
         generate(&mut a, &p, &d, &w, &t);
@@ -279,10 +337,23 @@ mod tests {
         decay.insert_node(0.5, 0.0);
         // node[0] stepped=true holds value 1.0 up to node[1] at 0.5; then
         // node[1] has value 0.0, so from 0.5 onward the curve returns 0.0.
-        decay.nodes[0] = MsegNode { time: 0.0, value: 1.0, tension: 0.0, stepped: true };
+        decay.nodes[0] = MsegNode {
+            time: 0.0,
+            value: 1.0,
+            tension: 0.0,
+            stepped: true,
+        };
         let mid = decay.nodes[1];
-        decay.nodes[1] = MsegNode { stepped: false, ..mid };
-        decay.nodes[2] = MsegNode { time: 1.0, value: 0.0, tension: 0.0, stepped: false };
+        decay.nodes[1] = MsegNode {
+            stepped: false,
+            ..mid
+        };
+        decay.nodes[2] = MsegNode {
+            time: 1.0,
+            value: 0.0,
+            tension: 0.0,
+            stepped: false,
+        };
         decay.debug_assert_valid();
 
         let mut s = VelvetSequence::new();
@@ -301,7 +372,11 @@ mod tests {
         let p = test_params();
         let mut s = VelvetSequence::new();
         generate(&mut s, &p, &default_decay_curve(), &flat(0.0), &flat(0.5));
-        assert_eq!(&s.location[..s.count], &s.location_r[..s.count], "width 0 = mono");
+        assert_eq!(
+            &s.location[..s.count],
+            &s.location_r[..s.count],
+            "width 0 = mono"
+        );
     }
 
     #[test]
@@ -316,7 +391,10 @@ mod tests {
                 .sum();
             sum as f64 / s.count.max(1) as f64
         };
-        assert!(mean_offset(0.8) > mean_offset(0.2), "more width → more jitter");
+        assert!(
+            mean_offset(0.8) > mean_offset(0.2),
+            "more width → more jitter"
+        );
     }
 
     #[test]
@@ -325,9 +403,16 @@ mod tests {
         let mean_idx = |tv: f32| {
             let mut s = VelvetSequence::new();
             generate(&mut s, &p, &default_decay_curve(), &flat(0.0), &flat(tv));
-            s.filter_idx[..s.count].iter().map(|&i| i as f64).sum::<f64>() / s.count.max(1) as f64
+            s.filter_idx[..s.count]
+                .iter()
+                .map(|&i| i as f64)
+                .sum::<f64>()
+                / s.count.max(1) as f64
         };
-        assert!(mean_idx(0.9) > mean_idx(0.1), "brighter tone → higher filter index");
+        assert!(
+            mean_idx(0.9) > mean_idx(0.1),
+            "brighter tone → higher filter index"
+        );
     }
 
     #[test]

@@ -178,6 +178,9 @@ mod tests {
         let _ = ch.process(1.0, &seq, &seq.location);
         ch.reset();
         let after = ch.process(0.0, &seq, &seq.location);
-        assert!(after.abs() < 1e-9, "reset should zero the ring + filter state");
+        assert!(
+            after.abs() < 1e-9,
+            "reset should zero the ring + filter state"
+        );
     }
 }

@@ -16,7 +16,10 @@ impl OnePole {
     /// Build from a cutoff in Hz at `sample_rate`.
     pub fn new(cutoff_hz: f32, sample_rate: f32) -> Self {
         let c = (-2.0 * std::f32::consts::PI * cutoff_hz / sample_rate).exp();
-        Self { c: c.clamp(0.0, 0.9999), z: 0.0 }
+        Self {
+            c: c.clamp(0.0, 0.9999),
+            z: 0.0,
+        }
     }
     #[inline]
     pub fn process(&mut self, x: f32) -> f32 {
@@ -97,7 +100,10 @@ mod tests {
         let dict = Dictionary::new(sr);
         let centroids: Vec<f32> = dict.filters.iter().map(|&f| centroid(f, sr)).collect();
         for w in centroids.windows(2) {
-            assert!(w[1] > w[0], "centroid must increase with index: {centroids:?}");
+            assert!(
+                w[1] > w[0],
+                "centroid must increase with index: {centroids:?}"
+            );
         }
     }
 
@@ -105,7 +111,10 @@ mod tests {
     fn all_filters_stable() {
         let dict = Dictionary::new(48_000.0);
         for f in &dict.filters {
-            assert!(f.coeff() >= 0.0 && f.coeff() < 1.0, "one-pole coeff must be in [0,1)");
+            assert!(
+                f.coeff() >= 0.0 && f.coeff() < 1.0,
+                "one-pole coeff must be in [0,1)"
+            );
         }
     }
 }
