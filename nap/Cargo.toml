@@ -1,0 +1,31 @@
+[package]
+name = "nap"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "nap"
+path = "src/main.rs"
+
+[dependencies]
+nih_plug = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr", features = ["standalone", "assert_process_allocs"] }
+baseview = { git = "https://github.com/RustAudio/baseview.git", tag = "v0.1.1", features = ["opengl"] }
+softbuffer = { version = "0.4", default-features = false, features = ["kms", "x11"] }
+raw-window-handle = "0.5"
+raw-window-handle-06 = { package = "raw-window-handle", version = "0.6" }
+tiny-skia = "0.12"
+tiny-skia-widgets = { path = "../tiny-skia-widgets" }
+keyboard-types = "0.6"
+crossbeam = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+tract-dsp = { path = "../tract-dsp" }
+
+[package.metadata.bundler]
+name = "Nap"
+company = "mpd"
+description = "A draw-your-tail velvet-noise reverb"
+license = "GPL-3.0-or-later"
+version = "0.1.0"

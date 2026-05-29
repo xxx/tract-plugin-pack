@@ -1290,6 +1290,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nap"
+version = "0.1.0"
+dependencies = [
+ "baseview",
+ "crossbeam",
+ "keyboard-types",
+ "nih_plug",
+ "raw-window-handle 0.5.2",
+ "raw-window-handle 0.6.2",
+ "serde",
+ "softbuffer",
+ "tiny-skia",
+ "tiny-skia-widgets",
+ "tract-dsp",
+]
+
+[[package]]
 name = "ndk"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
