@@ -56,16 +56,34 @@ impl std::fmt::Display for RandomStyle {
     }
 }
 
+/// triple32 integer hash (Chris Wellons) — a strong u32 avalanche so that
+/// small, sequential seeds map to thoroughly-mixed states. Pure function.
+fn triple32(mut x: u32) -> u32 {
+    x ^= x >> 17;
+    x = x.wrapping_mul(0xed5a_d4bb);
+    x ^= x >> 11;
+    x = x.wrapping_mul(0xac4c_1b51);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x3184_8bab);
+    x ^= x >> 14;
+    x
+}
+
 /// Deterministic xorshift32 PRNG — no dependency, seeded per `randomize` call.
 struct Rng(u32);
 
 impl Rng {
     fn new(seed: u32) -> Self {
-        // xorshift cannot leave the all-zero state, so map seed 0 to a fixed
-        // non-zero constant. Every other seed is used directly. NOT `seed | 1`
-        // — that collapses each pair (2k, 2k+1) onto one state, which made
-        // every other Randomize click reproduce the previous curve.
-        Rng(if seed == 0 { 0x9E37_79B9 } else { seed })
+        // Scramble the seed before using it as the xorshift32 state. The
+        // Randomize button feeds seed = 1, 2, 3, …; seeded directly, such tiny
+        // sequential seeds give xorshift a tiny, correlated FIRST output, so
+        // after value-snapping node 0 collapsed to one level and node 1 barely
+        // moved. triple32 avalanches the seed so every node (including the first
+        // two) randomizes. xorshift cannot leave the all-zero state, so map a
+        // hashed 0 to a fixed non-zero constant. (Also why NOT `seed | 1`, an
+        // earlier bug: that collapsed each pair (2k, 2k+1) onto one state.)
+        let s = triple32(seed);
+        Rng(if s == 0 { 0x9E37_79B9 } else { s })
     }
     fn next_u32(&mut self) -> u32 {
         let mut x = self.0;
@@ -292,6 +310,43 @@ mod tests {
                 assert!(d.is_valid(), "invalid for {style:?} seed {seed}");
                 assert!(d.node_count >= 2 && d.node_count <= MAX_NODES);
             }
+        }
+    }
+
+    #[test]
+    fn early_nodes_vary_across_sequential_seeds() {
+        // Regression: the Randomize button feeds seed = 1, 2, 3, … and
+        // `Rng::new` used that small integer directly as the xorshift32 state.
+        // xorshift's first output is tiny + correlated for small seeds, so after
+        // value-snapping node 0 always collapsed to the same level and node 1
+        // barely moved, while later nodes randomized fine. The seed must be
+        // scrambled so EVERY node — including the first two — varies.
+        use std::collections::HashSet;
+        // Use the full-range value styles: Stepped (snaps to value_steps levels —
+        // the case the user hit) and Chaos (continuous). Spiky is excluded: it
+        // intentionally pins even/odd nodes to narrow low/high bands, so its
+        // first node legitimately snaps to only 1–2 levels.
+        for style in [RandomStyle::Stepped, RandomStyle::Chaos] {
+            let mut n0 = HashSet::new();
+            let mut n1 = HashSet::new();
+            for seed in 1..=24u32 {
+                let mut d = MsegData::default(); // snap on, value_steps 8
+                randomize(&mut d, style, seed);
+                n0.insert(d.nodes[0].value.to_bits());
+                n1.insert(d.nodes[1].value.to_bits());
+            }
+            assert!(
+                n0.len() >= 4,
+                "{style:?}: node 0 barely varies across 24 sequential seeds \
+                 ({} distinct values)",
+                n0.len()
+            );
+            assert!(
+                n1.len() >= 4,
+                "{style:?}: node 1 barely varies across 24 sequential seeds \
+                 ({} distinct values)",
+                n1.len()
+            );
         }
     }
 
