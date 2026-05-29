@@ -15,6 +15,14 @@ Each plugin keeps its user manual under `docs/<plugin>/`:
 | Warp Zone | [warp-zone/warp-zone-manual.md](warp-zone/warp-zone-manual.md) | [warp-zone/warp-zone-manual.pdf](warp-zone/warp-zone-manual.pdf) |
 | Wavetable Filter | [wavetable-filter/wavetable-filter-manual.md](wavetable-filter/wavetable-filter-manual.md) | [wavetable-filter/wavetable-filter-manual.pdf](wavetable-filter/wavetable-filter-manual.pdf) |
 
+## Research notes
+
+Build-idea surveys and DSP background that inform future plugins live under `docs/research/`:
+
+| Note | Topic |
+|---|---|
+| [2026-05-new-audio-dsp-papers.md](research/2026-05-new-audio-dsp-papers.md) | Survey of recent audio DSP papers for buildable plugin ideas (velvet-noise reverb, WDF virtual-analog, ADAA waveshaping, perceptual-masking EQ) |
+
 ## Regenerating a PDF
 
 The markdown manuals use Unicode glyphs for math (−, ±, ×, ·, →, Σ, etc.) so the typography reads correctly. The default `pdflatex` engine pandoc reaches for cannot render arbitrary Unicode, so build the PDFs with **xelatex** plus a font that ships with broad Unicode coverage. **DejaVu Serif** + **DejaVu Sans Mono** is the project's chosen pair — installed by default on most Linux distros and on Homebrew (`brew install --cask font-dejavu`).
