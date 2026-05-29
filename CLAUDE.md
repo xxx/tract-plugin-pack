@@ -48,7 +48,8 @@ Per-plugin Criterion benches live in `<plugin>/benches/`. Workspace-shared rende
 - `multosis::dsp` — `AudioEngine::process` workload matrix (mixed / silence / idle / many-boundaries / 64-samp / 1024-samp / fm-heavy / delay-heavy). Baseline: 72 µs/512-samp at 48 kHz for the mixed case.
 - `multosis::effects` — one bench per `EffectKind`, registered via a loop over `EffectKind::ALL`. **Adding a new effect kind requires no edits to the bench file** — implement the `Effect` trait, append the variant to `EffectKind::ALL` and `default_params_for_kind`, and the loop registers `effect/process_sample_<Kind>` on the next run.
 - `warp-zone::dsp` (`SpectralShifter`), `pope-scope::dsp` (`RingBuffer` mipmap push), `wavetable-filter::dsp` (frame interp).
-- `tract-dsp/examples/tract_dsp_profile.rs` — profiling harness for shared DSP primitives (`cargo xtask native run --release -p tract-dsp --example tract_dsp_profile`).
+- `tract-dsp::dsp` — per-call/per-block Criterion benches for every shared primitive (boxcar, db, fast_math, fir, hilbert, window, spsc, true_peak by default; the FFT-backed `stft_analysis`/`spectral_clipper`/`spectral_shifter`/`spectral_engine`/`stft` groups are feature-gated). Run the full set with `cargo xtask native bench -p tract-dsp --bench dsp --features stft,spectral-engine`. Pairs `tanh_pade` vs libm `tanh` and `db_to_linear_fast` vs `powf` so the fast-path claims stay evidence-backed.
+- `tract-dsp/examples/tract_dsp_profile.rs` — profiling harness for shared DSP primitives, reporting whole-path real-time factors for a perf/flamegraph workflow (`cargo xtask native run --release -p tract-dsp --example tract_dsp_profile --features stft-analysis`).
 - `multosis::editor::grid_view::tests::bench_editor_draw` — a `#[test]` (not Criterion) that prints per-component editor-draw timings via `eprintln!`. Run with `cargo xtask native nextest run -p multosis -E 'test(bench_editor_draw)' --release --no-capture`.
 
 ## Development Practices

@@ -24,3 +24,17 @@ spectral-engine = ["stft-analysis"]
 [dependencies]
 realfft = { version = "3.3", optional = true }
 rustfft = { version = "6.2", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# Dev-only, needed solely to name `Complex<f32>` in the `spectral-engine`
+# bench's `SpectralTransform` impl. Never reaches the published library or
+# downstream consumers, and the workspace lock file already carries rustfft.
+rustfft = "6.2"
+
+# Per-sample DSP micro-benchmarks (criterion). Default features cover the
+# dependency-free primitives; pass `--features stft,spectral-engine` to add the
+# FFT-backed groups. See benches/dsp.rs for the run command.
+[[bench]]
+name = "dsp"
+harness = false
