@@ -114,6 +114,14 @@ pub(crate) fn pane_rects(w: f32, h: f32, scale: f32) -> [(f32, f32, f32, f32); 3
     ]
 }
 
+/// Distinct randomizer seed per MSEG pane (Decay/Width/Tone). Widely separated
+/// so the three curves randomize as independent streams, never in lockstep,
+/// for any realistic number of Randomize clicks.
+pub(crate) fn pane_seed(pane: usize) -> u32 {
+    const SEEDS: [u32; 3] = [0x0000_0000, 0x5555_5555, 0xAAAA_AAAA];
+    SEEDS[pane.min(SEEDS.len() - 1)]
+}
+
 /// The bottom strip rect (below the three panes).
 pub(crate) fn strip_rect(w: f32, h: f32, scale: f32) -> (f32, f32, f32, f32) {
     let strip_h = STRIP_H * scale;
@@ -218,11 +226,16 @@ impl NapWindow {
             params.width_curve.clone(),
             params.tone_curve.clone(),
         ];
-        let states = [
+        let mut states = [
             MsegEditState::new_curve_only(),
             MsegEditState::new_curve_only(),
             MsegEditState::new_curve_only(),
         ];
+        // Give each pane a distinct randomizer stream so Randomize never moves
+        // the three curves in lockstep (they'd otherwise all start at seed 0).
+        for (i, s) in states.iter_mut().enumerate() {
+            s.set_randomize_seed(pane_seed(i));
+        }
 
         // Seed the guard caches with the current state so the first frame does
         // not spuriously regenerate.
@@ -1035,6 +1048,17 @@ mod tests {
         assert_eq!(pane_at(5.0, h, scale), Some(0));
         assert_eq!(pane_at(h - 95.0, h, scale), Some(2));
         assert_eq!(pane_at(h - 10.0, h, scale), None); // in the strip
+    }
+
+    #[test]
+    fn pane_seeds_are_distinct() {
+        // The three MSEG panes must seed their randomizers differently, else
+        // Randomize moves all three curves in lockstep.
+        let s: Vec<u32> = (0..3).map(pane_seed).collect();
+        assert_eq!(s.len(), 3);
+        assert_ne!(s[0], s[1]);
+        assert_ne!(s[1], s[2]);
+        assert_ne!(s[0], s[2]);
     }
 
     #[test]

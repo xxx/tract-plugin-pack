@@ -292,6 +292,14 @@ impl MsegEditState {
         self.style = style;
     }
 
+    /// Set the randomizer's seed counter. Each Randomize click increments it,
+    /// so sibling editors sharing the default (0) randomize in lockstep. Give
+    /// each a distinct starting seed to make them independent streams. A
+    /// single-MSEG consumer (e.g. miff) can leave the default.
+    pub fn set_randomize_seed(&mut self, seed: u32) {
+        self.seed = seed;
+    }
+
     /// `true` when the dropdown for `id` is currently open.
     pub fn dropdown_is_open_for(&self, id: StripId) -> bool {
         self.dropdown.is_open_for(id)
@@ -1411,6 +1419,45 @@ mod tests {
         assert!(data.is_valid());
         assert_eq!(state.seed, 2);
         state.on_mouse_up(&mut data, RECT, 1.0);
+    }
+
+    #[test]
+    fn distinct_seeds_make_sibling_editors_randomize_independently() {
+        use crate::mseg::render::strip_buttons;
+        use crate::mseg::RandomStyle;
+        // Curve-only randomize button centre (the rightmost strip button).
+        let l = mseg_layout(RECT, true, 1.0);
+        let b = strip_buttons(l.strip, 1.0, false);
+        let (bx, by) = (
+            b.randomize.0 + b.randomize.2 * 0.5,
+            b.randomize.1 + b.randomize.3 * 0.5,
+        );
+        let click = |state: &mut MsegEditState, data: &mut MsegData| {
+            state.on_mouse_down(bx, by, data, RECT, 1.0, false);
+            state.on_mouse_up(data, RECT, 1.0);
+        };
+
+        // Control: two editors sharing the default seed (0) + same style land on
+        // the SAME curve — exactly the lockstep nap's three panes hit.
+        let mut s0 = MsegEditState::new_curve_only();
+        let mut s1 = MsegEditState::new_curve_only();
+        s0.set_style(RandomStyle::Stepped);
+        s1.set_style(RandomStyle::Stepped);
+        let (mut d0, mut d1) = (MsegData::default(), MsegData::default());
+        click(&mut s0, &mut d0);
+        click(&mut s1, &mut d1);
+        assert_eq!(d0, d1, "default seeds reproduce the lockstep (control)");
+
+        // Fix: a distinct seed makes the sibling diverge.
+        let mut a = MsegEditState::new_curve_only();
+        let mut b2 = MsegEditState::new_curve_only();
+        a.set_style(RandomStyle::Stepped);
+        b2.set_style(RandomStyle::Stepped);
+        b2.set_randomize_seed(0x5555_5555);
+        let (mut da, mut db) = (MsegData::default(), MsegData::default());
+        click(&mut a, &mut da);
+        click(&mut b2, &mut db);
+        assert_ne!(da, db, "distinct seeds must randomize independently");
     }
 
     #[test]
