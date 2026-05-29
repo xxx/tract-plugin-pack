@@ -2,5 +2,6 @@
 //! See `docs/superpowers/specs/2026-05-29-nap-velvet-reverb-design.md`.
 
 pub mod coloration;
+pub mod engine;
 pub mod rng;
 pub mod sequence;
