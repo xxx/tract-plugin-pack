@@ -3,3 +3,4 @@
 
 pub mod coloration;
 pub mod rng;
+pub mod sequence;
