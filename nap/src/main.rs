@@ -1,2 +1,4 @@
-// TODO(Task 8): restore nih_export_standalone::<nap::Nap>()
-fn main() {}
+use nih_plug::prelude::*;
+fn main() {
+    nih_export_standalone::<nap::Nap>();
+}
