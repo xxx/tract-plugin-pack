@@ -10,11 +10,14 @@
 //! Seed), regenerates the velvet sequence and publishes it through the
 //! `SequenceHandoff` — the exact GUI→audio pattern miff uses for `rebake()`.
 
+pub mod tail_view;
+
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use tiny_skia;
 use tiny_skia_widgets as widgets;
 use tiny_skia_widgets::mseg::{MsegData, MsegEdit, MsegEditState};
 
@@ -160,6 +163,10 @@ struct NapWindow {
     sample_rate: f32,
     /// Scratch buffer reused by every `regenerate()` (GUI-thread alloc only).
     scratch: VelvetSequence,
+    /// Snapshot of the last generated sequence, kept for the tail overlay.
+    snapshot: VelvetSequence,
+    /// Reusable column buffer for `tail_view::decimate` (no per-frame alloc).
+    columns: Vec<tail_view::Column>,
 
     text_renderer: widgets::TextRenderer,
     drag: widgets::DragState<HitAction>,
@@ -234,6 +241,8 @@ impl NapWindow {
             handoff,
             sample_rate,
             scratch: VelvetSequence::new(),
+            snapshot: VelvetSequence::new(),
+            columns: Vec::new(),
             text_renderer,
             drag: widgets::DragState::new(),
             text_edit: widgets::TextEditState::new(),
@@ -250,7 +259,9 @@ impl NapWindow {
 
     /// Regenerate the velvet sequence from the current params + curves and
     /// publish it to the audio thread. GUI-thread only. Mirrors miff's
-    /// `rebake()`. Refreshes the per-frame guard caches so they stay in sync.
+    /// `rebake()`. Refreshes the per-frame guard caches so they stay in sync,
+    /// and copies the freshly-generated sequence into `snapshot` for the tail
+    /// overlay (so the overlay always matches what was published).
     fn regenerate(&mut self) {
         crate::Nap::regenerate(
             &self.handoff,
@@ -258,6 +269,7 @@ impl NapWindow {
             self.sample_rate,
             &mut self.scratch,
         );
+        self.snapshot.copy_from(&self.scratch);
         self.last_design = current_design(&self.params);
         self.last_curves = read_curves(&self.curves);
     }
@@ -448,6 +460,11 @@ impl NapWindow {
                 colors[p],
             );
         }
+        // Tail overlay: draw the decimated pulse field over the Decay pane
+        // (pane 0). Cost is O(plot_width) regardless of pulse count because
+        // `decimate` caps to `cols` columns.
+        self.draw_tail_overlay(rects[0], s);
+
         // Dropdown popups for the panes (drawn after every pane so an open
         // grid/style popup overlays the curve beneath it).
         for (state, rect) in self.states.iter().zip(rects.iter()) {
@@ -460,6 +477,91 @@ impl NapWindow {
         }
 
         self.draw_strip(strip_rect(w, h, s), s);
+    }
+
+    /// Draw the tail pulse-field overlay over the Decay pane (`rect`).
+    ///
+    /// Decimates `self.snapshot` to the plot's pixel width, then for each
+    /// populated column draws a vertical stick whose height is proportional to
+    /// `coeff_abs` (value axis), tinted by dictionary index, with a tiny
+    /// horizontal offset that encodes the L/R split. All drawing uses
+    /// `widgets::draw_rect` so no unsafe code is needed.
+    fn draw_tail_overlay(&mut self, rect: (f32, f32, f32, f32), scale: f32) {
+        use widgets::mseg::{mseg_layout, phase_to_x, value_to_y};
+
+        let layout = mseg_layout(rect, true, scale);
+        let plot_w = layout.plot.2.max(1.0) as usize;
+
+        // Decimate into the reusable column buffer.
+        tail_view::decimate(&self.snapshot, plot_w, &mut self.columns);
+
+        // Per-column rendering constants.
+        let stick_w = 1.0_f32.max(scale * 0.75);
+        let bottom_y = value_to_y(&layout, 0.0);
+        let pane_colors = crate::theme::pane_colors();
+        // Filter-index brightness ramp: 6 filters, index 0 = darkest, 5 = brightest.
+        // Blend between the decay pane accent (warm amber) dimmed vs bright.
+        let num_filters = crate::coloration::Q as f32;
+
+        for (col_idx, col) in self.columns.iter().enumerate() {
+            if !col.present || col.coeff_abs < 1e-6 {
+                continue;
+            }
+
+            // Phase for this column (centre of the column bucket).
+            let phase = col_idx as f32 / (plot_w - 1).max(1) as f32;
+            let cx = phase_to_x(&layout, phase);
+
+            // Stick top: coeff_abs mapped via value_to_y (value 0 = bottom,
+            // coeff_abs = height above bottom). Clamp to the plot.
+            let top_y = value_to_y(&layout, col.coeff_abs.clamp(0.0, 1.0));
+            if top_y >= bottom_y {
+                continue; // degenerate / zero height
+            }
+
+            // Color: tint the decay accent by filter index brightness.
+            // Brighter (higher) filter_idx → more vivid, less dimmed.
+            let brightness = (col.filter_idx as f32 + 1.0) / num_filters;
+            let base = pane_colors[0]; // amber accent for the Decay pane
+            let r = (base.red() * brightness).clamp(0.0, 1.0);
+            let g = (base.green() * brightness).clamp(0.0, 1.0);
+            let b_ch = (base.blue() * brightness).clamp(0.0, 1.0);
+            let color = tiny_skia::Color::from_rgba(r, g, b_ch, 0.75).unwrap_or(base);
+
+            // Horizontal L/R split offset: scale lr_split to ±a few pixels
+            // (capped at ±3 px regardless of the raw sample delta).
+            let split_px = if self.snapshot.tail_len > 0 {
+                let split_phase =
+                    (col.lr_split as f32 / self.snapshot.tail_len as f32).clamp(-1.0, 1.0);
+                (split_phase * 3.0 * scale).round()
+            } else {
+                0.0
+            };
+
+            // Left stick (no offset, full coeff height).
+            widgets::draw_rect(
+                &mut self.surface.pixmap,
+                cx - stick_w * 0.5,
+                top_y,
+                stick_w,
+                bottom_y - top_y,
+                color,
+            );
+
+            // Right-channel indicator: a small horizontal notch offset by
+            // split_px, drawn at the midpoint of the stick height.
+            if split_px.abs() >= 1.0 {
+                let mid_y = (top_y + bottom_y) * 0.5;
+                widgets::draw_rect(
+                    &mut self.surface.pixmap,
+                    cx + split_px - stick_w * 0.5,
+                    mid_y - scale,
+                    stick_w,
+                    2.0 * scale,
+                    color,
+                );
+            }
+        }
     }
 
     /// Draw the bottom dial strip and register each dial's hit region.
