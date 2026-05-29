@@ -7,6 +7,7 @@ pub mod engine;
 pub mod handoff;
 pub mod rng;
 pub mod sequence;
+pub mod theme;
 
 use nih_plug::prelude::*;
 use std::num::NonZeroU32;
@@ -97,10 +98,17 @@ impl NapParams {
             tone_curve: Arc::new(Mutex::new(default_tone_curve())),
             editor_state: editor::default_editor_state(),
 
-            mix: FloatParam::new("Mix", 30.0, FloatRange::Linear { min: 0.0, max: 100.0 })
-                .with_smoother(SmoothingStyle::Linear(50.0))
-                .with_unit(" %")
-                .with_value_to_string(formatters::v2s_f32_rounded(0)),
+            mix: FloatParam::new(
+                "Mix",
+                30.0,
+                FloatRange::Linear {
+                    min: 0.0,
+                    max: 100.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_rounded(0)),
             predelay: FloatParam::new(
                 "Pre-Delay",
                 0.0,
@@ -294,8 +302,8 @@ impl Plugin for Nap {
             let mix = self.params.mix.smoothed.next() / 100.0;
             let in_gain = self.params.input.smoothed.next();
             let out_gain = self.params.output.smoothed.next();
-            let predelay_samps = ((self.params.predelay.smoothed.next() * 0.001
-                * self.sample_rate) as usize)
+            let predelay_samps = ((self.params.predelay.smoothed.next() * 0.001 * self.sample_rate)
+                as usize)
                 .min(predelay_cap - 1);
 
             let dry_l = left[i];
@@ -389,6 +397,10 @@ mod tests {
         let mut local = VelvetSequence::new();
         let mut local_gen = 0u64;
         assert!(handoff.try_read_into(&mut local, &mut local_gen));
-        assert!(local.count > 100, "expected a populated sequence, got {}", local.count);
+        assert!(
+            local.count > 100,
+            "expected a populated sequence, got {}",
+            local.count
+        );
     }
 }
