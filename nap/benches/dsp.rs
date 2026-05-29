@@ -8,7 +8,14 @@ use nap::sequence::{
 fn bench_engine(c: &mut Criterion) {
     let sr = 48_000.0;
     let mut group = c.benchmark_group("nap/engine");
-    for &(size, density) in &[(1.0f32, 1000.0f32), (2.0, 1500.0), (4.0, 3000.0)] {
+    // Includes the worst case (10 s × 4000/s = 40_000 pulses) where the
+    // O(pulse-count) convolution cost ceiling actually bites.
+    for &(size, density) in &[
+        (1.0f32, 1000.0f32),
+        (2.0, 1500.0),
+        (4.0, 3000.0),
+        (10.0, 4000.0),
+    ] {
         let p = GenParams {
             sample_rate: sr,
             size_s: size,

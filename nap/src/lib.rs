@@ -328,6 +328,9 @@ impl Plugin for Nap {
         // Tail handling: keep processing while the velvet tail rings out. Track
         // INPUT silence (not output) — the reverb tail keeps the output non-zero,
         // so an output-driven check would cut the tail off.
+        // Corner case: if tail_len < num_samples (extreme min size + density), the
+        // first silent block pushes silent_samples past tail_len and no Tail status
+        // is emitted — but that ring-out is under one block, so it's negligible.
         let tail_len = (seq.tail_len as u32).max(1);
         if in_peak < 1e-6 {
             self.silent_samples = self.silent_samples.saturating_add(num_samples as u32);

@@ -116,9 +116,10 @@ pub fn generate(
     };
 }
 
-/// Hard upper bound on pulse count: max Size (10 s) × max Density (4000/s) at
-/// 48 kHz, rounded up. Buffers are pre-allocated to this so generation and
-/// handoff never reallocate.
+/// Hard upper bound on pulse count. Pulse count ≈ size_s × density (the sample
+/// rate cancels), so the max is 10 s × 4000/s = 40_000; 48_000 gives ~20 %
+/// headroom at every sample rate. Buffers are pre-allocated to this so
+/// generation and handoff never reallocate.
 pub const MAX_PULSES: usize = 48_000;
 
 /// A baked velvet sequence. Buffers are pre-allocated to `MAX_PULSES`; only
