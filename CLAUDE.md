@@ -19,6 +19,7 @@ Tract Plugin Pack — a Cargo workspace of audio effect plugins (VST3, CLAP, sta
 - **warp-zone** — spectral shifter/stretcher (phase vocoder). Shift, Stretch, Freeze, Feedback, frequency range. 4096-pt FFT, 1024 hop, ~85 ms latency.
 - **imagine** — multiband stereo imager modeled on iZotope Ozone Imager. 4 bands, Ozone-style Width law, per-band Stereoize, Recover Sides, 4 vectorscope modes.
 - **multosis** — 16-row grid sequencer with per-row audio effects driven by MSEGs. 36 effect kinds in the registry, including a 14-effect Spectral family (`Spectral{Shift,Rotate,Twist,Mirror,Bandpass,Stretch,Scatter,Cascade,Smear,Reverb,Compress,Corrupt,Lofi,Spread}`) sharing `tract_dsp::spectral_engine::SpectralEngine` (audio-thread-safe switchable FFT 512/1024/2048/4096, 50% Hann COLA except `SpectralStretch` which holds its own 75% analyzer for the phase vocoder).
+- **nap** — EDVN velvet-noise character reverb. Three drawn curves (Decay/Width/Tone) over a shared tail-position axis sculpt the tail's loudness, stereo spread, and tonal colour independently. Sparse O(M) tapped-delay convolution into a 6-filter all-pole coloration bank; zero reported latency. Feature-tier (not held to 100+-instance target).
 
 ## Workspace Structure
 
@@ -84,6 +85,8 @@ Common shape per plugin: `lib.rs` (plugin struct, params, `process()`), `editor.
 **warp-zone** — `spectral.rs` (phase vocoder: STFT, bin remapping, phase accumulation, freeze, frequency range).
 
 **imagine** — `midside.rs` (M/S encode/decode); `crossover.rs` (`CrossoverIir` Linkwitz-Riley + Lipshitz/Vanderkooy comp, `CrossoverFir` double-buffered + crossfade); `hilbert.rs` (FIR 90° rotator, len 65); `decorrelator.rs` (Schroeder/Gerzon 6-stage all-pass); `bands.rs` (Ozone Width, Stereoize Mode I/II, S_removed accumulator); `spectrum.rs` (M+jS FFT trick, coherence); `vectorscope.rs` (SPSC AtomicU32 ring); `polar_rays.rs` (SPSC emit ring); `theme.rs` (Cassiopeia A gold/teal); `editor/{spectrum_view,vectorscope_view,band_strip,global_strip}.rs`.
+
+**nap** — `sequence.rs` (velvet sequence generation: `GenParams`, `generate`, forward-only `curve_value` cursor, energy normalization; `VelvetSequence` pre-allocated parallel arrays); `engine.rs` (`ReverbChannel` — input ring + Q-filter excitation scatter + post-LP + DC blocker; `MAX_RING_SAMPLES`); `coloration.rs` (`Dictionary` of Q=6 one-pole lowpass filters log-spaced dark→bright; `OnePole`); `handoff.rs` (`SequenceHandoff` — `Arc<Mutex<VelvetSequence>>` + generation counter, `try_lock` audio-thread consume); `rng.rs` (SplitMix64 seedable RNG); `editor.rs` (triple-MSEG editor, `pane_rects`/`pane_at` layout, regenerate-on-edit trigger); `editor/tail_view.rs` (`decimate` — max-|coeff|-per-column decimation for bounded render cost, live pulse-field viz).
 
 **tiny-skia-widgets** (shared) — `primitives.rs` (color palette, `draw_rect` opaque fast-path, `fill_pixmap_opaque`, `fill_column_opaque`); `text.rs` (fontdue glyph cache); `controls.rs` (button/slider/stepped-selector); `param_dial.rs` (rotary dial); `editor_base.rs` (EditorState size persistence, SurfaceState); `drag.rs` (DragState hit regions, `mouse_in_window`); `text_edit.rs` (`TextEditState<A>` right-click-to-type machine).
 

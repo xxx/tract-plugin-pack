@@ -63,6 +63,17 @@ A 16-row grid sequencer where each row runs a different audio effect driven by p
 - Per-row mute/solo and a PDC (plugin delay compensation) stripe that lights only on active rows carrying latency
 - CPU-rendered GUI (tiny-skia + softbuffer), freely resizable
 
+### Nap
+
+A character reverb built on the Extended Dark Velvet Noise (EDVN) engine. The defining feature is that you **draw three curves** — Decay, Width, and Tone — over a shared tail-position axis, sculpting how the tail's loudness, stereo spread, and tonal colour each evolve along their length. You can draw exponential decays, gated shapes, reverse swells, plateus, or anything in between; the Width curve collapses the image to mono or fans it wide at any point in the tail; the Tone curve scripts a bright-to-dark air-absorption arc or any tonal trajectory.
+
+- Three independent MSEG curve editors (Decay / Width / Tone) sharing a 0 – 100 % tail-position axis
+- EDVN sparse velvet-noise engine — time-domain O(M) tapped-delay convolution into a 6-filter all-pole coloration bank (dark→bright), no FFT, zero reported latency
+- Live tail visualization in the Decay pane shows the generated pulse field (height = gain, colour = tone/filter, L/R split = width jitter)
+- Width curve drives per-pulse right-channel jitter for frequency-dependent interaural coherence (BDVN coherence-via-jitter theory)
+- Design-time controls (Size, Density, Width amount, Seed) re-generate the velvet sequence off the audio thread; automatable controls (Mix, Pre-Delay, Input, Output) smooth continuously
+- CPU-rendered GUI (tiny-skia + softbuffer), freely resizable
+
 ### Pope Scope
 
 A multichannel real-time oscilloscope with beat sync. Multiple instances share audio data through a global store, allowing one window to display waveforms from up to 16 tracks simultaneously.
@@ -166,6 +177,7 @@ cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle imagine --release
 cargo nih-plug bundle miff --release
 cargo nih-plug bundle multosis --release
+cargo nih-plug bundle nap --release
 cargo nih-plug bundle pope-scope --release
 cargo nih-plug bundle satch --release
 cargo nih-plug bundle six-pack --release
@@ -179,6 +191,7 @@ cargo build --bin gs-meter --release
 cargo build --bin imagine --release
 cargo build --bin miff --release
 cargo build --bin multosis --release
+cargo build --bin nap --release
 cargo build --bin pope-scope --release
 cargo build --bin satch --release
 cargo build --bin six-pack --release
@@ -213,6 +226,7 @@ tract-plugin-pack/
 ├── imagine/                # Multiband stereo imager modeled on Ozone Imager
 ├── miff/                   # MSEG hand-drawn FIR convolution filter
 ├── multosis/               # 16-row grid sequencer with per-row effects + MSEGs
+├── nap/                    # EDVN velvet-noise character reverb with drawn curves
 ├── pope-scope/             # Multichannel real-time oscilloscope
 ├── satch/                  # Spectral saturator with detail preservation
 ├── six-pack/               # Six-band parallel multiband saturator
@@ -228,6 +242,7 @@ tract-plugin-pack/
 │   ├── imagine/
 │   ├── miff/
 │   ├── multosis/
+│   ├── nap/
 │   ├── pope-scope/
 │   ├── satch/
 │   ├── six-pack/
@@ -253,6 +268,7 @@ Install nextest via `cargo install cargo-nextest --locked`. Config lives in `.co
 - [Imagine Manual](docs/imagine/imagine-manual.md)
 - [Miff Manual](docs/miff/miff-manual.md)
 - [Multosis Manual](docs/multosis/multosis-manual.md)
+- [Nap Manual](docs/nap/nap-manual.md)
 - [Pope Scope Manual](docs/pope-scope/pope-scope-manual.md)
 - [Satch Manual](docs/satch/satch-manual.md)
 - [Six Pack Manual](docs/six-pack/six-pack-manual.md)
