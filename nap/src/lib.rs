@@ -360,7 +360,12 @@ impl Plugin for Nap {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        editor::create(self.params.clone(), self.handoff.clone(), self.sample_rate)
+        editor::create(
+            self.params.clone(),
+            self.handoff.clone(),
+            self.ir_handoff.clone(),
+            self.sample_rate,
+        )
     }
 
     fn initialize(

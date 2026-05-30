@@ -3,12 +3,15 @@
 //! Layout (880×720, freely resizable):
 //! - Three stacked curve-only MSEG editors (top→bottom: Decay, Width, Tone),
 //!   each editing the matching `Arc<Mutex<MsegData>>` from `NapParams`.
-//! - A fixed-height bottom strip of dials (Size / Density / Width / Pre-Delay /
-//!   Mix / Output) plus a Seed stepper.
+//! - A fixed-height bottom strip with a mode selector (Zero Latency / Efficient)
+//!   plus dials (Size / Density / Width / Pre-Delay / Mix / Output) and a Seed stepper.
 //!
 //! Any curve edit, or any change to a design-time param (Size/Density/Width/
 //! Seed), regenerates the velvet sequence and publishes it through the
 //! `SequenceHandoff` — the exact GUI→audio pattern miff uses for `rebake()`.
+//! When the mode is Efficient, curve/dial edits also bake and publish the IR
+//! via the `IrHandoff`; the bake is deferred during continuous MSEG node drags
+//! (fast sequence regen still runs) and fires on drag-release.
 
 pub mod tail_view;
 
@@ -21,10 +24,11 @@ use tiny_skia;
 use tiny_skia_widgets as widgets;
 use tiny_skia_widgets::mseg::{MsegData, MsegEdit, MsegEditState};
 
-use crate::handoff::SequenceHandoff;
+use crate::handoff::{IrHandoff, SequenceHandoff};
+use crate::ir::{IrBaker, IrSpectra};
 use crate::sequence::VelvetSequence;
 use crate::theme::pane_colors;
-use crate::NapParams;
+use crate::{NapMode, NapParams};
 
 // 880 matches miff (the other curve-only MSEG consumer): each full-width pane
 // gives the shared MSEG control strip enough room (it needs ≥ 676 px at scale
@@ -97,6 +101,7 @@ impl DialId {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum HitAction {
+    ModeSelector,
     Dial(DialId),
 }
 
@@ -137,7 +142,25 @@ pub(crate) fn pane_at(y: f32, h: f32, scale: f32) -> Option<usize> {
         .position(|&(_, py, _, ph)| ph > 0.0 && y >= py && y < py + ph)
 }
 
+/// Width reserved for the mode selector in the bottom strip (logical pixels).
+const MODE_W: f32 = 180.0;
+/// Height of the mode selector (logical pixels).
+const MODE_H: f32 = 34.0;
+
+/// Mode selector rect within the bottom strip — left-aligned, vertically centred.
+/// Pure — unit-testable without a window.
+pub(crate) fn mode_selector_rect(strip: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32) {
+    let (sx, sy, _sw, sh) = strip;
+    let pad = 6.0 * scale;
+    let mode_w = MODE_W * scale;
+    let mode_h = MODE_H * scale;
+    let mode_x = sx + pad;
+    let mode_y = sy + (sh - mode_h) * 0.5;
+    (mode_x, mode_y, mode_w, mode_h)
+}
+
 /// Per-dial center + hit rect within the bottom strip, left→right.
+/// The mode selector occupies the leftmost portion; the dials fill the rest.
 /// Pure — unit-testable without a window.
 pub(crate) fn dial_regions(
     strip: (f32, f32, f32, f32),
@@ -145,11 +168,15 @@ pub(crate) fn dial_regions(
 ) -> Vec<((f32, f32, f32, f32), DialId)> {
     let (sx, sy, sw, sh) = strip;
     let pad = 6.0 * scale;
+    let mode_w = MODE_W * scale;
+    // Dials start after the mode selector.
+    let dials_x = sx + pad + mode_w + pad;
+    let dials_w = (sx + sw - dials_x - pad).max(0.0);
     let n = DialId::ALL.len() as f32;
-    let slot_w = ((sw - 2.0 * pad) / n).max(0.0);
+    let slot_w = (dials_w / n).max(0.0);
     let mut out = Vec::with_capacity(DialId::ALL.len());
     for (i, &id) in DialId::ALL.iter().enumerate() {
-        let rx = sx + pad + slot_w * i as f32;
+        let rx = dials_x + slot_w * i as f32;
         out.push(((rx, sy, slot_w, sh), id));
     }
     out
@@ -168,6 +195,8 @@ struct NapWindow {
 
     params: Arc<NapParams>,
     handoff: Arc<SequenceHandoff>,
+    /// Shared with the audio thread for publishing baked IR spectra.
+    ir_handoff: Arc<IrHandoff>,
     sample_rate: f32,
     /// Scratch buffer reused by every `regenerate()` (GUI-thread alloc only).
     scratch: VelvetSequence,
@@ -175,6 +204,12 @@ struct NapWindow {
     snapshot: VelvetSequence,
     /// Reusable column buffer for `tail_view::decimate` (no per-frame alloc).
     columns: Vec<tail_view::Column>,
+
+    /// Owns the FFT planner + IR scratch buffers for GUI-thread IR baking.
+    baker: IrBaker,
+    /// Scratch L/R spectra for `bake_ir()` (pre-allocated, GUI-thread only).
+    scratch_ir_l: IrSpectra,
+    scratch_ir_r: IrSpectra,
 
     text_renderer: widgets::TextRenderer,
     drag: widgets::DragState<HitAction>,
@@ -199,6 +234,15 @@ struct NapWindow {
     /// Last-seen curve documents; a curve changed underneath us (preset load)
     /// also triggers a regenerate.
     last_curves: [MsegData; 3],
+
+    // ── Drag-deferred IR bake ───────────────────────────────────────────────
+    /// `true` while a left-button press is being held down inside an MSEG pane
+    /// (i.e. a continuous node drag may be in progress). During this window the
+    /// IR bake is deferred so dragging nodes stays smooth; it fires on release.
+    mseg_dragging: bool,
+    /// `true` if a curve changed during an ongoing drag, so we know to bake
+    /// the IR on mouse-up even when mode is Efficient.
+    ir_needs_bake: bool,
 }
 
 impl NapWindow {
@@ -208,6 +252,7 @@ impl NapWindow {
         gui_context: Arc<dyn GuiContext>,
         params: Arc<NapParams>,
         handoff: Arc<SequenceHandoff>,
+        ir_handoff: Arc<IrHandoff>,
         sample_rate: f32,
         shared_scale: Arc<AtomicCell<f32>>,
         pending_resize: Arc<AtomicU64>,
@@ -250,12 +295,16 @@ impl NapWindow {
             scale_factor,
             shared_scale,
             pending_resize,
-            params,
+            params: params.clone(),
             handoff,
+            ir_handoff,
             sample_rate,
             scratch: VelvetSequence::new(),
             snapshot: VelvetSequence::new(),
             columns: Vec::new(),
+            baker: IrBaker::new(sample_rate),
+            scratch_ir_l: IrSpectra::new(sample_rate),
+            scratch_ir_r: IrSpectra::new(sample_rate),
             text_renderer,
             drag: widgets::DragState::new(),
             text_edit: widgets::TextEditState::new(),
@@ -267,6 +316,8 @@ impl NapWindow {
             last_click_pos: (-999.0, -999.0),
             last_design,
             last_curves,
+            mseg_dragging: false,
+            ir_needs_bake: false,
         }
     }
 
@@ -287,13 +338,53 @@ impl NapWindow {
         self.last_curves = read_curves(&self.curves);
     }
 
+    /// Bake and publish the IR if the mode is Efficient. GUI-thread only.
+    /// No-op in Zero Latency mode. Designed to be called after discrete edits
+    /// (node add/delete, dial change, mode switch) and on drag-release.
+    fn bake_ir_if_efficient(&mut self) {
+        if self.params.mode.value() == NapMode::Efficient {
+            crate::Nap::bake_ir(
+                &self.ir_handoff,
+                &self.params,
+                self.sample_rate,
+                &mut self.scratch,
+                &mut self.baker,
+                &mut self.scratch_ir_l,
+                &mut self.scratch_ir_r,
+            );
+        }
+    }
+
+    /// Apply a mode change by variant index (0 = Zero Latency, 1 = Efficient).
+    /// When switching to Efficient, immediately bakes the IR so audio updates
+    /// without waiting for the next edit.
+    fn set_mode(&mut self, variant: usize) {
+        let target = match variant {
+            0 => NapMode::ZeroLatency,
+            _ => NapMode::Efficient,
+        };
+        let setter = ParamSetter::new(self.gui_context.as_ref());
+        let norm = self.params.mode.preview_normalized(target);
+        setter.begin_set_parameter(&self.params.mode);
+        setter.set_parameter_normalized(&self.params.mode, norm);
+        setter.end_set_parameter(&self.params.mode);
+        // Bake immediately when switching to Efficient so the audio thread has
+        // the IR ready without waiting for the next design-time edit.
+        if target == NapMode::Efficient {
+            self.bake_ir_if_efficient();
+        }
+    }
+
     /// Top-of-frame guard: if a design-time param or a curve changed under us
-    /// (host/preset automation while the editor is open), regenerate.
+    /// (host/preset automation while the editor is open), regenerate and (if
+    /// Efficient mode) bake the IR.
     fn check_external_changes(&mut self) {
         let design = current_design(&self.params);
         let curves = read_curves(&self.curves);
         if design != self.last_design || curves != self.last_curves {
             self.regenerate();
+            // External change (preset load, host automation): bake immediately.
+            self.bake_ir_if_efficient();
         }
     }
 
@@ -388,18 +479,26 @@ impl NapWindow {
         let Some((action, text)) = self.text_edit.commit() else {
             return;
         };
-        let HitAction::Dial(id) = action;
-        let norm = match self.float_param(id) {
-            Some(p) => p.string_to_normalized_value(&text),
-            None => self.params.seed.string_to_normalized_value(&text),
-        };
-        let Some(norm) = norm else { return };
-        let setter = ParamSetter::new(self.gui_context.as_ref());
-        self.begin_dial(&setter, id);
-        self.set_dial_normalized(&setter, id, norm);
-        self.end_dial(&setter, id);
-        if id.affects_sequence() {
-            self.regenerate();
+        match action {
+            HitAction::ModeSelector => {
+                // Mode selector is not a text-entry control — no-op.
+            }
+            HitAction::Dial(id) => {
+                let norm = match self.float_param(id) {
+                    Some(p) => p.string_to_normalized_value(&text),
+                    None => self.params.seed.string_to_normalized_value(&text),
+                };
+                let Some(norm) = norm else { return };
+                let setter = ParamSetter::new(self.gui_context.as_ref());
+                self.begin_dial(&setter, id);
+                self.set_dial_normalized(&setter, id, norm);
+                self.end_dial(&setter, id);
+                if id.affects_sequence() {
+                    self.regenerate();
+                    // Discrete text-edit: bake IR immediately (no drag in flight).
+                    self.bake_ir_if_efficient();
+                }
+            }
         }
     }
 
@@ -577,7 +676,7 @@ impl NapWindow {
         }
     }
 
-    /// Draw the bottom dial strip and register each dial's hit region.
+    /// Draw the bottom strip: mode selector + dials. Registers all hit regions.
     fn draw_strip(&mut self, strip: (f32, f32, f32, f32), scale: f32) {
         let (sx, sy, sw, _sh) = strip;
 
@@ -591,6 +690,28 @@ impl NapWindow {
             widgets::color_border(),
         );
 
+        // ── Mode selector ────────────────────────────────────────────────────
+        let (mx, my, mw, mh) = mode_selector_rect(strip, scale);
+        self.drag
+            .push_region(mx, my, mw, mh, HitAction::ModeSelector);
+        let mode_idx = if self.params.mode.value() == NapMode::ZeroLatency {
+            0usize
+        } else {
+            1
+        };
+        widgets::draw_stepped_selector(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            mx,
+            my,
+            mw,
+            mh,
+            &["Zero Latency", "Efficient"],
+            mode_idx,
+            None,
+        );
+
+        // ── Dials ────────────────────────────────────────────────────────────
         let regions = dial_regions(strip, scale);
         let radius = 24.0 * scale;
 
@@ -703,6 +824,8 @@ impl baseview::WindowHandler for NapWindow {
                         self.set_dial_normalized(&setter, id, norm);
                         if id.affects_sequence() {
                             self.regenerate();
+                            // Dial drag: defer IR bake to drag-end (on_mouse_up).
+                            self.ir_needs_bake = true;
                         }
                     }
                 } else if let Some(p) = pane_at(y, h, s) {
@@ -717,6 +840,12 @@ impl baseview::WindowHandler for NapWindow {
                     };
                     if changed == Some(MsegEdit::Changed) {
                         self.regenerate();
+                        // During a node drag, defer IR bake to mouse-up.
+                        if self.mseg_dragging {
+                            self.ir_needs_bake = true;
+                        } else {
+                            self.bake_ir_if_efficient();
+                        }
                     }
                 } else {
                     // Cursor is in the bottom strip with no dial drag active.
@@ -743,6 +872,12 @@ impl baseview::WindowHandler for NapWindow {
                         };
                         if changed == Some(MsegEdit::Changed) {
                             self.regenerate();
+                            // During a node drag, defer IR bake to mouse-up.
+                            if self.mseg_dragging {
+                                self.ir_needs_bake = true;
+                            } else {
+                                self.bake_ir_if_efficient();
+                            }
                         }
                     }
                 }
@@ -785,29 +920,55 @@ impl baseview::WindowHandler for NapWindow {
                     };
                     if changed == Some(MsegEdit::Changed) {
                         self.regenerate();
+                        if is_double {
+                            // Double-click node add/delete is a discrete edit — bake immediately.
+                            self.bake_ir_if_efficient();
+                        } else {
+                            // Mouse-down with potential drag starting: mark dragging,
+                            // defer bake. We'll bake on mouse-up if the curve changed.
+                            self.mseg_dragging = true;
+                            self.ir_needs_bake = true;
+                        }
+                    } else {
+                        // Mouse-down in pane: a drag may start (even if no immediate change).
+                        self.mseg_dragging = true;
                     }
                 } else {
-                    // Bottom strip: dial drag / double-click reset.
+                    // Bottom strip: mode selector, dial drag / double-click reset.
                     let setter = ParamSetter::new(self.gui_context.as_ref());
                     if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
                         self.end_dial(&setter, id);
                     }
                     if let Some(region) = self.drag.hit_test().cloned() {
-                        // Dial double-click is ACTION-based (`check_double_click`):
-                        // two clicks on the SAME dial within the window reset it
-                        // to its default (vs the MSEG's position-based check above).
                         let is_double = self.drag.check_double_click(&region.action);
-                        let HitAction::Dial(id) = region.action;
-                        if is_double {
-                            self.reset_dial_to_default(&setter, id);
-                            if id.affects_sequence() {
-                                self.regenerate();
+                        match region.action {
+                            HitAction::ModeSelector => {
+                                // Determine which half of the selector was clicked.
+                                let (mx, _, mw, _) = mode_selector_rect(strip_rect(w, h, s), s);
+                                let variant = if x - mx < mw * 0.5 { 0 } else { 1 };
+                                self.set_mode(variant);
                             }
-                        } else {
-                            let norm = self.dial_normalized(id);
-                            self.drag
-                                .begin_drag(HitAction::Dial(id), norm, self.shift_held);
-                            self.begin_dial(&setter, id);
+                            HitAction::Dial(id) => {
+                                // Dial double-click is ACTION-based (`check_double_click`):
+                                // two clicks on the SAME dial within the window reset it
+                                // to its default (vs the MSEG's position-based check above).
+                                if is_double {
+                                    self.reset_dial_to_default(&setter, id);
+                                    if id.affects_sequence() {
+                                        self.regenerate();
+                                        // Discrete reset: bake immediately.
+                                        self.bake_ir_if_efficient();
+                                    }
+                                } else {
+                                    let norm = self.dial_normalized(id);
+                                    self.drag.begin_drag(
+                                        HitAction::Dial(id),
+                                        norm,
+                                        self.shift_held,
+                                    );
+                                    self.begin_dial(&setter, id);
+                                }
+                            }
                         }
                     }
                 }
@@ -830,14 +991,25 @@ impl baseview::WindowHandler for NapWindow {
                     };
                     if changed == Some(MsegEdit::Changed) {
                         self.regenerate();
+                        self.ir_needs_bake = true;
                     }
                 }
+
+                // Clear MSEG drag tracking; bake on release if deferred.
+                self.mseg_dragging = false;
+                if self.ir_needs_bake {
+                    self.ir_needs_bake = false;
+                    self.bake_ir_if_efficient();
+                }
+
                 // End any dial gesture.
                 if let Some(HitAction::Dial(id)) = self.drag.end_drag() {
                     let setter = ParamSetter::new(self.gui_context.as_ref());
                     self.end_dial(&setter, id);
                     if id.affects_sequence() {
                         self.regenerate();
+                        // Dial drag end: discrete bake.
+                        self.bake_ir_if_efficient();
                     }
                 }
             }
@@ -863,14 +1035,18 @@ impl baseview::WindowHandler for NapWindow {
                     };
                     if changed == Some(MsegEdit::Changed) {
                         self.regenerate();
+                        // Right-click curve edit is discrete — bake immediately.
+                        self.bake_ir_if_efficient();
                     }
                 } else {
-                    // Right-click on a dial opens text entry.
+                    // Right-click on a dial opens text entry; mode selector has none.
                     self.commit_text_edit();
                     if let Some(region) = self.drag.hit_test().cloned() {
-                        let HitAction::Dial(id) = region.action;
-                        let initial = self.dial_value_without_unit(id);
-                        self.text_edit.begin(HitAction::Dial(id), &initial);
+                        if let HitAction::Dial(id) = region.action {
+                            let initial = self.dial_value_without_unit(id);
+                            self.text_edit.begin(HitAction::Dial(id), &initial);
+                        }
+                        // HitAction::ModeSelector: no text entry on the mode selector.
                     }
                 }
             }
@@ -909,6 +1085,8 @@ impl baseview::WindowHandler for NapWindow {
                             };
                             if changed == Some(MsegEdit::Changed) {
                                 self.regenerate();
+                                // Node deletion is discrete — bake IR immediately.
+                                self.bake_ir_if_efficient();
                                 return baseview::EventStatus::Captured;
                             }
                         }
@@ -930,6 +1108,7 @@ impl baseview::WindowHandler for NapWindow {
 pub(crate) struct NapEditor {
     params: Arc<NapParams>,
     handoff: Arc<SequenceHandoff>,
+    ir_handoff: Arc<IrHandoff>,
     sample_rate: f32,
     scaling_factor: Arc<AtomicCell<f32>>,
     pending_resize: Arc<AtomicU64>,
@@ -938,11 +1117,13 @@ pub(crate) struct NapEditor {
 pub fn create(
     params: Arc<NapParams>,
     handoff: Arc<SequenceHandoff>,
+    ir_handoff: Arc<IrHandoff>,
     sample_rate: f32,
 ) -> Option<Box<dyn Editor>> {
     Some(Box::new(NapEditor {
         params,
         handoff,
+        ir_handoff,
         sample_rate,
         scaling_factor: Arc::new(AtomicCell::new(1.0)),
         pending_resize: Arc::new(AtomicU64::new(0)),
@@ -962,6 +1143,7 @@ impl Editor for NapEditor {
         let gui_context = Arc::clone(&context);
         let params = Arc::clone(&self.params);
         let handoff = Arc::clone(&self.handoff);
+        let ir_handoff = Arc::clone(&self.ir_handoff);
         let sample_rate = self.sample_rate;
         let shared_scale = Arc::clone(&self.scaling_factor);
         let pending_resize = Arc::clone(&self.pending_resize);
@@ -980,6 +1162,7 @@ impl Editor for NapEditor {
                     gui_context,
                     params,
                     handoff,
+                    ir_handoff,
                     sample_rate,
                     shared_scale,
                     pending_resize,
@@ -1073,6 +1256,42 @@ mod tests {
         for ((rx, ry, rw, rh), _) in &regions {
             assert!(*rx >= strip.0 - 0.5 && rx + rw <= strip.0 + strip.2 + 0.5);
             assert!(*ry >= strip.1 - 0.5 && ry + rh <= strip.1 + strip.3 + 0.5);
+        }
+    }
+
+    #[test]
+    fn mode_selector_is_within_strip_and_does_not_overlap_dials() {
+        // The mode selector must lie inside the strip and must not overlap any
+        // dial region. Both are pure layout functions, no window needed.
+        let (w, h, scale) = (880.0_f32, 720.0_f32, 1.0_f32);
+        let strip = strip_rect(w, h, scale);
+        let (sx, sy, sw, sh) = strip;
+
+        let (mx, my, mw, mh) = mode_selector_rect(strip, scale);
+
+        // Must be inside the strip (with small float tolerance).
+        assert!(
+            mx >= sx - 0.5 && mx + mw <= sx + sw + 0.5,
+            "mode selector x-range [{mx}, {}] outside strip x-range [{sx}, {}]",
+            mx + mw,
+            sx + sw
+        );
+        assert!(
+            my >= sy - 0.5 && my + mh <= sy + sh + 0.5,
+            "mode selector y-range [{my}, {}] outside strip y-range [{sy}, {}]",
+            my + mh,
+            sy + sh
+        );
+
+        // Must not overlap any dial region.
+        let dial_regs = dial_regions(strip, scale);
+        for ((rx, ry, rw, rh), id) in &dial_regs {
+            let overlap = mx < rx + rw && mx + mw > *rx && my < ry + rh && my + mh > *ry;
+            assert!(
+                !overlap,
+                "mode selector overlaps dial {:?}: selector ({mx},{my},{mw},{mh}) vs dial ({rx},{ry},{rw},{rh})",
+                id
+            );
         }
     }
 }
