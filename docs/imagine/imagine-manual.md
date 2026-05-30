@@ -60,7 +60,7 @@ The window has two halves:
 
 ### Vectorscope (left)
 
-Four display modes, cycled by clicking the mode label below the scope. The cycle is **Polar → Polar Level → Goniometer → Lissajous → Polar**. Throughout, **gold** denotes the L channel and **deep teal** the R channel.
+Four display modes, cycled by clicking the mode label below the scope. The cycle is **Polar → Polar Level → Goniometer → Lissajous → Polar**. The theme colours are **gold** and **deep teal**; the L = gold / R = teal split applies to the L/R peak-meter strips and the **Goniometer** dot cloud (gold = L-dominant, teal = R-dominant). The other modes draw their dots/rays in a single accent colour rather than splitting by channel.
 
 - **Polar** (default): half-disc dot cloud. Each (L, R) pair is mapped to a polar position where mono in-phase content lands at the top, hard-L / hard-R in-phase content lands on the upper-left / upper-right 45° spokes (the iZotope "safe lines"), and out-of-phase content lands beyond the spokes toward the L / R baseline corners. Samples that exceed 0 dBFS are flagged in **red** beyond the rim. A thin **L / R peak meter strip** sits in the otherwise-empty top of the panel — two stacked dB-scaled bars showing the peak amplitude per channel over the last ~100 ms.
 - **Polar Level**: same half-disc geometry as **Polar**, but instead of a dot cloud the audio thread peak-picks the loudest (M, S) sample every 30 ms and emits one ray at that position. Each ray is a thick triangular fan that fades to background over the next ~1 second of emits, so the display reads as a constellation of recently-emitted rays at independent decay states. Per the iZotope Imager manual: ray length = amplitude, ray angle = stereo position. Inside the 45° "safe lines" the rays represent in-phase content; rays beyond the safe lines are out-of-phase. The angle of an out-of-phase ray within its wing reflects how anti-phase the peak sample was — just past the spoke = mildly anti-phase, at the baseline corner = perfectly anti-phase (`L = −R`). Same L / R peak meter strip at the top as Polar mode.
@@ -78,7 +78,7 @@ Log-frequency display from 20 Hz to 20 kHz. Three vertical lines mark the three 
 
 - **Drag** any split line horizontally to move that crossover frequency. The bands on either side update immediately.
 - The faded backdrop is `|M|` (mid-channel magnitude spectrum) so you can see what's living in each band before deciding where to split.
-- The four bands are rendered in alternating teal / gold tints. Each band's tint matches its column in the band strip below.
+- The three split lines divide the spectrum into the four bands; the spectrum view itself is not tinted per band (the `|M|` bars use one colour and the per-band controls live in the band strip below).
 
 ### Coherence Spectrum (bottom right)
 
@@ -104,7 +104,7 @@ Four columns, one per band. Each column has, top to bottom:
 
 - **Recover Sides** horizontal bar: 0 %–100 %, default 0 %. Mixes Hilbert-rotated residue of removed-side energy back into mid for bands that were narrowed.
 - **Link Bands** toggle: when on, dragging any band's Width changes all four bands by the same delta (useful for global widening / narrowing while preserving relative differences).
-- **Quality** 2-segment selector: **Linear** (FIR crossovers, latency = 255 samples ≈ 5.3 ms at 48 kHz) or **IIR** (Linkwitz-Riley, zero latency). Quality is non-automatable — set it once when you load the plugin.
+- **Quality** 2-segment selector: **Linear** (FIR crossovers, latency = 287 samples ≈ 6.0 ms at 48 kHz) or **IIR** (Linkwitz-Riley crossover, latency = 32 samples ≈ 0.7 ms). Both modes include the always-on 32-sample Hilbert rotator used by Recover Sides, so neither is truly zero-latency. Quality is non-automatable — set it once when you load the plugin.
 
 ## Per-Band Controls
 
@@ -189,8 +189,8 @@ Two-segment selector: **Linear / IIR**. Default: **Linear**.
 
 This selects the crossover topology:
 
-- **Linear**: linear-phase FIR crossovers (windowed-sinc, length 511). Magnitude-flat sum, perfectly phase-aligned bands. Latency: 255 samples (≈5.3 ms at 48 kHz). Best for mastering work where phase coherence matters.
-- **IIR**: 4th-order Linkwitz-Riley with Lipshitz/Vanderkooy delay-matched compensation. Magnitude-flat sum to ±0.05 dB across 20 Hz – 20 kHz. Phase response is **not** linear, but the band sum is true allpass-equivalent (shape preserved). Latency: 0 samples. Best for mixing work where latency budget is tight.
+- **Linear**: linear-phase FIR crossovers (windowed-sinc, length 511). Magnitude-flat sum, perfectly phase-aligned bands. Latency: 287 samples (≈6.0 ms at 48 kHz) — the 255-sample FIR crossover plus the 32-sample Hilbert rotator. Best for mastering work where phase coherence matters.
+- **IIR**: 4th-order Linkwitz-Riley with Lipshitz/Vanderkooy delay-matched compensation. Magnitude-flat sum to ±0.05 dB across 20 Hz – 20 kHz. Phase response is **not** linear, but the band sum is true allpass-equivalent (shape preserved). Latency: 32 samples (≈0.7 ms) — the crossover itself is zero-latency; the 32 samples are the always-on Hilbert rotator. Best for mixing work where latency budget is tight.
 
 **Quality is non-automatable.** Latency is reported once at `initialize()`; switching mid-stream would change the host's PDC compensation without re-querying. Set it once when you load the plugin.
 
@@ -200,13 +200,13 @@ This selects the crossover topology:
 
 ```
 L, R → M/S encode → 4-band crossover (IIR or FIR by Quality)
-     → per-band: Width (constant-power M/S gain) + Stereoize
+     → per-band: Width (scale-the-side M/S gain) + Stereoize
      → recombine M_sum, S_sum across bands
-     → S_sum + recover_amount · Hilbert(S_removed_total)
+     → M_sum + recover_amount · Hilbert(S_removed_total)
      → M/S decode → L_out, R_out
 ```
 
-The dry M/S sums are passed through a delay matching the Hilbert FIR's group delay (~32 samples) so that the Recover Sides injection lines up cleanly when added to S_sum.
+The dry M/S sums are passed through a delay matching the Hilbert FIR's group delay (~32 samples) so that the Recover Sides injection lines up cleanly when added to M_sum (Recover Sides folds the rotated removed-side residue back into the mid, not the side).
 
 ### Width law (Ozone-style scale-the-side)
 
@@ -313,7 +313,7 @@ The plugin is suitable for use on multiple buses simultaneously. Tested at 16 in
 - **IIR crossovers** use Lipshitz/Vanderkooy delay-matched cascade so the 4-band sum is true allpass-equivalent (magnitude-flat to ±0.05 dB).
 - **Hilbert** is FIR-only (Type-IV anti-symmetric, length 65, ~32-sample latency). Mathematically exact 90° rotation across the band; ~0.7 ms latency is below human perception threshold.
 - **Spectrum + coherence** display uses the complex M+jS FFT trick to recover both `|M|` and `|S|` spectra in a single transform. Magnitude-squared coherence γ²(k) is computed audio-side via smoothed auto/cross spectra; published as `1 − γ²` per log-spaced bin so the GUI just blits the bar.
-- **Vectorscope ring buffer** uses per-sample `AtomicU32` storage (f32 stored as bit-pattern) to avoid `unsafe` while remaining lock-free SPSC. Capacity 32 768 sample pairs.
+- **Vectorscope ring buffer** uses per-sample `AtomicU32` storage (f32 stored as bit-pattern) to avoid `unsafe` while remaining lock-free SPSC. Capacity 65 536 sample pairs.
 - **CPU rendering.** Uses tiny-skia (software rasterizer) + fontdue (glyph cache) + softbuffer (pixel buffer). No OpenGL context, no GPU drivers loaded.
 
 ## Formats
