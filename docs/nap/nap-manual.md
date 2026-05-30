@@ -268,7 +268,7 @@ Nap's window is freely resizable — drag the plugin window's edge or corner in 
 
 - CLAP
 - VST3
-- Standalone (JACK backend, with an offline dummy fallback)
+- Standalone (JACK, or CPAL — ALSA on Linux, CoreAudio on macOS, WASAPI on Windows — with a dummy/offline fallback)
 
 ## License
 
