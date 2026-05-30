@@ -46,7 +46,7 @@ When set to X, the instance operates independently. When set to a group number, 
 
 ### Link Mode
 
-Controls how gain changes propagate within the group. Only visible when a group is selected (not X). Two modes:
+Controls how gain changes propagate within the group. Only visible when a group is selected (not X). Two modes (**Rel** is the default):
 
 - **Abs** (Absolute) -- all instances in the group maintain identical gain values. When any instance's gain changes, all others snap to that value.
 - **Rel** (Relative) -- gain *changes* (deltas) propagate, but each instance keeps its own base gain. All instances gain-ride together while maintaining individual offsets.
@@ -66,7 +66,7 @@ Invert is per-instance. You can have some instances inverted and others not with
 
 ### Scaling
 
-Use the **-** / **+** buttons in the upper right corner, or **Ctrl+=** / **Ctrl+-** on the keyboard. Range: 75% to 300%.
+The window is freely resizable — drag the plugin window's edge or corner in your host. (There are no in-plugin zoom buttons or keyboard shortcuts.) The scale tracks the window width and clamps to 0.5×–4.0× (50% – 400%); the chosen size is persisted across host restarts via `EditorState`.
 
 ## How Grouping Works
 
@@ -120,7 +120,7 @@ Benchmarks (Bitwig, 48 kHz / 1024 samples, GUI closed, all grouped):
 
 - CLAP
 - VST3
-- Standalone (JACK or ALSA backend)
+- Standalone (JACK, or CPAL — ALSA on Linux, CoreAudio on macOS, WASAPI on Windows — with a dummy/offline fallback)
 
 ## License
 
