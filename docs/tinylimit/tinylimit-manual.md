@@ -69,9 +69,9 @@ The yellow indicator line on the output meters shows the current ceiling level.
 
 #### Stereo Link (Link%)
 
-Controls whether both channels are limited together or independently. Range: 0 to 100%. Default: 100%.
+Range: 0 to 100%. Default: 100%.
 
-At 100%, both channels receive the same gain reduction (preserves stereo image). At 0%, each channel is limited independently (may shift stereo image but allows more loudness). For most uses, keep at 100%.
+**Not yet active in this version.** The control is present and automatable, but the limiter currently always uses linked detection (`max(|L|, |R|)`), so both channels always receive the same gain reduction regardless of this setting. It is reserved for a planned per-channel limiting mode.
 
 ### Limiter Character (Row 2)
 
@@ -101,9 +101,9 @@ At 0 dB (hard knee), the limiter engages instantly at the ceiling -- maximum pre
 
 Controls the balance between the transient and dynamics limiting stages. Range: 0 to 100%. Default: 50%.
 
-- **Low values (0-30%)**: The fast transient stage dominates. Catches peaks quickly, releases quickly. Preserves punch but can distort on sustained material.
+- **Low values (0-30%)**: The slow dynamics stage dominates. Smoother, more controlled, but can soften transients.
 - **Mid values (40-60%)**: Balanced. Both stages contribute. Best all-around setting.
-- **High values (70-100%)**: The slow dynamics stage dominates. Smoother, more controlled, but can soften transients.
+- **High values (70-100%)**: The fast transient stage dominates. Catches peaks quickly, releases quickly. Preserves punch but can distort on sustained material.
 
 ### Toggles
 
@@ -111,7 +111,7 @@ Controls the balance between the transient and dynamics limiting stages. Range: 
 
 When enabled, the limiter targets ITU-1770 True Peak (dBTP) instead of sample peak (dBFS). This ensures the reconstructed analog waveform between samples does not exceed the ceiling -- required for broadcast and streaming deliverables.
 
-Uses the same ITU-R BS.1770-4 polyphase FIR detector as GS Meter (48-tap, 4-phase, 4x oversampling at <96kHz).
+Uses the same ITU-R BS.1770-4 polyphase FIR detector as GS Meter (48-tap, 4-phase): 4x oversampling below 96 kHz, 2x from 96-192 kHz, and bypass (sample peak) at 192 kHz and above.
 
 #### Gain Link
 
@@ -158,7 +158,7 @@ tinylimit uses a **feed-forward topology** with a lookahead delay line:
 
 ## Scaling
 
-Use the **-** / **+** buttons in the upper right corner, or **Ctrl+=** / **Ctrl+-** on the keyboard. Range: 75% to 300%.
+The window is freely resizable -- drag the plugin window's edge or corner in your host. (There are no in-plugin zoom buttons or keyboard shortcuts.) The scale tracks the window width and clamps to 0.5x-4.0x (50% - 400%); the chosen size is persisted across host restarts.
 
 ## Interaction
 
@@ -186,7 +186,7 @@ Benchmarks (Bitwig, 48 kHz / 1024 samples, GUI closed):
 
 - CLAP
 - VST3
-- Standalone (JACK or ALSA backend)
+- Standalone (JACK, or CPAL -- ALSA on Linux, CoreAudio on macOS, WASAPI on Windows -- with a dummy/offline fallback)
 
 ## License
 
