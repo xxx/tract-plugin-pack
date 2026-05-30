@@ -1,5 +1,6 @@
 //! Nap — a draw-your-tail velvet-noise (EDVN) reverb.
 //! See `docs/superpowers/specs/2026-05-29-nap-velvet-reverb-design.md`.
+#![feature(portable_simd)]
 
 pub mod coloration;
 pub mod editor;
@@ -38,6 +39,12 @@ pub struct Nap {
     predelay_r: Vec<f32>,
     predelay_pos: usize,
     silent_samples: u32,
+    // Per-block scratch for the SIMD convolution path (gained input + wet out,
+    // one `engine::BLOCK` chunk per channel). Pre-allocated; never resized.
+    blk_in_l: Vec<f32>,
+    blk_in_r: Vec<f32>,
+    blk_wet_l: Vec<f32>,
+    blk_wet_r: Vec<f32>,
 }
 
 #[derive(Params)]
@@ -86,6 +93,10 @@ impl Default for Nap {
             predelay_r: vec![0.0; MAX_PREDELAY_SAMPLES],
             predelay_pos: 0,
             silent_samples: 0,
+            blk_in_l: vec![0.0; engine::BLOCK],
+            blk_in_r: vec![0.0; engine::BLOCK],
+            blk_wet_l: vec![0.0; engine::BLOCK],
+            blk_wet_r: vec![0.0; engine::BLOCK],
         }
     }
 }
@@ -295,34 +306,62 @@ impl Plugin for Nap {
         let right = &mut rest[0][..num_samples];
 
         let predelay_cap = self.predelay_l.len();
-        let seq = &self.seq;
-
         let mut in_peak = 0.0f32;
-        for i in 0..num_samples {
-            let mix = self.params.mix.smoothed.next() / 100.0;
-            let in_gain = self.params.input.smoothed.next();
-            let out_gain = self.params.output.smoothed.next();
-            let predelay_samps = ((self.params.predelay.smoothed.next() * 0.001 * self.sample_rate)
-                as usize)
-                .min(predelay_cap - 1);
 
-            let dry_l = left[i];
-            let dry_r = right[i];
-            in_peak = in_peak.max(dry_l.abs()).max(dry_r.abs());
+        // Process in BLOCK-sized sub-blocks so the SIMD convolution's working
+        // set stays cache-resident regardless of the host's buffer size. Each
+        // smoothed param still advances exactly once per sample, in order, so
+        // automation stays sample-accurate.
+        let mut off = 0;
+        while off < num_samples {
+            let b = (num_samples - off).min(engine::BLOCK);
 
-            let wet_l = self.left.process(dry_l * in_gain, seq, &seq.location);
-            let wet_r = self.right.process(dry_r * in_gain, seq, &seq.location_r);
+            // Gather the input-gained dry block (input gain smoothed per sample).
+            for i in 0..b {
+                let g = self.params.input.smoothed.next();
+                let dl = left[off + i];
+                let dr = right[off + i];
+                in_peak = in_peak.max(dl.abs()).max(dr.abs());
+                self.blk_in_l[i] = dl * g;
+                self.blk_in_r[i] = dr * g;
+            }
 
-            // Pre-delay the wet path only (dry stays aligned).
-            self.predelay_l[self.predelay_pos] = wet_l;
-            self.predelay_r[self.predelay_pos] = wet_r;
-            let read = (self.predelay_pos + predelay_cap - predelay_samps) % predelay_cap;
-            let dwet_l = self.predelay_l[read];
-            let dwet_r = self.predelay_r[read];
-            self.predelay_pos = (self.predelay_pos + 1) % predelay_cap;
+            // Block reverb for each channel (L uses location, R the jittered set).
+            self.left.process_block(
+                &self.blk_in_l[..b],
+                &mut self.blk_wet_l[..b],
+                &self.seq,
+                &self.seq.location,
+            );
+            self.right.process_block(
+                &self.blk_in_r[..b],
+                &mut self.blk_wet_r[..b],
+                &self.seq,
+                &self.seq.location_r,
+            );
 
-            left[i] = ((1.0 - mix) * dry_l + mix * dwet_l) * out_gain;
-            right[i] = ((1.0 - mix) * dry_r + mix * dwet_r) * out_gain;
+            // Per-sample pre-delay (wet only) + dry/wet mix + output gain.
+            for i in 0..b {
+                let mix = self.params.mix.smoothed.next() / 100.0;
+                let out_gain = self.params.output.smoothed.next();
+                let predelay_samps =
+                    ((self.params.predelay.smoothed.next() * 0.001 * self.sample_rate) as usize)
+                        .min(predelay_cap - 1);
+
+                self.predelay_l[self.predelay_pos] = self.blk_wet_l[i];
+                self.predelay_r[self.predelay_pos] = self.blk_wet_r[i];
+                let read = (self.predelay_pos + predelay_cap - predelay_samps) % predelay_cap;
+                let dwet_l = self.predelay_l[read];
+                let dwet_r = self.predelay_r[read];
+                self.predelay_pos = (self.predelay_pos + 1) % predelay_cap;
+
+                let dry_l = left[off + i];
+                let dry_r = right[off + i];
+                left[off + i] = ((1.0 - mix) * dry_l + mix * dwet_l) * out_gain;
+                right[off + i] = ((1.0 - mix) * dry_r + mix * dwet_r) * out_gain;
+            }
+
+            off += b;
         }
 
         // Tail handling: keep processing while the velvet tail rings out. Track
@@ -331,7 +370,7 @@ impl Plugin for Nap {
         // Corner case: if tail_len < num_samples (extreme min size + density), the
         // first silent block pushes silent_samples past tail_len and no Tail status
         // is emitted — but that ring-out is under one block, so it's negligible.
-        let tail_len = (seq.tail_len as u32).max(1);
+        let tail_len = (self.seq.tail_len as u32).max(1);
         if in_peak < 1e-6 {
             self.silent_samples = self.silent_samples.saturating_add(num_samples as u32);
         } else {
