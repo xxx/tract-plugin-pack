@@ -109,7 +109,7 @@ Uses Short-Time Fourier Transform (STFT) with 50% overlap-add. The input signal 
 
 ## WAV files (.wav)
 
-Standard WAV audio files. The file is divided into equal-sized contiguous frames. The frame size is determined by the total sample count divided by the number of frames. Common frame sizes are 256, 512, 1024, or 2048 samples.
+Standard WAV audio files. The file is divided into equal-sized contiguous frames. Because a raw WAV carries no frame metadata, the frame size is auto-detected: the loader tries 2048, 1024, 512, then 256 samples and picks the largest of those that evenly divides the total sample count and yields at most 256 frames. The frame count is then the total sample count divided by that frame size.
 
 ## Surge Wavetable files (.wt)
 
