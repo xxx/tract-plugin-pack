@@ -124,7 +124,7 @@ Warp Zone uses a **phase vocoder** -- a well-established technique for frequency
 
 5. **Synthesis**: The remapped spectrum is transformed back to the time domain via inverse FFT, windowed, and overlap-added to produce the output.
 
-When Shift is 0 and Stretch is 1.0x, the phase vocoder is bypassed entirely (direct bin copy) for perfect transparent passthrough.
+When Shift is 0 and Stretch is 1.0x, the phase vocoder takes a fast identity path (no bin remapping or phase accumulation). This path is phase-transparent, but it is **not a unity-gain bit copy**: every bin is scaled by a fixed −3 dB trim (`IDENTITY_TRIM`) so the identity output sits at the same level as the processed path and the level doesn't jump when you move Shift or Stretch off their identity values.
 
 ## Resizing
 
@@ -145,13 +145,13 @@ The plugin window is freely resizable by the host (drag the window edges in your
 - **No audio-thread allocations** -- process() never allocates heap memory
 - **CPU rendering** -- tiny-skia (software rasterizer) + fontdue (glyph cache) + softbuffer (pixel buffer). No OpenGL, no GPU drivers loaded
 - **Lock-free visualization** -- spectral magnitudes are shared between audio and GUI threads via atomic storage, with no locks or channels
-- **Phase vocoder identity bypass** -- when shift=0 and stretch=1.0, the FFT bins are copied directly without phase accumulation, ensuring bit-perfect passthrough (within overlap-add precision)
+- **Phase vocoder identity bypass** -- when shift=0 and stretch=1.0, the FFT bins skip remapping and phase accumulation but are scaled by a fixed −3 dB trim (`IDENTITY_TRIM` = 0.7079) so the identity path is level-matched to the processed path. It is phase-transparent but ~3 dB below unity -- not a bit-perfect copy
 
 ## Formats
 
 - CLAP
 - VST3
-- Standalone (JACK or ALSA backend)
+- Standalone (JACK, or CPAL -- ALSA on Linux, CoreAudio on macOS, WASAPI on Windows -- with a dummy/offline fallback)
 
 ## License
 
