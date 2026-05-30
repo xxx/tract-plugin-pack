@@ -47,7 +47,7 @@ A standalone build is also available: `cargo build --bin six-pack --release` pro
 The main view spans most of the window:
 
 - **Filter icons** along the top: a low-shelf icon, four peak icons, and a high-shelf icon. Click any icon to toggle that band on or off.
-- **EQ curve view** below the icons: log-frequency axis (20 Hz – 20 kHz) horizontal, dB axis (0 → +18 dB) vertical. The composite EQ response of all enabled bands is drawn as a cyan line.
+- **EQ curve view** below the icons: log-frequency axis (20 Hz – 20 kHz) horizontal, dB axis labeled 0 to +18 dB vertical (the plot area actually spans ≈−3 to +21 dB for headroom). The composite EQ response of all enabled bands is drawn as a cyan line.
 - **Faded blue spectrum** behind the curve: the input signal's spectrum (post input-gain).
 - **Bright orange overlay** on top: the *wet* path's spectrum — i.e., what Six Pack is adding to the signal. At low drive this is subtle; at higher drive it lights up the bands you've boosted.
 - **Six color-coded dots** on the curve: one per band, in rainbow order (red → orange → yellow → green → blue → violet, low to high frequency). Each dot's halo brightens and inflates with the band's current saturation activity.
@@ -132,7 +132,7 @@ Post-saturation gain applied after the downsampler. Useful for compensating when
 
 ### I/O Link
 
-When enabled, **Output** is automatically slaved to `-Input` (in dB), keeping perceived loudness constant as you push input harder. The Output dial becomes display-only while the link is active. Same workflow as Spectre's link toggle.
+When enabled, **Output** is automatically slaved to `-Input` (in dB), keeping perceived loudness constant as you push input harder. While the link is active the Output dial mirrors `-Input` and any manual change to it has no effect on the audio (the output gain is driven from Input), though the control itself stays interactive. Same workflow as Spectre's link toggle.
 
 ### Mix
 
@@ -247,7 +247,7 @@ The de-emph subtract uses the *unscaled* boost (not `drive_k * boost`). This is 
 - **Click** any filter icon at the top of the window to toggle that band's Enable.
 - **Click** an Algo or Mode label cell to cycle to the next option.
 - **Right-click** a dial or any numeric label cell (Freq / Gain / Q) to type a value. **Enter** commits, **Escape** cancels, clicking outside auto-commits.
-- The window is **freely resizable** — drag the bottom-right corner. Size persists with the host session.
+- The window is **freely resizable** — drag the plugin window's edge or corner in your host. Size persists with the host session.
 
 ## Visual Feedback
 
