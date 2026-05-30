@@ -223,12 +223,12 @@ In Vertical display mode, a dashed horizontal line shows the peak amplitude for 
 
 ## Window Resizing
 
-Drag the window edges to resize (host-initiated resize via CLAP/VST3). The display scales proportionally. Window size is persisted across host restarts. Keyboard shortcuts **Ctrl+=** and **Ctrl+-** also work.
+Drag the window edges to resize (host-initiated resize via CLAP/VST3). The display scales proportionally. Window size is persisted across host restarts. (There are no in-plugin zoom buttons or keyboard shortcuts.)
 
 ## Technical Notes
 
 - **Pass-through audio** -- Pope Scope does not modify the audio signal. Input is passed directly to output.
-- **No audio-thread allocations** -- the process() callback pushes samples into pre-allocated ring buffers using `try_lock()` to avoid blocking
+- **No audio-thread allocations** -- the process() callback pushes samples into pre-allocated ring buffers using `try_write()` (a non-blocking `RwLock` write attempt) to avoid blocking
 - **CPU rendering** -- uses tiny-skia (software rasterizer) + fontdue (glyph cache) + softbuffer (pixel buffer). No OpenGL context, no GPU drivers loaded
 - **Direct pixel-write waveform path** -- the dense-samples branches of `draw_waveform_line` and `draw_waveform_filled` bypass tiny-skia's raster pipeline entirely. Each pixel column is a single 1-pixel-wide strip written directly into the pixmap's backing buffer, with the color pre-flattened to `PremultipliedColorU8` once per draw. No `Paint`, no anti-aliased blit, no per-pixel source-over blend. The envelope contour uses a half-split smoothing rule (`min(own_top, (prev + own)/2, (own + next)/2)` and the symmetric `max` for the bottom) to avoid visible staircase steps without re-introducing rasterization cost. Profile measurements on a 2-track cursor-motion scenario in Bitwig showed a ~52% reduction in GUI CPU versus the original path-based renderer
 - **Cursor tooltip `peak_at_column`** -- the per-track dB readings in the cursor tooltip use `WaveSnapshot::peak_at_column(col, num_cols, mix_to_mono)`, which samples the buffer over the exact range of underlying samples the renderer assigns to that pixel column. Uses integer `div_ceil` arithmetic that mirrors tiny-skia's floor-based decimation. In the sparse-samples branch (fewer samples than pixel columns) it linearly interpolates between the two adjacent samples bracketing the cursor's fractional position. This guarantees the tooltip's reported dB matches the envelope peak visible at the cursor, even at decimated zoom levels where a single column covers dozens of samples
@@ -253,7 +253,7 @@ The GUI-open number from earlier revisions (80% CPU for 16 instances with a larg
 
 - CLAP
 - VST3
-- Standalone (JACK or ALSA backend)
+- Standalone (JACK, or CPAL -- ALSA on Linux, CoreAudio on macOS, WASAPI on Windows -- with a dummy/offline fallback)
 
 ## License
 
