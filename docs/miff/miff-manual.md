@@ -81,16 +81,16 @@ by **segments**.
 
 ### Drawing and editing
 
-- **Click empty canvas** — add a node at the pointer.
+- **Double-click empty canvas** — add a node at the pointer. (A single click-and-drag on empty canvas draws a selection marquee instead of adding a node.)
 - **Drag a node** — move it. Interior nodes stay between their neighbours; the
   first and last nodes are pinned to the left and right edges (their value can
   still move).
 - **Drag a segment's tension handle** — bend the segment between two nodes from
   a straight line into an exponential curve.
 - **Double-click a node** — delete it.
-- **Right-click a segment** — toggle it **stepped**. A stepped segment holds its
-  start node's value flat until the next node, instead of interpolating.
-- **Shift+drag** — fine adjustment (smaller movement per pixel).
+- **Right-click a segment** (or an unselected node) — toggle that segment **stepped**. A stepped segment holds its
+  start node's value flat until the next node, instead of interpolating. **Right-click a *selected* node** instead opens a transform menu (Compress / Expand × values / times) acting on the current selection.
+- **Shift+drag** — temporarily bypass the snap grid, for free node positioning between grid cells. (The per-pixel fine-adjust mode is a bottom-strip dial feature, not a curve-editor one.)
 - **Alt+drag** — **stepped-draw**: paint a staircase directly. As the pointer
   crosses each grid cell, Miff places one stepped node at your cursor height.
   Dragging back over cells you have already painted *repaints* them — it does
@@ -165,7 +165,8 @@ steeply; shorter kernels keep the response brighter (see below).
 - Default: 256
 
 **Length is not automatable.** Re-baking the kernel is a short FFT that runs on
-the GUI thread when you release the dial or commit a text entry. Marking the
+the GUI thread — continuously as you drag the Length dial (on each cursor move),
+and on text-entry commit. Marking the
 parameter non-automatable keeps that work off the audio thread — Length will
 not respond to host automation lanes.
 
