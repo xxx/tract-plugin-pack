@@ -8,13 +8,13 @@ colorlinks: true
 
 # Nap Manual
 
-<!-- TODO: add screenshot.png (width=80%) once the GUI is captured -->
+![Nap interface](screenshot.png){ width=80% }
 
 ## What is Nap?
 
 Nap is a character reverb built on the **Extended Dark Velvet Noise (EDVN)** engine. Its defining feature is that you draw three curves — **Decay**, **Width**, and **Tone** — over a shared tail-position axis (0 → 100 %) that sculpt exactly how the reverb tail's loudness, stereo image, and tonal colour each evolve along their length.
 
-That means you can draw a reverse swell, a plateau that collapses, a tail that starts mono and fans into full stereo at the halfway point, or one that starts bright and dims as it decays — all with the same three curve editors. No commercial reverb offers this level of per-section control.
+That means you can draw a reverse swell, a plateau that collapses, a tail that starts mono and fans into full stereo at the halfway point, or one that starts bright and dims as it decays — all with the same three curve editors. Drawing the tail's loudness, stereo width, and tonal colour as three independent curves over its own timeline is an unusually direct degree of per-section control — most reverbs expose these as fixed knobs or per-band settings rather than shapes you draw across the tail.
 
 The DSP is time-domain sparse convolution (no FFT) by default, so Nap reports **zero latency** to the host. An optional **Efficient** engine switches to uniformly-partitioned FFT convolution (UPOLS), reducing CPU cost at large/dense settings at the cost of a short algorithmic latency (~512 samples ≈ 10.7 ms at 48 kHz). Pre-Delay shifts only the wet path; the dry signal stays phase-aligned in both engine modes.
 
@@ -39,16 +39,24 @@ The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` fil
 1. Insert Nap on a track and play audio through it.
 2. Set **Mix** to around 30 % to blend in the tail.
 3. The default **Decay** curve falls from full to silence — the tail decays naturally. Try sketching a plateau or a reverse swell.
-4. Raise **Width** to spread the tail stereo image; the **Width curve** controls how wide each section of the tail is.
+4. Raise the **Width** dial to spread the tail stereo image; the **Width curve** defaults to a narrow → wide ramp so the tail starts centred and blooms wide, like a real room. Reshape it to control how wide each section of the tail is.
 5. The **Tone curve** defaults to bright-at-attack, darkening over time (air absorption). Flatten it or invert it to taste.
 6. Adjust **Size** (tail length) and **Density** (pulse count) to change the reverb character. The live tail visualization in the Decay pane updates as you edit.
-7. Hit **Seed** / **Regenerate** to re-roll the random velvet pattern while keeping the curve shapes.
+7. Drag the **Seed** dial to re-roll the random velvet pattern while keeping the curve shapes.
 
 ## Controls
 
 ### Curve Editors (top three panes)
 
 The three stacked MSEG editors share a **tail-position x-axis** running from 0 % (attack of the tail) to 100 % (end of the tail). All three drive the velvet sequence generation together; any edit triggers an immediate re-generation.
+
+**Reading the curves.** Every curve runs left-to-right along the same axis — the *left edge is the start of the tail* (just after the dry hit) and the *right edge is the end of the tail* (where it fades out). The y-axis is "more of that quality": higher = louder (Decay), wider (Width), or brighter (Tone). The factory defaults are deliberately shaped to read as one **natural room**: the tail **decays** to silence, **widens** from a centred onset into a diffuse stereo bloom, and **darkens** as high frequencies are absorbed. That gives you a familiar starting point — drag any curve from there to sculpt the part of the tail you want to change.
+
+| Curve | Controls | Default shape (start → end) |
+|-------|----------|-----------------------------|
+| **Decay** | Tail loudness `g(m)` | Full → silence (exponential fall) |
+| **Width** | Stereo spread `J(m)` | Narrow → wide (0.15 → 0.85 ramp) |
+| **Tone**  | Brightness (filter routing) | Bright → dark (0.85 → 0.25) |
 
 #### Decay
 
@@ -70,7 +78,7 @@ Controls the **stereo spread** of the tail, section by section. The y-axis maps 
 - **0.0 (bottom)** → L and R channels receive identical pulse locations → the tail collapses to mono at that point.
 - **1.0 (top)** → maximum jitter (set by the **Width** dial) → widest spread at that point.
 - Draw a **flat 0** for a fully mono tail; draw a **flat 1** for uniform stereo spread.
-- Draw a **ramp** to have the image open up progressively along the tail.
+- Draw a **ramp** (the default: 0.15 → 0.85) to have the image open up progressively along the tail — narrow, centred early reflections blooming into a wide, diffuse late tail, as in a real room.
 - At Width dial = 0 ms, the curve has no effect (mono throughout).
 
 The width mechanism is grounded in EDVN/BDVN theory: interaural coherence equals the DTFT of the pulse-location jitter distribution. Animating jitter width over the tail animates the stereo image at zero additional compute cost.
@@ -155,7 +163,7 @@ Selects the random velvet pattern. The generated pulse locations and signs are f
 
 Use this when the current pattern has an audible irregularity or comb artefact. A few seed values usually yield a smooth, natural-sounding tail for any given set of curves.
 
-**Design-time parameter** — non-automatable. There is a **Regenerate** button beside the dial that re-generates with the current seed (useful when a preset was loaded and the sequence needs to be rebuilt for the current sample rate).
+**Design-time parameter** — non-automatable. The velvet sequence regenerates automatically whenever the seed (or any other design-time parameter or curve) changes, and after a sample-rate change — there is no manual regenerate step.
 
 #### Engine
 
@@ -222,12 +230,11 @@ When the **Efficient** engine is active, any sequence change also triggers an `I
 
 All three panes use the shared MSEG editor from `tiny-skia-widgets`. The curve runs left-to-right over tail position (0 → 100 %).
 
-- **Left-click and drag** on empty space to add and move a node.
-- **Drag a node** to reposition it.
-- **Drag a segment** (between nodes) to adjust tension (positive tension bows upward, negative bows downward).
-- **Alt-drag** on a node or segment for stepped (staircase) draw mode.
-- **Double-click a node** to delete it.
-- **Right-click** on a node for the context menu (reset tension, delete, etc.).
+- **Double-click empty space** to add a node; **double-click a node** to delete it.
+- **Drag a node** to move it. **Left-click and drag on empty space** draws a marquee that selects every node inside it; dragging any selected node then moves the whole group.
+- **Drag a segment** (between two nodes) to bend it — this adjusts the segment's tension.
+- **Alt-drag** for stepped (staircase) draw mode.
+- **Right-click a selected node** opens a transform menu (**Compress** / **Expand** × **values** / **times**); **right-click anywhere else** toggles that segment's stepped flag.
 
 Any edit triggers immediate re-generation of the velvet sequence. The pulse-field visualization in the Decay pane updates on the next paint frame.
 
@@ -240,13 +247,13 @@ All bottom-strip dials use the shared `param_dial` widget:
 - **Double-click** to reset to default.
 - **Right-click** to type an exact value. Press **Enter** to commit, **Escape** to cancel; clicking outside the edit field auto-commits.
 
-### Seed and Regenerate
+### Seed
 
-The **Seed** dial selects the integer seed for the velvet pattern. Dragging it re-rolls the pulse locations. The adjacent **Regenerate** button forces a new generation pass with the current seed — useful after loading a preset to rebuild the sequence at the current sample rate, or to confirm the current sequence is up to date.
+The **Seed** dial selects the integer seed for the velvet pattern. Dragging it re-rolls the pulse locations while keeping the curve shapes. The sequence regenerates automatically on any change to the seed, the design-time parameters, or the curves — and after a sample-rate change — so there is no separate regenerate step.
 
 ### Resize
 
-Use the **−** / **+** buttons in the corner, or **Ctrl+=** / **Ctrl+−** on the keyboard. Scale range: 75 % to 300 %. The scale is persisted across host restarts via `EditorState`.
+Nap's window is freely resizable — drag the plugin window's edge or corner in your host. (Nap has no separate zoom buttons or keyboard shortcuts.) The GUI is CPU-rendered and re-rasterises crisply at any size; the scale tracks the window width (`physical_width / 880`) and clamps to 0.5×–4.0× (50 % – 400 %). The chosen size is persisted across host restarts via `EditorState`.
 
 ## Technical Notes
 
@@ -261,7 +268,7 @@ Use the **−** / **+** buttons in the corner, or **Ctrl+=** / **Ctrl+−** on t
 
 - CLAP
 - VST3
-- Standalone (JACK or ALSA backend)
+- Standalone (JACK backend, with an offline dummy fallback)
 
 ## License
 
