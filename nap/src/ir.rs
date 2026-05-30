@@ -32,6 +32,17 @@ impl IrSpectra {
         self.k = other.k;
         self.spectra[..self.k * BINS].copy_from_slice(&other.spectra[..self.k * BINS]);
     }
+
+    /// Grow the spectra buffer in place to hold the max IR for `sample_rate`
+    /// (no-op if already large enough). GUI/setup thread only — used to bring a
+    /// default-sized (48 kHz) instance up to the real sample rate so a max-Size
+    /// IR at 96/192 kHz fits. Resizing in place keeps any shared `Arc` valid.
+    pub fn resize_for(&mut self, sample_rate: f32) {
+        let want = max_ir_len(sample_rate).div_ceil(P).max(1) * BINS;
+        if self.spectra.len() < want {
+            self.spectra.resize(want, Complex::new(0.0, 0.0));
+        }
+    }
 }
 
 /// Reusable GUI-thread baker (owns the IR scratch + FFT planner).
@@ -128,6 +139,19 @@ mod tests {
     use super::*;
     use crate::engine::ReverbChannel;
     use crate::rng::Rng;
+
+    #[test]
+    fn resize_for_grows_to_higher_sample_rate() {
+        let mut s = IrSpectra::new(48_000.0);
+        let lo = s.spectra.len();
+        s.resize_for(192_000.0);
+        let want = max_ir_len(192_000.0).div_ceil(P).max(1) * BINS;
+        assert_eq!(s.spectra.len(), want);
+        assert!(s.spectra.len() > lo, "192k buffer must exceed 48k buffer");
+        // Resizing back down (or to the same SR) never shrinks.
+        s.resize_for(48_000.0);
+        assert_eq!(s.spectra.len(), want, "resize_for never shrinks");
+    }
 
     #[test]
     fn analytic_ir_matches_engine_impulse_response() {

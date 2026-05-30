@@ -70,6 +70,18 @@ impl IrHandoff {
         }
     }
 
+    /// Grow both shared `IrSpectra` slots in place to hold the max IR for
+    /// `sample_rate`. GUI/setup thread only; called from `initialize` before
+    /// the first bake so a default-sized (48 kHz) instance can hold a max-Size
+    /// IR at the real sample rate (96/192 kHz). `initialize` is not concurrent
+    /// with `process`, so locking + reallocating here is safe.
+    pub fn resize_for(&self, sample_rate: f32) {
+        if let Ok(mut slot) = self.shared.lock() {
+            slot.0.resize_for(sample_rate);
+            slot.1.resize_for(sample_rate);
+        }
+    }
+
     /// Publish freshly-baked L/R spectra (GUI thread). Copies into the shared
     /// slot and bumps the generation.
     pub fn publish(&self, left: &IrSpectra, right: &IrSpectra) {
@@ -202,5 +214,26 @@ mod tests {
         assert_eq!(lr.k, 5);
         assert!((ll.spectra[0].re - 7.7).abs() < 1e-6);
         assert!((lr.spectra[0].re - 8.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ir_handoff_resizes_for_higher_sample_rate() {
+        use tract_dsp::partitioned_conv::{BINS, P};
+        // A 48 kHz handoff resized for 192 kHz must accept a full 192k-sized IR
+        // without the out-of-bounds copy that crashed before resize_for.
+        let h = IrHandoff::new(48_000.0);
+        h.resize_for(192_000.0);
+        // Largest IR at 192 kHz: max_k partitions.
+        let max_k = crate::ir::max_ir_len(192_000.0).div_ceil(P).max(1);
+        let mut big = IrSpectra::new(192_000.0);
+        big.k = max_k;
+        big.spectra[(max_k - 1) * BINS].re = 3.14; // touch the last partition
+        h.publish(&big, &big); // must not panic
+        let mut ll = IrSpectra::new(192_000.0);
+        let mut lr = IrSpectra::new(192_000.0);
+        let mut gen = 0u64;
+        assert!(h.try_read_into(&mut ll, &mut lr, &mut gen));
+        assert_eq!(ll.k, max_k);
+        assert!((ll.spectra[(max_k - 1) * BINS].re - 3.14).abs() < 1e-6);
     }
 }
