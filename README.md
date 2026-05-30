@@ -68,7 +68,7 @@ A 16-row grid sequencer where each row runs a different audio effect driven by p
 A character reverb built on the Extended Dark Velvet Noise (EDVN) engine. The defining feature is that you **draw three curves** — Decay, Width, and Tone — over a shared tail-position axis, sculpting how the tail's loudness, stereo spread, and tonal colour each evolve along their length. You can draw exponential decays, gated shapes, reverse swells, plateus, or anything in between; the Width curve collapses the image to mono or fans it wide at any point in the tail; the Tone curve scripts a bright-to-dark air-absorption arc or any tonal trajectory.
 
 - Three independent MSEG curve editors (Decay / Width / Tone) sharing a 0 – 100 % tail-position axis
-- EDVN sparse velvet-noise engine — time-domain O(M) tapped-delay convolution into a 6-filter all-pole coloration bank (dark→bright), no FFT, zero reported latency
+- Dual convolution engine — **Zero Latency** (time-domain O(M) tapped-delay sparse convolution, no FFT, zero reported latency) and **Efficient** (UPOLS FFT convolution of the analytically baked IR, ~512-sample latency, lower CPU at large/dense settings; both engines produce identical output)
 - Live tail visualization in the Decay pane shows the generated pulse field (height = gain, colour = tone/filter, L/R split = width jitter)
 - Width curve drives per-pulse right-channel jitter for frequency-dependent interaural coherence (BDVN coherence-via-jitter theory)
 - Design-time controls (Size, Density, Width amount, Seed) re-generate the velvet sequence off the audio thread; automatable controls (Mix, Pre-Delay, Input, Output) smooth continuously

@@ -16,7 +16,7 @@ Nap is a character reverb built on the **Extended Dark Velvet Noise (EDVN)** eng
 
 That means you can draw a reverse swell, a plateau that collapses, a tail that starts mono and fans into full stereo at the halfway point, or one that starts bright and dims as it decays — all with the same three curve editors. No commercial reverb offers this level of per-section control.
 
-The DSP is time-domain sparse convolution (no FFT), so Nap reports **zero latency** to the host. Pre-Delay shifts only the wet path; the dry signal stays phase-aligned.
+The DSP is time-domain sparse convolution (no FFT) by default, so Nap reports **zero latency** to the host. An optional **Efficient** engine switches to uniformly-partitioned FFT convolution (UPOLS), reducing CPU cost at large/dense settings at the cost of a short algorithmic latency (~512 samples ≈ 10.7 ms at 48 kHz). Pre-Delay shifts only the wet path; the dry signal stays phase-aligned in both engine modes.
 
 Inspired by the Aalto Acoustics Lab papers on EDVN (Fagerström et al., JAES 2024) and BDVN (DAFx 2024).
 
@@ -157,6 +157,19 @@ Use this when the current pattern has an audible irregularity or comb artefact. 
 
 **Design-time parameter** — non-automatable. There is a **Regenerate** button beside the dial that re-generates with the current seed (useful when a preset was loaded and the sequence needs to be rebuilt for the current sample rate).
 
+#### Engine
+
+Convolution engine selector: **Zero Latency** (default) or **Efficient**.
+
+- **Zero Latency** — time-domain O(M) sparse convolution (the EDVN tapped-delay-line). Reports zero algorithmic latency to the host; the dry and wet paths stay exactly phase-aligned. CPU cost scales linearly with Size × Density (pulse count M).
+- **Efficient** — uniformly-partitioned FFT convolution (UPOLS, 512-sample partitions). Nap analytically bakes the wet-path impulse response on the GUI thread and installs it into a `PartitionedConvolver`; the audio thread performs only FFT multiply-accumulate operations rather than M scattered ring-reads per sample. Lower CPU cost at large/dense settings; reports ~512 samples (~10.7 ms at 48 kHz, proportionally fewer at higher sample rates) of algorithmic latency to the host.
+
+Both engines implement the same EDVN coloration physics — they are mathematically equivalent: `Efficient[n + 512] ≈ ZeroLatency[n]` to floating-point precision. Use **Zero Latency** when host latency compensation is unavailable or when absolute minimal delay is required (e.g., live monitoring). Use **Efficient** when recording with PDC and Size or Density is pushed large enough that the time-domain cost is noticeable.
+
+Switching engines resets the convolver state cleanly and reports the updated latency to the host. Switching to **Efficient** immediately triggers an IR bake if the current sequence is up to date; if a curve drag is in progress, the bake is deferred to drag-release.
+
+**Design-time parameter** — non-automatable.
+
 ## How It Works
 
 ### EDVN Velvet Noise
@@ -187,9 +200,21 @@ The left and right channels use the same `coeff[]` and `filter_idx[]` arrays but
 
 Cost is O(M) per sample where M = Size × Density. A 2 s tail at 1500 pulses/s = 3000 taps per sample — well within real-time budget on modern hardware.
 
+### Efficient Engine (FFT convolution, optional)
+
+Because the entire wet path is linear and time-invariant, it equals convolution with a single baked impulse response. The **Efficient** engine exploits this:
+
+1. On the GUI thread, `IrBaker` analytically constructs the IR by simulating each coloration filter's response to the velvet pulse field (identical to what `ReverbChannel` computes sample-by-sample), then applies the post-LP and DC blocker in one forward pass over the IR array.
+2. The IR is divided into 512-sample partitions, each zero-padded to 1024 points and forward-FFT'd (UPOLS pre-partitioning). The resulting spectra are published to the audio thread via `IrHandoff`.
+3. On the audio thread, `PartitionedConvolver` maintains a frequency-domain delay line (FDL) of past input-block spectra. For each new 512-sample input block it runs one forward FFT, accumulates the frequency-domain product against all IR partitions (one multiply-accumulate per partition per bin), and recovers the output via one inverse FFT. The audio thread never transforms the IR itself.
+
+The result is that at large M the O(M) per-sample gather is replaced by O(k · N log N) per 512-sample block (k = partition count ≈ IR length / 512). At a 10 s × 4000 /s maximum setting the break-even is well past typical usage, so **Efficient consistently reduces CPU** at the cost of a one-partition (~10.7 ms at 48 kHz) algorithmic latency.
+
 ### Sequence Generation (GUI thread)
 
 The velvet sequence is generated on the GUI thread whenever any design-time parameter or drawn curve changes, then published to the audio thread via a lock-free handoff (`SequenceHandoff`, mirroring miff's `KernelHandoff`). The audio thread calls `try_lock` once per block; if a newer sequence exists, it copies it into its local buffer (pre-allocated to `MAX_PULSES` capacity, no heap allocation) and proceeds.
+
+When the **Efficient** engine is active, any sequence change also triggers an `IrBaker::bake` pass (GUI thread) followed by an `IrHandoff` publish; the audio thread picks up the new spectra on the next block. Continuous MSEG node drags defer the bake to drag-release so the GUI stays responsive during editing; the sequence and the tail visualization still update live on every frame.
 
 ## Interaction
 
@@ -225,7 +250,7 @@ Use the **−** / **+** buttons in the corner, or **Ctrl+=** / **Ctrl+−** on t
 
 ## Technical Notes
 
-- **Zero reported latency** — time-domain causal sparse convolution, no FFT, no lookahead. Pre-Delay is a musical wet-path control, not algorithmic latency, and is not reported to the host.
+- **Engine-dependent latency** — Zero Latency mode (default): no algorithmic latency reported to the host. Efficient mode: ~512 samples (~10.7 ms at 48 kHz, fewer at higher sample rates) reported so DAWs with PDC compensate correctly. Pre-Delay is a musical wet-path control in both modes and is not included in the reported latency.
 - **No audio-thread allocations** — ring buffers, filter state, and sequence buffers are pre-allocated to maximum capacity; the handoff uses `try_lock` + a bounded copy, never `Vec::new()` or `clone()` in `process()`.
 - **No unsafe code** — beyond the standard baseview/raw-window-handle glue inherited from the editor scaffold (where the FFI requires it).
 - **CPU rendering** — tiny-skia (software rasterizer) + fontdue (glyph cache) + softbuffer (pixel buffer). No OpenGL context, no GPU driver overhead per instance.
