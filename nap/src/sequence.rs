@@ -283,7 +283,10 @@ mod tests {
             (curve_value(d, 0.0, &mut a), curve_value(d, 1.0, &mut b))
         };
         let (d0, d1) = dir(&default_decay_curve());
-        assert!(d0 > 0.9 && d1 < 0.05, "decay must fall to silence: {d0} -> {d1}");
+        assert!(
+            d0 > 0.9 && d1 < 0.05,
+            "decay must fall to silence: {d0} -> {d1}"
+        );
         let (w0, w1) = dir(&default_width_curve());
         assert!(w1 > w0 + 0.5, "width must widen narrow->wide: {w0} -> {w1}");
         let (t0, t1) = dir(&default_tone_curve());
