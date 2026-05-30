@@ -189,18 +189,21 @@ pub fn default_decay_curve() -> MsegData {
     d
 }
 
-/// Default Width curve: a moderate, constant 0.5 width across the tail.
+/// Default Width curve: a linear ramp from narrow at the start of the tail to
+/// wide at the end (0.15 → 0.85). Mirrors a natural room — early reflections
+/// arrive more centred/correlated, the late diffuse tail spreads wide — and
+/// the rising line makes the control's purpose legible at a glance. Unipolar.
 pub fn default_width_curve() -> MsegData {
     let mut d = MsegData::default();
     d.nodes[0] = MsegNode {
         time: 0.0,
-        value: 0.5,
+        value: 0.15,
         tension: 0.0,
         stepped: false,
     };
     d.nodes[1] = MsegNode {
         time: 1.0,
-        value: 0.5,
+        value: 0.85,
         tension: 0.0,
         stepped: false,
     };
@@ -268,6 +271,23 @@ mod tests {
         assert!(default_decay_curve().is_valid());
         assert!(default_width_curve().is_valid());
         assert!(default_tone_curve().is_valid());
+    }
+
+    #[test]
+    fn default_curves_tell_the_natural_room_story() {
+        // The three defaults read as a physical room evolving across the tail:
+        // loudness falls to silence, stereo width widens, tone darkens. Sample
+        // start (phase 0) vs end (phase 1) and assert each direction holds.
+        let dir = |d: &MsegData| {
+            let (mut a, mut b) = (0usize, 0usize);
+            (curve_value(d, 0.0, &mut a), curve_value(d, 1.0, &mut b))
+        };
+        let (d0, d1) = dir(&default_decay_curve());
+        assert!(d0 > 0.9 && d1 < 0.05, "decay must fall to silence: {d0} -> {d1}");
+        let (w0, w1) = dir(&default_width_curve());
+        assert!(w1 > w0 + 0.5, "width must widen narrow->wide: {w0} -> {w1}");
+        let (t0, t1) = dir(&default_tone_curve());
+        assert!(t0 > t1 + 0.4, "tone must darken bright->dark: {t0} -> {t1}");
     }
 
     #[test]
