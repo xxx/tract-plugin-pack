@@ -30,6 +30,20 @@ pub const BLOCK: usize = 512;
 /// DC blocker pole radius (one-pole high-pass `y = x - x1 + R·y1`).
 const DC_BLOCKER_R: f32 = 0.995;
 
+/// Below this magnitude an input sample (and the reverb output) counts as silent.
+const SILENCE_EPS: f32 = 1e-6;
+
+/// After the input ring has cleared (≥ `tail_len` silent samples → zero
+/// excitation), the coloration filters + post-LP + DC blocker still ring out.
+/// The slowest is the DC blocker (R=0.995 → decays to `SILENCE_EPS` in ~2760
+/// samples); this margin covers that cascade with headroom at every sample
+/// rate, after which the whole output is `≤ SILENCE_EPS` and the idle fast-path
+/// may emit exact silence. The gate's `tail_len` term separately pays for tap
+/// reach, so this is the cascade-only budget (worst case ~5.2k samples even at
+/// 192 kHz under full-scale drive). Generous on purpose — engaging the skip a
+/// little later only forgoes a few ms of savings on an already-idle bus.
+const SETTLE_SAMPLES: usize = 8192;
+
 /// `dst[i] += c * src[i]` over equal-length slices, as a true fused
 /// multiply-add (`vfmadd`), `f32x16`-vectorised with a scalar tail. Both slices
 /// are contiguous — the cache-friendly, auto-prefetchable core of the block
@@ -62,6 +76,8 @@ pub struct ReverbChannel {
     // DC blocker state (one-pole high-pass): y = x - x1 + R*y1
     dc_x1: f32,
     dc_y1: f32,
+    /// Consecutive silent input samples seen so far (for the idle fast-path).
+    silent_in: usize,
     /// Per-filter excitation scratch for `process_block`: `Q` blocks of `BLOCK`,
     /// laid out `[filter q][sample i]` at `exc[q * BLOCK + i]`. Pre-allocated.
     exc: Vec<f32>,
@@ -84,6 +100,7 @@ impl ReverbChannel {
             post: OnePole::new(12_000.0, sample_rate),
             dc_x1: 0.0,
             dc_y1: 0.0,
+            silent_in: 0,
             exc: vec![0.0; Q * BLOCK],
             wet: vec![0.0; BLOCK],
         }
@@ -96,6 +113,7 @@ impl ReverbChannel {
         self.post.reset();
         self.dc_x1 = 0.0;
         self.dc_y1 = 0.0;
+        self.silent_in = 0;
     }
 
     /// Push one input sample and return the wet reverb sample, reading taps at
@@ -163,6 +181,27 @@ impl ReverbChannel {
             location.len() >= seq.count,
             "location slice shorter than pulse count"
         );
+
+        // Idle fast-path: once the input has been silent long enough that the
+        // ring has cleared (≥ tail_len) AND the filter chain has decayed
+        // (+ SETTLE_SAMPLES), the output is provably ≤ SILENCE_EPS, so skip the
+        // O(pulse-count) convolution and emit exact silence. The ring/write
+        // pointer stay coherent (we still write the silent input) and the
+        // at-rest filter states are left untouched, so resuming on the next
+        // non-silent block is within fp tolerance of never having skipped —
+        // gated by `silence_fastpath_matches_reference`. Zero sound change.
+        let block_silent = input.iter().all(|&x| x.abs() <= SILENCE_EPS);
+        if block_silent && self.silent_in >= seq.tail_len + SETTLE_SAMPLES {
+            let mask = self.mask;
+            for i in 0..b {
+                self.ring[(self.write + i) & mask] = 0.0;
+            }
+            self.write = (self.write + b) & mask;
+            self.silent_in = self.silent_in.saturating_add(b);
+            output[..b].fill(0.0);
+            return;
+        }
+
         let cap = self.mask + 1;
         let write_start = self.write;
 
@@ -214,6 +253,18 @@ impl ReverbChannel {
 
         // 5. Advance the write pointer past the block.
         self.write = (write_start + b) & self.mask;
+
+        // Track the run of consecutive silent input samples ending at this
+        // block boundary, for the idle fast-path above.
+        self.silent_in = if block_silent {
+            self.silent_in.saturating_add(b)
+        } else {
+            input
+                .iter()
+                .rev()
+                .take_while(|&&x| x.abs() <= SILENCE_EPS)
+                .count()
+        };
     }
 }
 
@@ -401,6 +452,75 @@ mod tests {
                 ref_out[i]
             );
         }
+    }
+
+    #[test]
+    fn silence_fastpath_matches_reference() {
+        use crate::rng::Rng;
+        // Small tail so the idle threshold (tail_len + SETTLE_SAMPLES) is reached
+        // within the test. A varied multi-filter sequence.
+        let mut seq = VelvetSequence::new();
+        let n = 64;
+        seq.count = n;
+        let mut rng = Rng::new(3);
+        for m in 0..n {
+            let loc = (rng.next_u64() % 200) as u32;
+            seq.location[m] = loc;
+            seq.location_r[m] = loc;
+            seq.coeff[m] = (rng.next_f32() * 2.0 - 1.0) * 0.1;
+            seq.filter_idx[m] = (rng.next_u64() % Q as u64) as u8;
+        }
+        seq.tail_len = 200;
+
+        // Impulse, then a long silence that crosses the fast-path threshold.
+        let total = seq.tail_len + SETTLE_SAMPLES + 3 * BLOCK;
+        let mut input = vec![0.0f32; total];
+        input[0] = 1.0;
+
+        // Reference: per-sample, NO fast path.
+        let mut refc = ReverbChannel::new(48_000.0);
+        let ref_out: Vec<f32> = input
+            .iter()
+            .map(|&x| refc.process(x, &seq, &seq.location))
+            .collect();
+
+        // Block path WITH the idle fast-path.
+        let mut blkc = ReverbChannel::new(48_000.0);
+        let mut blk_out = vec![0.0f32; total];
+        let mut off = 0;
+        while off < total {
+            let b = (total - off).min(BLOCK);
+            blkc.process_block(
+                &input[off..off + b],
+                &mut blk_out[off..off + b],
+                &seq,
+                &seq.location,
+            );
+            off += b;
+        }
+
+        // Match within tolerance throughout — including the late region where the
+        // fast path emits exact 0 and the reference emits its (≤ SILENCE_EPS) decay.
+        for i in 0..total {
+            assert!(
+                (ref_out[i] - blk_out[i]).abs() <= 1e-4 + 1e-4 * ref_out[i].abs(),
+                "sample {i}: fast-path {} vs reference {}",
+                blk_out[i],
+                ref_out[i]
+            );
+        }
+        // The fast path must actually engage: the final block is exact silence.
+        assert!(
+            blk_out[total - BLOCK..].iter().all(|&v| v == 0.0),
+            "idle fast-path should emit exact zeros once the tail + filters have settled"
+        );
+        // Sanity: the reference there has decayed below EPS (so emitting 0 is fine).
+        assert!(
+            ref_out[total - BLOCK..]
+                .iter()
+                .all(|&v| v.abs() <= SILENCE_EPS),
+            "reference output should have decayed below SILENCE_EPS by then"
+        );
     }
 
     #[test]
