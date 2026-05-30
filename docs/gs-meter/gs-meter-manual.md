@@ -60,7 +60,7 @@ This is the gain you adjust to match your reference level. The "-> Gain" buttons
 
 Your target level. Range: -60 to 0 dB. Default: 0 dB.
 
-When you click a "-> Gain" button, the gain is set to: `reference - meter_reading`. For example, if your reference is -14 dB and the integrated RMS reads -18 dB, clicking "-> Gain" sets gain to +4 dB.
+When you click a "-> Gain" button, `reference - meter_reading` is **added to the current gain**, moving that reading onto your reference. Starting from 0 dB gain this is simply `reference - meter_reading` -- e.g. with reference -14 dB and integrated RMS -18 dB, clicking "-> Gain" sets gain to +4 dB. (Because the adjustment is relative to the current gain, re-clicking after the level settles nudges it the rest of the way to the reference.)
 
 ### RMS Window
 
@@ -75,7 +75,7 @@ This matches dpMeter5's RMS Window setting. Changing it resets the momentary max
 
 Each mode has its own independent gain and reference values. Switching modes switches which gain is applied to the audio signal.
 
-In LUFS mode, gain is displayed in LU (Loudness Units) and reference in LUFS. The gain-match formula is the same: `Gain = Reference - Reading`. For example, with reference at -14.0 LUFS and integrated reading at -20.0 LUFS, clicking "-> Gain" sets gain to +6.0 LU.
+In LUFS mode, gain is displayed in LU (Loudness Units) and reference in LUFS. The gain-match works the same way -- `reference - reading` is added to the current gain. For example, from 0 LU with reference -14.0 LUFS and integrated reading -20.0 LUFS, clicking "-> Gain" sets gain to +6.0 LU.
 
 The LUFS mode default reference is -14.0 LUFS (common streaming target). The dB mode default reference is 0.0 dBFS (clip-to-zero).
 
@@ -87,7 +87,7 @@ The LUFS mode default reference is -14.0 LUFS (common streaming target). The dB 
 
 ### Scaling
 
-Use the **-** / **+** buttons in the upper right corner, or **Ctrl+=** / **Ctrl+-** on the keyboard. Range: 75% to 300%.
+The window is freely resizable -- drag the plugin window's edge or corner in your host. (There are no in-plugin zoom buttons or keyboard shortcuts.) The scale tracks the window width and clamps to 0.5x-4.0x (50% - 400%); the chosen size is persisted across host restarts via `EditorState`.
 
 ## Readings
 
@@ -145,7 +145,7 @@ Loudness Range in LU. Measures the dynamic range of the program material using t
 
 ### -> Gain Buttons
 
-Each reading (except Crest in dB mode and LRA in LUFS mode) has a "-> Gain" button that sets: `Gain = Reference - Reading`.
+Each reading (except Crest in dB mode and LRA in LUFS mode) has a "-> Gain" button that **adds** `reference - reading` to the current gain, so that reading lands on the reference.
 
 In dB mode, use the integrated RMS button for clip-to-zero. In LUFS mode, use the integrated loudness button for broadcast/streaming level matching.
 
@@ -168,7 +168,7 @@ Clears all accumulated values in both modes: peak, true peak, RMS, crest, and al
 
 - CLAP
 - VST3
-- Standalone (JACK or ALSA backend)
+- Standalone (JACK, or CPAL -- ALSA on Linux, CoreAudio on macOS, WASAPI on Windows -- with a dummy/offline fallback)
 
 ## License
 
