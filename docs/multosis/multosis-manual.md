@@ -119,7 +119,7 @@ The grid is **16 rows × 32 columns**, arranged in four groups of eight columns.
 The track list is the 16-row strip on the left of the window, present in both Grid and Effect views. Each row corresponds to one grid row and shows:
 
 - **Row number** — "1"-"16" at the left edge.
-- **PDC** (plugin delay compensation) **stripe** — a thin teal vertical bar at the very left edge, shown only for rows whose effect adds latency (see [Latency](#latency)) and that aren't muted.
+- **PDC** (plugin delay compensation) **stripe** — a thin teal vertical bar at the very left edge, shown only for rows whose effect adds latency (see [Latency](#latency)) and that are currently contributing — not muted, and not silenced by another row's solo.
 
   ![PDC stripe](pdc-stripe.png){ width=40% }
 - **Effect name** — the current effect, shown with a small warm-grey family caption (e.g. "Filter") above the unique suffix (e.g. "Ladder"). The family caption disambiguates similarly-named effects (Modulation `Phaser` vs Filter `Phaser Filter`). The `None` kind is shown as a single line with no caption.
@@ -190,7 +190,7 @@ These controls appear in a strip above the curve canvas; some appear only condit
 A strip of mode controls runs along the bottom of the MSEG editor, beneath the curve canvas. Left to right:
 
 - **Snap On / Snap Off** button — toggles node snapping to the Time Grid. When Snap is on, dragging or inserting a node snaps its time to the nearest grid column and its value to the nearest grid row; with Snap off, nodes land on whatever continuous (time, value) coordinate the cursor was at. **Hold Shift while dragging to temporarily bypass Snap and place the node at the exact cursor position** — useful for nudging a snapped node off-grid without flipping the global Snap state.
-- **Grid `T/V`** dropdown — sets the snap grid, shown as `Grid T/V` where `T` is the number of time columns and `V` is the number of value rows. Multosis ships four presets: `4/4`, `8/8`, `16/8`, `32/16`. Finer grids let you place nodes more precisely and feed the Randomizer more cells to fill.
+- **Grid `T/V`** dropdown — sets the snap grid, shown as `Grid T/V` where `T` is the number of time columns and `V` is the number of value rows. Multosis ships four presets, listed in the dropdown as `4 / 4`, `8 / 8`, `16 / 8`, `32 / 16`. Finer grids let you place nodes more precisely and feed the Randomizer more cells to fill.
 - **Style `{name}`** dropdown — sets the character the **Randomize** button uses. Five options:
     - **Smooth** — each node lands in the opposite half from its predecessor, no stepped segments, generous tension. Produces curves that always swing and use the full range.
     - **Ramps** — random values at each node, zero tension, no stepping. Straight-line ramps between nodes; sparser node count for a calmer feel.
@@ -599,7 +599,7 @@ Granular time-stretch (pitch-preserving).
 
 ## Spectral family (and Satch / Warp Zone)
 
-All Spectral-family effects share a switchable FFT analyser. The **FFT** selector (last param on each spectral effect) picks among `512`, `1024`, `2048`, `4096` (default `2048`). Higher FFT = better frequency resolution, more latency. **Latency = FFT size in samples** for every effect in this family except `Spectral Stretch` (which reports `FFT / 4` because it runs the analyser at 75 % overlap). See [Latency](#latency) for the full table.
+The fourteen switchable spectral effects share a switchable FFT analyser. The **FFT** selector (last param on each spectral effect) picks among `512`, `1024`, `2048`, `4096` (default `2048`). Higher FFT = better frequency resolution, more latency. **Latency = FFT size in samples** for every one of them — including Spectral Stretch, whose analyser runs at 75 % overlap internally but still reports a full-window latency. (Satch and Warp Zone use a fixed FFT size.) See [Latency](#latency) for the full table.
 
 The two FFT-fixed effects in this category — **Satch** (2048-pt) and **Warp Zone** (4096-pt) — pre-date the switchable family but share its character.
 
@@ -734,14 +734,14 @@ In-band bin folding around a centre frequency.
 
 ### Spectral Stretch
 
-Phase-vocoder pitch shifter with chaos. The name follows Infiltrator's terminology, but **Speed** in this effect is a pitch-shift ratio (per-bin remap), not a literal time-stretch playback rate. Unlike the other spectral effects, Spectral Stretch runs its own analyser at **75 %** overlap (hop = FFT/4) rather than the shared SpectralEngine's 50 %, so its latency is **lower** than the others at the same FFT size.
+Phase-vocoder pitch shifter with chaos. The name follows Infiltrator's terminology, but **Speed** in this effect is a pitch-shift ratio (per-bin remap), not a literal time-stretch playback rate. Unlike the other spectral effects, Spectral Stretch runs its own analyser at **75 %** overlap (hop = FFT/4) rather than the shared SpectralEngine's 50 %. Its reported latency is still one full FFT window — the same as every other spectral effect at a given FFT size.
 
 - **Speed** (0.25..4.0×, default 1.0) — pitch-shift ratio (per-bin frequency multiplier).
 - **Tempo** (1..100 %, default 100) — throttle on re-analyse rate.
 - **Chaos** (0..100 %, default 0) — per-hop phase randomisation.
 - **FFT** — switchable.
 
-**Latency:** FFT / 4 samples (`128`, `256`, `512`, `1024` at 512, 1024, 2048, 4096 FFT respectively).
+**Latency:** FFT size in samples (`512`, `1024`, `2048`, `4096` at the four FFT settings), the same as every other spectral effect — the OLA output ring is one full window deep regardless of the analyser's overlap.
 
 # Latency
 
@@ -751,10 +751,9 @@ Only the effects below add latency; everything else is zero-latency.
 |---|---:|---:|---:|---:|
 | Satch (fixed FFT) | — | — | 2 048 (~42.7 ms) | — |
 | Warp Zone (fixed FFT) | — | — | — | 4 096 (~85.3 ms) |
-| Spectral Bandpass / Cascade / Compress / Corrupt / Lofi / Mirror / Reverb / Rotate / Scatter / Shift / Smear / Spread / Twist | 512 (~10.7 ms) | 1 024 (~21.3 ms) | 2 048 (~42.7 ms) | 4 096 (~85.3 ms) |
-| Spectral Stretch | 128 (~2.7 ms) | 256 (~5.3 ms) | 512 (~10.7 ms) | 1 024 (~21.3 ms) |
+| Spectral Bandpass / Cascade / Compress / Corrupt / Lofi / Mirror / Reverb / Rotate / Scatter / Shift / Smear / Spread / Stretch / Twist | 512 (~10.7 ms) | 1 024 (~21.3 ms) | 2 048 (~42.7 ms) | 4 096 (~85.3 ms) |
 
-The track-list row label shows a small **PDC** stripe (thin teal vertical bar on the left edge) for any row whose effect adds latency, provided that row isn't muted. Multosis reports the **sum** of every non-muted, non-None row's latency to the host as the plugin's PDC value, so stacking two latency-bearing rows accumulates their latencies. The reported PDC only changes when you add / remove a latency-bearing effect, mute / unmute a latency-bearing row, or change the FFT selector on a spectral effect — never every step.
+The track-list row label shows a small **PDC** stripe (thin teal vertical bar on the left edge) for any row whose effect adds latency, provided that row is currently contributing — not muted, and not silenced by another row's solo. Multosis reports the **sum** of every contributing (non-muted, non-solo-suppressed), non-None row's latency to the host as the plugin's PDC value, so stacking two latency-bearing rows accumulates their latencies. The reported PDC only changes when the contributing set of latency-bearing rows changes — adding / removing such an effect, muting / unmuting or soloing in a way that bypasses one, or changing the FFT selector on a spectral effect — never every step.
 
 # Tips
 
