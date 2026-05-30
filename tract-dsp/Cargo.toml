@@ -20,6 +20,8 @@ stft = ["dep:realfft", "dep:rustfft"]
 # Gates the `stft_analysis` module (rustfft only — complex transforms, no realfft).
 stft-analysis = ["dep:rustfft"]
 spectral-engine = ["stft-analysis"]
+# Gates the `partitioned_conv` module (uniformly-partitioned FFT convolution).
+partitioned-conv = ["dep:realfft", "dep:rustfft"]
 
 [dependencies]
 realfft = { version = "3.3", optional = true }

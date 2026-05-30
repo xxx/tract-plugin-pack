@@ -17,6 +17,8 @@ pub mod db;
 pub mod fast_math;
 pub mod fir;
 pub mod hilbert;
+#[cfg(feature = "partitioned-conv")]
+pub mod partitioned_conv;
 #[cfg(feature = "stft-analysis")]
 pub mod spectral_clipper;
 #[cfg(feature = "spectral-engine")]
