@@ -1300,6 +1300,8 @@ dependencies = [
  "nih_plug",
  "raw-window-handle 0.5.2",
  "raw-window-handle 0.6.2",
+ "realfft",
+ "rustfft",
  "serde",
  "softbuffer",
  "tiny-skia",

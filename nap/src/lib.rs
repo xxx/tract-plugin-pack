@@ -6,6 +6,7 @@ pub mod coloration;
 pub mod editor;
 pub mod engine;
 pub mod handoff;
+pub mod ir;
 pub mod rng;
 pub mod sequence;
 pub mod theme;

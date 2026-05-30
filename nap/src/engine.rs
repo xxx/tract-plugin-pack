@@ -28,7 +28,7 @@ pub const MAX_TAIL_SECONDS: f32 = 10.0;
 pub const BLOCK: usize = 512;
 
 /// DC blocker pole radius (one-pole high-pass `y = x - x1 + R·y1`).
-const DC_BLOCKER_R: f32 = 0.995;
+pub(crate) const DC_BLOCKER_R: f32 = 0.995;
 
 /// Below this magnitude an input sample (and the reverb output) counts as silent.
 const SILENCE_EPS: f32 = 1e-6;
@@ -42,7 +42,7 @@ const SILENCE_EPS: f32 = 1e-6;
 /// reach, so this is the cascade-only budget (worst case ~5.2k samples even at
 /// 192 kHz under full-scale drive). Generous on purpose — engaging the skip a
 /// little later only forgoes a few ms of savings on an already-idle bus.
-const SETTLE_SAMPLES: usize = 8192;
+pub(crate) const SETTLE_SAMPLES: usize = 8192;
 
 /// `dst[i] += c * src[i]` over equal-length slices, as a true fused
 /// multiply-add (`vfmadd`), `f32x16`-vectorised with a scalar tail. Both slices
