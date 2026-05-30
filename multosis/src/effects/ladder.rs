@@ -127,8 +127,7 @@ impl LadderEffect {
         // match the analog ladder's pole-Q curve across the audible range.
         let fcr = 1.8730 * fc3 + 0.4955 * fc2 - 0.6490 * fc_n + 0.9988;
         self.acr = -3.9364 * fc2 + 1.8409 * fc_n + 0.9968;
-        self.tune =
-            (1.0 - (-((2.0 * std::f32::consts::PI) * f * fcr)).exp()) / Self::THERMAL;
+        self.tune = (1.0 - (-((2.0 * std::f32::consts::PI) * f * fcr)).exp()) / Self::THERMAL;
         self.res_quad = 4.0 * self.resonance.clamp(0.0, 1.0) * self.acr;
         self.drive_lin = 10.0_f32.powf(self.drive_db.clamp(0.0, 24.0) / 20.0);
     }

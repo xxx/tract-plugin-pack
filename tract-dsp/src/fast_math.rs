@@ -62,7 +62,10 @@ mod tests {
             let x = (i as f32) * 0.005;
             let pos = tanh_pade(x);
             let neg = tanh_pade(-x);
-            assert!((pos + neg).abs() < 1e-7, "broken odd symmetry at x={x}: {pos} vs {neg}");
+            assert!(
+                (pos + neg).abs() < 1e-7,
+                "broken odd symmetry at x={x}: {pos} vs {neg}"
+            );
         }
     }
 
@@ -80,7 +83,10 @@ mod tests {
         // value is monotonic so downstream stages don't see runaway.
         for &x in &[-100.0, -10.0, -7.7, -5.0, 5.0, 7.7, 10.0, 100.0] {
             let y = tanh_pade(x);
-            assert!(y.abs() < 1.001, "tanh_pade({x}) = {y} escapes near-unit bound");
+            assert!(
+                y.abs() < 1.001,
+                "tanh_pade({x}) = {y} escapes near-unit bound"
+            );
         }
     }
 
@@ -101,7 +107,10 @@ mod tests {
                 max = err;
             }
         }
-        assert!(max < 5e-7, "max abs error in [-1.5, 1.5] was {max}, exceeds 5e-7");
+        assert!(
+            max < 5e-7,
+            "max abs error in [-1.5, 1.5] was {max}, exceeds 5e-7"
+        );
     }
 
     #[test]
@@ -112,7 +121,10 @@ mod tests {
         // The 0.1% audibility threshold (1e-3) is still 10x higher than
         // our worst case here.
         let err = max_abs_err(1_000);
-        assert!(err < 5e-4, "max abs error over [-5, 5] was {err}, exceeds 5e-4");
+        assert!(
+            err < 5e-4,
+            "max abs error over [-5, 5] was {err}, exceeds 5e-4"
+        );
     }
 
     #[test]
@@ -120,7 +132,10 @@ mod tests {
         for &x in &[-0.1, -0.01, 0.0, 0.01, 0.1, 0.5] {
             let approx = tanh_pade(x);
             let truth = x.tanh();
-            assert!((approx - truth).abs() < 1e-6, "diverged at {x}: {approx} vs {truth}");
+            assert!(
+                (approx - truth).abs() < 1e-6,
+                "diverged at {x}: {approx} vs {truth}"
+            );
         }
     }
 
@@ -129,7 +144,10 @@ mod tests {
         for x in [-2.0, -1.5, -1.0, -0.75, 0.75, 1.0, 1.5, 2.0] {
             let approx = tanh_pade(x);
             let truth = x.tanh();
-            assert!((approx - truth).abs() < 1e-5, "diverged at {x}: {approx} vs {truth}");
+            assert!(
+                (approx - truth).abs() < 1e-5,
+                "diverged at {x}: {approx} vs {truth}"
+            );
         }
     }
 
@@ -143,7 +161,10 @@ mod tests {
         // exactly at the boundary.
         let approx = tanh_pade(5.0);
         let truth = 5.0_f32.tanh();
-        assert!((approx - truth).abs() < 5e-4, "approx {approx} vs truth {truth}");
+        assert!(
+            (approx - truth).abs() < 5e-4,
+            "approx {approx} vs truth {truth}"
+        );
         let above_clamp = tanh_pade(100.0);
         assert_eq!(above_clamp, approx);
     }

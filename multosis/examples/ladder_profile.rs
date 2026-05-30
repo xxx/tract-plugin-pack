@@ -56,9 +56,7 @@ fn run_one(label: &str, cutoff: f32, resonance: f32, drive_db: f32) {
     let rtf = audio_secs / wall_secs;
     let per_sample_ns = elapsed.as_nanos() as f64 / real_samples as f64;
     let core_pct = 100.0 / rtf;
-    println!(
-        "{label:<40} rtf={rtf:>7.1}x  {per_sample_ns:>7.1} ns/sample  ~{core_pct:.2}% core",
-    );
+    println!("{label:<40} rtf={rtf:>7.1}x  {per_sample_ns:>7.1} ns/sample  ~{core_pct:.2}% core",);
 }
 
 fn main() {

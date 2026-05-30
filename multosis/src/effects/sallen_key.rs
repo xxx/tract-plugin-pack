@@ -84,7 +84,10 @@ impl SallenKeyEffect {
             max: 1.0,
             default: 0.5,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 2, unit: "" },
+            format: ParamFormat::Number {
+                decimals: 2,
+                unit: "",
+            },
         },
         ParamSpec {
             name: "Drive",
@@ -92,7 +95,10 @@ impl SallenKeyEffect {
             max: 24.0,
             default: 0.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 1, unit: "dB" },
+            format: ParamFormat::Number {
+                decimals: 1,
+                unit: "dB",
+            },
         },
         ParamSpec {
             name: "Type",
@@ -100,7 +106,9 @@ impl SallenKeyEffect {
             max: (SK_TYPE_LABELS.len() - 1) as f32,
             default: 0.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Enum { labels: SK_TYPE_LABELS },
+            format: ParamFormat::Enum {
+                labels: SK_TYPE_LABELS,
+            },
         },
     ];
 
@@ -135,7 +143,8 @@ impl SallenKeyEffect {
         let gp1 = 1.0 + g;
         self.coef_g = g / gp1;
 
-        let mk = (self.user_resonance.clamp(0.0, 1.0) * Self::K_MAX).clamp(Self::K_MIN, Self::K_MAX);
+        let mk =
+            (self.user_resonance.clamp(0.0, 1.0) * Self::K_MAX).clamp(Self::K_MIN, Self::K_MAX);
         self.coef_k = mk;
         self.coef_alpha = 1.0 / (1.0 - mk * self.coef_g + mk * self.coef_g * self.coef_g);
 
@@ -391,7 +400,10 @@ mod tests {
             sum_sq += l * l;
         }
         let rms = (sum_sq / 4096.0).sqrt();
-        assert!(rms > 0.005, "high resonance should self-oscillate, got rms={rms}");
+        assert!(
+            rms > 0.005,
+            "high resonance should self-oscillate, got rms={rms}"
+        );
     }
 
     #[test]

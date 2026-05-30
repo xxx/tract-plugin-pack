@@ -35,7 +35,10 @@ impl LimiterEffect {
             max: 0.0,
             default: -3.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 1, unit: "dB" },
+            format: ParamFormat::Number {
+                decimals: 1,
+                unit: "dB",
+            },
         },
         ParamSpec {
             name: "Release",
@@ -43,7 +46,10 @@ impl LimiterEffect {
             max: 1_000.0,
             default: 50.0,
             scaling: ParamScaling::Log,
-            format: ParamFormat::Number { decimals: 0, unit: "ms" },
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "ms",
+            },
         },
         ParamSpec {
             name: "Ceiling",
@@ -51,7 +57,10 @@ impl LimiterEffect {
             max: 0.0,
             default: -0.3,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 1, unit: "dB" },
+            format: ParamFormat::Number {
+                decimals: 1,
+                unit: "dB",
+            },
         },
         ParamSpec {
             name: "Knee",
@@ -59,7 +68,10 @@ impl LimiterEffect {
             max: 12.0,
             default: 3.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 1, unit: "dB" },
+            format: ParamFormat::Number {
+                decimals: 1,
+                unit: "dB",
+            },
         },
     ];
 
@@ -142,8 +154,8 @@ impl Effect for LimiterEffect {
         if target_gr_db <= self.env_gr_db {
             self.env_gr_db = target_gr_db;
         } else {
-            self.env_gr_db = self.alpha_release * self.env_gr_db
-                + (1.0 - self.alpha_release) * target_gr_db;
+            self.env_gr_db =
+                self.alpha_release * self.env_gr_db + (1.0 - self.alpha_release) * target_gr_db;
         }
         let gain = 10.0_f32.powf(self.env_gr_db / 20.0);
         let mut l = left * gain;
@@ -203,7 +215,7 @@ mod tests {
         e.set_sample_rate(48_000.0);
         e.set_param(0, -3.0);
         e.set_param(3, 0.0); // hard knee
-        // Drive at -12 dBFS -- well below the -3 dB threshold.
+                             // Drive at -12 dBFS -- well below the -3 dB threshold.
         let x = 0.25;
         for _ in 0..1024 {
             let (l, r) = e.process_sample(x, -x);
@@ -242,7 +254,10 @@ mod tests {
         }
         let (l, r) = e.process_sample(0.8, 0.2);
         let ratio = l / r;
-        assert!((ratio - 4.0).abs() < 0.05, "stereo balance broken: {l}/{r} = {ratio}");
+        assert!(
+            (ratio - 4.0).abs() < 0.05,
+            "stereo balance broken: {l}/{r} = {ratio}"
+        );
     }
 
     #[test]

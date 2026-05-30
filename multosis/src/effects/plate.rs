@@ -159,7 +159,10 @@ impl PlateEffect {
             max: 200.0,
             default: 0.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 0, unit: "ms" },
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "ms",
+            },
         },
         ParamSpec {
             name: "Decay",
@@ -167,7 +170,10 @@ impl PlateEffect {
             max: 95.0,
             default: 60.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 0, unit: "%" },
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "%",
+            },
         },
         ParamSpec {
             name: "Damping",
@@ -175,7 +181,10 @@ impl PlateEffect {
             max: 100.0,
             default: 40.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 0, unit: "%" },
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "%",
+            },
         },
         ParamSpec {
             name: "Bandwidth",
@@ -191,7 +200,10 @@ impl PlateEffect {
             max: 100.0,
             default: 100.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 0, unit: "%" },
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "%",
+            },
         },
     ];
 
@@ -331,13 +343,7 @@ impl PlateEffect {
     /// One allpass tick. `out = -g*x + buf[delay]`, then write
     /// `x + g*out` into the ring. Standard Dattorro form.
     #[inline]
-    fn allpass_step(
-        buf: &mut [f32],
-        pos: &mut usize,
-        x: f32,
-        delay_samples: f32,
-        g: f32,
-    ) -> f32 {
+    fn allpass_step(buf: &mut [f32], pos: &mut usize, x: f32, delay_samples: f32, g: f32) -> f32 {
         let delayed = Self::read_frac(buf, *pos, delay_samples);
         let out = -g * x + delayed;
         Self::write_ring(buf, pos, x + g * out);
@@ -486,20 +492,64 @@ impl Effect for PlateEffect {
         //          - d1R[4] - apf2R[5] - d2R[6]
         //      R = +d1R[0] + d1R[1] - apf2R[2] + d2R[3]
         //          - d1L[4] - apf2L[5] - d2L[6]
-        let yl = Self::read_int(&self.tank_delay1_bufs[0], self.tank_delay1_pos[0], self.left_tap_offsets[0] as usize)
-            + Self::read_int(&self.tank_delay1_bufs[0], self.tank_delay1_pos[0], self.left_tap_offsets[1] as usize)
-            - Self::read_int(&self.tank_apf2_bufs[0], self.tank_apf2_pos[0], self.left_tap_offsets[2] as usize)
-            + Self::read_int(&self.tank_delay2_bufs[0], self.tank_delay2_pos[0], self.left_tap_offsets[3] as usize)
-            - Self::read_int(&self.tank_delay1_bufs[1], self.tank_delay1_pos[1], self.left_tap_offsets[4] as usize)
-            - Self::read_int(&self.tank_apf2_bufs[1], self.tank_apf2_pos[1], self.left_tap_offsets[5] as usize)
-            - Self::read_int(&self.tank_delay2_bufs[1], self.tank_delay2_pos[1], self.left_tap_offsets[6] as usize);
-        let yr = Self::read_int(&self.tank_delay1_bufs[1], self.tank_delay1_pos[1], self.right_tap_offsets[0] as usize)
-            + Self::read_int(&self.tank_delay1_bufs[1], self.tank_delay1_pos[1], self.right_tap_offsets[1] as usize)
-            - Self::read_int(&self.tank_apf2_bufs[1], self.tank_apf2_pos[1], self.right_tap_offsets[2] as usize)
-            + Self::read_int(&self.tank_delay2_bufs[1], self.tank_delay2_pos[1], self.right_tap_offsets[3] as usize)
-            - Self::read_int(&self.tank_delay1_bufs[0], self.tank_delay1_pos[0], self.right_tap_offsets[4] as usize)
-            - Self::read_int(&self.tank_apf2_bufs[0], self.tank_apf2_pos[0], self.right_tap_offsets[5] as usize)
-            - Self::read_int(&self.tank_delay2_bufs[0], self.tank_delay2_pos[0], self.right_tap_offsets[6] as usize);
+        let yl = Self::read_int(
+            &self.tank_delay1_bufs[0],
+            self.tank_delay1_pos[0],
+            self.left_tap_offsets[0] as usize,
+        ) + Self::read_int(
+            &self.tank_delay1_bufs[0],
+            self.tank_delay1_pos[0],
+            self.left_tap_offsets[1] as usize,
+        ) - Self::read_int(
+            &self.tank_apf2_bufs[0],
+            self.tank_apf2_pos[0],
+            self.left_tap_offsets[2] as usize,
+        ) + Self::read_int(
+            &self.tank_delay2_bufs[0],
+            self.tank_delay2_pos[0],
+            self.left_tap_offsets[3] as usize,
+        ) - Self::read_int(
+            &self.tank_delay1_bufs[1],
+            self.tank_delay1_pos[1],
+            self.left_tap_offsets[4] as usize,
+        ) - Self::read_int(
+            &self.tank_apf2_bufs[1],
+            self.tank_apf2_pos[1],
+            self.left_tap_offsets[5] as usize,
+        ) - Self::read_int(
+            &self.tank_delay2_bufs[1],
+            self.tank_delay2_pos[1],
+            self.left_tap_offsets[6] as usize,
+        );
+        let yr = Self::read_int(
+            &self.tank_delay1_bufs[1],
+            self.tank_delay1_pos[1],
+            self.right_tap_offsets[0] as usize,
+        ) + Self::read_int(
+            &self.tank_delay1_bufs[1],
+            self.tank_delay1_pos[1],
+            self.right_tap_offsets[1] as usize,
+        ) - Self::read_int(
+            &self.tank_apf2_bufs[1],
+            self.tank_apf2_pos[1],
+            self.right_tap_offsets[2] as usize,
+        ) + Self::read_int(
+            &self.tank_delay2_bufs[1],
+            self.tank_delay2_pos[1],
+            self.right_tap_offsets[3] as usize,
+        ) - Self::read_int(
+            &self.tank_delay1_bufs[0],
+            self.tank_delay1_pos[0],
+            self.right_tap_offsets[4] as usize,
+        ) - Self::read_int(
+            &self.tank_apf2_bufs[0],
+            self.tank_apf2_pos[0],
+            self.right_tap_offsets[5] as usize,
+        ) - Self::read_int(
+            &self.tank_delay2_bufs[0],
+            self.tank_delay2_pos[0],
+            self.right_tap_offsets[6] as usize,
+        );
 
         // 9. Width: at 100% the L/R taps stay as-is (full plate stereo);
         //    at 0% they collapse to mono. Implemented as Mid/Side
@@ -640,7 +690,10 @@ mod tests {
             let (l, r) = e.process_sample(0.0, 0.0);
             sum_late += l * l + r * r;
         }
-        assert!(sum_late < sum_early * 0.1, "tail not decaying: early={sum_early}, late={sum_late}");
+        assert!(
+            sum_late < sum_early * 0.1,
+            "tail not decaying: early={sum_early}, late={sum_late}"
+        );
     }
 
     #[test]
@@ -686,7 +739,10 @@ mod tests {
         };
         let short = measure_tail(30.0);
         let long = measure_tail(90.0);
-        assert!(long > short * 1.5, "Decay should grow tail: short={short}, long={long}");
+        assert!(
+            long > short * 1.5,
+            "Decay should grow tail: short={short}, long={long}"
+        );
     }
 
     #[test]
@@ -700,8 +756,14 @@ mod tests {
         for i in 0..48_000 {
             let x = (i as f32 * 0.05).sin() * 0.5;
             let (l, r) = e.process_sample(x, x);
-            assert!(l.is_finite() && r.is_finite(), "non-finite at i={i}: {l}, {r}");
-            assert!(l.abs() < 32.0 && r.abs() < 32.0, "runaway at i={i}: {l}, {r}");
+            assert!(
+                l.is_finite() && r.is_finite(),
+                "non-finite at i={i}: {l}, {r}"
+            );
+            assert!(
+                l.abs() < 32.0 && r.abs() < 32.0,
+                "runaway at i={i}: {l}, {r}"
+            );
         }
     }
 
@@ -720,7 +782,10 @@ mod tests {
             let (l, r) = e.process_sample(0.5, -0.5);
             max_diff = max_diff.max((l - r).abs());
         }
-        assert!(max_diff < 1e-6, "Width=0 should collapse to mono, got max diff={max_diff}");
+        assert!(
+            max_diff < 1e-6,
+            "Width=0 should collapse to mono, got max diff={max_diff}"
+        );
     }
 
     #[test]

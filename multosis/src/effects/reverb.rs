@@ -341,8 +341,7 @@ impl Effect for ReverbEffect {
             );
             let new_l = -Self::AP_FEEDBACK * y_l + tap_l;
             self.ap_l[i].buf[self.ap_l[i].write_idx] = y_l + Self::AP_FEEDBACK * new_l;
-            self.ap_l[i].write_idx =
-                (self.ap_l[i].write_idx + 1) & (self.ap_l[i].buf.len() - 1);
+            self.ap_l[i].write_idx = (self.ap_l[i].write_idx + 1) & (self.ap_l[i].buf.len() - 1);
             y_l = new_l;
 
             let tap_r = Self::read_frac(
@@ -352,8 +351,7 @@ impl Effect for ReverbEffect {
             );
             let new_r = -Self::AP_FEEDBACK * y_r + tap_r;
             self.ap_r[i].buf[self.ap_r[i].write_idx] = y_r + Self::AP_FEEDBACK * new_r;
-            self.ap_r[i].write_idx =
-                (self.ap_r[i].write_idx + 1) & (self.ap_r[i].buf.len() - 1);
+            self.ap_r[i].write_idx = (self.ap_r[i].write_idx + 1) & (self.ap_r[i].buf.len() - 1);
             y_r = new_r;
         }
 

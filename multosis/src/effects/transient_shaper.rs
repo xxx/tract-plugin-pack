@@ -57,7 +57,10 @@ impl TransientShaperEffect {
             max: 100.0,
             default: 0.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 0, unit: "%" },
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "%",
+            },
         },
         ParamSpec {
             name: "Sustain",
@@ -65,7 +68,10 @@ impl TransientShaperEffect {
             max: 100.0,
             default: 0.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 0, unit: "%" },
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "%",
+            },
         },
     ];
 

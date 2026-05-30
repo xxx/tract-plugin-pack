@@ -192,8 +192,14 @@ mod tests {
             min_l = min_l.min(l.abs());
             min_r = min_r.min(r.abs());
         }
-        assert!(min_l < 0.01, "L should hit ~0 at the right extreme, got {min_l}");
-        assert!(min_r < 0.01, "R should hit ~0 at the left extreme, got {min_r}");
+        assert!(
+            min_l < 0.01,
+            "L should hit ~0 at the right extreme, got {min_l}"
+        );
+        assert!(
+            min_r < 0.01,
+            "R should hit ~0 at the left extreme, got {min_r}"
+        );
     }
 
     #[test]

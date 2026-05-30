@@ -19,7 +19,10 @@ impl StereoWidenerEffect {
         max: 200.0,
         default: 100.0,
         scaling: ParamScaling::Linear,
-        format: ParamFormat::Number { decimals: 0, unit: "%" },
+        format: ParamFormat::Number {
+            decimals: 0,
+            unit: "%",
+        },
     }];
 
     pub fn new() -> Self {

@@ -37,9 +37,7 @@ fn run_one(label: &str, fft_param: f32, speed: f32, tempo_pct: f32, chaos_pct: f
 
     // 440 Hz sine -- representative tonal input.
     let input: Vec<f32> = (0..BLOCK)
-        .map(|i| {
-            (2.0 * std::f32::consts::PI * 440.0 * i as f32 / SAMPLE_RATE).sin() * 0.5
-        })
+        .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / SAMPLE_RATE).sin() * 0.5)
         .collect();
 
     let target_samples = (SECONDS * SAMPLE_RATE) as usize;
@@ -62,9 +60,7 @@ fn run_one(label: &str, fft_param: f32, speed: f32, tempo_pct: f32, chaos_pct: f
     let rtf = audio_secs / wall_secs;
     let per_sample_ns = elapsed.as_nanos() as f64 / real_samples as f64;
     let core_pct = 100.0 / rtf;
-    println!(
-        "{label:<40} rtf={rtf:>7.1}x  {per_sample_ns:>7.1} ns/sample  ~{core_pct:.2}% core",
-    );
+    println!("{label:<40} rtf={rtf:>7.1}x  {per_sample_ns:>7.1} ns/sample  ~{core_pct:.2}% core",);
 }
 
 fn main() {

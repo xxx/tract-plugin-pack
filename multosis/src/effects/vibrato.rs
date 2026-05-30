@@ -240,7 +240,10 @@ mod tests {
             let (l, _) = e.process_sample(x, x);
             peak = peak.max(l.abs());
         }
-        assert!(peak > 0.9 && peak < 1.1, "fixed-delay peak should be ~1, got {peak}");
+        assert!(
+            peak > 0.9 && peak < 1.1,
+            "fixed-delay peak should be ~1, got {peak}"
+        );
     }
 
     #[test]
@@ -255,7 +258,10 @@ mod tests {
         for i in 0..48_000 {
             let x = (i as f32 * 0.05).sin() * 0.5;
             let (l, r) = e.process_sample(x, x);
-            assert!(l.is_finite() && r.is_finite(), "non-finite output: {l}, {r}");
+            assert!(
+                l.is_finite() && r.is_finite(),
+                "non-finite output: {l}, {r}"
+            );
             assert!(l.abs() < 2.0 && r.abs() < 2.0, "out of range: {l}, {r}");
         }
     }

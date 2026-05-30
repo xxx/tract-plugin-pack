@@ -102,7 +102,9 @@ fn bench_fast_math(c: &mut Criterion) {
     use tract_dsp::fast_math::tanh_pade;
 
     // Span the full clamp range so neither branch is constant-folded.
-    let xs: Vec<f32> = (0..BLOCK).map(|i| -5.0 + (i as f32) * (10.0 / BLOCK as f32)).collect();
+    let xs: Vec<f32> = (0..BLOCK)
+        .map(|i| -5.0 + (i as f32) * (10.0 / BLOCK as f32))
+        .collect();
 
     let mut group = c.benchmark_group("fast_math");
     group.throughput(Throughput::Elements(BLOCK as u64));

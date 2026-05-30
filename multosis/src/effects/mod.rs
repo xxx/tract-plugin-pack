@@ -803,9 +803,7 @@ impl EffectKind {
             | Self::Vibrato => Some("Modulation"),
             Self::FrequencyShift | Self::PitchShift | Self::Varispeed => Some("Pitch"),
             Self::Haas | Self::StereoWidener => Some("Spatial"),
-            Self::Delay | Self::Plate | Self::Repeat | Self::Reverb | Self::Stretch => {
-                Some("Time")
-            }
+            Self::Delay | Self::Plate | Self::Repeat | Self::Reverb | Self::Stretch => Some("Time"),
             Self::Satch
             | Self::WarpZone
             | Self::SpectralRotate

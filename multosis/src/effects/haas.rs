@@ -40,7 +40,10 @@ impl HaasEffect {
         max: 25.0,
         default: 0.0,
         scaling: ParamScaling::Linear,
-        format: ParamFormat::Number { decimals: 1, unit: "ms" },
+        format: ParamFormat::Number {
+            decimals: 1,
+            unit: "ms",
+        },
     }];
 
     pub fn new() -> Self {
@@ -75,8 +78,7 @@ impl Effect for HaasEffect {
         // Position direction doesn't drop history.
         self.delay_l[self.write_idx] = left;
         self.delay_r[self.write_idx] = right;
-        let offset =
-            (self.position_ms.abs() * 0.001 * self.sample_rate.max(1.0)).round() as usize;
+        let offset = (self.position_ms.abs() * 0.001 * self.sample_rate.max(1.0)).round() as usize;
         let offset = offset.min(Self::RING_CAP - 1);
         let (l_out, r_out) = if offset == 0 {
             (left, right)
@@ -153,7 +155,10 @@ mod tests {
             assert!(r.abs() < 1e-6, "right leaked before the delay");
         }
         let (_, r) = e.process_sample(0.0, 0.0);
-        assert!((r - 1.0).abs() < 1e-6, "expected impulse at sample 480, got {r}");
+        assert!(
+            (r - 1.0).abs() < 1e-6,
+            "expected impulse at sample 480, got {r}"
+        );
     }
 
     #[test]
@@ -167,7 +172,10 @@ mod tests {
             assert!(l.abs() < 1e-6);
         }
         let (l, _) = e.process_sample(0.0, 0.0);
-        assert!((l - 1.0).abs() < 1e-6, "expected impulse at sample 480, got {l}");
+        assert!(
+            (l - 1.0).abs() < 1e-6,
+            "expected impulse at sample 480, got {l}"
+        );
     }
 
     #[test]
@@ -180,7 +188,10 @@ mod tests {
         for i in 0..1024 {
             let x = (i as f32 * 0.05).sin();
             let (l, _) = e.process_sample(x, 0.0);
-            assert!((l - x).abs() < 1e-6, "L not transparent at i={i}: {l} vs {x}");
+            assert!(
+                (l - x).abs() < 1e-6,
+                "L not transparent at i={i}: {l} vs {x}"
+            );
         }
     }
 

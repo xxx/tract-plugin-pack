@@ -86,11 +86,36 @@ impl FolderCell {
 /// WestCoastWavefolder; derivation from the desmos linked in that
 /// header file's docs.
 const CELLS: [FolderCell; 5] = [
-    FolderCell { g: 0.8333, b: 0.5, thresh: 0.6, mix: -12.0 },
-    FolderCell { g: 0.3768, b: 1.1281, thresh: 2.994, mix: -27.777 },
-    FolderCell { g: 0.2829, b: 1.5446, thresh: 5.46, mix: -21.428 },
-    FolderCell { g: 0.5743, b: 1.0338, thresh: 1.8, mix: 17.647 },
-    FolderCell { g: 0.2673, b: 1.0907, thresh: 4.08, mix: 36.363 },
+    FolderCell {
+        g: 0.8333,
+        b: 0.5,
+        thresh: 0.6,
+        mix: -12.0,
+    },
+    FolderCell {
+        g: 0.3768,
+        b: 1.1281,
+        thresh: 2.994,
+        mix: -27.777,
+    },
+    FolderCell {
+        g: 0.2829,
+        b: 1.5446,
+        thresh: 5.46,
+        mix: -21.428,
+    },
+    FolderCell {
+        g: 0.5743,
+        b: 1.0338,
+        thresh: 1.8,
+        mix: 17.647,
+    },
+    FolderCell {
+        g: 0.2673,
+        b: 1.0907,
+        thresh: 4.08,
+        mix: 36.363,
+    },
 ];
 
 /// Linear `x` contribution baked into the canonical Buchla shape.
@@ -115,7 +140,10 @@ impl WavefolderEffect {
             max: 24.0,
             default: 6.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 1, unit: "dB" },
+            format: ParamFormat::Number {
+                decimals: 1,
+                unit: "dB",
+            },
         },
         ParamSpec {
             name: "Fold",
@@ -123,7 +151,10 @@ impl WavefolderEffect {
             max: 100.0,
             default: 50.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 0, unit: "%" },
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "%",
+            },
         },
         ParamSpec {
             name: "Bias",
@@ -131,7 +162,10 @@ impl WavefolderEffect {
             max: 100.0,
             default: 0.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 0, unit: "%" },
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "%",
+            },
         },
     ];
 
@@ -416,7 +450,10 @@ mod tests {
             let (l, _) = e.process_sample(0.0, 0.0);
             max_abs = max_abs.max(l.abs());
         }
-        assert!(max_abs < 0.01, "DC blocker should drain bias offset, got {max_abs}");
+        assert!(
+            max_abs < 0.01,
+            "DC blocker should drain bias offset, got {max_abs}"
+        );
     }
 
     #[test]

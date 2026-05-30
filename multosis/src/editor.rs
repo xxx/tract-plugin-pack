@@ -2248,33 +2248,17 @@ impl baseview::WindowHandler for MultosisWindow {
                     };
                 let win = (self.physical_width as f32, self.physical_height as f32);
                 let dd_key = match &ev.key {
-                    keyboard_types::Key::ArrowUp => {
-                        Some(widgets::dropdown::DropdownKey::Up)
-                    }
-                    keyboard_types::Key::ArrowDown => {
-                        Some(widgets::dropdown::DropdownKey::Down)
-                    }
-                    keyboard_types::Key::Enter => {
-                        Some(widgets::dropdown::DropdownKey::Enter)
-                    }
-                    keyboard_types::Key::Escape => {
-                        Some(widgets::dropdown::DropdownKey::Esc)
-                    }
+                    keyboard_types::Key::ArrowUp => Some(widgets::dropdown::DropdownKey::Up),
+                    keyboard_types::Key::ArrowDown => Some(widgets::dropdown::DropdownKey::Down),
+                    keyboard_types::Key::Enter => Some(widgets::dropdown::DropdownKey::Enter),
+                    keyboard_types::Key::Escape => Some(widgets::dropdown::DropdownKey::Esc),
                     keyboard_types::Key::Backspace => {
                         Some(widgets::dropdown::DropdownKey::Backspace)
                     }
-                    keyboard_types::Key::PageUp => {
-                        Some(widgets::dropdown::DropdownKey::PageUp)
-                    }
-                    keyboard_types::Key::PageDown => {
-                        Some(widgets::dropdown::DropdownKey::PageDown)
-                    }
-                    keyboard_types::Key::Home => {
-                        Some(widgets::dropdown::DropdownKey::Home)
-                    }
-                    keyboard_types::Key::End => {
-                        Some(widgets::dropdown::DropdownKey::End)
-                    }
+                    keyboard_types::Key::PageUp => Some(widgets::dropdown::DropdownKey::PageUp),
+                    keyboard_types::Key::PageDown => Some(widgets::dropdown::DropdownKey::PageDown),
+                    keyboard_types::Key::Home => Some(widgets::dropdown::DropdownKey::Home),
+                    keyboard_types::Key::End => Some(widgets::dropdown::DropdownKey::End),
                     _ => None,
                 };
                 let event = if let Some(k) = dd_key {

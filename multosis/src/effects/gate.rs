@@ -56,7 +56,10 @@ impl GateEffect {
             max: 0.0,
             default: -40.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 1, unit: "dB" },
+            format: ParamFormat::Number {
+                decimals: 1,
+                unit: "dB",
+            },
         },
         ParamSpec {
             name: "Attack",
@@ -64,7 +67,10 @@ impl GateEffect {
             max: 100.0,
             default: 2.0,
             scaling: ParamScaling::Log,
-            format: ParamFormat::Number { decimals: 1, unit: "ms" },
+            format: ParamFormat::Number {
+                decimals: 1,
+                unit: "ms",
+            },
         },
         ParamSpec {
             name: "Release",
@@ -72,7 +78,10 @@ impl GateEffect {
             max: 2_000.0,
             default: 100.0,
             scaling: ParamScaling::Log,
-            format: ParamFormat::Number { decimals: 0, unit: "ms" },
+            format: ParamFormat::Number {
+                decimals: 0,
+                unit: "ms",
+            },
         },
         ParamSpec {
             name: "Hysteresis",
@@ -80,7 +89,10 @@ impl GateEffect {
             max: 24.0,
             default: 6.0,
             scaling: ParamScaling::Linear,
-            format: ParamFormat::Number { decimals: 1, unit: "dB" },
+            format: ParamFormat::Number {
+                decimals: 1,
+                unit: "dB",
+            },
         },
     ];
 
@@ -220,7 +232,10 @@ mod tests {
             let (l, _) = e.process_sample(x, x);
             max_diff = max_diff.max((l - x).abs());
         }
-        assert!(max_diff < 0.01, "loud signal didn't pass cleanly: {max_diff}");
+        assert!(
+            max_diff < 0.01,
+            "loud signal didn't pass cleanly: {max_diff}"
+        );
     }
 
     #[test]
@@ -229,8 +244,8 @@ mod tests {
         e.set_sample_rate(48_000.0);
         e.set_param(0, -40.0);
         e.set_param(2, 50.0); // fast release
-        // Initial state: gate is closed; verify silent input stays
-        // silent for many samples after the gain rampdown completes.
+                              // Initial state: gate is closed; verify silent input stays
+                              // silent for many samples after the gain rampdown completes.
         for _ in 0..48_000 {
             e.process_sample(0.0, 0.0);
         }
@@ -276,7 +291,11 @@ mod tests {
         for cycle in 0..10 {
             for i in 0..1024 {
                 let t = (i as f32) / 1024.0;
-                let x = if cycle % 2 == 0 { t * 0.2 } else { (1.0 - t) * 0.2 };
+                let x = if cycle % 2 == 0 {
+                    t * 0.2
+                } else {
+                    (1.0 - t) * 0.2
+                };
                 e.process_sample(x, x);
                 if e.is_open != prev_open {
                     flips += 1;
@@ -284,7 +303,10 @@ mod tests {
                 }
             }
         }
-        assert!(flips <= 20, "too many state flips ({flips}) -- hysteresis ineffective");
+        assert!(
+            flips <= 20,
+            "too many state flips ({flips}) -- hysteresis ineffective"
+        );
     }
 
     #[test]

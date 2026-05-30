@@ -230,7 +230,8 @@ impl DiodeEffect {
         stage_sat[2] = stage_s[2];
 
         // Stage 4: clamp-saturated TPT LP, fed straight from stage3.
-        let stage4_out = Self::tick_clamp(&mut stage_s[3], &mut stage_sat[3], stage3_out, self.coef);
+        let stage4_out =
+            Self::tick_clamp(&mut stage_s[3], &mut stage_sat[3], stage3_out, self.coef);
         stage4_out * self.post_multiply
     }
 
