@@ -143,7 +143,10 @@ pub(crate) fn pane_at(y: f32, h: f32, scale: f32) -> Option<usize> {
 }
 
 /// Width reserved for the mode selector in the bottom strip (logical pixels).
-const MODE_W: f32 = 180.0;
+/// Wide enough that the longer "Zero Latency" label fits its half-segment
+/// (~128 px) at the strip's text size — miff needs 220 for "Phaseless", and
+/// "Zero Latency" is wider.
+const MODE_W: f32 = 256.0;
 /// Height of the mode selector (logical pixels).
 const MODE_H: f32 = 34.0;
 
@@ -1317,6 +1320,23 @@ mod tests {
                 !overlap,
                 "mode selector overlaps dial {:?}: selector ({mx},{my},{mw},{mh}) vs dial ({rx},{ry},{rw},{rh})",
                 id
+            );
+        }
+    }
+
+    #[test]
+    fn mode_labels_fit_their_selector_segment() {
+        // `draw_stepped_selector` centers each label in a `MODE_W/2` segment at
+        // text size `MODE_H*0.5`. Measure with the real editor font and assert
+        // both labels fit (with a small margin) so neither overflows its button.
+        let mut tr = widgets::TextRenderer::new(include_bytes!("fonts/DejaVuSans.ttf"));
+        let text_size = MODE_H * 0.5;
+        let seg_w = MODE_W / 2.0;
+        for label in ["Zero Latency", "Efficient"] {
+            let tw = tr.text_width(label, text_size);
+            assert!(
+                tw <= seg_w - 4.0,
+                "'{label}' is {tw:.1} px at {text_size} px — exceeds the {seg_w:.1} px segment",
             );
         }
     }
