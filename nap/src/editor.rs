@@ -285,8 +285,11 @@ impl NapWindow {
         ];
         // Give each pane a distinct randomizer stream so Randomize never moves
         // the three curves in lockstep (they'd otherwise all start at seed 0).
+        // Hide the Unipolar/Bipolar toggle: nap's curves (Decay/Width/Tone) are
+        // all 0..1 quantities, so the polarity view-toggle is dead chrome here.
         for (i, s) in states.iter_mut().enumerate() {
             s.set_randomize_seed(pane_seed(i));
+            s.set_show_polarity(false);
         }
 
         // Seed the guard caches with the current state so the first frame does

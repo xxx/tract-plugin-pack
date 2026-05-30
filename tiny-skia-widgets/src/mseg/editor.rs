@@ -96,6 +96,11 @@ pub enum MarkerHandle {
 pub struct MsegEditState {
     /// When true, playback/timing controls and the marker lane are hidden.
     curve_only: bool,
+    /// When false, the strip's Unipolar/Bipolar polarity toggle is hidden (and
+    /// clicks on its area are ignored). For consumers whose curves are
+    /// conceptually unipolar (e.g. nap), where the toggle is dead chrome.
+    /// Defaults true; set via [`set_show_polarity`](Self::set_show_polarity).
+    show_polarity: bool,
     /// Active drag, if any.
     drag: Option<DragTarget>,
     /// Hovered node index, for highlight.
@@ -153,6 +158,7 @@ impl MsegEditState {
         let grid_labels = Self::build_labels(&grid_options);
         Self {
             curve_only,
+            show_polarity: true,
             drag: None,
             hover: None,
             selection: 0,
@@ -232,6 +238,19 @@ impl MsegEditState {
     /// `true` for a curve-only editor.
     pub fn is_curve_only(&self) -> bool {
         self.curve_only
+    }
+
+    /// Show or hide the strip's Unipolar/Bipolar polarity toggle. When hidden,
+    /// the toggle is not drawn and clicks in its area are ignored — for
+    /// consumers whose curves are conceptually unipolar (e.g. nap), where the
+    /// toggle would be dead chrome. Defaults to shown.
+    pub fn set_show_polarity(&mut self, show: bool) {
+        self.show_polarity = show;
+    }
+
+    /// Whether the strip's polarity toggle is shown. For the renderer.
+    pub fn show_polarity(&self) -> bool {
+        self.show_polarity
     }
 
     /// Set whether the caller's stepped-draw modifier is currently held.
@@ -432,13 +451,13 @@ impl MsegEditState {
                 // Resolve which strip button was clicked via the very layout
                 // the renderer draws — clicks land exactly on the buttons, and
                 // a click in a gap between buttons is a no-op.
-                use crate::mseg::render::{in_rect, strip_buttons};
-                let b = strip_buttons(layout.strip, scale, !self.curve_only);
+                use crate::mseg::render::{in_rect, strip_buttons_ex};
+                let b = strip_buttons_ex(layout.strip, scale, !self.curve_only, self.show_polarity);
                 let window_size = (rect.0 + rect.2, rect.1 + rect.3);
                 if in_rect(b.snap, x, y) {
                     data.snap = !data.snap;
                     Some(MsegEdit::Changed)
-                } else if in_rect(b.polarity, x, y) {
+                } else if self.show_polarity && in_rect(b.polarity, x, y) {
                     // Pure view toggle — node values stay 0..1, only the
                     // midline marker draw branches on this.
                     data.polarity = match data.polarity {
@@ -1540,6 +1559,35 @@ mod tests {
         );
         state.on_mouse_up(&mut data, RECT, 1.0);
         assert_eq!(data.play_mode, was, "curve_only must not expose play_mode");
+    }
+
+    #[test]
+    fn show_polarity_false_zeroes_rect_and_ignores_clicks() {
+        // nap builds curve-only editors and calls set_show_polarity(false): the
+        // polarity rect collapses to 0×0 (so it never hit-tests) and a click
+        // where it used to sit is a no-op, leaving the polarity at its default.
+        use crate::mseg::render::{strip_buttons_ex, StripButtons};
+        use crate::mseg::Polarity;
+        let mut data = MsegData::default();
+        let mut state = MsegEditState::new_curve_only();
+        state.set_show_polarity(false);
+        assert!(!state.show_polarity());
+
+        let l = mseg_layout(RECT, true, 1.0);
+        // curve-only (no play_mode) + polarity hidden: nap's exact layout.
+        let hidden = strip_buttons_ex(l.strip, 1.0, false, false);
+        assert_eq!(hidden.polarity, (0.0, 0.0, 0.0, 0.0));
+        // Where polarity sits when shown (the slot nap vacates).
+        let StripButtons { polarity, .. } = strip_buttons_ex(l.strip, 1.0, false, true);
+
+        let was = data.polarity;
+        let x = polarity.0 + polarity.2 * 0.5;
+        let y = polarity.1 + polarity.3 * 0.5;
+        let ev = state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        state.on_mouse_up(&mut data, RECT, 1.0);
+        assert_eq!(ev, None, "click in vacated polarity slot is a no-op");
+        assert_eq!(data.polarity, was, "hidden polarity must not toggle");
+        assert_eq!(data.polarity, Polarity::Unipolar);
     }
 
     // --- Grid dropdown tests ---

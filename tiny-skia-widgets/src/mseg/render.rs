@@ -473,6 +473,21 @@ pub(crate) fn strip_buttons(
     scale: f32,
     show_play_mode: bool,
 ) -> StripButtons {
+    // Default: polarity shown (miff/multosis and every existing caller).
+    strip_buttons_ex(strip, scale, show_play_mode, true)
+}
+
+/// As [`strip_buttons`], but with explicit control over whether the `polarity`
+/// toggle is laid out. When `show_polarity` is false the polarity rect is the
+/// zero rect and the per-MSEG behaviour group reflows (no reserved gap) — used
+/// by consumers whose curves are conceptually unipolar (e.g. nap), so the
+/// midline-marker toggle is dead chrome.
+pub(crate) fn strip_buttons_ex(
+    strip: (f32, f32, f32, f32),
+    scale: f32,
+    show_play_mode: bool,
+    show_polarity: bool,
+) -> StripButtons {
     let (sx, sy, sw, sh) = strip;
     let pad = 6.0 * scale;
     let gap = 4.0 * scale;
@@ -492,14 +507,26 @@ pub(crate) fn strip_buttons(
     // Left cluster, anchored at `sx + pad`.
     let snap = (sx + pad, by, snap_w, bh);
     let grid = (snap.0 + snap_w + gap, by, grid_w, bh);
-    let polarity = (grid.0 + grid_w + group_gap, by, polarity_w, bh);
+    // The per-MSEG behaviour group (polarity + play_mode) starts here.
+    let behaviour_x = grid.0 + grid_w + group_gap;
+    let polarity = if show_polarity {
+        (behaviour_x, by, polarity_w, bh)
+    } else {
+        (0.0, 0.0, 0.0, 0.0)
+    };
     let play_mode = if show_play_mode {
-        (polarity.0 + polarity_w + gap, by, play_mode_w, bh)
+        // Anchor after polarity when shown, else at the group start (reflow).
+        let px = if show_polarity {
+            polarity.0 + polarity_w + gap
+        } else {
+            behaviour_x
+        };
+        (px, by, play_mode_w, bh)
     } else {
         (0.0, 0.0, 0.0, 0.0)
     };
 
-    // Right cluster, anchored at `sx + sw - pad`.
+    // Right cluster, anchored at `sx + sw - pad` (independent of the left cluster).
     let randomize = (sx + sw - rand_w - pad, by, rand_w, bh);
     let style = (randomize.0 - gap - style_w, by, style_w, bh);
 
@@ -532,7 +559,8 @@ fn draw_strip(
     draw_rect_outline(pixmap, sx, sy, sw, sh, color_border(), 1.0);
 
     let show_play_mode = !state.is_curve_only();
-    let b = strip_buttons(layout.strip, scale, show_play_mode);
+    let show_polarity = state.show_polarity();
+    let b = strip_buttons_ex(layout.strip, scale, show_play_mode, show_polarity);
     // Snap: plain toggle button, Title Case, highlighted when active.
     let snap_label = if data.snap { "Snap On" } else { "Snap Off" };
     use crate::controls::draw_button;
@@ -570,22 +598,26 @@ fn draw_strip(
 
     // Polarity: cycles between Unipolar (default) and Bipolar view. Neither
     // value is conceptually "on" — the label tells the user which mode is
-    // current — so this is drawn as a plain (un-highlighted) button.
-    let polarity_label = match data.polarity {
-        crate::mseg::Polarity::Bipolar => "Bipolar",
-        crate::mseg::Polarity::Unipolar => "Unipolar",
-    };
-    draw_button(
-        pixmap,
-        text_renderer,
-        b.polarity.0,
-        b.polarity.1,
-        b.polarity.2,
-        b.polarity.3,
-        polarity_label,
-        false,
-        false,
-    );
+    // current — so this is drawn as a plain (un-highlighted) button. Hidden for
+    // consumers whose curves are unipolar-only (the toggle does nothing for
+    // them); see `MsegEditState::set_show_polarity`.
+    if show_polarity {
+        let polarity_label = match data.polarity {
+            crate::mseg::Polarity::Bipolar => "Bipolar",
+            crate::mseg::Polarity::Unipolar => "Unipolar",
+        };
+        draw_button(
+            pixmap,
+            text_renderer,
+            b.polarity.0,
+            b.polarity.1,
+            b.polarity.2,
+            b.polarity.3,
+            polarity_label,
+            false,
+            false,
+        );
+    }
 
     // Play mode: cycles between Cyclic (default — the envelope loops) and
     // OneShot (runs once per trigger, holds at the end). Same rationale as
