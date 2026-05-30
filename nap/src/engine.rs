@@ -13,7 +13,7 @@
 //!   make it several times faster. The `block_matches_per_sample_reference`
 //!   test gates the equivalence.
 
-use std::simd::f32x16;
+use std::simd::{f32x16, StdFloat};
 
 use crate::coloration::{Dictionary, OnePole, Q};
 use crate::sequence::VelvetSequence;
@@ -30,9 +30,11 @@ pub const BLOCK: usize = 512;
 /// DC blocker pole radius (one-pole high-pass `y = x - x1 + R·y1`).
 const DC_BLOCKER_R: f32 = 0.995;
 
-/// `dst[i] += c * src[i]` over equal-length slices, `f32x16`-vectorised with a
-/// scalar tail. Both slices are contiguous, so this is the cache-friendly,
-/// auto-prefetchable core of the block convolution.
+/// `dst[i] += c * src[i]` over equal-length slices, as a true fused
+/// multiply-add (`vfmadd`), `f32x16`-vectorised with a scalar tail. Both slices
+/// are contiguous — the cache-friendly, auto-prefetchable core of the block
+/// convolution. `mul_add` lowers to one hardware FMA on the pack's `haswell`
+/// release target (vs. the separate `vmulps`+`vaddps` a plain `d + c*s` emits).
 #[inline]
 fn fma_into(dst: &mut [f32], src: &[f32], c: f32) {
     debug_assert_eq!(dst.len(), src.len());
@@ -42,11 +44,11 @@ fn fma_into(dst: &mut [f32], src: &[f32], c: f32) {
     while i < lanes {
         let s = f32x16::from_slice(&src[i..i + 16]);
         let d = f32x16::from_slice(&dst[i..i + 16]);
-        (d + cv * s).copy_to_slice(&mut dst[i..i + 16]);
+        cv.mul_add(s, d).copy_to_slice(&mut dst[i..i + 16]);
         i += 16;
     }
     for j in lanes..dst.len() {
-        dst[j] += c * src[j];
+        dst[j] = c.mul_add(src[j], dst[j]);
     }
 }
 
