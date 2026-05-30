@@ -197,7 +197,10 @@ struct NapWindow {
     handoff: Arc<SequenceHandoff>,
     /// Shared with the audio thread for publishing baked IR spectra.
     ir_handoff: Arc<IrHandoff>,
-    sample_rate: f32,
+    /// Live sample-rate from the audio thread; updated in `initialize`.
+    shared_sr: Arc<AtomicCell<f32>>,
+    /// The SR the current `baker`/`scratch_ir_*` were built for.
+    baker_sr: f32,
     /// Scratch buffer reused by every `regenerate()` (GUI-thread alloc only).
     scratch: VelvetSequence,
     /// Snapshot of the last generated sequence, kept for the tail overlay.
@@ -253,11 +256,12 @@ impl NapWindow {
         params: Arc<NapParams>,
         handoff: Arc<SequenceHandoff>,
         ir_handoff: Arc<IrHandoff>,
-        sample_rate: f32,
+        shared_sr: Arc<AtomicCell<f32>>,
         shared_scale: Arc<AtomicCell<f32>>,
         pending_resize: Arc<AtomicU64>,
         scale_factor: f32,
     ) -> Self {
+        let sample_rate = shared_sr.load();
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
         let ph = (WINDOW_HEIGHT as f32 * scale_factor).round() as u32;
 
@@ -298,7 +302,8 @@ impl NapWindow {
             params: params.clone(),
             handoff,
             ir_handoff,
-            sample_rate,
+            shared_sr,
+            baker_sr: sample_rate,
             scratch: VelvetSequence::new(),
             snapshot: VelvetSequence::new(),
             columns: Vec::new(),
@@ -330,7 +335,7 @@ impl NapWindow {
         crate::Nap::regenerate(
             &self.handoff,
             &self.params,
-            self.sample_rate,
+            self.baker_sr,
             &mut self.scratch,
         );
         self.snapshot.copy_from(&self.scratch);
@@ -346,7 +351,7 @@ impl NapWindow {
             crate::Nap::bake_ir(
                 &self.ir_handoff,
                 &self.params,
-                self.sample_rate,
+                self.baker_sr,
                 &mut self.scratch,
                 &mut self.baker,
                 &mut self.scratch_ir_l,
@@ -373,6 +378,24 @@ impl NapWindow {
         if target == NapMode::Efficient {
             self.bake_ir_if_efficient();
         }
+    }
+
+    /// Top-of-frame guard: if the audio-thread sample rate has changed since the
+    /// baker was built, rebuild the baker and scratch IR spectra at the new SR,
+    /// then (if in Efficient mode) immediately publish a freshly-baked IR so the
+    /// convolvers get correct coloration-filter coefficients and a full-length tail.
+    fn check_sr_change(&mut self) {
+        let sr = self.shared_sr.load();
+        if sr == self.baker_sr {
+            return;
+        }
+        self.baker_sr = sr;
+        self.baker = IrBaker::new(sr);
+        self.scratch_ir_l = IrSpectra::new(sr);
+        self.scratch_ir_r = IrSpectra::new(sr);
+        // Regenerate with the new SR before baking; bake_ir_if_efficient uses baker_sr.
+        self.regenerate();
+        self.bake_ir_if_efficient();
     }
 
     /// Top-of-frame guard: if a design-time param or a curve changed under us
@@ -773,6 +796,8 @@ impl baseview::WindowHandler for NapWindow {
             (self.physical_width, self.physical_height),
             window,
         );
+        // Rebuild the baker if the audio-thread sample rate has changed.
+        self.check_sr_change();
         // Pick up host/preset-driven changes to params or curves while open.
         self.check_external_changes();
         self.draw();
@@ -1109,7 +1134,8 @@ pub(crate) struct NapEditor {
     params: Arc<NapParams>,
     handoff: Arc<SequenceHandoff>,
     ir_handoff: Arc<IrHandoff>,
-    sample_rate: f32,
+    /// Shared with the audio thread (`Nap::shared_sr`); updated in `initialize`.
+    shared_sr: Arc<AtomicCell<f32>>,
     scaling_factor: Arc<AtomicCell<f32>>,
     pending_resize: Arc<AtomicU64>,
 }
@@ -1118,13 +1144,13 @@ pub fn create(
     params: Arc<NapParams>,
     handoff: Arc<SequenceHandoff>,
     ir_handoff: Arc<IrHandoff>,
-    sample_rate: f32,
+    shared_sr: Arc<AtomicCell<f32>>,
 ) -> Option<Box<dyn Editor>> {
     Some(Box::new(NapEditor {
         params,
         handoff,
         ir_handoff,
-        sample_rate,
+        shared_sr,
         scaling_factor: Arc::new(AtomicCell::new(1.0)),
         pending_resize: Arc::new(AtomicU64::new(0)),
     }))
@@ -1144,7 +1170,7 @@ impl Editor for NapEditor {
         let params = Arc::clone(&self.params);
         let handoff = Arc::clone(&self.handoff);
         let ir_handoff = Arc::clone(&self.ir_handoff);
-        let sample_rate = self.sample_rate;
+        let shared_sr = Arc::clone(&self.shared_sr);
         let shared_scale = Arc::clone(&self.scaling_factor);
         let pending_resize = Arc::clone(&self.pending_resize);
 
@@ -1163,7 +1189,7 @@ impl Editor for NapEditor {
                     params,
                     handoff,
                     ir_handoff,
-                    sample_rate,
+                    shared_sr,
                     shared_scale,
                     pending_resize,
                     sf,

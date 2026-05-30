@@ -11,6 +11,7 @@ pub mod rng;
 pub mod sequence;
 pub mod theme;
 
+use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
@@ -79,6 +80,8 @@ pub struct Nap {
     handoff: Arc<SequenceHandoff>,
     ir_handoff: Arc<IrHandoff>,
     sample_rate: f32,
+    /// Shared with the editor so it can rebuild its `IrBaker` at the real SR.
+    shared_sr: Arc<crossbeam::atomic::AtomicCell<f32>>,
 
     // Audio-thread state.
     seq: VelvetSequence,
@@ -153,6 +156,7 @@ impl Default for Nap {
             handoff: Arc::new(SequenceHandoff::new()),
             ir_handoff: Arc::new(IrHandoff::new(default_sr)),
             sample_rate: default_sr,
+            shared_sr: Arc::new(AtomicCell::new(default_sr)),
             seq: VelvetSequence::new(),
             seq_gen: 0,
             left: ReverbChannel::new(default_sr),
@@ -364,7 +368,7 @@ impl Plugin for Nap {
             self.params.clone(),
             self.handoff.clone(),
             self.ir_handoff.clone(),
-            self.sample_rate,
+            self.shared_sr.clone(),
         )
     }
 
@@ -375,6 +379,7 @@ impl Plugin for Nap {
         context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
+        self.shared_sr.store(self.sample_rate);
         self.left = ReverbChannel::new(self.sample_rate);
         self.right = ReverbChannel::new(self.sample_rate);
         // Clear pre-delay/tail state so stale samples don't survive an SR change.
@@ -592,10 +597,11 @@ impl Plugin for Nap {
                                 as usize)
                                 .min(predelay_cap - 1);
 
-                        // Delay the gained-dry by exactly P samples so it aligns
-                        // with the convolver's P-late wet output.
-                        let delayed_dry_l = self.dry_delay_l.push_pop(self.blk_in_l[i]);
-                        let delayed_dry_r = self.dry_delay_r.push_pop(self.blk_in_r[i]);
+                        // Delay the RAW (un-gained) input by exactly P samples so
+                        // it aligns with the convolver's P-late wet output and
+                        // matches ZL's behaviour where Input drives the wet only.
+                        let delayed_dry_l = self.dry_delay_l.push_pop(left[off + i]);
+                        let delayed_dry_r = self.dry_delay_r.push_pop(right[off + i]);
 
                         // Pre-delay the wet output through the same predelay ring.
                         self.predelay_l[self.predelay_pos] = self.blk_wet_l[i];
