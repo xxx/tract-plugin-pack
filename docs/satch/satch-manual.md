@@ -92,17 +92,17 @@ At 100%, the output is fully processed. At 0%, the output is the original dry si
 
 satch combines two clipping paths:
 
-1. **Time-domain path**: Applies `gain * threshold * tanh(gain * x / threshold)` (with knee blend) to produce standard flat-top clipping at the threshold level.
+1. **Time-domain path**: Applies `threshold * tanh(gain * x / threshold)` (crossfaded with a hard clip via the knee) to produce flat-top clipping at the threshold level.
 
-2. **Spectral path**: Uses STFT (Short-Time Fourier Transform) to analyze the signal's frequency content. Each FFT bin's magnitude is individually saturated via per-bin magnitude compression. Quiet bins (detail) pass through nearly unchanged while loud bins (the fundamental) are compressed. After ISTFT reconstruction, the result has the same flat-top clipping character but with quiet harmonics preserved.
+2. **Spectral path**: Uses an STFT (Short-Time Fourier Transform) to split each frame's bins into a *loud* path (bins within 6 dB of the spectral peak) and a *quiet* path (bins more than 20 dB below it, smoothly crossfaded between). The two paths are reconstructed by **separate inverse STFTs**; the nonlinear clipping is applied in the **time domain after reconstruction** (not per-bin in the frequency domain), which keeps the overlap-add normalization exact. The result has flat-top clipping character but with the quiet detail preserved.
 
 The **Detail** knob blends between the two paths, but only in clipped regions. A clip-aware mask (`tanh^2(gain * x / threshold)`) detects where clipping is occurring and applies the spectral difference only there. Unclipped material always uses the time-domain path.
 
-The output is hard-clamped at ±threshold so detail texture hangs downward from the ceiling without overshooting.
+The output is safety-clamped at ±threshold × 1.5 -- detail texture can ride up to 50% above the threshold clip level rather than being limited exactly at it.
 
 ## Scaling
 
-Use the **-** / **+** buttons in the upper right corner, or **Ctrl+=** / **Ctrl+-** on the keyboard. Range: 75% to 300%. Scale is persisted across host restarts.
+The window is freely resizable -- drag the plugin window's edge or corner in your host. (There are no in-plugin zoom buttons or keyboard shortcuts.) The scale tracks the window width and clamps to 0.5x-4.0x (50% - 400%); the chosen size is persisted across host restarts.
 
 ## Interaction
 
@@ -115,7 +115,7 @@ Use the **-** / **+** buttons in the upper right corner, or **Ctrl+=** / **Ctrl+
 
 - **No audio-thread allocations** -- the process() callback never allocates heap memory in release builds
 - **CPU rendering** -- uses tiny-skia (software rasterizer) + fontdue (glyph cache) + softbuffer (pixel buffer). No OpenGL context, no GPU drivers loaded
-- **Per-bin spectral saturation** -- each of the 2048 FFT bins is individually saturated with `ceiling * tanh(gain * mag / ceiling)`, preserving phase. Quiet bins get the same gain boost as tanh in the linear region; loud bins are compressed toward the ceiling
+- **Time-domain nonlinearity** -- the tanh clipping is applied to the reconstructed signal in the time domain (after the two inverse STFTs), *not* per-bin in the frequency domain; this keeps the overlap-add COLA normalization exact. Quiet bins (detail) pass through while the loud fundamental is clipped
 - **Clip-aware detail blend** -- `tanh^2` mask ensures spectral detail is only applied where the signal is actually being clipped, leaving unclipped material identical to the time-domain path
 - **Peak-relative spectral split** -- bins within 6 dB of the spectral peak are classified as "loud"; bins more than 20 dB below are "quiet"; smooth crossfade in between
 
@@ -129,7 +129,7 @@ Benchmarks (Bitwig, 48 kHz / 1024 samples, GUI closed):
 
 - CLAP
 - VST3
-- Standalone (JACK or ALSA backend)
+- Standalone (JACK, or CPAL -- ALSA on Linux, CoreAudio on macOS, WASAPI on Windows -- with a dummy/offline fallback)
 
 ## License
 
