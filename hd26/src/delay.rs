@@ -6,15 +6,23 @@
 pub struct DelayLine {
     buf: Vec<f32>,
     write: usize,
+    /// `len - 1`. The buffer length is always a power of two, so ring indexing
+    /// is a bitwise `& mask` instead of a (runtime, non-pow2) integer `% len` —
+    /// the modulo was ~20% of the per-sample cost in profiling.
+    mask: usize,
 }
 
 impl DelayLine {
-    /// Allocate a delay line holding up to `max_len` samples of history
-    /// (clamped to a minimum of 4 — cubic interpolation needs four taps).
+    /// Allocate a delay line holding up to `max_len` samples of history. The
+    /// buffer is rounded up to the next power of two (minimum 4) so the read
+    /// index is a bitmask rather than an integer modulo; cubic interpolation
+    /// needs four taps, hence the floor of 4.
     pub fn new(max_len: usize) -> Self {
+        let len = max_len.max(4).next_power_of_two();
         Self {
-            buf: vec![0.0; max_len.max(4)],
+            buf: vec![0.0; len],
             write: 0,
+            mask: len - 1,
         }
     }
 
@@ -35,10 +43,7 @@ impl DelayLine {
     #[inline]
     pub fn write(&mut self, x: f32) {
         self.buf[self.write] = x;
-        self.write += 1;
-        if self.write == self.buf.len() {
-            self.write = 0;
-        }
+        self.write = (self.write + 1) & self.mask;
     }
 
     /// Read the sample `delay` samples in the past (fractional), using 4-point
@@ -53,7 +58,8 @@ impl DelayLine {
         let frac = d - i0 as f32;
 
         // tap(age): sample written `age` samples ago (age 1 = most recent).
-        let tap = |age: usize| self.buf[(self.write + len - age) % len];
+        // `len` is a power of two, so `& self.mask` == `% len`.
+        let tap = |age: usize| self.buf[(self.write + len - age) & self.mask];
 
         let ym1 = tap(i0 - 1);
         let y0 = tap(i0);

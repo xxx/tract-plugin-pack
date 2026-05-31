@@ -97,10 +97,14 @@ impl Hyper {
     /// `read_cubic` silently clamps and flattens the bottom of the sweep,
     /// producing asymmetric/incorrect detune. `rate` must be > 0 (the caller
     /// floors it at 0.01 Hz).
+    /// `cents_to_samples` is the rate-dependent factor `sr / (CENTS_PER_RATIO *
+    /// 2π * rate)` — identical for every voice in a sample, so the caller hoists
+    /// it out of the voice loop (one divide per sample instead of one per voice).
     #[inline]
-    fn voice_depth(cents: f32, rate: f32, sr: f32, voice_base: f32, max_depth: f32) -> f32 {
-        let raw = (cents.abs() / (CENTS_PER_RATIO * std::f32::consts::TAU * rate)) * sr;
-        raw.min(max_depth).min((voice_base - 2.0).max(0.0))
+    fn voice_depth(cents: f32, cents_to_samples: f32, voice_base: f32, max_depth: f32) -> f32 {
+        (cents.abs() * cents_to_samples)
+            .min(max_depth)
+            .min((voice_base - 2.0).max(0.0))
     }
 
     #[inline]
@@ -119,6 +123,8 @@ impl Hyper {
         let max_depth = MAX_DEPTH_MS / 1000.0 * sr;
         let detune_curve = p.detune * p.detune; // subtle low, steeper high
         let rate = p.rate_hz.max(0.01);
+        // Hoisted out of the voice loop: same denominator for every voice.
+        let cents_to_samples = sr / (CENTS_PER_RATIO * std::f32::consts::TAU * rate);
         let gain = 1.0 / (n as f32).sqrt();
         let width_shift = 0.25 * p.width.clamp(0.0, 1.0); // up to ¼-cycle R offset
 
@@ -128,7 +134,7 @@ impl Hyper {
             let shape = VOICE_SHAPE[Self::shape_index(i, n)];
             let cents = shape * MAX_CENTS * detune_curve;
             let voice_base = base + i as f32 * spacing;
-            let depth = Self::voice_depth(cents, rate, sr, voice_base, max_depth);
+            let depth = Self::voice_depth(cents, cents_to_samples, voice_base, max_depth);
             let ph = &self.phasors[i];
             let lfo_l = ph.sine();
             let lfo_r = ph.sine_at_offset(width_shift);
@@ -241,10 +247,11 @@ mod tests {
         let spacing = VOICE_SPACING_MS / 1000.0 * sr;
         let max_depth = MAX_DEPTH_MS / 1000.0 * sr;
         for &rate in &[0.01f32, 0.05, 0.1, 0.3, 0.5, 1.0, 5.0, 10.0] {
+            let cents_to_samples = sr / (CENTS_PER_RATIO * std::f32::consts::TAU * rate);
             for i in 0..MAX_VOICES {
                 let voice_base = base + i as f32 * spacing;
                 let cents = MAX_CENTS; // worst case |shape| ~= 1.0, detune_curve = 1.0
-                let depth = Hyper::voice_depth(cents, rate, sr, voice_base, max_depth);
+                let depth = Hyper::voice_depth(cents, cents_to_samples, voice_base, max_depth);
                 assert!(
                     voice_base - depth >= 2.0 - 1e-3,
                     "trough underflow at rate={rate} voice={i}: base={voice_base} depth={depth}"
