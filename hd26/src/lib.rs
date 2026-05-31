@@ -116,9 +116,9 @@ impl Hd26Params {
         Self {
             editor_state: editor::default_editor_state(),
 
-            hyper_unison: IntParam::new("Hyper Unison", 3, IntRange::Linear { min: 0, max: 7 }),
+            hyper_unison: IntParam::new("H Unison", 3, IntRange::Linear { min: 0, max: 7 }),
             hyper_detune: FloatParam::new(
-                "Hyper Detune",
+                "H Detune",
                 0.30,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
@@ -127,7 +127,7 @@ impl Hd26Params {
             .with_string_to_value(formatters::s2v_f32_percentage())
             .with_smoother(SmoothingStyle::Linear(20.0)),
             hyper_rate: FloatParam::new(
-                "Hyper Rate",
+                "H Rate",
                 1.0,
                 FloatRange::Skewed {
                     min: 0.01,
@@ -138,42 +138,34 @@ impl Hd26Params {
             .with_unit(" Hz")
             .with_value_to_string(formatters::v2s_f32_rounded(2))
             .with_smoother(SmoothingStyle::Linear(20.0)),
-            hyper_width: FloatParam::new(
-                "Hyper Width",
-                0.0,
-                FloatRange::Linear { min: 0.0, max: 1.0 },
-            )
-            .with_unit(" %")
-            .with_value_to_string(formatters::v2s_f32_percentage(0))
-            .with_string_to_value(formatters::s2v_f32_percentage())
-            .with_smoother(SmoothingStyle::Linear(20.0)),
-            hyper_retrig: BoolParam::new("Hyper Retrig", false),
+            hyper_width: FloatParam::new("H Width", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage())
+                .with_smoother(SmoothingStyle::Linear(20.0)),
+            hyper_retrig: BoolParam::new("H Retrig", false),
             hyper_sensitivity: FloatParam::new(
-                "Hyper Sensitivity",
+                "H Sensitivity",
                 0.5,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
             .with_unit(" %")
             .with_value_to_string(formatters::v2s_f32_percentage(0))
             .with_string_to_value(formatters::s2v_f32_percentage()),
-            hyper_mix: FloatParam::new("Hyper Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+            hyper_mix: FloatParam::new("H Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage())
                 .with_smoother(SmoothingStyle::Linear(20.0)),
 
-            dim_size: FloatParam::new(
-                "Dimension Size",
-                0.30,
-                FloatRange::Linear { min: 0.0, max: 1.0 },
-            )
-            .with_unit(" %")
-            .with_value_to_string(formatters::v2s_f32_percentage(0))
-            .with_string_to_value(formatters::s2v_f32_percentage())
-            .with_smoother(SmoothingStyle::Linear(20.0)),
-            dim_mode: EnumParam::new("Dimension Mode", DimensionMode::Am),
+            dim_size: FloatParam::new("D Size", 0.30, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage())
+                .with_smoother(SmoothingStyle::Linear(20.0)),
+            dim_mode: EnumParam::new("D Mode", DimensionMode::Am),
             dim_hpf: FloatParam::new(
-                "Dimension Wet HPF",
+                "D Wet HPF",
                 120.0,
                 FloatRange::Skewed {
                     min: 20.0,
@@ -184,15 +176,11 @@ impl Hd26Params {
             .with_unit(" Hz")
             .with_value_to_string(formatters::v2s_f32_rounded(0))
             .with_smoother(SmoothingStyle::Linear(20.0)),
-            dim_mix: FloatParam::new(
-                "Dimension Mix",
-                0.0,
-                FloatRange::Linear { min: 0.0, max: 1.0 },
-            )
-            .with_unit(" %")
-            .with_value_to_string(formatters::v2s_f32_percentage(0))
-            .with_string_to_value(formatters::s2v_f32_percentage())
-            .with_smoother(SmoothingStyle::Linear(20.0)),
+            dim_mix: FloatParam::new("D Mix", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage())
+                .with_smoother(SmoothingStyle::Linear(20.0)),
 
             output: FloatParam::new(
                 "Output",

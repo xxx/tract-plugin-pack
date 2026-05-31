@@ -16,7 +16,7 @@ use crate::{DimensionMode, Hd26Params, Telemetry};
 use tiny_skia_widgets as widgets;
 
 const WINDOW_WIDTH: u32 = 560;
-const WINDOW_HEIGHT: u32 = 280;
+const WINDOW_HEIGHT: u32 = 320;
 const LED_FLASH_FRAMES: u32 = 8;
 
 pub use widgets::EditorState;
@@ -157,16 +157,16 @@ impl Hd26Window {
         self.text_renderer.draw_text(
             &mut self.surface.pixmap,
             16.0 * s,
-            22.0 * s,
-            "HYPER",
+            24.0 * s,
+            "H____",
             title,
             widgets::color_text(),
         );
         self.text_renderer.draw_text(
             &mut self.surface.pixmap,
             400.0 * s,
-            22.0 * s,
-            "DIMENSION",
+            24.0 * s,
+            "D________",
             title,
             widgets::color_text(),
         );
@@ -175,16 +175,16 @@ impl Hd26Window {
         widgets::draw_rect(
             &mut self.surface.pixmap,
             378.0 * s,
-            12.0 * s,
+            14.0 * s,
             1.0 * s,
-            210.0 * s,
+            232.0 * s,
             widgets::color_muted(),
         );
 
         // Dial grid: (id, label, cx, cy) in logical px.
         let hx = [56.0, 140.0, 224.0, 308.0];
-        let row0 = 64.0;
-        let row1 = 148.0;
+        let row0 = 92.0;
+        let row1 = 180.0;
         let dials: [(ParamId, &str, f32, f32); 9] = [
             (ParamId::Unison, "Voices", hx[0], row0),
             (ParamId::Detune, "Detune", hx[1], row0),
@@ -236,7 +236,7 @@ impl Hd26Window {
         let btn_w = 56.0 * s;
         let btn_h = 22.0 * s;
         let retrig_x = (224.0 - 28.0) * s;
-        let retrig_y = (row1 - 8.0) * s;
+        let retrig_y = (row1 - 26.0) * s;
         widgets::draw_button(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
@@ -312,7 +312,7 @@ impl Hd26Window {
             DimensionMode::Pitch => 1,
         };
         let mode_x = 474.0 * s;
-        let mode_y = (row1 - 8.0) * s;
+        let mode_y = (row1 - 26.0) * s;
         let mode_w = 84.0 * s;
         let mode_h = 22.0 * s;
         widgets::draw_stepped_selector(
@@ -347,7 +347,7 @@ impl Hd26Window {
 
         // ── Global row: Output dial + Bypass ──
         let out_cx = 200.0 * s;
-        let out_cy = 236.0 * s;
+        let out_cy = 284.0 * s;
         let normalized = self.params.output.modulated_normalized_value();
         let value_text = self
             .params
@@ -382,7 +382,7 @@ impl Hd26Window {
 
         let bypass_on = self.params.bypass.value();
         let by_x = 300.0 * s;
-        let by_y = 228.0 * s;
+        let by_y = 272.0 * s;
         widgets::draw_button(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
