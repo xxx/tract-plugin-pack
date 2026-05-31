@@ -6,7 +6,7 @@ pub mod lfo;
 pub mod delay;
 pub mod transient;
 pub mod hyper;
-// pub mod dimension;
+pub mod dimension;
 // mod editor;
 
 pub struct Hd26 {
