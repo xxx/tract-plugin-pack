@@ -190,8 +190,8 @@ impl Hd26Window {
             (ParamId::Detune, "Detune", hx[1], row0),
             (ParamId::Rate, "Rate", hx[2], row0),
             (ParamId::Width, "Width", hx[3], row0),
-            (ParamId::Sensitivity, "Sens", hx[0], row1),
-            (ParamId::HyperMix, "Mix", hx[1], row1),
+            (ParamId::HyperMix, "Mix", hx[0], row1),
+            (ParamId::Sensitivity, "Sens", hx[1], row1),
             (ParamId::Size, "Size", 432.0, row0),
             (ParamId::Hpf, "Wet HPF", 516.0, row0),
             (ParamId::DimMix, "Mix", 432.0, row1),
@@ -208,20 +208,41 @@ impl Hd26Window {
                 .active_for(&HitAction::Dial(id))
                 .map(str::to_owned);
             let caret = self.text_edit.caret_visible();
-            widgets::draw_dial_ex(
-                &mut self.surface.pixmap,
-                &mut self.text_renderer,
-                cx,
-                cy,
-                r,
-                label,
-                &value_text,
-                normalized,
-                None,
-                editing.as_deref(),
-                caret,
-                accent,
-            );
+            // Sensitivity only affects the (Retrig-gated) transient retrigger, so
+            // dim it when Retrig is off to signal it isn't acting on the audio.
+            // It stays interactive, and the live LED still reflects detections.
+            let dim_sens = matches!(id, ParamId::Sensitivity) && !self.params.hyper_retrig.value();
+            if dim_sens {
+                widgets::draw_dial_dimmed_ex(
+                    &mut self.surface.pixmap,
+                    &mut self.text_renderer,
+                    cx,
+                    cy,
+                    r,
+                    label,
+                    &value_text,
+                    normalized,
+                    None,
+                    editing.as_deref(),
+                    caret,
+                    accent,
+                );
+            } else {
+                widgets::draw_dial_ex(
+                    &mut self.surface.pixmap,
+                    &mut self.text_renderer,
+                    cx,
+                    cy,
+                    r,
+                    label,
+                    &value_text,
+                    normalized,
+                    None,
+                    editing.as_deref(),
+                    caret,
+                    accent,
+                );
+            }
             self.drag.push_region(
                 cx - r - 6.0 * s,
                 cy - r - 14.0 * s,

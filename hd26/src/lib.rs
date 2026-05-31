@@ -284,12 +284,15 @@ impl Plugin for Hd26 {
             let l = chans[0][i];
             let r = chans[1][i];
 
-            // Transient detector runs every sample so the GUI meter is live
-            // even before Retrig is enabled; it only retriggers when armed.
-            let fire = self.transient.process_sample((l + r) * 0.5);
-            if retrig_on && fire {
-                self.hyper.retrig();
+            // The detector runs every sample and the LED reflects every detected
+            // transient — so Sensitivity can be tuned (and the LED watched) even
+            // with Retrig off. The actual voice retrigger only fires when Retrig
+            // is enabled.
+            if self.transient.process_sample((l + r) * 0.5) {
                 self.telemetry.trigger_count.fetch_add(1, Ordering::Relaxed);
+                if retrig_on {
+                    self.hyper.retrig();
+                }
             }
 
             let (hl, hr) = self.hyper.process_sample(l, r, &hp);

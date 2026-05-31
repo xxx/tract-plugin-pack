@@ -94,8 +94,15 @@ impl TransientDetector {
             fired = true;
             self.cooldown = self.refractory;
             self.armed = false;
-        } else if ratio < self.threshold * 0.7 {
-            // Re-arm once the ratio falls back, so sustained tones don't refire.
+        } else if ratio < 1.0 + 0.5 * (self.threshold - 1.0) {
+            // Re-arm once the ratio falls back toward unity. The re-arm level
+            // sits halfway between the unity baseline (1.0) and the fire
+            // threshold, so it is ALWAYS reachable as the signal settles —
+            // even at high sensitivity (low threshold). A `0.7 * threshold`
+            // gate dropped below 1.0 for thresholds under ~1.43, so high
+            // sensitivity could never re-arm on sustained/rising material: it
+            // fired once and went quiet, making higher sensitivity behave like
+            // LOWER sensitivity.
             self.armed = true;
         }
         fired
@@ -151,5 +158,38 @@ mod tests {
         let mut d = TransientDetector::new(48_000.0);
         count_fires(&mut d, &[0.8; 2400]);
         assert!(d.fast_env() > 0.5, "fast_env should track to ~0.8");
+    }
+
+    #[test]
+    fn higher_sensitivity_does_not_fire_fewer_times() {
+        // Regression: the re-arm gate must stay reachable at high sensitivity.
+        // Rising plateaus — each step up is a transient and the signal never
+        // drops, so re-arm can only occur as the ratio settles back toward 1.0.
+        // A re-arm level of 0.7*threshold drops below 1.0 at high sensitivity
+        // (threshold ~1.15 -> re-arm 0.805), so the detector fired once and went
+        // quiet — higher sensitivity behaved like LOWER sensitivity.
+        // Plateaus must outlast the 100 ms slow-envelope time constant so the
+        // fast/slow ratio settles toward 1.0 between steps (else it stays
+        // elevated and nothing re-arms). 24000 samples = 500 ms.
+        let mut input = Vec::new();
+        for &level in &[0.1f32, 0.2, 0.3, 0.4, 0.5] {
+            for _ in 0..24_000 {
+                input.push(level);
+            }
+        }
+        let mut low = TransientDetector::new(48_000.0);
+        low.set_sensitivity(0.1);
+        let mut high = TransientDetector::new(48_000.0);
+        high.set_sensitivity(1.0);
+        let low_fires = count_fires(&mut low, &input);
+        let high_fires = count_fires(&mut high, &input);
+        assert!(
+            high_fires >= low_fires,
+            "higher sensitivity must not fire fewer times: high={high_fires} low={low_fires}"
+        );
+        assert!(
+            high_fires >= 3,
+            "high sensitivity should retrigger across the repeated steps, got {high_fires}"
+        );
     }
 }
