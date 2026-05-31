@@ -90,6 +90,21 @@ impl Hyper {
         (u * (MAX_VOICES as f32 - 1.0)).round() as usize
     }
 
+    /// Per-voice LFO modulation depth in samples, derived from the target peak
+    /// pitch deviation `cents` via the Doppler relation
+    /// `cents = CENTS_PER_RATIO * 2π * rate * depth_seconds`, then clamped so the
+    /// sinusoidal sweep's trough (`voice_base - depth`) never undershoots
+    /// `read_cubic`'s valid range (>= 2 samples). Without the `voice_base - 2`
+    /// clamp, slow rates + high detune push the trough below 2 samples, where
+    /// `read_cubic` silently clamps and flattens the bottom of the sweep,
+    /// producing asymmetric/incorrect detune. `rate` must be > 0 (the caller
+    /// floors it at 0.01 Hz).
+    #[inline]
+    fn voice_depth(cents: f32, rate: f32, sr: f32, voice_base: f32, max_depth: f32) -> f32 {
+        let raw = (cents.abs() / (CENTS_PER_RATIO * std::f32::consts::TAU * rate)) * sr;
+        raw.min(max_depth).min((voice_base - 2.0).max(0.0))
+    }
+
     #[inline]
     pub fn process_sample(&mut self, l: f32, r: f32, p: &HyperParams) -> (f32, f32) {
         let n = p.voices.min(MAX_VOICES);
@@ -114,16 +129,11 @@ impl Hyper {
         for i in 0..n {
             let shape = VOICE_SHAPE[Self::shape_index(i, n)];
             let cents = shape * MAX_CENTS * detune_curve;
-            // depth (samples) so peak deviation ≈ |cents|:
-            // cents = CENTS_PER_RATIO * 2π * rate * depth_seconds.
-            let depth = ((cents.abs()
-                / (CENTS_PER_RATIO * std::f32::consts::TAU * rate))
-                * sr)
-                .min(max_depth);
+            let voice_base = base + i as f32 * spacing;
+            let depth = Self::voice_depth(cents, rate, sr, voice_base, max_depth);
             let ph = &self.phasors[i];
             let lfo_l = ph.sine();
             let lfo_r = ph.sine_at_offset(width_shift);
-            let voice_base = base + i as f32 * spacing;
             wet_l += self.delay_l.read_cubic(voice_base + depth * lfo_l);
             wet_r += self.delay_r.read_cubic(voice_base + depth * lfo_r);
         }
@@ -215,5 +225,27 @@ mod tests {
         assert_eq!(h.phasors[0].phase(), 0.0);
         // Voice 1's initial phase is 1/7.
         assert!((h.phasors[1].phase() - 1.0 / 7.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn modulation_trough_stays_in_valid_range() {
+        // Regression: at slow rates + high detune the derived depth must be
+        // clamped so the LFO trough (voice_base - depth) never undershoots
+        // read_cubic's 2-sample floor (which would silently flatten the sweep).
+        let sr = 48_000.0;
+        let base = BASE_DELAY_MS / 1000.0 * sr;
+        let spacing = VOICE_SPACING_MS / 1000.0 * sr;
+        let max_depth = MAX_DEPTH_MS / 1000.0 * sr;
+        for &rate in &[0.01f32, 0.05, 0.1, 0.3, 0.5, 1.0, 5.0, 10.0] {
+            for i in 0..MAX_VOICES {
+                let voice_base = base + i as f32 * spacing;
+                let cents = MAX_CENTS; // worst case |shape| ~= 1.0, detune_curve = 1.0
+                let depth = Hyper::voice_depth(cents, rate, sr, voice_base, max_depth);
+                assert!(
+                    voice_base - depth >= 2.0 - 1e-3,
+                    "trough underflow at rate={rate} voice={i}: base={voice_base} depth={depth}"
+                );
+            }
+        }
     }
 }
