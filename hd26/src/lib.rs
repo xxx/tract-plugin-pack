@@ -7,7 +7,7 @@ pub mod dimension;
 pub mod hyper;
 pub mod lfo;
 pub mod transient;
-// mod editor; // enabled in Task 8
+mod editor;
 
 use dimension::{DimMode, DimParams, Dimension};
 use hyper::{Hyper, HyperParams};
@@ -114,7 +114,7 @@ impl Default for Hd26 {
 impl Hd26Params {
     fn new() -> Self {
         Self {
-            editor_state: tiny_skia_widgets::EditorState::from_size(560, 280),
+            editor_state: editor::default_editor_state(),
 
             hyper_unison: IntParam::new("Hyper Unison", 3, IntRange::Linear { min: 0, max: 7 }),
             hyper_detune: FloatParam::new("Hyper Detune", 0.30, FloatRange::Linear { min: 0.0, max: 1.0 })
@@ -190,6 +190,10 @@ impl Plugin for Hd26 {
 
     fn params(&self) -> Arc<dyn Params> {
         self.params.clone()
+    }
+
+    fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor::create(self.params.clone(), self.telemetry.clone())
     }
 
     fn initialize(
