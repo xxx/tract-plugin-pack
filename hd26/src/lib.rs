@@ -5,7 +5,7 @@ use std::sync::Arc;
 pub mod lfo;
 pub mod delay;
 pub mod transient;
-// pub mod hyper;
+pub mod hyper;
 // pub mod dimension;
 // mod editor;
 
