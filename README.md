@@ -28,10 +28,10 @@ A lightweight loudness meter with integrated gain utility, purpose-built for [cl
 
 ### HD26
 
-A Serum-style Hyper/Dimension unison chorus and pseudo-stereo widener. **Hyper** stacks up to 16 modulated fractional-delay voices per channel for rich detuned unison; **Dimension** runs a 4-tap pseudo-stereo widener with two modes — AM mode (Serum-accurate, antisymmetric Side injection, mono-safe) and Pitch mode (Dimension-D-flavoured delay modulation). A transient-detector **Retrig** snaps voice phases on note attacks to suppress initial smear.
+A unison-detune chorus and pseudo-stereo widener, inspired by Serum's Hyper/Dimension module. Two sections run in series, labelled `H____` and `D________` on the panel. The first stacks up to 7 modulated fractional-delay voices per channel for rich detuned unison; the second is a 4-tap pseudo-stereo widener with two modes — AM (antisymmetric Side injection, mono-safe) and Pitch (delay modulation with cross-feed). A transient-detector **Retrig** re-aligns voice phases on detected attacks.
 
-- **Hyper**: 1–16 unison voices (1 = dry), Szabo-style angle spread, per-voice modulated fractional delay (Catmull-Rom interp), rate/depth/width controls; trough clamp prevents voices from disappearing into phase cancellation
-- **Dimension**: 4-tap widener in AM mode (antisymmetric L/R side injection → mono sums to exact dry) or Pitch mode (Dimension-D-flavoured modulated delay); wet HPF removes DC/sub from the Dimension path
+- **Unison chorus** (`H____`): 0–7 voices (0 = off), Szabo-style asymmetric detune spread, per-voice modulated fractional delay (Catmull-Rom interp), detune/rate/width controls; a depth clamp keeps the modulation sweep within the delay line's range
+- **Widener** (`D________`): 4-tap widener in AM mode (antisymmetric L/R side injection → mono sums to exact dry) or Pitch mode (modulated delay + cross-feed); a wet HPF keeps the low end out of the widened path
 - **Retrig**: fast/slow-envelope onset detector with refractory period; fires when a transient is detected to reset voice phases (reduces smear on new notes)
 - Zero latency; no FFT; no allocations on the audio thread
 - CPU-rendered GUI with lock-free retrig LED and level-bar telemetry (tiny-skia + softbuffer), freely resizable
@@ -235,7 +235,7 @@ The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` fil
 tract-plugin-pack/
 ├── gain-brain/             # Gain utility with group linking
 ├── gs-meter/               # Loudness meter + gain utility
-├── hd26/                   # Serum-style Hyper/Dimension chorus + widener
+├── hd26/                   # Unison-detune chorus + pseudo-stereo widener (Serum-inspired)
 ├── imagine/                # Multiband stereo imager modeled on Ozone Imager
 ├── miff/                   # MSEG hand-drawn FIR convolution filter
 ├── multosis/               # 16-row grid sequencer with per-row effects + MSEGs
