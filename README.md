@@ -279,6 +279,7 @@ Install nextest via `cargo install cargo-nextest --locked`. Config lives in `.co
 
 - [Gain Brain Manual](docs/gain-brain/gain-brain-manual.md)
 - [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
+- [HD26 Manual](docs/hd26/hd26-manual.md)
 - [Imagine Manual](docs/imagine/imagine-manual.md)
 - [Miff Manual](docs/miff/miff-manual.md)
 - [Multosis Manual](docs/multosis/multosis-manual.md)
