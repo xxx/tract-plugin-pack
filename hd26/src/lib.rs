@@ -4,7 +4,7 @@ use std::sync::Arc;
 // DSP modules (uncommented as they are added in later tasks):
 pub mod lfo;
 pub mod delay;
-// pub mod transient;
+pub mod transient;
 // pub mod hyper;
 // pub mod dimension;
 // mod editor;
