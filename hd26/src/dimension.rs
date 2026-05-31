@@ -265,7 +265,10 @@ mod tests {
             let (ol, or) = d.process_sample(x, x, &p);
             max_diff = max_diff.max((ol - or).abs());
         }
-        assert!(max_diff > 1e-3, "AM should widen mono input, max_diff={max_diff}");
+        assert!(
+            max_diff > 1e-3,
+            "AM should widen mono input, max_diff={max_diff}"
+        );
     }
 
     #[test]

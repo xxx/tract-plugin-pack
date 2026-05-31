@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 pub mod delay;
 pub mod dimension;
+mod editor;
 pub mod hyper;
 pub mod lfo;
 pub mod transient;
-mod editor;
 
 use dimension::{DimMode, DimParams, Dimension};
 use hyper::{Hyper, HyperParams};
@@ -117,22 +117,34 @@ impl Hd26Params {
             editor_state: editor::default_editor_state(),
 
             hyper_unison: IntParam::new("Hyper Unison", 3, IntRange::Linear { min: 0, max: 7 }),
-            hyper_detune: FloatParam::new("Hyper Detune", 0.30, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_value_to_string(formatters::v2s_f32_percentage(0))
-                .with_string_to_value(formatters::s2v_f32_percentage())
-                .with_smoother(SmoothingStyle::Linear(20.0)),
+            hyper_detune: FloatParam::new(
+                "Hyper Detune",
+                0.30,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage())
+            .with_smoother(SmoothingStyle::Linear(20.0)),
             hyper_rate: FloatParam::new(
                 "Hyper Rate",
                 1.0,
-                FloatRange::Skewed { min: 0.01, max: 10.0, factor: FloatRange::skew_factor(-2.0) },
+                FloatRange::Skewed {
+                    min: 0.01,
+                    max: 10.0,
+                    factor: FloatRange::skew_factor(-2.0),
+                },
             )
             .with_unit(" Hz")
             .with_value_to_string(formatters::v2s_f32_rounded(2))
             .with_smoother(SmoothingStyle::Linear(20.0)),
-            hyper_width: FloatParam::new("Hyper Width", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_value_to_string(formatters::v2s_f32_percentage(0))
-                .with_string_to_value(formatters::s2v_f32_percentage())
-                .with_smoother(SmoothingStyle::Linear(20.0)),
+            hyper_width: FloatParam::new(
+                "Hyper Width",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage())
+            .with_smoother(SmoothingStyle::Linear(20.0)),
             hyper_retrig: BoolParam::new("Hyper Retrig", false),
             hyper_sensitivity: FloatParam::new(
                 "Hyper Sensitivity",
@@ -146,28 +158,47 @@ impl Hd26Params {
                 .with_string_to_value(formatters::s2v_f32_percentage())
                 .with_smoother(SmoothingStyle::Linear(20.0)),
 
-            dim_size: FloatParam::new("Dimension Size", 0.30, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_value_to_string(formatters::v2s_f32_percentage(0))
-                .with_string_to_value(formatters::s2v_f32_percentage())
-                .with_smoother(SmoothingStyle::Linear(20.0)),
+            dim_size: FloatParam::new(
+                "Dimension Size",
+                0.30,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage())
+            .with_smoother(SmoothingStyle::Linear(20.0)),
             dim_mode: EnumParam::new("Dimension Mode", DimensionMode::Am),
             dim_hpf: FloatParam::new(
                 "Dimension Wet HPF",
                 120.0,
-                FloatRange::Skewed { min: 20.0, max: 500.0, factor: FloatRange::skew_factor(-1.0) },
+                FloatRange::Skewed {
+                    min: 20.0,
+                    max: 500.0,
+                    factor: FloatRange::skew_factor(-1.0),
+                },
             )
             .with_unit(" Hz")
             .with_value_to_string(formatters::v2s_f32_rounded(0))
             .with_smoother(SmoothingStyle::Linear(20.0)),
-            dim_mix: FloatParam::new("Dimension Mix", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_value_to_string(formatters::v2s_f32_percentage(0))
-                .with_string_to_value(formatters::s2v_f32_percentage())
-                .with_smoother(SmoothingStyle::Linear(20.0)),
+            dim_mix: FloatParam::new(
+                "Dimension Mix",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage())
+            .with_smoother(SmoothingStyle::Linear(20.0)),
 
-            output: FloatParam::new("Output", 0.0, FloatRange::Linear { min: -24.0, max: 12.0 })
-                .with_unit(" dB")
-                .with_value_to_string(formatters::v2s_f32_rounded(1))
-                .with_smoother(SmoothingStyle::Linear(50.0)),
+            output: FloatParam::new(
+                "Output",
+                0.0,
+                FloatRange::Linear {
+                    min: -24.0,
+                    max: 12.0,
+                },
+            )
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(1))
+            .with_smoother(SmoothingStyle::Linear(50.0)),
             bypass: BoolParam::new("Bypass", false),
         }
     }
@@ -289,8 +320,11 @@ impl ClapPlugin for Hd26 {
         Some("Serum-style Hyper/Dimension chorus + widener");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
-    const CLAP_FEATURES: &'static [ClapFeature] =
-        &[ClapFeature::AudioEffect, ClapFeature::Chorus, ClapFeature::Stereo];
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::AudioEffect,
+        ClapFeature::Chorus,
+        ClapFeature::Stereo,
+    ];
 }
 
 impl Vst3Plugin for Hd26 {
@@ -333,8 +367,19 @@ mod tests {
     fn stages_chain_without_nan() {
         // Drive a few blocks through the raw DSP chain (mirrors process()).
         let mut p = make();
-        let hp = HyperParams { voices: 7, detune: 0.8, rate_hz: 1.0, width: 0.5, mix: 1.0 };
-        let dp = DimParams { size: 0.5, mode: DimMode::Am, hpf_hz: 120.0, mix: 0.7 };
+        let hp = HyperParams {
+            voices: 7,
+            detune: 0.8,
+            rate_hz: 1.0,
+            width: 0.5,
+            mix: 1.0,
+        };
+        let dp = DimParams {
+            size: 0.5,
+            mode: DimMode::Am,
+            hpf_hz: 120.0,
+            mix: 0.7,
+        };
         for n in 0..4000 {
             let x = (0.09 * n as f32).sin() * 0.8;
             let (hl, hr) = p.hyper.process_sample(x, x, &hp);

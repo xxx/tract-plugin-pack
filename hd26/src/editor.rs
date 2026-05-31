@@ -52,16 +52,46 @@ enum HitAction {
 macro_rules! dispatch {
     ($self:expr, $id:expr, $p:ident => $body:expr) => {
         match $id {
-            ParamId::Unison => { let $p = &$self.params.hyper_unison; $body }
-            ParamId::Detune => { let $p = &$self.params.hyper_detune; $body }
-            ParamId::Rate => { let $p = &$self.params.hyper_rate; $body }
-            ParamId::Width => { let $p = &$self.params.hyper_width; $body }
-            ParamId::Sensitivity => { let $p = &$self.params.hyper_sensitivity; $body }
-            ParamId::HyperMix => { let $p = &$self.params.hyper_mix; $body }
-            ParamId::Size => { let $p = &$self.params.dim_size; $body }
-            ParamId::Hpf => { let $p = &$self.params.dim_hpf; $body }
-            ParamId::DimMix => { let $p = &$self.params.dim_mix; $body }
-            ParamId::Output => { let $p = &$self.params.output; $body }
+            ParamId::Unison => {
+                let $p = &$self.params.hyper_unison;
+                $body
+            }
+            ParamId::Detune => {
+                let $p = &$self.params.hyper_detune;
+                $body
+            }
+            ParamId::Rate => {
+                let $p = &$self.params.hyper_rate;
+                $body
+            }
+            ParamId::Width => {
+                let $p = &$self.params.hyper_width;
+                $body
+            }
+            ParamId::Sensitivity => {
+                let $p = &$self.params.hyper_sensitivity;
+                $body
+            }
+            ParamId::HyperMix => {
+                let $p = &$self.params.hyper_mix;
+                $body
+            }
+            ParamId::Size => {
+                let $p = &$self.params.dim_size;
+                $body
+            }
+            ParamId::Hpf => {
+                let $p = &$self.params.dim_hpf;
+                $body
+            }
+            ParamId::DimMix => {
+                let $p = &$self.params.dim_mix;
+                $body
+            }
+            ParamId::Output => {
+                let $p = &$self.params.output;
+                $body
+            }
         }
     };
 }
@@ -172,8 +202,7 @@ impl Hd26Window {
             let cx = lcx * s;
             let cy = lcy * s;
             let normalized = dispatch!(self, id, p => p.modulated_normalized_value());
-            let value_text =
-                dispatch!(self, id, p => p.normalized_value_to_string(p.modulated_normalized_value(), true));
+            let value_text = dispatch!(self, id, p => p.normalized_value_to_string(p.modulated_normalized_value(), true));
             let editing = self
                 .text_edit
                 .active_for(&HitAction::Dial(id))
@@ -265,7 +294,14 @@ impl Hd26Window {
         } else {
             widgets::color_control_bg()
         };
-        widgets::draw_rect(&mut self.surface.pixmap, led_x, meter_y, meter_h, meter_h, led_c);
+        widgets::draw_rect(
+            &mut self.surface.pixmap,
+            led_x,
+            meter_y,
+            meter_h,
+            meter_h,
+            led_c,
+        );
         if self.led_flash > 0 {
             self.led_flash -= 1;
         }
@@ -439,7 +475,10 @@ impl baseview::WindowHandler for Hd26Window {
                     (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
                 self.resize_buffers();
             }
-            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved { position, modifiers }) => {
+            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved {
+                position,
+                modifiers,
+            }) => {
                 self.drag.set_mouse(position.x as f32, position.y as f32);
                 if let Some(HitAction::Dial(id)) = self.drag.active_action().copied() {
                     let shift = modifiers.contains(keyboard_types::Modifiers::SHIFT);

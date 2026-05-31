@@ -17,8 +17,7 @@ const MAX_CENTS: f32 = 50.0;
 const CENTS_PER_RATIO: f32 = 1731.234;
 
 /// Normalized Szabo JP-8000 voice offsets in [-1, 1] (index 3 = center 0.0).
-const VOICE_SHAPE: [f32; MAX_VOICES] =
-    [-1.0, -0.5715, -0.1774, 0.0, 0.1810, 0.5651, 0.9766];
+const VOICE_SHAPE: [f32; MAX_VOICES] = [-1.0, -0.5715, -0.1774, 0.0, 0.1810, 0.5651, 0.9766];
 
 #[derive(Clone, Copy)]
 pub struct HyperParams {
@@ -56,8 +55,7 @@ impl Hyper {
     }
 
     fn ring_capacity(sample_rate: f32) -> usize {
-        let max_ms =
-            BASE_DELAY_MS + (MAX_VOICES as f32 - 1.0) * VOICE_SPACING_MS + MAX_DEPTH_MS;
+        let max_ms = BASE_DELAY_MS + (MAX_VOICES as f32 - 1.0) * VOICE_SPACING_MS + MAX_DEPTH_MS;
         ((max_ms / 1000.0 * sample_rate).ceil() as usize) + 8
     }
 
@@ -185,7 +183,10 @@ mod tests {
         for n in 0..2000 {
             let x = (0.07 * n as f32).sin() * 0.5;
             let (ol, or) = h.process_sample(x, x, &p);
-            assert!((ol - or).abs() < 1e-5, "channels diverged at {n}: {ol} vs {or}");
+            assert!(
+                (ol - or).abs() < 1e-5,
+                "channels diverged at {n}: {ol} vs {or}"
+            );
         }
     }
 
@@ -199,7 +200,10 @@ mod tests {
             let (ol, or) = h.process_sample(x, x, &p);
             max_diff = max_diff.max((ol - or).abs());
         }
-        assert!(max_diff > 1e-3, "width should decorrelate L/R, max_diff={max_diff}");
+        assert!(
+            max_diff > 1e-3,
+            "width should decorrelate L/R, max_diff={max_diff}"
+        );
     }
 
     #[test]

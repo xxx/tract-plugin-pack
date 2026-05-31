@@ -140,7 +140,10 @@ mod tests {
         let lo = d.threshold;
         d.set_sensitivity(1.0);
         let hi = d.threshold;
-        assert!(hi < lo, "higher sensitivity must lower threshold: {hi} < {lo}");
+        assert!(
+            hi < lo,
+            "higher sensitivity must lower threshold: {hi} < {lo}"
+        );
     }
 
     #[test]

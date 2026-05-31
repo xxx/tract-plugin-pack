@@ -26,6 +26,16 @@ A lightweight loudness meter with integrated gain utility, purpose-built for [cl
 - ~1.8 MB RSS and 0.05% CPU per instance (300 instances @ 15% CPU, 560 MB total)
 - Inspired by [TBProAudio dpMeter](https://www.tbproaudio.de/products/dpmeter)
 
+### HD26
+
+A Serum-style Hyper/Dimension unison chorus and pseudo-stereo widener. **Hyper** stacks up to 16 modulated fractional-delay voices per channel for rich detuned unison; **Dimension** runs a 4-tap pseudo-stereo widener with two modes — AM mode (Serum-accurate, antisymmetric Side injection, mono-safe) and Pitch mode (Dimension-D-flavoured delay modulation). A transient-detector **Retrig** snaps voice phases on note attacks to suppress initial smear.
+
+- **Hyper**: 1–16 unison voices (1 = dry), Szabo-style angle spread, per-voice modulated fractional delay (Catmull-Rom interp), rate/depth/width controls; trough clamp prevents voices from disappearing into phase cancellation
+- **Dimension**: 4-tap widener in AM mode (antisymmetric L/R side injection → mono sums to exact dry) or Pitch mode (Dimension-D-flavoured modulated delay); wet HPF removes DC/sub from the Dimension path
+- **Retrig**: fast/slow-envelope onset detector with refractory period; fires when a transient is detected to reset voice phases (reduces smear on new notes)
+- Zero latency; no FFT; no allocations on the audio thread
+- CPU-rendered GUI with lock-free retrig LED and level-bar telemetry (tiny-skia + softbuffer), freely resizable
+
 ### Imagine
 
 A multiband stereo imager modeled on iZotope Ozone Imager. Four fixed bands with switchable linear-phase FIR or Linkwitz-Riley IIR (Lipshitz/Vanderkooy compensated) crossovers. Per-band Ozone-style **Width** (S_gain = (width+100)/100, mid unchanged), two **Stereoize** modes — Mode I is a Haas mid-into-side delay (1–20 ms control), Mode II is a Schroeder/Gerzon all-pass decorrelator (0.5–2.0× delay-scale control) — and a global **Recover Sides** that folds a Hilbert-rotated residue of removed-side energy back into mid for perceptual width retention when narrowing.
@@ -174,6 +184,7 @@ sudo apt install libxcb1-dev libx11-xcb-dev libx11-dev libxcursor-dev \
 # Build all plugins (VST3 + CLAP)
 cargo nih-plug bundle gain-brain --release
 cargo nih-plug bundle gs-meter --release
+cargo nih-plug bundle hd26 --release
 cargo nih-plug bundle imagine --release
 cargo nih-plug bundle miff --release
 cargo nih-plug bundle multosis --release
@@ -188,6 +199,7 @@ cargo nih-plug bundle wavetable-filter --release
 # Standalone binaries
 cargo build --bin gain-brain --release
 cargo build --bin gs-meter --release
+cargo build --bin hd26 --release
 cargo build --bin imagine --release
 cargo build --bin miff --release
 cargo build --bin multosis --release
@@ -223,6 +235,7 @@ The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` fil
 tract-plugin-pack/
 ├── gain-brain/             # Gain utility with group linking
 ├── gs-meter/               # Loudness meter + gain utility
+├── hd26/                   # Serum-style Hyper/Dimension chorus + widener
 ├── imagine/                # Multiband stereo imager modeled on Ozone Imager
 ├── miff/                   # MSEG hand-drawn FIR convolution filter
 ├── multosis/               # 16-row grid sequencer with per-row effects + MSEGs
@@ -239,6 +252,7 @@ tract-plugin-pack/
 ├── docs/                   # Plugin manuals
 │   ├── gain-brain/
 │   ├── gs-meter/
+│   ├── hd26/
 │   ├── imagine/
 │   ├── miff/
 │   ├── multosis/
