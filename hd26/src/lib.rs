@@ -122,6 +122,7 @@ impl Hd26Params {
                 0.30,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
+            .with_unit(" %")
             .with_value_to_string(formatters::v2s_f32_percentage(0))
             .with_string_to_value(formatters::s2v_f32_percentage())
             .with_smoother(SmoothingStyle::Linear(20.0)),
@@ -142,6 +143,7 @@ impl Hd26Params {
                 0.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
+            .with_unit(" %")
             .with_value_to_string(formatters::v2s_f32_percentage(0))
             .with_string_to_value(formatters::s2v_f32_percentage())
             .with_smoother(SmoothingStyle::Linear(20.0)),
@@ -151,9 +153,11 @@ impl Hd26Params {
                 0.5,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
+            .with_unit(" %")
             .with_value_to_string(formatters::v2s_f32_percentage(0))
             .with_string_to_value(formatters::s2v_f32_percentage()),
             hyper_mix: FloatParam::new("Hyper Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage())
                 .with_smoother(SmoothingStyle::Linear(20.0)),
@@ -163,6 +167,7 @@ impl Hd26Params {
                 0.30,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
+            .with_unit(" %")
             .with_value_to_string(formatters::v2s_f32_percentage(0))
             .with_string_to_value(formatters::s2v_f32_percentage())
             .with_smoother(SmoothingStyle::Linear(20.0)),
@@ -184,6 +189,7 @@ impl Hd26Params {
                 0.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
+            .with_unit(" %")
             .with_value_to_string(formatters::v2s_f32_percentage(0))
             .with_string_to_value(formatters::s2v_f32_percentage())
             .with_smoother(SmoothingStyle::Linear(20.0)),

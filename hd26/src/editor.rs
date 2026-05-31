@@ -226,7 +226,7 @@ impl Hd26Window {
                 cx - r - 6.0 * s,
                 cy - r - 14.0 * s,
                 2.0 * r + 12.0 * s,
-                2.0 * r + 40.0 * s,
+                2.0 * r + 28.0 * s,
                 HitAction::Dial(id),
             );
         }
