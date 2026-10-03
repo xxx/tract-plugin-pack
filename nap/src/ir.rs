@@ -109,12 +109,12 @@ impl IrBaker {
         let mut post = self.post;
         post.reset();
         let (mut dc_x1, mut dc_y1) = (0.0f32, 0.0f32);
-        for i in 0..l {
-            let p = post.process(self.h[i]);
+        for sample in &mut self.h[..l] {
+            let p = post.process(*sample);
             let y = p - dc_x1 + DC_BLOCKER_R * dc_y1;
             dc_x1 = p;
             dc_y1 = y;
-            self.h[i] = y;
+            *sample = y;
         }
 
         // Partition h into k blocks of P, zero-pad to N, forward-FFT.

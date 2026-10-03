@@ -137,9 +137,9 @@ fn ensure_freq_table(cache: &mut FftCache, num_points: usize) {
     cache.freq_table.resize(num_points + 1, 0.0);
     let log_min = FREQ_MIN.ln();
     let log_range = FREQ_MAX.ln() - log_min;
-    for i in 0..=num_points {
+    for (i, freq) in cache.freq_table.iter_mut().enumerate() {
         let x_norm = i as f32 / num_points as f32;
-        cache.freq_table[i] = (log_min + x_norm * log_range).exp();
+        *freq = (log_min + x_norm * log_range).exp();
     }
     cache.freq_table_size = num_points;
     cache.cached_response_ys.clear();

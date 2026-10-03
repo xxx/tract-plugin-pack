@@ -51,8 +51,8 @@ impl AudioEngine {
             effects: std::array::from_fn(|r| {
                 let cfg = TrackEffect::default_for_row(r);
                 let mut e = EffectInstance::new(cfg.kind);
-                for i in 0..e.parameters().len() {
-                    e.set_param(i, cfg.params[i]);
+                for (i, &param) in cfg.params[..e.parameters().len()].iter().enumerate() {
+                    e.set_param(i, param);
                 }
                 e
             }),
@@ -94,8 +94,11 @@ impl AudioEngine {
                 self.effects[r] = EffectInstance::new(cfg.kind);
                 self.effects[r].set_sample_rate(self.sample_rate);
             }
-            for i in 0..self.effects[r].parameters().len() {
-                self.effects[r].set_param(i, cfg.params[i]);
+            for (i, &param) in cfg.params[..self.effects[r].parameters().len()]
+                .iter()
+                .enumerate()
+            {
+                self.effects[r].set_param(i, param);
             }
         }
         self.track_effects = *config;
@@ -383,8 +386,7 @@ impl AudioEngine {
     fn effective_mute_mask(&self) -> u16 {
         let any_soloed = self.track_effects.iter().any(|te| te.soloed);
         let mut mask = 0u16;
-        for r in 0..ROWS {
-            let te = &self.track_effects[r];
+        for (r, te) in self.track_effects.iter().enumerate() {
             if te.muted || (any_soloed && !te.soloed) {
                 mask |= 1 << r;
             }

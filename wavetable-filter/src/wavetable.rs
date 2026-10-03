@@ -173,8 +173,10 @@ impl Wavetable {
                 .map_err(|e| format!("Failed to read sample data: {}", e))?;
 
             buffer
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|chunk| f32::from_le_bytes(*chunk))
                 .collect()
         } else {
             // int16 format
@@ -184,9 +186,11 @@ impl Wavetable {
                 .map_err(|e| format!("Failed to read sample data: {}", e))?;
 
             buffer
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|chunk| {
-                    let sample_i16 = i16::from_le_bytes([chunk[0], chunk[1]]);
+                    let sample_i16 = i16::from_le_bytes(*chunk);
                     sample_i16 as f32 / 32768.0 // Convert to -1.0 to 1.0 range
                 })
                 .collect()

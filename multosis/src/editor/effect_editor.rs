@@ -255,8 +255,8 @@ pub fn effect_hit(
     if in_rect(lay.randomize, px, py) {
         return Some(EffectHit::Randomize);
     }
-    for i in 0..param_count.min(DIAL_SLOTS) {
-        if in_rect(lay.dials[i], px, py) {
+    for (i, &dial) in lay.dials[..param_count.min(DIAL_SLOTS)].iter().enumerate() {
+        if in_rect(dial, px, py) {
             return Some(EffectHit::Dial(i));
         }
     }

@@ -400,8 +400,7 @@ impl LufsMeter {
         // Step 1: mean of blocks above absolute gate
         let mut abs_sum = 0.0_f64;
         let mut abs_count = 0_u64;
-        for i in 0..count {
-            let e = self.block_ring[i];
+        for &e in &self.block_ring[..count] {
             if e > abs_gate_energy {
                 abs_sum += e;
                 abs_count += 1;
@@ -419,8 +418,7 @@ impl LufsMeter {
 
         let mut rel_sum = 0.0_f64;
         let mut rel_count = 0_u64;
-        for i in 0..count {
-            let e = self.block_ring[i];
+        for &e in &self.block_ring[..count] {
             if e > abs_gate_energy && e > rel_gate_energy {
                 rel_sum += e;
                 rel_count += 1;
@@ -459,8 +457,7 @@ impl LufsMeter {
         // Step 1: mean of blocks above absolute gate
         let mut abs_sum = 0.0_f64;
         let mut abs_count = 0_u64;
-        for i in 0..count {
-            let e = self.st_block_energies[i];
+        for &e in &self.st_block_energies[..count] {
             if e > abs_gate_energy {
                 abs_sum += e;
                 abs_count += 1;
