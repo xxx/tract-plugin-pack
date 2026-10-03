@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use hd26::dimension::{DimMode, DimParams, Dimension};
 use hd26::hyper::{Hyper, HyperParams};
 use hd26::transient::TransientDetector;

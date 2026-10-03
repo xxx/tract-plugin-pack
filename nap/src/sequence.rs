@@ -2,7 +2,7 @@
 //! Size/Density/Width/Seed into a sparse signed pulse train with per-pulse
 //! coloration routing and per-pulse right-channel jitter.
 
-use tiny_skia_widgets::mseg::{warp, MsegData, MsegNode, Polarity};
+use tiny_skia_widgets::mseg::{MsegData, MsegNode, Polarity, warp};
 
 use crate::coloration::Q;
 use crate::rng::Rng;

@@ -22,11 +22,11 @@ mod curve_view;
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crate::spectrum::N_BINS;
 use crate::SixPackParams;
+use crate::spectrum::N_BINS;
 use tiny_skia_widgets as widgets;
 
 const WINDOW_WIDTH: u32 = 720;
@@ -272,12 +272,12 @@ impl SixPackWindow {
                 }
             }
             HitAction::BandLabel(band, field) => {
-                if let Some(p) = self.float_for_band(band, field) {
-                    if let Some(norm) = p.string_to_normalized_value(&text) {
-                        setter.begin_set_parameter(p);
-                        setter.set_parameter_normalized(p, norm);
-                        setter.end_set_parameter(p);
-                    }
+                if let Some(p) = self.float_for_band(band, field)
+                    && let Some(norm) = p.string_to_normalized_value(&text)
+                {
+                    setter.begin_set_parameter(p);
+                    setter.set_parameter_normalized(p, norm);
+                    setter.end_set_parameter(p);
                 }
             }
             _ => {}
@@ -560,11 +560,11 @@ impl SixPackWindow {
                     Some(p) => p.unmodulated_normalized_value(),
                     None => return,
                 };
-                if let Some(norm) = self.drag.update_drag(shift, current) {
-                    if let Some(p) = self.float_for_band(idx, field) {
-                        let setter = ParamSetter::new(self.gui_context.as_ref());
-                        setter.set_parameter_normalized(p, norm);
-                    }
+                if let Some(norm) = self.drag.update_drag(shift, current)
+                    && let Some(p) = self.float_for_band(idx, field)
+                {
+                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                    setter.set_parameter_normalized(p, norm);
                 }
             }
             _ => {}
@@ -841,11 +841,13 @@ mod tests {
     #[test]
     fn text_edit_state_inactive_by_default() {
         let te: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(te
-            .active_for(&HitAction::GlobalDial(GlobalDialId::Input))
-            .is_none());
-        assert!(te
-            .active_for(&HitAction::BandLabel(0, BandLabelField::Freq))
-            .is_none());
+        assert!(
+            te.active_for(&HitAction::GlobalDial(GlobalDialId::Input))
+                .is_none()
+        );
+        assert!(
+            te.active_for(&HitAction::BandLabel(0, BandLabelField::Freq))
+                .is_none()
+        );
     }
 }

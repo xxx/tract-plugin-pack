@@ -4,7 +4,7 @@ use crate::theme;
 use crate::{ImagineParams, Quality};
 use std::sync::Arc;
 use tiny_skia::Pixmap;
-use tiny_skia_widgets::{fill_rect_i, stroke_rect_i, TextRenderer};
+use tiny_skia_widgets::{TextRenderer, fill_rect_i, stroke_rect_i};
 
 /// Reserved height for the section caption row at the top of the strip
 /// ("Recover Sides", "Link", "Quality").

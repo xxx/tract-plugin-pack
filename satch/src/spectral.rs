@@ -5,5 +5,5 @@
 //! etc.) building without changes.
 
 pub use tract_dsp::spectral_clipper::{
-    saturate_td, saturate_td_with_tanh, saturate_td_with_tanh_fast, SpectralClipper,
+    SpectralClipper, saturate_td, saturate_td_with_tanh, saturate_td_with_tanh_fast,
 };

@@ -3,10 +3,10 @@
 //!
 //! No allocations on hot redraw paths.
 
-use crate::bands::FilterShape;
-use crate::editor::{band_color, band_color_alpha, HitAction, SixPackWindow};
-use crate::spectrum::N_BINS;
 use crate::BAND_SHAPES;
+use crate::bands::FilterShape;
+use crate::editor::{HitAction, SixPackWindow, band_color, band_color_alpha};
+use crate::spectrum::N_BINS;
 use tiny_skia_widgets as widgets;
 
 const FREQ_MIN: f32 = 20.0;

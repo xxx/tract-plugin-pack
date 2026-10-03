@@ -11,7 +11,7 @@
 
 use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
 use rustfft::num_complex::Complex;
-use tract_dsp::spectral_engine::{SpectralEngine, SpectralTransform, FFT_SIZES};
+use tract_dsp::spectral_engine::{FFT_SIZES, SpectralEngine, SpectralTransform};
 
 /// Maximum half-spectrum entries we'll ever need to hold -- (4096 / 2) + 1.
 const MAX_HALF_PLUS_ONE: usize = 4096 / 2 + 1;

@@ -3,7 +3,7 @@
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §7.
 
-use crate::grid::{Grid, LoopRegion, COLS, ROWS};
+use crate::grid::{COLS, Grid, LoopRegion, ROWS};
 use tiny_skia::Pixmap;
 use tiny_skia_widgets as widgets;
 
@@ -411,11 +411,14 @@ pub fn draw_region_overlay(
     );
 
     // Move grip — drawn only while the cursor is inside the loop region.
-    if let Some((cur_x, cur_y)) = cursor {
-        if cur_x >= x0 && cur_x <= (x1 + w1) && cur_y >= y0 && cur_y <= (y1 + h1) {
-            let (gx, gy, gw, gh) = region_grip_rect(lr, scale);
-            widgets::draw_rect(pixmap, gx, gy, gw, gh, color_loop());
-        }
+    if let Some((cur_x, cur_y)) = cursor
+        && cur_x >= x0
+        && cur_x <= (x1 + w1)
+        && cur_y >= y0
+        && cur_y <= (y1 + h1)
+    {
+        let (gx, gy, gw, gh) = region_grip_rect(lr, scale);
+        widgets::draw_rect(pixmap, gx, gy, gw, gh, color_loop());
     }
 }
 

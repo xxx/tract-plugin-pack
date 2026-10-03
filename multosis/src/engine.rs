@@ -8,7 +8,7 @@ use crate::compressor::Compressor;
 use crate::effects::{Effect, EffectInstance, TrackEffect};
 use crate::grid::{Grid, ROWS};
 use crate::modulation::{Modulation, TrackModulation};
-use crate::propagation::{active_rows, Playhead};
+use crate::propagation::{Playhead, active_rows};
 
 /// Upper bound on step boundaries handled within one process block. At any
 /// realistic tempo/speed/sample-rate, `samples_per_step` is at least a few

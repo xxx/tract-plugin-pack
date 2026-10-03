@@ -11,11 +11,7 @@
 pub fn gain_computer_db(input_db: f32, knee_db: f32) -> f32 {
     if knee_db < 0.01 {
         // Hard knee: no reduction below 0, full limiting above
-        if input_db <= 0.0 {
-            0.0
-        } else {
-            -input_db
-        }
+        if input_db <= 0.0 { 0.0 } else { -input_db }
     } else {
         let half_knee = knee_db / 2.0;
         if input_db < -half_knee {

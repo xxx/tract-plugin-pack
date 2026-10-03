@@ -377,7 +377,7 @@ mod tests {
         fm.set_param(0, 200.0); // Freq
         fm.set_param(1, 0.0); // Depth
         fm.set_param(2, 0.0); // Feedback
-                              // Warm up the input-gate envelope follower (~5 attack TCs).
+        // Warm up the input-gate envelope follower (~5 attack TCs).
         for _ in 0..256 {
             fm.process_sample(1.0, 1.0);
         }
@@ -520,7 +520,7 @@ mod tests {
         fm.set_param(0, 100.0); // Freq
         fm.set_param(1, 0.0); // Depth
         fm.set_param(2, 0.0); // Feedback
-                              // Settle the input-gate envelope follower.
+        // Settle the input-gate envelope follower.
         for _ in 0..2048 {
             fm.process_sample(1.0, 1.0);
         }
@@ -547,7 +547,7 @@ mod tests {
         fm.set_sample_rate(48_000.0);
         fm.set_param(3, 1.0); // Mode → Modulator (visible non-zero output)
         fm.set_param(0, 200.0); // Freq
-                                // Drive it for a while to fill delay lines and advance phases.
+        // Drive it for a while to fill delay lines and advance phases.
         for _ in 0..1024 {
             fm.process_sample(0.4, 0.4);
         }

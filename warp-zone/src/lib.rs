@@ -1,6 +1,6 @@
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 pub mod editor;
 // SpectralShifter has been promoted to `tract_dsp::spectral_shifter` so

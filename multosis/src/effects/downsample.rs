@@ -335,8 +335,8 @@ mod tests {
         d.set_param(1, 0.0); // Smoothing 0 -> pure S&H
         d.set_param(2, 0.0); // Jitter 0 -> deterministic period
         d.set_param(3, 0.0); // Width 0 -> mono
-                             // Feed a slowly-changing input (one new value every sample,
-                             // ascending) and collect the L outputs.
+        // Feed a slowly-changing input (one new value every sample,
+        // ascending) and collect the L outputs.
         let mut out = Vec::with_capacity(200);
         for i in 0..200 {
             let x = i as f32;

@@ -3,9 +3,9 @@
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §7.
 
-use crate::editor::grid_view::{MARGIN, TOOLBAR_ROW_H};
-use crate::editor::WINDOW_WIDTH;
 use crate::MultosisParams;
+use crate::editor::WINDOW_WIDTH;
+use crate::editor::grid_view::{MARGIN, TOOLBAR_ROW_H};
 use nih_plug::prelude::Param;
 use tiny_skia::Pixmap;
 use tiny_skia_widgets as widgets;

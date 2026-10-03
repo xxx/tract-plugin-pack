@@ -169,11 +169,7 @@ impl DistortionEffect {
                 //   y      = 3 − mod4   otherwise
                 let phased = x + 1.0;
                 let mod4 = phased - 4.0 * (phased * 0.25).floor();
-                if mod4 < 2.0 {
-                    mod4 - 1.0
-                } else {
-                    3.0 - mod4
-                }
+                if mod4 < 2.0 { mod4 - 1.0 } else { 3.0 - mod4 }
             }
             // `set_param` clamps `type_idx` into the valid range, so
             // this arm is unreachable in normal operation. Define it

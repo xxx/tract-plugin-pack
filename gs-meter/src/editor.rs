@@ -2,8 +2,8 @@
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tiny_skia_widgets as widgets;
 
@@ -793,16 +793,15 @@ impl baseview::WindowHandler for GsMeterWindow {
                 self.mouse_y = position.y as f32;
 
                 // Handle slider drag
-                if let Some(param_id) = self.drag_active {
-                    if let Some(region) = self
+                if let Some(param_id) = self.drag_active
+                    && let Some(region) = self
                         .hit_regions
                         .iter()
                         .find(|r| matches!(&r.action, HitAction::Slider(id) if *id == param_id))
-                    {
-                        let normalized = ((self.mouse_x - region.x) / region.w).clamp(0.0, 1.0);
-                        let setter = ParamSetter::new(self.gui_context.as_ref());
-                        self.set_param_normalized(&setter, param_id, normalized);
-                    }
+                {
+                    let normalized = ((self.mouse_x - region.x) / region.w).clamp(0.0, 1.0);
+                    let setter = ParamSetter::new(self.gui_context.as_ref());
+                    self.set_param_normalized(&setter, param_id, normalized);
                 }
             }
             baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {

@@ -5,7 +5,7 @@
 
 use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
 use rustfft::num_complex::Complex;
-use tract_dsp::spectral_engine::{SpectralEngine, SpectralTransform, FFT_SIZES};
+use tract_dsp::spectral_engine::{FFT_SIZES, SpectralEngine, SpectralTransform};
 
 #[derive(Clone, Copy)]
 struct ParamsCache {
@@ -181,9 +181,9 @@ mod tests {
         let mut e = SpectralBandpassEffect::default();
         e.set_param(2, 1.0); // FFT = 1024 (slot 2)
         e.set_param(0, 1000.0); // Freq (slot 0)
-                                // Half-octave passband centred at 1 kHz.
+        // Half-octave passband centred at 1 kHz.
         e.set_param(1, 0.5); // Width (slot 1)
-                             // Drive a 5 kHz sine -- well outside the passband.
+        // Drive a 5 kHz sine -- well outside the passband.
         let out = drive(&mut e, 4096, |i| {
             (2.0 * std::f32::consts::PI * 5000.0 * i as f32 / sr).sin()
         });

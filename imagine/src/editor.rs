@@ -25,12 +25,12 @@ mod vectorscope_view;
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::editor::vectorscope_view::VectorMode;
 use crate::vectorscope::VectorConsumer;
-use crate::{ImagineParams, Quality, StereoizeModeParam, NUM_BANDS};
+use crate::{ImagineParams, NUM_BANDS, Quality, StereoizeModeParam};
 use tiny_skia_widgets as widgets;
 
 pub const WINDOW_WIDTH: u32 = 960;
@@ -891,18 +891,16 @@ impl baseview::WindowHandler for ImagineWindow {
                         let setter = ParamSetter::new(self.gui_context.as_ref());
                         self.end_drag_for_action(&setter, prev);
                     }
-                    if is_double {
-                        if let Some(p) = self.float_for_action(action) {
-                            let setter = ParamSetter::new(self.gui_context.as_ref());
-                            setter.begin_set_parameter(p);
-                            setter.set_parameter_normalized(p, p.default_normalized_value());
-                            setter.end_set_parameter(p);
-                            // Clear so a third quick click isn't itself a double-click.
-                            self.last_click_target = None;
-                            return baseview::EventStatus::Captured;
-                        }
-                        // Discrete target: fall through to normal click handler.
+                    if is_double && let Some(p) = self.float_for_action(action) {
+                        let setter = ParamSetter::new(self.gui_context.as_ref());
+                        setter.begin_set_parameter(p);
+                        setter.set_parameter_normalized(p, p.default_normalized_value());
+                        setter.end_set_parameter(p);
+                        // Clear so a third quick click isn't itself a double-click.
+                        self.last_click_target = None;
+                        return baseview::EventStatus::Captured;
                     }
+                    // Discrete target: fall through to normal click handler.
                     self.handle_left_press(action);
                 }
             }

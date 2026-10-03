@@ -2,8 +2,8 @@
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use nih_plug::prelude::*;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use crate::{MeterReadings, TinylimitParams};
 use tiny_skia_widgets as widgets;
@@ -1034,9 +1034,11 @@ mod text_entry_tests {
     #[test]
     fn text_edit_roundtrip_for_threshold_action() {
         let mut text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Threshold))
-            .is_none());
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Threshold))
+                .is_none()
+        );
 
         text_edit.begin(HitAction::Dial(ParamId::Threshold), "-6.0");
         assert_eq!(
@@ -1053,37 +1055,55 @@ mod text_entry_tests {
         let (action, buffer) = text_edit.commit().unwrap();
         assert_eq!(action, HitAction::Dial(ParamId::Threshold));
         assert_eq!(buffer, "-6.00");
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Threshold))
-            .is_none());
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Threshold))
+                .is_none()
+        );
     }
 
     #[test]
     fn state_starts_inactive() {
         let text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Input))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Threshold))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Ceiling))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Attack))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Release))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Knee))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::StereoLink))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Transient))
-            .is_none());
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Input))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Threshold))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Ceiling))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Attack))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Release))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Knee))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::StereoLink))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Transient))
+                .is_none()
+        );
     }
 }

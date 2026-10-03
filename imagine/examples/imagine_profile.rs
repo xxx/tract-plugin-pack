@@ -31,10 +31,10 @@ use imagine::bands::{Band, StereoizeMode};
 use imagine::crossover::{CrossoverFir, CrossoverIir};
 use imagine::midside;
 use imagine::spectrum::{Analyzer, SpectrumDisplay};
-use imagine::vectorscope::{ring_pair, VectorProducer};
+use imagine::vectorscope::{VectorProducer, ring_pair};
 use imagine::{
-    Quality, FIR_CROSSFADE_DEFAULT, FIR_CROSSOVER_LENGTH, FIR_HILBERT_LENGTH, HAAS_BUFFER_MAX_MS,
-    HAAS_DEFAULT_MS, MAX_SAMPLE_RATE, NUM_BANDS, STZ_SCALE_DEFAULT,
+    FIR_CROSSFADE_DEFAULT, FIR_CROSSOVER_LENGTH, FIR_HILBERT_LENGTH, HAAS_BUFFER_MAX_MS,
+    HAAS_DEFAULT_MS, MAX_SAMPLE_RATE, NUM_BANDS, Quality, STZ_SCALE_DEFAULT,
 };
 use tract_dsp::hilbert::HilbertFir;
 

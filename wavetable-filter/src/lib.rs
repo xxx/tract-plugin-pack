@@ -573,19 +573,19 @@ impl WavetableFilter {
             .ok()
             .map(|p| p.clone())
             .filter(|p| !p.is_empty());
-        if let Some(path) = persisted {
-            if std::path::Path::new(&path).exists() && self.load_wavetable_from_file(&path).is_ok()
-            {
-                return;
-            }
+        if let Some(path) = persisted
+            && std::path::Path::new(&path).exists()
+            && self.load_wavetable_from_file(&path).is_ok()
+        {
+            return;
         }
 
         // 2. Environment variable override
-        if let Ok(path) = std::env::var("WAVETABLE_FILTER_PATH") {
-            if std::path::Path::new(&path).exists() && self.load_wavetable_from_file(&path).is_ok()
-            {
-                return;
-            }
+        if let Ok(path) = std::env::var("WAVETABLE_FILTER_PATH")
+            && std::path::Path::new(&path).exists()
+            && self.load_wavetable_from_file(&path).is_ok()
+        {
+            return;
         }
 
         // 3. Default file location
@@ -803,29 +803,28 @@ impl Plugin for WavetableFilter {
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         // Check if a pre-prepared reload is ready (no allocations on audio thread)
-        if self.should_reload.load(Ordering::Relaxed) {
-            if let Ok(mut pending) = self.pending_reload.try_lock() {
-                if let Some(reload) = pending.take() {
-                    self.current_frame_count
-                        .store(reload.wavetable.frame_count, Ordering::Relaxed);
+        if self.should_reload.load(Ordering::Relaxed)
+            && let Ok(mut pending) = self.pending_reload.try_lock()
+            && let Some(reload) = pending.take()
+        {
+            self.current_frame_count
+                .store(reload.wavetable.frame_count, Ordering::Relaxed);
 
-                    self.wavetable = Some(reload.wavetable);
-                    self.frame_fft = reload.frame_fft;
-                    self.frame_cache = reload.frame_cache;
-                    self.frame_buf = reload.frame_buf;
-                    self.frame_spectrum = reload.frame_spectrum;
-                    self.frame_mags = reload.frame_mags;
+            self.wavetable = Some(reload.wavetable);
+            self.frame_fft = reload.frame_fft;
+            self.frame_cache = reload.frame_cache;
+            self.frame_buf = reload.frame_buf;
+            self.frame_spectrum = reload.frame_spectrum;
+            self.frame_mags = reload.frame_mags;
 
-                    for state in &mut self.filter_state {
-                        state.reset();
-                    }
-
-                    self.first_process = true;
-                    self.should_reload.store(false, Ordering::Relaxed);
-                }
+            for state in &mut self.filter_state {
+                state.reset();
             }
-            // If try_lock fails, leave should_reload true and retry next buffer
+
+            self.first_process = true;
+            self.should_reload.store(false, Ordering::Relaxed);
         }
+        // If try_lock fails, leave should_reload true and retry next buffer
 
         if self.wavetable.is_none() {
             return ProcessStatus::Normal;
@@ -1060,18 +1059,17 @@ impl Plugin for WavetableFilter {
                 .stft_fft
                 .process(&mut self.stft_scratch, &mut self.input_spectrum_scratch)
                 .is_ok()
+                && let Ok(mut shared) = self.shared_input_spectrum.try_lock()
             {
-                if let Ok(mut shared) = self.shared_input_spectrum.try_lock() {
-                    shared.0 = self.sample_rate;
-                    let peak = self
-                        .input_spectrum_scratch
-                        .iter()
-                        .map(|c| c.norm())
-                        .fold(0.0f32, f32::max)
-                        .max(1e-10);
-                    for (dst, c) in shared.1.iter_mut().zip(self.input_spectrum_scratch.iter()) {
-                        *dst = c.norm() / peak;
-                    }
+                shared.0 = self.sample_rate;
+                let peak = self
+                    .input_spectrum_scratch
+                    .iter()
+                    .map(|c| c.norm())
+                    .fold(0.0f32, f32::max)
+                    .max(1e-10);
+                for (dst, c) in shared.1.iter_mut().zip(self.input_spectrum_scratch.iter()) {
+                    *dst = c.norm() / peak;
                 }
             }
         }
@@ -2045,7 +2043,9 @@ mod tests {
         let exceeded = times_us.iter().filter(|&&t| t > threshold_us).count();
 
         eprintln!("  {label}:");
-        eprintln!("    min={min:.1} us  avg={avg:.1} us  p50={p50:.1} us  p95={p95:.1} us  p99={p99:.1} us  max={max:.1} us");
+        eprintln!(
+            "    min={min:.1} us  avg={avg:.1} us  p50={p50:.1} us  p95={p95:.1} us  p99={p99:.1} us  max={max:.1} us"
+        );
         eprintln!(
             "    exceeded 50% buffer period ({threshold_us:.0} us): {exceeded}/{} calls",
             times_us.len()
@@ -2159,7 +2159,9 @@ mod tests {
             total_times.push(t_interp + t_spectrum + t_ifft);
         }
 
-        eprintln!("\n--- Per-step breakdown (static frame_pos={static_frame_pos}, {num_buffers} buffers) ---");
+        eprintln!(
+            "\n--- Per-step breakdown (static frame_pos={static_frame_pos}, {num_buffers} buffers) ---"
+        );
         print_timing_stats("interpolate_frame_into", &interp_times);
         print_timing_stats("compute_base_spectrum_into", &spectrum_times);
         print_timing_stats("apply_resonance_and_ifft", &ifft_times);

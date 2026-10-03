@@ -5,8 +5,8 @@
 
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use multosis::effects::{default_params_for_kind, Effect, EffectInstance, EffectKind};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use multosis::effects::{Effect, EffectInstance, EffectKind, default_params_for_kind};
 
 /// Per-bench sample count. Matches the engine bench's block size so per-sample
 /// numbers compare across files.

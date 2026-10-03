@@ -1,6 +1,6 @@
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub mod delay;
 pub mod dimension;

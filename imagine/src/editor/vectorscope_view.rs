@@ -2,14 +2,14 @@
 //! Lissajous trace, or polar level (per-pan-angle level histogram).
 //! Below the scope: correlation bar + balance bar.
 
-use crate::polar_rays::{Ray, RING_CAPACITY as POLAR_RING_CAPACITY};
+use crate::ImagineParams;
+use crate::polar_rays::{RING_CAPACITY as POLAR_RING_CAPACITY, Ray};
 use crate::theme;
 use crate::vectorscope::VectorConsumer;
-use crate::ImagineParams;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, PixmapMut, Transform};
-use tiny_skia_widgets::{fill_rect_i, stroke_rect_i, TextRenderer};
+use tiny_skia_widgets::{TextRenderer, fill_rect_i, stroke_rect_i};
 
 /// Per-frame audio history snapshot fed to the dot-cloud modes
 /// (HalfPolar / Polar / Lissajous). Sized for ~800 ms at 48 kHz so the

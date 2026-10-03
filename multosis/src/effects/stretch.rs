@@ -442,8 +442,8 @@ mod tests {
         s.set_bpm(120.0);
         s.set_param(1, 8.0); // Refresh → 1/4 note (= 24000 samples @ 120 BPM)
         s.set_param(0, 0.5); // Pace → 0.5
-                             // Pump enough samples to fire several Refresh ticks at the
-                             // smaller capture window (12000 samples) so primed flips.
+        // Pump enough samples to fire several Refresh ticks at the
+        // smaller capture window (12000 samples) so primed flips.
         for _ in 0..48_000 {
             let _ = s.process_sample(0.5, 0.5);
         }

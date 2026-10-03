@@ -4,12 +4,12 @@
 //! - Top strip (~60px): Title, bypass toggle, Shift/Stretch/Mix dials
 //! - Main area: Scrolling spectral waterfall
 
-use crate::{SpectralDisplay, WarpZoneParams, DISPLAY_BINS, DISPLAY_COLUMNS};
+use crate::{DISPLAY_BINS, DISPLAY_COLUMNS, SpectralDisplay, WarpZoneParams};
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use crossbeam::atomic::AtomicCell;
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tiny_skia_widgets as widgets;
 
 const WINDOW_WIDTH: u32 = 600;
@@ -745,9 +745,11 @@ mod text_entry_tests {
     #[test]
     fn text_edit_roundtrip_for_shift_action() {
         let mut text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Shift))
-            .is_none());
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Shift))
+                .is_none()
+        );
 
         text_edit.begin(HitAction::Dial(ParamId::Shift), "-12");
         assert_eq!(
@@ -764,31 +766,45 @@ mod text_entry_tests {
         let (action, buffer) = text_edit.commit().unwrap();
         assert_eq!(action, HitAction::Dial(ParamId::Shift));
         assert_eq!(buffer, "-125");
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Shift))
-            .is_none());
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Shift))
+                .is_none()
+        );
     }
 
     #[test]
     fn state_starts_inactive() {
         let text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Shift))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Stretch))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Mix))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Feedback))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::LowFreq))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::HighFreq))
-            .is_none());
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Shift))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Stretch))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Mix))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Feedback))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::LowFreq))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::HighFreq))
+                .is_none()
+        );
     }
 }

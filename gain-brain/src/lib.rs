@@ -1,6 +1,6 @@
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 mod editor;
 pub mod groups;
@@ -259,13 +259,13 @@ impl Plugin for GainBrain {
                     // Param has been modified since dispatch — skip.
                     return;
                 }
-                if let Ok(guard) = gui_context.lock() {
-                    if let Some(ctx) = guard.as_ref() {
-                        let setter = ParamSetter::new(ctx.as_ref());
-                        setter.begin_set_parameter(&params.gain);
-                        setter.set_parameter_normalized(&params.gain, normalized);
-                        setter.end_set_parameter(&params.gain);
-                    }
+                if let Ok(guard) = gui_context.lock()
+                    && let Some(ctx) = guard.as_ref()
+                {
+                    let setter = ParamSetter::new(ctx.as_ref());
+                    setter.begin_set_parameter(&params.gain);
+                    setter.set_parameter_normalized(&params.gain, normalized);
+                    setter.end_set_parameter(&params.gain);
                 }
             }
         })
@@ -572,8 +572,11 @@ impl GainBrain {
                         let clamped_mb = db_to_millibels(clamped_db);
                         debug_log!(
                             "gain-brain[{}]: READ REL canonical_delta={}mb local_delta={}mb eff={:.2}->{:.2}dB",
-                            self.instance_id, canonical_delta, local_delta,
-                            self.effective_gain_db, clamped_db
+                            self.instance_id,
+                            canonical_delta,
+                            local_delta,
+                            self.effective_gain_db,
+                            clamped_db
                         );
                         self.group_gain_override
                             .store(clamped_mb, Ordering::Relaxed);
@@ -607,7 +610,10 @@ impl GainBrain {
 
                 debug_log!(
                     "gain-brain[{}]: USER WRITE local_delta={}mb canonical_delta={}mb canonical_abs={}mb",
-                    self.instance_id, local_delta, canonical_delta, canonical_absolute
+                    self.instance_id,
+                    local_delta,
+                    canonical_delta,
+                    canonical_absolute
                 );
 
                 let (old_cumulative, new_gen) = groups::add_delta(group as u8, canonical_delta);
@@ -646,7 +652,10 @@ impl GainBrain {
                 } else {
                     debug_log!(
                         "gain-brain[{}]: USER OVERRIDE via param: param={}mb stale={}mb target={}mb",
-                        self.instance_id, current_mb, self.stale_param_mb, target
+                        self.instance_id,
+                        current_mb,
+                        self.stale_param_mb,
+                        target
                     );
                     self.param_sync_target_mb = None;
                     false
@@ -662,7 +671,10 @@ impl GainBrain {
 
                 debug_log!(
                     "gain-brain[{}]: WRITE local_delta={}mb canonical_delta={}mb canonical_abs={}mb",
-                    self.instance_id, local_delta, canonical_delta, canonical_absolute
+                    self.instance_id,
+                    local_delta,
+                    canonical_delta,
+                    canonical_absolute
                 );
 
                 let (old_cumulative, new_gen) = groups::add_delta(group as u8, canonical_delta);
@@ -730,8 +742,13 @@ impl GainBrain {
             let snap = groups::read_slot(new_group as u8);
             debug_log!(
                 "gain-brain[{}]: TRANSITION JOIN LIVE group={} cum={} abs={} epoch={} gen={} effective={:.2}dB",
-                self.instance_id, new_group, snap.cumulative_delta, snap.absolute_gain,
-                snap.epoch, snap.generation, self.effective_gain_db
+                self.instance_id,
+                new_group,
+                snap.cumulative_delta,
+                snap.absolute_gain,
+                snap.epoch,
+                snap.generation,
+                self.effective_gain_db
             );
             self.last_seen_cumulative = snap.cumulative_delta;
             self.last_seen_epoch = snap.epoch;

@@ -1,8 +1,8 @@
 #![feature(portable_simd)]
 
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Debug-only logging. Compiles to nothing in release builds, avoiding
 /// format!() heap allocations and stderr writes on the audio thread.
@@ -329,7 +329,8 @@ impl Plugin for PopeScope {
                 }
                 debug_log!(
                     "pope-scope: initialize() acquired slot {idx} (hash={}, channels={num_channels}, sr={})",
-                    self.instance_hash, self.sample_rate
+                    self.instance_hash,
+                    self.sample_rate
                 );
                 true
             }
@@ -348,10 +349,10 @@ impl Plugin for PopeScope {
     fn update_track_info(&mut self, info: TrackInfo) {
         if let Some(idx) = self.slot_index {
             let slot = store::slot(idx);
-            if let Some(name) = &info.name {
-                if let Ok(mut guard) = slot.metadata.track_name.lock() {
-                    *guard = name.clone();
-                }
+            if let Some(name) = &info.name
+                && let Ok(mut guard) = slot.metadata.track_name.lock()
+            {
+                *guard = name.clone();
             }
             if let Some((r, g, b, _a)) = info.color {
                 let argb = 0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
@@ -431,38 +432,41 @@ impl Plugin for PopeScope {
 
         // Push audio to ring buffers. If try_write fails (GUI reading),
         // buffer the samples and push them on the next successful lock.
-        if let Ok(mut guard) = slot.buffers.try_write() {
-            if let Some(bufs) = guard.as_mut() {
-                let num_channels = buffer.channels();
-                // Flush any previously buffered samples first
-                let mut pending_samples = 0u64;
-                for (ch, pending) in self.pending_push.iter_mut().enumerate() {
-                    if !pending.is_empty() && ch < bufs.len() {
-                        if ch == 0 {
-                            pending_samples = pending.len() as u64;
+        match slot.buffers.try_write() {
+            Ok(mut guard) => {
+                if let Some(bufs) = guard.as_mut() {
+                    let num_channels = buffer.channels();
+                    // Flush any previously buffered samples first
+                    let mut pending_samples = 0u64;
+                    for (ch, pending) in self.pending_push.iter_mut().enumerate() {
+                        if !pending.is_empty() && ch < bufs.len() {
+                            if ch == 0 {
+                                pending_samples = pending.len() as u64;
+                            }
+                            bufs[ch].push(pending);
+                            pending.clear();
                         }
-                        bufs[ch].push(pending);
-                        pending.clear();
+                    }
+                    self.cached_ring_buf_pos += pending_samples;
+                    // Push current buffer
+                    for (ch, channel_samples) in buffer.as_slice().iter().enumerate() {
+                        if ch < bufs.len() && ch < num_channels {
+                            bufs[ch].push(channel_samples);
+                        }
                     }
                 }
-                self.cached_ring_buf_pos += pending_samples;
-                // Push current buffer
+                self.cached_ring_buf_pos += buffer.samples() as u64;
+            }
+            _ => {
+                // Buffer the samples for next successful push
+                let num_channels = buffer.channels();
+                while self.pending_push.len() < num_channels {
+                    self.pending_push.push(Vec::with_capacity(4096));
+                }
                 for (ch, channel_samples) in buffer.as_slice().iter().enumerate() {
-                    if ch < bufs.len() && ch < num_channels {
-                        bufs[ch].push(channel_samples);
+                    if ch < num_channels {
+                        self.pending_push[ch].extend_from_slice(channel_samples);
                     }
-                }
-            }
-            self.cached_ring_buf_pos += buffer.samples() as u64;
-        } else {
-            // Buffer the samples for next successful push
-            let num_channels = buffer.channels();
-            while self.pending_push.len() < num_channels {
-                self.pending_push.push(Vec::with_capacity(4096));
-            }
-            for (ch, channel_samples) in buffer.as_slice().iter().enumerate() {
-                if ch < num_channels {
-                    self.pending_push[ch].extend_from_slice(channel_samples);
                 }
             }
         }

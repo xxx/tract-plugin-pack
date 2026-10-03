@@ -1,7 +1,7 @@
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use multosis::effects::{default_params_for_kind, EffectKind, TrackEffect};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use multosis::effects::{EffectKind, TrackEffect, default_params_for_kind};
 use multosis::engine::AudioEngine;
 use multosis::grid::Grid;
 use multosis::modulation::TrackModulation;

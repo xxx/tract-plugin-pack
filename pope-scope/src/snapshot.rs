@@ -344,11 +344,7 @@ impl WaveSnapshot {
         } else {
             let lo = ch0.get(i * 2).copied().unwrap_or(0.0);
             let hi = ch0.get(i * 2 + 1).copied().unwrap_or(0.0);
-            if lo.abs() > hi.abs() {
-                lo
-            } else {
-                hi
-            }
+            if lo.abs() > hi.abs() { lo } else { hi }
         }
     }
 
@@ -1089,7 +1085,7 @@ mod tests {
         // Two pairs: (min=-0.2, max=0.7) and (min=-0.9, max=0.1)
         snap.audio_data = vec![vec![-0.2, 0.7, -0.9, 0.1]];
         snap.data_points = 2; // number of pairs
-                              // First pair: |max| > |min|, so should return max (0.7)
+        // First pair: |max| > |min|, so should return max (0.7)
         assert!((snap.sample_at_normalized_x(0.0, false) - 0.7).abs() < 1e-6);
         // Second pair: |min| > |max|, so should return min (-0.9)
         assert!((snap.sample_at_normalized_x(0.75, false) + 0.9).abs() < 1e-6);

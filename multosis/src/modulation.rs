@@ -5,12 +5,12 @@
 //! See `docs/superpowers/specs/2026-05-19-multosis-phase-2b-design.md`.
 
 use crate::effects::{
-    default_params_for_kind, norm_to_value, param_count, value_to_norm, Effect, EffectInstance,
-    EffectKind, ParamScaling, ParamSpec, TrackEffect,
+    Effect, EffectInstance, EffectKind, ParamScaling, ParamSpec, TrackEffect,
+    default_params_for_kind, norm_to_value, param_count, value_to_norm,
 };
 use crate::grid::ROWS;
 use tiny_skia_widgets::{
-    advance, value_at_phase, MsegData, MsegNode, PlayMode, Polarity, SyncMode,
+    MsegData, MsegNode, PlayMode, Polarity, SyncMode, advance, value_at_phase,
 };
 
 /// Default threshold for a fresh `TriggerSource::Transient` (≈ +3.5 dB on the
@@ -262,10 +262,10 @@ impl TrackModulation {
     /// never reference a parameter the new effect does not have.
     pub fn clamp_targets(&mut self, param_count: usize) {
         for target in &mut self.targets {
-            if let Some(i) = *target {
-                if i >= param_count {
-                    *target = None;
-                }
+            if let Some(i) = *target
+                && i >= param_count
+            {
+                *target = None;
             }
         }
     }
@@ -770,9 +770,11 @@ mod tests {
         assert!(a.depths[0] != 0.0);
         assert_eq!(a.depths[1], 0.0);
         assert!(a.msegs[1].beats != b.msegs[1].beats);
-        assert!(a.msegs[0].nodes[..a.msegs[0].node_count]
-            .iter()
-            .all(|n| (n.value - 1.0).abs() < 1e-6));
+        assert!(
+            a.msegs[0].nodes[..a.msegs[0].node_count]
+                .iter()
+                .all(|n| (n.value - 1.0).abs() < 1e-6)
+        );
     }
 
     #[test]

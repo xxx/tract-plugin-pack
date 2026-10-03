@@ -3,8 +3,8 @@
 //! the (larger) copies with a generation counter so the audio thread copies
 //! only when the data actually changed.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ir::IrSpectra;
 use crate::sequence::VelvetSequence;
@@ -182,8 +182,8 @@ mod tests {
         h.publish(&mk_ir(2, 1.5), &mk_ir(3, 2.5));
         let mut ll = IrSpectra::new(SR);
         let mut lr = IrSpectra::new(SR);
-        let mut gen = 0u64;
-        assert!(h.try_read_into(&mut ll, &mut lr, &mut gen));
+        let mut generation = 0u64;
+        assert!(h.try_read_into(&mut ll, &mut lr, &mut generation));
         assert_eq!(ll.k, 2);
         assert_eq!(lr.k, 3);
         assert!((ll.spectra[0].re - 1.5).abs() < 1e-6);
@@ -196,9 +196,9 @@ mod tests {
         h.publish(&mk_ir(1, 0.1), &mk_ir(1, 0.2));
         let mut ll = IrSpectra::new(SR);
         let mut lr = IrSpectra::new(SR);
-        let mut gen = 0u64;
-        assert!(h.try_read_into(&mut ll, &mut lr, &mut gen)); // first: copies
-        assert!(!h.try_read_into(&mut ll, &mut lr, &mut gen)); // second: unchanged
+        let mut generation = 0u64;
+        assert!(h.try_read_into(&mut ll, &mut lr, &mut generation)); // first: copies
+        assert!(!h.try_read_into(&mut ll, &mut lr, &mut generation)); // second: unchanged
     }
 
     #[test]
@@ -208,8 +208,8 @@ mod tests {
         h.publish(&mk_ir(4, 7.7), &mk_ir(5, 8.8));
         let mut ll = IrSpectra::new(SR);
         let mut lr = IrSpectra::new(SR);
-        let mut gen = 0u64;
-        h.try_read_into(&mut ll, &mut lr, &mut gen);
+        let mut generation = 0u64;
+        h.try_read_into(&mut ll, &mut lr, &mut generation);
         assert_eq!(ll.k, 4);
         assert_eq!(lr.k, 5);
         assert!((ll.spectra[0].re - 7.7).abs() < 1e-6);
@@ -231,8 +231,8 @@ mod tests {
         h.publish(&big, &big); // must not panic
         let mut ll = IrSpectra::new(192_000.0);
         let mut lr = IrSpectra::new(192_000.0);
-        let mut gen = 0u64;
-        assert!(h.try_read_into(&mut ll, &mut lr, &mut gen));
+        let mut generation = 0u64;
+        assert!(h.try_read_into(&mut ll, &mut lr, &mut generation));
         assert_eq!(ll.k, max_k);
         assert!((ll.spectra[(max_k - 1) * BINS].re - 3.14).abs() < 1e-6);
     }

@@ -308,11 +308,7 @@ impl VocoderEffect {
                 if self.carrier_phase >= 1.0 {
                     self.carrier_phase -= self.carrier_phase.floor();
                 }
-                if self.carrier_phase < 0.5 {
-                    1.0
-                } else {
-                    -1.0
-                }
+                if self.carrier_phase < 0.5 { 1.0 } else { -1.0 }
             }
             Self::CARRIER_NOISE => {
                 // White noise in `[-1, +1)` via top-24-bit

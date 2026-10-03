@@ -1,8 +1,8 @@
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use nap::engine::ReverbChannel;
 use nap::sequence::{
-    default_decay_curve, default_tone_curve, default_width_curve, generate, GenParams,
-    VelvetSequence,
+    GenParams, VelvetSequence, default_decay_curve, default_tone_curve, default_width_curve,
+    generate,
 };
 
 /// One 512-sample block of audio at 48 kHz is the real-time budget yardstick:

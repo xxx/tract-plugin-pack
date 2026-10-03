@@ -1,6 +1,6 @@
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use warp_zone::spectral::SpectralShifter;
 
 fn bench_spectral_shifter(c: &mut Criterion) {

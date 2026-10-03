@@ -15,8 +15,8 @@
 //! This is the shared engine behind `imagine`'s vectorscope and polar-ray
 //! rings; capacity and payload semantics are fixed by the calling wrapper.
 
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 struct Inner {
     a: Vec<AtomicU32>,
