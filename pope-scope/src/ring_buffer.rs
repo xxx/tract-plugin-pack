@@ -8,7 +8,7 @@
 //! - `read_most_recent_l1/l2()` takes `&self` (shared access, behind RwLock read guard)
 //! - The RwLock on the store provides memory synchronization between writer and readers.
 
-use std::simd::{f32x16, num::SimdFloat};
+use fearless_simd::{Level, dispatch, f32x16, prelude::*};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Level 1 mipmap: min/max per 64-sample block.
@@ -26,21 +26,23 @@ pub struct MinMax {
 
 /// Compute min/max of a slice using SIMD (f32x16).
 fn minmax_slice(s: &[f32]) -> MinMax {
-    let mut vmin = f32x16::splat(f32::MAX);
-    let mut vmax = f32x16::splat(f32::MIN);
-    let (chunks, remainder) = s.as_chunks::<16>();
-    for chunk in chunks {
-        let v = f32x16::from_array(*chunk);
-        vmin = vmin.simd_min(v);
-        vmax = vmax.simd_max(v);
-    }
-    let mut min = vmin.reduce_min();
-    let mut max = vmax.reduce_max();
-    for &x in remainder {
-        min = min.min(x);
-        max = max.max(x);
-    }
-    MinMax { min, max }
+    dispatch!(Level::new(), simd => {
+        let mut vmin = f32x16::splat(simd, f32::MAX);
+        let mut vmax = f32x16::splat(simd, f32::MIN);
+        let (chunks, remainder) = s.as_chunks::<16>();
+        for chunk in chunks {
+            let v = f32x16::from_slice(simd, chunk);
+            vmin = vmin.min_precise(v);
+            vmax = vmax.max_precise(v);
+        }
+        let mut min = vmin.reduce_min_precise();
+        let mut max = vmax.reduce_max_precise();
+        for &x in remainder {
+            min = min.min(x);
+            max = max.max(x);
+        }
+        MinMax { min, max }
+    })
 }
 
 /// A fixed-size circular buffer for audio samples.
@@ -296,6 +298,18 @@ impl RingBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn minmax_ignores_nan_lanes_without_losing_extrema() {
+        let mut samples = [0.0; 49];
+        samples[0] = -0.75;
+        samples[1] = 0.875;
+        samples[16] = f32::NAN;
+        samples[33] = f32::NAN;
+        samples[48] = f32::NAN;
+        let result = minmax_slice(&samples);
+        assert_eq!((result.min, result.max), (-0.75, 0.875));
+    }
 
     #[test]
     fn test_new_buffer_is_zeroed() {

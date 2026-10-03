@@ -36,7 +36,7 @@ Benchmarks (Bitwig, 48 kHz / 1024 samples, GUI closed):
 
 ## Installation
 
-Build from source (requires nightly Rust):
+Build from source (requires stable Rust):
 
 ```bash
 cargo nih-plug bundle gs-meter --release
@@ -161,7 +161,7 @@ Clears all accumulated values in both modes: peak, true peak, RMS, crest, and al
 - **EBU R128 / ITU-R BS.1770-4** -- K-weighting filter (4th-order IIR), gated integration, loudness range with cached O(n log n) percentile computation
 - **Pre-allocated buffers** -- RMS rings, LUFS momentary/short-term windows, and LRA scratch buffer are all pre-allocated at construction
 - **CPU rendering** -- uses tiny-skia (software rasterizer) + fontdue (glyph cache) + softbuffer (pixel buffer). No OpenGL context, no GPU drivers loaded
-- **SIMD** -- uses Rust's portable SIMD (`std::simd::f32x16`) for peak detection, sum-of-squares, and true peak FIR convolution
+- **SIMD** -- uses Rust's portable SIMD (`fearless_simd::f32x16`) for peak detection, sum-of-squares, and true peak FIR convolution
 - **Embedded font** -- DejaVu Sans, compiled into the binary. No runtime font loading
 
 ## Formats

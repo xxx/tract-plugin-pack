@@ -18,7 +18,7 @@ Inspired by BlueCat's Gain Suite grouping feature.
 
 ## Installation
 
-Build from source (requires nightly Rust):
+Build from source (requires stable Rust):
 
 ```bash
 cargo nih-plug bundle gain-brain --release

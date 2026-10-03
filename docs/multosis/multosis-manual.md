@@ -18,7 +18,7 @@ Multosis is a **16-row grid step sequencer where each row hosts a per-row audio 
 
 ## Installation
 
-Build from source (requires nightly Rust):
+Build from source (requires stable Rust):
 
 ```bash
 cargo nih-plug bundle multosis --release

@@ -7,7 +7,7 @@
 //!
 //! Extracted verbatim from the copy that previously lived in both
 //! `gs-meter/src/meter.rs` and `tinylimit/src/true_peak.rs`.
-use std::simd::{f32x16, num::SimdFloat};
+use fearless_simd::{Level, dispatch, f32x16, prelude::*};
 
 // ── True Peak: 4x oversampling per ITU-R BS.1770-4, Annex 2 ─────────────
 //
@@ -57,11 +57,11 @@ const ITU_COEFFS_PADDED: [[f32; 16]; TRUE_PEAK_PHASES] = {
 
 /// SIMD dot product of 12 contiguous samples against 16-element padded coefficients.
 #[inline(always)]
-fn dot12_simd(history: &[f32], coeffs: &[f32; 16]) -> f32 {
+fn dot12_simd<S: Simd>(simd: S, history: &[f32], coeffs: &[f32; 16]) -> f32 {
     let mut h = [0.0_f32; 16];
     h[..12].copy_from_slice(&history[..12]);
-    let hv = f32x16::from_array(h);
-    let cv = f32x16::from_array(*coeffs);
+    let hv = f32x16::from_slice(simd, &h);
+    let cv = f32x16::from_slice(simd, coeffs);
     (hv * cv).reduce_sum()
 }
 
@@ -88,6 +88,7 @@ pub struct TruePeakDetector {
     true_peak_max: f32,
     /// Oversampling mode (depends on input sample rate).
     mode: TruePeakMode,
+    simd_level: Level,
 }
 
 impl Default for TruePeakDetector {
@@ -103,6 +104,7 @@ impl TruePeakDetector {
             pos: 0,
             true_peak_max: 0.0,
             mode: TruePeakMode::Oversample4x,
+            simd_level: Level::new(),
         }
     }
 
@@ -163,14 +165,16 @@ impl TruePeakDetector {
             TruePeakMode::Bypass => unreachable!(),
         };
 
-        for &p in phases {
-            // Use reversed phase: oldest-first slice × reversed coefficients
-            let rev_p = TRUE_PEAK_PHASES - 1 - p;
-            let abs = dot12_simd(hist, &ITU_COEFFS_PADDED[rev_p]).abs();
-            if abs > self.true_peak_max {
-                self.true_peak_max = abs;
+        dispatch!(self.simd_level, simd => {
+            for &p in phases {
+                // Use reversed phase: oldest-first slice × reversed coefficients
+                let rev_p = TRUE_PEAK_PHASES - 1 - p;
+                let abs = dot12_simd(simd, hist, &ITU_COEFFS_PADDED[rev_p]).abs();
+                if abs > self.true_peak_max {
+                    self.true_peak_max = abs;
+                }
             }
-        }
+        });
     }
 
     /// Process one sample and return the instantaneous true peak (linear, absolute).
@@ -204,14 +208,17 @@ impl TruePeakDetector {
             TruePeakMode::Bypass => unreachable!(),
         };
 
-        let mut peak = 0.0_f32;
-        for &p in phases {
-            let rev_p = TRUE_PEAK_PHASES - 1 - p;
-            let abs = dot12_simd(hist, &ITU_COEFFS_PADDED[rev_p]).abs();
-            if abs > peak {
-                peak = abs;
+        let peak = dispatch!(self.simd_level, simd => {
+            let mut peak = 0.0_f32;
+            for &p in phases {
+                let rev_p = TRUE_PEAK_PHASES - 1 - p;
+                let abs = dot12_simd(simd, hist, &ITU_COEFFS_PADDED[rev_p]).abs();
+                if abs > peak {
+                    peak = abs;
+                }
             }
-        }
+            peak
+        });
         if peak > self.true_peak_max {
             self.true_peak_max = peak;
         }
@@ -233,7 +240,7 @@ mod tests {
             0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8, 0.9, -1.0, 0.5, -0.3,
         ];
         for phase in 0..4 {
-            let simd_result = dot12_simd(&history, &ITU_COEFFS_PADDED[phase]);
+            let simd_result = dispatch!(Level::new(), simd => dot12_simd(simd, &history, &ITU_COEFFS_PADDED[phase]));
             let scalar_result: f32 = history
                 .iter()
                 .zip(ITU_COEFFS[phase].iter())

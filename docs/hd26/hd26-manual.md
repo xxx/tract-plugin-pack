@@ -21,7 +21,7 @@ Both sections have their own **Mix** control and can be used alone or together. 
 
 ## Installation
 
-Build from source (requires nightly Rust):
+Build from source (requires stable Rust):
 
 ```bash
 cargo nih-plug bundle hd26 --release

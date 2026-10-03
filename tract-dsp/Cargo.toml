@@ -6,7 +6,6 @@ description = "Shared GUI-free DSP primitives for the tract-plugin-pack workspac
 license = "GPL-3.0-or-later"
 
 # No [lib] section: default rlib. No cdylib, no bin — this is a library only.
-# No [dependencies]: pure std + std::simd (nightly, pinned by rust-toolchain.toml).
 
 # The profiling harness drives the StftAnalyzer hot path, so it needs the
 # `stft-analysis` feature; declared here so a featureless build skips it.
@@ -24,6 +23,7 @@ spectral-engine = ["stft-analysis"]
 partitioned-conv = ["dep:realfft", "dep:rustfft"]
 
 [dependencies]
+fearless_simd.workspace = true
 realfft = { version = "3.3", optional = true }
 rustfft = { version = "6.2", optional = true }
 
@@ -35,7 +35,7 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 rustfft = "6.2"
 
 # Per-sample DSP micro-benchmarks (criterion). Default features cover the
-# dependency-free primitives; pass `--features stft,spectral-engine` to add the
+# non-FFT primitives; pass `--features stft,spectral-engine` to add the
 # FFT-backed groups. See benches/dsp.rs for the run command.
 [[bench]]
 name = "dsp"

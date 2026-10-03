@@ -3,14 +3,12 @@
 //!
 //! This crate contains pure signal-processing code only. It has no
 //! `nih-plug`, `tiny-skia`, `softbuffer`, or editor dependency. By default it
-//! pulls no external crates at all — just `std` and `std::simd`. The optional
+//! uses `fearless_simd` for stable-compatible SIMD. The optional
 //! `stft` feature adds `realfft`/`rustfft` and enables the `stft` module; the
 //! optional `stft-analysis` feature adds `rustfft` and enables the
 //! `stft_analysis` module.
 //!
-//! Requires nightly Rust for `std::simd`; the workspace already pins nightly
-//! via `rust-toolchain.toml`.
-#![feature(portable_simd)]
+//! Builds on stable Rust, selected by `rust-toolchain.toml`.
 
 pub mod boxcar;
 pub mod db;

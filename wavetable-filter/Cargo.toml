@@ -11,7 +11,8 @@ name = "wavetable-filter"
 path = "src/main.rs"
 
 [dependencies]
-nih_plug = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr", features = ["simd", "standalone", "assert_process_allocs"] }
+fearless_simd.workspace = true
+nih_plug = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr", features = ["standalone", "assert_process_allocs"] }
 baseview = { git = "https://github.com/RustAudio/baseview.git", tag = "v0.1.1", features = ["opengl"] }
 softbuffer = { version = "0.4", default-features = false, features = ["kms", "x11"] }
 raw-window-handle = "0.5"

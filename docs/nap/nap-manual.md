@@ -22,7 +22,7 @@ Inspired by the Aalto Acoustics Lab papers on EDVN (Fagerström et al., JAES 202
 
 ## Installation
 
-Build from source (requires nightly Rust):
+Build from source (requires stable Rust):
 
 ```bash
 cargo nih-plug bundle nap --release

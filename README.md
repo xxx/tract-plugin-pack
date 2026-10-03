@@ -166,7 +166,7 @@ A wavetable-based audio filter that uses wavetable frames as FIR filter kernels.
 
 ## Build Requirements
 
-- Rust 2024 edition with the nightly toolchain (automatically configured via `rust-toolchain.toml`)
+- Rust 2024 edition with the stable toolchain (automatically configured via `rust-toolchain.toml`)
 - Linux system dependencies (see below)
 
 ```bash

@@ -1,9 +1,7 @@
-#![feature(portable_simd)]
-
+use fearless_simd::{Level, dispatch, f32x16, prelude::*};
 use nih_plug::prelude::*;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use rustfft::num_complex::Complex;
-use std::simd::f32x16;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tract_dsp::fir::FirRing;
@@ -28,6 +26,22 @@ pub(crate) struct PendingReload {
     pub(crate) frame_buf: Vec<f32>,
     pub(crate) frame_spectrum: Vec<Complex<f32>>,
     pub(crate) frame_mags: Vec<f32>,
+}
+
+fn blend_kernel(current: &mut [f32], target: &[f32], alpha: f32) {
+    debug_assert_eq!(current.len(), target.len());
+    debug_assert_eq!(current.len() % 16, 0);
+    dispatch!(Level::new(), simd => {
+        let a_vec = f32x16::splat(simd, alpha);
+        let one_minus_a = f32x16::splat(simd, 1.0 - alpha);
+        let (current, _) = current.as_chunks_mut::<16>();
+        let (target, _) = target.as_chunks::<16>();
+        for (s, t) in current.iter_mut().zip(target) {
+            let blended = f32x16::from_slice(simd, s) * one_minus_a
+                + f32x16::from_slice(simd, t) * a_vec;
+            blended.store_slice(s);
+        }
+    });
 }
 
 pub struct WavetableFilter {
@@ -896,15 +910,11 @@ impl Plugin for WavetableFilter {
                 if filter_mode == FilterMode::Raw {
                     // Bake any in-progress crossfade before installing the new target.
                     if self.crossfade_active {
-                        let a_vec = f32x16::splat(self.crossfade_alpha);
-                        let one_minus_a = f32x16::splat(1.0 - self.crossfade_alpha);
-                        for chunk in 0..KERNEL_LEN / 16 {
-                            let k = chunk * 16;
-                            let s = f32x16::from_slice(&self.synthesized_kernel[k..k + 16]);
-                            let t = f32x16::from_slice(&self.crossfade_target_kernel[k..k + 16]);
-                            let blended = s * one_minus_a + t * a_vec;
-                            self.synthesized_kernel[k..k + 16].copy_from_slice(&blended.to_array());
-                        }
+                        blend_kernel(
+                            &mut self.synthesized_kernel,
+                            &self.crossfade_target_kernel,
+                            self.crossfade_alpha,
+                        );
                         self.crossfade_active = false;
                         self.crossfade_alpha = 0.0;
                     }
@@ -1108,6 +1118,20 @@ nih_export_vst3!(WavetableFilter);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kernel_blend_matches_scalar_at_crossfade_endpoints_and_between() {
+        let original: Vec<f32> = (0..KERNEL_LEN).map(|i| (i as f32 * 0.17).sin()).collect();
+        let target: Vec<f32> = (0..KERNEL_LEN).map(|i| (i as f32 * 0.13).cos()).collect();
+        for alpha in [0.0, 0.125, 0.5, 1.0] {
+            let mut current = original.clone();
+            blend_kernel(&mut current, &target, alpha);
+            for ((actual, from), to) in current.iter().zip(&original).zip(&target) {
+                let expected = from * (1.0 - alpha) + to * alpha;
+                assert!((actual - expected).abs() < 1e-7);
+            }
+        }
+    }
 
     // ── Convolution helper ─────────────────────────────────────────────────
 
@@ -2443,15 +2467,11 @@ mod tests {
             ) {
                 // Step 4: crossfade bake (if a crossfade was active, bake it first)
                 if plugin.crossfade_active {
-                    let a_vec = f32x16::splat(plugin.crossfade_alpha);
-                    let one_minus_a = f32x16::splat(1.0 - plugin.crossfade_alpha);
-                    for chunk in 0..KERNEL_LEN / 16 {
-                        let k = chunk * 16;
-                        let s = f32x16::from_slice(&plugin.synthesized_kernel[k..k + 16]);
-                        let t = f32x16::from_slice(&plugin.crossfade_target_kernel[k..k + 16]);
-                        let blended = s * one_minus_a + t * a_vec;
-                        plugin.synthesized_kernel[k..k + 16].copy_from_slice(&blended.to_array());
-                    }
+                    blend_kernel(
+                        &mut plugin.synthesized_kernel,
+                        &plugin.crossfade_target_kernel,
+                        plugin.crossfade_alpha,
+                    );
                     plugin.crossfade_active = false;
                     plugin.crossfade_alpha = 0.0;
                 }

@@ -18,7 +18,7 @@ A scrolling spectral waterfall display shows the output spectrum in real time wi
 
 ## Installation
 
-Build from source (requires nightly Rust):
+Build from source (requires stable Rust):
 
 ```bash
 cargo nih-plug bundle warp-zone --release

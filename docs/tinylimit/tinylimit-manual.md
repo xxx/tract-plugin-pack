@@ -18,7 +18,7 @@ Inspired by DMG Audio's TrackLimit.
 
 ## Installation
 
-Build from source (requires nightly Rust):
+Build from source (requires stable Rust):
 
 ```bash
 cargo nih-plug bundle tinylimit --release
@@ -173,7 +173,7 @@ The window is freely resizable -- drag the plugin window's edge or corner in you
 - **CPU rendering** -- uses tiny-skia (software rasterizer) + fontdue (glyph cache) + softbuffer (pixel buffer). No OpenGL context, no GPU drivers loaded
 - **Optimized DSP** -- hard knee fast path skips log/exp for sub-threshold samples; exp() instead of powf() for gain application; threshold/ceiling lerped per block instead of per-sample powf
 - **Zero-copy delay line** -- ring buffer with read-before-write for correct latency alignment
-- **True peak via SIMD** -- ITU-R BS.1770-4 polyphase FIR with portable SIMD (`std::simd::f32x16`)
+- **True peak via SIMD** -- ITU-R BS.1770-4 polyphase FIR with portable SIMD (`fearless_simd::f32x16`)
 - **Gain computer** -- Giannoulis et al. (2012) formulation with ratio = infinity (brickwall)
 
 Benchmarks (Bitwig, 48 kHz / 1024 samples, GUI closed):

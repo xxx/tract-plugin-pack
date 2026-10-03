@@ -9,8 +9,6 @@
 //! Solo bypasses the Recover Sides injection and uses the un-delayed band's
 //! M_out, S_out directly so the user hears the band's own contribution.
 
-#![feature(portable_simd)]
-
 use nih_plug::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
