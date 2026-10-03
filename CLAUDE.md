@@ -28,7 +28,7 @@ Each plugin is a crate (`<plugin>/`). Plus: `tiny-skia-widgets/` (shared CPU-ren
 
 ## Build / Test / Lint
 
-Requires **nightly Rust** (enforced by `rust-toolchain.toml`) for portable SIMD (`std::simd::f32x16`).
+Uses **stable Rust** (selected by `rust-toolchain.toml`) with `fearless_simd::f32x16` for portable SIMD.
 
 Workspace packages inherit the Rust 2024 edition from `[workspace.package]`; the workspace uses Cargo resolver 3.
 
@@ -95,7 +95,7 @@ Common shape per plugin: `lib.rs` (plugin struct, params, `process()`), `editor.
 
 **tiny-skia-widgets** (shared) — `primitives.rs` (color palette, `draw_rect` opaque fast-path, `fill_pixmap_opaque`, `fill_column_opaque`); `text.rs` (fontdue glyph cache); `controls.rs` (button/slider/stepped-selector); `param_dial.rs` (rotary dial); `editor_base.rs` (EditorState size persistence, SurfaceState); `drag.rs` (DragState hit regions, `mouse_in_window`); `text_edit.rs` (`TextEditState<A>` right-click-to-type machine).
 
-**tract-dsp** (shared, GUI-free DSP) — `true_peak.rs` (ITU-R BS.1770-4 detector, used by gs-meter/tinylimit); `spsc.rs` (lock-free SPSC ring); `db.rs`; `window.rs` (`hann_periodic` D=N / `hann_symmetric` D=N−1); `boxcar.rs` (`RunningSumWindow`, f64 accumulator); `fir.rs` (`FirRing` — double-buffered SIMD MAC, used by miff/wavetable-filter); `hilbert.rs` (`HilbertFir` — Type-IV anti-symmetric linear-phase 90° rotator; `AnalyticSignal` — delay-matched `(real, imag)` pair; used by imagine and multosis FM); `stft.rs` (`StftConvolver` — magnitude-multiply overlap-add; `stft` feature); `stft_analysis.rs` (`StftAnalyzer` — STFT analysis front-end: input ring + periodic-Hann + COLA window + forward FFT; `stft-analysis` feature; used by satch/warp-zone); `spectral_engine.rs` (`SpectralEngine` — per-channel STFT analysis/synthesis with all four FFT sizes (512/1024/2048/4096) pre-allocated; FFT-size switching is audio-thread-safe; effects implement `SpectralTransform` and pass an instance to `process_sample`; `spectral-engine` feature; used by multosis's 14-effect Spectral family); `partitioned_conv.rs` (`PartitionedConvolver` — uniformly-partitioned overlap-save (UPOLS) real convolver; P=512 partition/latency size, N=1024 FFT; owns input/output FIFOs so it accepts arbitrary-length blocks; `set_ir` installs pre-baked partition spectra (audio thread never transforms the IR); `partitioned-conv` feature; used by nap's Efficient engine). Zero external deps by default; the FFT modules are feature-gated. `examples/tract_dsp_profile.rs` is the profiling harness.
+**tract-dsp** (shared, GUI-free DSP) — `true_peak.rs` (ITU-R BS.1770-4 detector, used by gs-meter/tinylimit); `spsc.rs` (lock-free SPSC ring); `db.rs`; `window.rs` (`hann_periodic` D=N / `hann_symmetric` D=N−1); `boxcar.rs` (`RunningSumWindow`, f64 accumulator); `fir.rs` (`FirRing` — double-buffered SIMD MAC, used by miff/wavetable-filter); `hilbert.rs` (`HilbertFir` — Type-IV anti-symmetric linear-phase 90° rotator; `AnalyticSignal` — delay-matched `(real, imag)` pair; used by imagine and multosis FM); `stft.rs` (`StftConvolver` — magnitude-multiply overlap-add; `stft` feature); `stft_analysis.rs` (`StftAnalyzer` — STFT analysis front-end: input ring + periodic-Hann + COLA window + forward FFT; `stft-analysis` feature; used by satch/warp-zone); `spectral_engine.rs` (`SpectralEngine` — per-channel STFT analysis/synthesis with all four FFT sizes (512/1024/2048/4096) pre-allocated; FFT-size switching is audio-thread-safe; effects implement `SpectralTransform` and pass an instance to `process_sample`; `spectral-engine` feature; used by multosis's 14-effect Spectral family); `partitioned_conv.rs` (`PartitionedConvolver` — uniformly-partitioned overlap-save (UPOLS) real convolver; P=512 partition/latency size, N=1024 FFT; owns input/output FIFOs so it accepts arbitrary-length blocks; `set_ir` installs pre-baked partition spectra (audio thread never transforms the IR); `partitioned-conv` feature; used by nap's Efficient engine). Only `fearless_simd` by default; the FFT modules are feature-gated. `examples/tract_dsp_profile.rs` is the profiling harness.
 
 ## Key Design Decisions
 
@@ -149,7 +149,7 @@ Common shape per plugin: `lib.rs` (plugin struct, params, `process()`), `editor.
 - `bake_taps` walks the curve with a forward-only segment cursor, reproducing `mseg::value_at_phase` exactly without its per-tap rescan — O(N + nodes) not O(N·nodes).
 
 **Dependencies**
-- nih-plug points to `xxx/nih-plug` branch `finish-vst3-pr` — fork adds `Editor::set_size()`, `update_track_info()` + `TrackInfo`, `BYPASS_BUFFER_COPY`, nightly SIMD compat, VST3 license fix.
+- nih-plug points to `xxx/nih-plug` branch `finish-vst3-pr` — fork adds `Editor::set_size()`, `update_track_info()` + `TrackInfo`, `BYPASS_BUFFER_COPY`, SIMD compat, VST3 license fix.
 - baseview pinned to tag `v0.1.1` across every crate (and the nih-plug fork) so the tree resolves a single baseview. v0.1.1 fixes an x11 modifier-mask bug (`KeyButMask::BUTTON1/2/4` mis-wired to ALT/NUM_LOCK/META) that broke the MSEG editor's Alt-held stepped-draw.
 
 ## Wavetable File Formats

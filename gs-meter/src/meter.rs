@@ -1,7 +1,7 @@
 //! Core metering DSP: peak tracking, RMS computation, crest factor, true peak.
 //! All levels are in linear amplitude; dB conversion happens at display time.
 
-use std::simd::{f32x16, num::SimdFloat};
+use fearless_simd::{Level, dispatch, f32x16, prelude::*};
 use tract_dsp::boxcar::RunningSumWindow;
 pub use tract_dsp::db::linear_to_db;
 use tract_dsp::true_peak::TruePeakDetector;
@@ -12,31 +12,33 @@ const MAX_WINDOW_SAMPLES: usize = 576_000;
 /// SIMD scan: find peak absolute value and sum-of-squares across a buffer.
 /// Returns (peak, sum_of_squares_f64).
 fn simd_peak_sumsq(samples: &[f32]) -> (f32, f64) {
-    let chunks = samples.len() / 16;
-    let mut peak_v = f32x16::splat(0.0);
-    let mut sumsq_accum = 0.0_f64;
+    dispatch!(Level::new(), simd => {
+        let chunks = samples.len() / 16;
+        let mut peak_v = f32x16::splat(simd, 0.0);
+        let mut sumsq_accum = 0.0_f64;
 
-    for i in 0..chunks {
-        let v = f32x16::from_slice(&samples[i * 16..]);
-        let abs_v = v.abs();
-        peak_v = peak_v.simd_max(abs_v);
-        // Accumulate sum-of-squares per chunk, promote to f64 per chunk
-        sumsq_accum += (v * v).reduce_sum() as f64;
-    }
-
-    let mut peak = peak_v.reduce_max();
-
-    // Scalar tail
-    let tail_start = chunks * 16;
-    for &s in &samples[tail_start..] {
-        let abs = s.abs();
-        if abs > peak {
-            peak = abs;
+        for i in 0..chunks {
+            let v = f32x16::from_slice(simd, &samples[i * 16..i * 16 + 16]);
+            let abs_v = v.abs();
+            peak_v = peak_v.max_precise(abs_v);
+            // Accumulate sum-of-squares per chunk, promote to f64 per chunk
+            sumsq_accum += (v * v).reduce_sum() as f64;
         }
-        sumsq_accum += (s as f64) * (s as f64);
-    }
 
-    (peak, sumsq_accum)
+        let mut peak = peak_v.reduce_max_precise();
+
+        // Scalar tail
+        let tail_start = chunks * 16;
+        for &s in &samples[tail_start..] {
+            let abs = s.abs();
+            if abs > peak {
+                peak = abs;
+            }
+            sumsq_accum += (s as f64) * (s as f64);
+        }
+
+        (peak, sumsq_accum)
+    })
 }
 
 /// Per-channel metering state.
@@ -878,6 +880,16 @@ mod tests {
             sumsq,
             expected_sumsq
         );
+    }
+
+    #[test]
+    fn peak_survives_nan_in_the_same_simd_lane() {
+        let mut samples = [0.0; 33];
+        samples[0] = -0.875;
+        samples[16] = f32::NAN;
+        let (peak, sumsq) = simd_peak_sumsq(&samples);
+        assert_eq!(peak, 0.875);
+        assert!(sumsq.is_nan());
     }
 
     #[test]

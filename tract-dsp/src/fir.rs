@@ -1,6 +1,6 @@
 //! Time-domain FIR convolution: a double-buffered history ring + SIMD MAC.
 
-use std::simd::{f32x16, num::SimdFloat};
+use fearless_simd::{Level, dispatch, f32x16, prelude::*};
 
 /// A per-channel FIR convolution history: a double-buffered ring so the SIMD
 /// MAC always reads a contiguous window with no per-chunk wraparound.
@@ -19,6 +19,7 @@ pub struct FirRing {
     write_pos: usize,
     mask: usize,
     is_silent: bool,
+    simd_level: Level,
 }
 
 impl FirRing {
@@ -31,6 +32,7 @@ impl FirRing {
             write_pos: 0,
             mask: cap - 1,
             is_silent: true,
+            simd_level: Level::new(),
         }
     }
 
@@ -74,13 +76,15 @@ impl FirRing {
         let cap = self.mask + 1;
         let start = (self.write_pos + cap - len) & self.mask;
         let window = &self.history[start..start + len];
-        let mut acc = f32x16::splat(0.0);
-        for c in 0..len / 16 {
-            let w = f32x16::from_slice(&window[c * 16..c * 16 + 16]);
-            let k = f32x16::from_slice(&rev_taps[c * 16..c * 16 + 16]);
-            acc += w * k;
-        }
-        acc.reduce_sum()
+        dispatch!(self.simd_level, simd => {
+            let mut acc = f32x16::splat(simd, 0.0);
+            for c in 0..len / 16 {
+                let w = f32x16::from_slice(simd, &window[c * 16..c * 16 + 16]);
+                let k = f32x16::from_slice(simd, &rev_taps[c * 16..c * 16 + 16]);
+                acc += w * k;
+            }
+            acc.reduce_sum()
+        })
     }
 }
 
@@ -151,6 +155,25 @@ mod tests {
         for i in 0..1000 {
             ring.push(i as f32);
             assert!((ring.mac(&rev) - i as f32).abs() < 1e-6, "i={i}");
+        }
+    }
+
+    #[test]
+    fn multi_chunk_mac_matches_scalar_across_simd_levels_and_wraparound() {
+        let taps: Vec<f32> = (0..48).map(|i| (i as f32 * 0.17).sin() * 0.1).collect();
+        let reversed: Vec<f32> = taps.iter().rev().copied().collect();
+        for simd_level in [Level::baseline(), Level::new()] {
+            let mut ring = FirRing::new(taps.len());
+            ring.simd_level = simd_level;
+            let mut history = [0.0; 48];
+            for i in 0..200 {
+                let sample = (i as f32 * 0.13).cos();
+                history.rotate_right(1);
+                history[0] = sample;
+                ring.push(sample);
+                let expected: f32 = taps.iter().zip(history).map(|(tap, x)| tap * x).sum();
+                assert!((ring.mac(&reversed) - expected).abs() < 1e-6);
+            }
         }
     }
 }

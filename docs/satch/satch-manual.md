@@ -18,7 +18,7 @@ Inspired by Newfangled Audio's Saturate.
 
 ## Installation
 
-Build from source (requires nightly Rust):
+Build from source (requires stable Rust):
 
 ```bash
 cargo nih-plug bundle satch --release

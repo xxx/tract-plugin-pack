@@ -3,7 +3,7 @@
 //! `M = (L + R) / 2`, `S = (L - R) / 2`. The half-scaling makes the encode/decode
 //! pair lossless: `decode(encode(L, R)) == (L, R)` exactly.
 
-use std::simd::f32x16;
+use fearless_simd::{Level, dispatch, f32x16, prelude::*};
 
 #[inline]
 pub fn encode(l: f32, r: f32) -> (f32, f32) {
@@ -19,26 +19,28 @@ pub fn decode(m: f32, s: f32) -> (f32, f32) {
 
 /// SIMD block encode. All four slices must be the same length.
 pub fn encode_block(l: &[f32], r: &[f32], m_out: &mut [f32], s_out: &mut [f32]) {
-    assert_eq!(l.len(), r.len());
-    assert_eq!(l.len(), m_out.len());
-    assert_eq!(l.len(), s_out.len());
+    dispatch!(Level::new(), simd => {
+        assert_eq!(l.len(), r.len());
+        assert_eq!(l.len(), m_out.len());
+        assert_eq!(l.len(), s_out.len());
 
-    let chunks = l.len() / 16;
-    let half = f32x16::splat(0.5);
-    for c in 0..chunks {
-        let off = c * 16;
-        let lv = f32x16::from_slice(&l[off..off + 16]);
-        let rv = f32x16::from_slice(&r[off..off + 16]);
-        let mv = (lv + rv) * half;
-        let sv = (lv - rv) * half;
-        m_out[off..off + 16].copy_from_slice(mv.as_array());
-        s_out[off..off + 16].copy_from_slice(sv.as_array());
-    }
-    for i in (chunks * 16)..l.len() {
-        let (m, s) = encode(l[i], r[i]);
-        m_out[i] = m;
-        s_out[i] = s;
-    }
+        let chunks = l.len() / 16;
+        let half = f32x16::splat(simd, 0.5);
+        for c in 0..chunks {
+            let off = c * 16;
+            let lv = f32x16::from_slice(simd, &l[off..off + 16]);
+            let rv = f32x16::from_slice(simd, &r[off..off + 16]);
+            let mv = (lv + rv) * half;
+            let sv = (lv - rv) * half;
+            mv.store_slice(&mut m_out[off..off + 16]);
+            sv.store_slice(&mut s_out[off..off + 16]);
+        }
+        for i in (chunks * 16)..l.len() {
+            let (m, s) = encode(l[i], r[i]);
+            m_out[i] = m;
+            s_out[i] = s;
+        }
+    })
 }
 
 #[cfg(test)]

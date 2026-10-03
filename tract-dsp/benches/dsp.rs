@@ -6,7 +6,7 @@
 //! for regression tracking. Every primitive that runs on a per-sample audio
 //! hot path is covered here, because this crate has to be fast in all ways.
 //!
-//! The default-feature build benches only the dependency-free primitives
+//! The default-feature build benches only the non-FFT primitives
 //! (boxcar, db, fast_math, fir, hilbert, window, spsc, true_peak). The
 //! FFT-backed paths are feature-gated to match the library:
 //!
@@ -476,7 +476,7 @@ fn bench_stft(c: &mut Criterion) {
 // ──────────────────────────── orchestration ────────────────────────────────
 
 fn all(c: &mut Criterion) {
-    // Always-on, dependency-free primitives.
+    // Always-on, non-FFT primitives.
     bench_boxcar(c);
     bench_db(c);
     bench_fast_math(c);

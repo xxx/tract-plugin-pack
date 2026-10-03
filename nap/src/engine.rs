@@ -13,7 +13,7 @@
 //!   make it several times faster. The `block_matches_per_sample_reference`
 //!   test gates the equivalence.
 
-use std::simd::{StdFloat, f32x16};
+use fearless_simd::{Level, dispatch, f32x16, prelude::*};
 
 use crate::coloration::{Dictionary, OnePole, Q};
 use crate::sequence::VelvetSequence;
@@ -51,14 +51,19 @@ pub(crate) const SETTLE_SAMPLES: usize = 8192;
 /// release target (vs. the separate `vmulps`+`vaddps` a plain `d + c*s` emits).
 #[inline]
 fn fma_into(dst: &mut [f32], src: &[f32], c: f32) {
+    dispatch!(Level::new(), simd => fma_into_simd(simd, dst, src, c));
+}
+
+#[inline(always)]
+fn fma_into_simd<S: Simd>(simd: S, dst: &mut [f32], src: &[f32], c: f32) {
     debug_assert_eq!(dst.len(), src.len());
-    let cv = f32x16::splat(c);
+    let cv = f32x16::splat(simd, c);
     let lanes = dst.len() / 16 * 16;
     let mut i = 0;
     while i < lanes {
-        let s = f32x16::from_slice(&src[i..i + 16]);
-        let d = f32x16::from_slice(&dst[i..i + 16]);
-        cv.mul_add(s, d).copy_to_slice(&mut dst[i..i + 16]);
+        let s = f32x16::from_slice(simd, &src[i..i + 16]);
+        let d = f32x16::from_slice(simd, &dst[i..i + 16]);
+        cv.mul_add_precise(s, d).store_slice(&mut dst[i..i + 16]);
         i += 16;
     }
     for j in lanes..dst.len() {
@@ -271,6 +276,31 @@ impl ReverbChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fma_preserves_fused_rounding_across_simd_levels_and_tails() {
+        let c = 1.0 + f32::EPSILON;
+        let sample = 1.0 - f32::EPSILON;
+        let expected = c.mul_add(sample, -1.0);
+        assert_ne!(expected, c * sample - 1.0);
+
+        for len in [0, 1, 15, 16, 17, 31, 32, 33] {
+            let src = vec![sample; len];
+            let mut dst = vec![-1.0; len];
+            fma_into(&mut dst, &src, c);
+            assert!(
+                dst.iter()
+                    .all(|value| value.to_bits() == expected.to_bits())
+            );
+
+            dst.fill(-1.0);
+            dispatch!(Level::baseline(), simd => fma_into_simd(simd, &mut dst, &src, c));
+            assert!(
+                dst.iter()
+                    .all(|value| value.to_bits() == expected.to_bits())
+            );
+        }
+    }
 
     /// A sequence with `Q=1`-routed pulses and an identity-ish setup to check
     /// the sparse convolution math in isolation. We bypass the filters by

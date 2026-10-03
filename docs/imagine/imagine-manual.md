@@ -26,7 +26,7 @@ Inspired by iZotope Ozone Imager.
 
 ## Installation
 
-Build from source (requires nightly Rust):
+Build from source (requires stable Rust):
 
 ```bash
 cargo nih-plug bundle imagine --release

@@ -1,5 +1,3 @@
-#![feature(portable_simd)]
-
 use nih_plug::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};

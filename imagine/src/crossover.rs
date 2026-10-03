@@ -445,25 +445,27 @@ impl FirLowpass {
 /// pattern are identical.
 #[inline]
 fn dot_simd_f32x16(a: &[f32], b: &[f32]) -> f32 {
-    use std::simd::{f32x16, num::SimdFloat};
+    use fearless_simd::{Level, dispatch, f32x16, prelude::*};
 
-    debug_assert_eq!(a.len(), b.len());
-    let n = a.len();
-    let chunks = n / 16;
-    let mut acc = f32x16::splat(0.0);
-    let mut i = 0;
-    for _ in 0..chunks {
-        let av = f32x16::from_slice(&a[i..i + 16]);
-        let bv = f32x16::from_slice(&b[i..i + 16]);
-        acc += av * bv;
-        i += 16;
-    }
-    let mut tail = acc.reduce_sum();
-    while i < n {
-        tail += a[i] * b[i];
-        i += 1;
-    }
-    tail
+    dispatch!(Level::new(), simd => {
+        debug_assert_eq!(a.len(), b.len());
+        let n = a.len();
+        let chunks = n / 16;
+        let mut acc = f32x16::splat(simd, 0.0);
+        let mut i = 0;
+        for _ in 0..chunks {
+            let av = f32x16::from_slice(simd, &a[i..i + 16]);
+            let bv = f32x16::from_slice(simd, &b[i..i + 16]);
+            acc += av * bv;
+            i += 16;
+        }
+        let mut tail = acc.reduce_sum();
+        while i < n {
+            tail += a[i] * b[i];
+            i += 1;
+        }
+        tail
+    })
 }
 
 /// 4-band linear-phase FIR crossover. Bands are derived from a single LP per split:

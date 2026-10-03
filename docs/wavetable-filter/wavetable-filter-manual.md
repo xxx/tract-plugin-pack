@@ -128,12 +128,12 @@ Surge-compatible wavetable format with frame metadata embedded in the file heade
 
 - **Formats:** VST3, CLAP, Standalone
 - **OS:** Linux (other platforms may work but are untested)
-- **CPU:** x86_64 or Apple Silicon (SIMD via Rust's portable `std::simd`)
+- **CPU:** x86_64 or Apple Silicon (SIMD via `fearless_simd`)
 - **DAW:** Any VST3 or CLAP compatible host (tested with Bitwig Studio)
 
 # Building from Source
 
-Requires nightly Rust (for portable SIMD).
+Requires stable Rust.
 
 ```bash
 # Plugin bundles (VST3 + CLAP)
