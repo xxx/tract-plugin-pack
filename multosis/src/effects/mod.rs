@@ -2116,7 +2116,7 @@ mod tests {
 
     #[test]
     fn effect_kind_all_includes_fm() {
-        assert!(EffectKind::ALL.contains(&EffectKind::Fm));
+        assert!(EffectKind::ALL.iter().any(|&k| k == EffectKind::Fm));
         assert_eq!(EffectKind::Fm.name(), "FM");
         assert_eq!(param_count(EffectKind::Fm), 5);
         let defaults = default_params_for_kind(EffectKind::Fm);

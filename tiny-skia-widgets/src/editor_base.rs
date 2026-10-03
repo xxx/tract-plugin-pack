@@ -316,7 +316,7 @@ impl SoftbufferSurface {
         let mut buffer = self.sb_surface.buffer_mut().unwrap();
         let data = self.pixmap.data();
         // Convert tiny-skia premultiplied RGBA to softbuffer 0xFFRRGGBB
-        for (dst, src) in buffer.iter_mut().zip(data.as_chunks::<4>()) {
+        for (dst, src) in buffer.iter_mut().zip(data.chunks_exact(4)) {
             let r = src[0] as u32;
             let g = src[1] as u32;
             let b = src[2] as u32;

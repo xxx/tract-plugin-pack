@@ -734,7 +734,7 @@ mod tests {
         d.hold = HoldMode::Loop { start: 0, end: 1 }; // loop [0.0, 0.25]
                                                       // Held: crossing the loop end wraps back toward the loop start.
         let (p, _) = advance(&d, 0.2, 0.1, false);
-        assert!((0.0..0.25).contains(&p), "looped back into [0,0.25], got {p}");
+        assert!(p < 0.25 && p >= 0.0, "looped back into [0,0.25], got {p}");
         // Released: advances past the loop end toward the real end.
         let (p, _) = advance(&d, 0.2, 0.1, true);
         assert!((p - 0.3).abs() < 1e-6, "released advances freely, got {p}");

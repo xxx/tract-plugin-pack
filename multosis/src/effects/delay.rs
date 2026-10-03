@@ -343,7 +343,7 @@ mod tests {
         // 100 ms @ 48 kHz = 4 800 samples; with linear-interp reads
         // the peak lands within a sample of that.
         assert!(
-            (4_795..=4_805).contains(&echo_peak_idx),
+            echo_peak_idx >= 4_795 && echo_peak_idx <= 4_805,
             "echo peak should land near sample 4800, got {echo_peak_idx}"
         );
         assert!(

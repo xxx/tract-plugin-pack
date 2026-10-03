@@ -2475,8 +2475,8 @@ mod tests {
             std::hint::black_box(&plugin.crossfade_target_kernel);
             std::hint::black_box(&plugin.synthesized_kernel);
 
-            
-            t0.elapsed().as_nanos() as f64 / 1000.0
+            let elapsed_us = t0.elapsed().as_nanos() as f64 / 1000.0;
+            elapsed_us
         }
 
         // ── Warm up FFT plans ───────────────────────────────────────────
@@ -2522,7 +2522,7 @@ mod tests {
             );
         }
         eprintln!("  Per-iteration times (last 10):");
-        for i in (num_steps - 10)..num_steps {
+        for i in (num_steps - 10).max(0)..num_steps {
             let flag = if sweep_times[i] > threshold_us {
                 " *** EXCEEDED 1ms"
             } else {
