@@ -8,10 +8,10 @@
 use std::collections::VecDeque;
 use std::sync::PoisonError;
 
+use crate::MultosisParams;
 use crate::effects::TrackEffect;
 use crate::grid::{Grid, ROWS};
 use crate::modulation::TrackModulation;
-use crate::MultosisParams;
 
 /// Upper bound on the undo stack. Pushing past this drops the oldest entry.
 pub const UNDO_DEPTH: usize = 128;
@@ -53,11 +53,11 @@ impl<S: PartialEq> UndoHistory<S> {
     /// the captured pre-state, push the pre-state as an undo entry and clear
     /// the redo stack. Otherwise the pending capture is discarded.
     pub fn commit_capture(&mut self, after: &S) {
-        if let Some(before) = self.pending.take() {
-            if before != *after {
-                self.push_undo(before);
-                self.redo.clear();
-            }
+        if let Some(before) = self.pending.take()
+            && before != *after
+        {
+            self.push_undo(before);
+            self.redo.clear();
         }
     }
 

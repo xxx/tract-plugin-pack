@@ -12,8 +12,8 @@
 #![feature(portable_simd)]
 
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub mod bands;
 pub mod crossover;
@@ -29,7 +29,7 @@ use crate::bands::{Band, StereoizeMode};
 use crate::crossover::{CrossoverFir, CrossoverIir};
 use crate::polar_rays::{PolarRayConsumer, PolarRayProducer};
 use crate::spectrum::{Analyzer, SpectrumDisplay};
-use crate::vectorscope::{ring_pair, VectorConsumer, VectorProducer};
+use crate::vectorscope::{VectorConsumer, VectorProducer, ring_pair};
 use tract_dsp::hilbert::HilbertFir;
 
 // ── Constants ────────────────────────────────────────────────────────────────

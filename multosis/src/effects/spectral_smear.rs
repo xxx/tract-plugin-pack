@@ -10,7 +10,7 @@
 
 use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
 use rustfft::num_complex::Complex;
-use tract_dsp::spectral_engine::{SpectralEngine, SpectralTransform, FFT_SIZES};
+use tract_dsp::spectral_engine::{FFT_SIZES, SpectralEngine, SpectralTransform};
 
 /// Maximum half-spectrum entries we'll ever need to hold -- (4096 / 2) + 1.
 const MAX_HALF_PLUS_ONE: usize = 4096 / 2 + 1;
@@ -257,11 +257,7 @@ mod tests {
             })
             .collect();
         let out = drive(&mut e, burst_samples + tail_samples, |i| {
-            if i < burst_samples {
-                noise[i]
-            } else {
-                0.0
-            }
+            if i < burst_samples { noise[i] } else { 0.0 }
         });
         // Burst-region energy (input is ~ N * (1/12) for uniform [-0.5, 0.5]).
         let burst_e: f32 = out[..burst_samples].iter().map(|x| x * x).sum();

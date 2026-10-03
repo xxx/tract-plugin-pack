@@ -244,8 +244,8 @@ mod tests {
         e.set_sample_rate(48_000.0);
         e.set_param(0, -40.0);
         e.set_param(2, 50.0); // fast release
-                              // Initial state: gate is closed; verify silent input stays
-                              // silent for many samples after the gain rampdown completes.
+        // Initial state: gate is closed; verify silent input stays
+        // silent for many samples after the gain rampdown completes.
         for _ in 0..48_000 {
             e.process_sample(0.0, 0.0);
         }

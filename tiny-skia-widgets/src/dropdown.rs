@@ -771,13 +771,13 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         let action = self.active.as_ref()?.action;
 
         // Scrollbar thumb -> start dragging.
-        if let Some(sb) = layout.scrollbar {
-            if Self::point_in(sb.thumb, x, y) {
-                if let Some(active) = self.active.as_mut() {
-                    active.scrollbar_drag = Some(y - sb.thumb.1);
-                }
-                return None;
+        if let Some(sb) = layout.scrollbar
+            && Self::point_in(sb.thumb, x, y)
+        {
+            if let Some(active) = self.active.as_mut() {
+                active.scrollbar_drag = Some(y - sb.thumb.1);
             }
+            return None;
         }
 
         // Item row -> select and close. Header rows are non-selectable: a
@@ -1159,14 +1159,18 @@ mod tests {
         let with = open_state(5, true);
         let without = open_state(5, false);
         let items: Vec<&str> = vec!["a"; 5];
-        assert!(dropdown_popup_layout(&with, &items, WIN)
-            .unwrap()
-            .filter_rect
-            .is_some());
-        assert!(dropdown_popup_layout(&without, &items, WIN)
-            .unwrap()
-            .filter_rect
-            .is_none());
+        assert!(
+            dropdown_popup_layout(&with, &items, WIN)
+                .unwrap()
+                .filter_rect
+                .is_some()
+        );
+        assert!(
+            dropdown_popup_layout(&without, &items, WIN)
+                .unwrap()
+                .filter_rect
+                .is_none()
+        );
     }
 
     #[test]

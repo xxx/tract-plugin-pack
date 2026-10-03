@@ -21,10 +21,10 @@ use engine::ReverbChannel;
 use handoff::{IrHandoff, SequenceHandoff};
 use ir::{IrBaker, IrSpectra};
 use sequence::{
-    default_decay_curve, default_tone_curve, default_width_curve, generate, GenParams,
-    VelvetSequence,
+    GenParams, VelvetSequence, default_decay_curve, default_tone_curve, default_width_curve,
+    generate,
 };
-use tract_dsp::partitioned_conv::{PartitionedConvolver, BINS, P};
+use tract_dsp::partitioned_conv::{BINS, P, PartitionedConvolver};
 
 /// Engine mode: zero-latency time-domain reverb or FFT convolution.
 #[derive(Enum, Debug, PartialEq, Eq, Clone, Copy)]
@@ -722,7 +722,7 @@ mod tests {
         use crate::engine::ReverbChannel;
         use crate::ir::{IrBaker, IrSpectra};
         use crate::rng::Rng;
-        use tract_dsp::partitioned_conv::{PartitionedConvolver, P};
+        use tract_dsp::partitioned_conv::{P, PartitionedConvolver};
 
         let mut seq = VelvetSequence::new();
         let n = 200;

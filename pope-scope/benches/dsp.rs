@@ -1,6 +1,6 @@
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use pope_scope::ring_buffer::RingBuffer;
 
 fn bench_ring_buffer_push(c: &mut Criterion) {

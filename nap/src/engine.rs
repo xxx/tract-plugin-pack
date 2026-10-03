@@ -13,7 +13,7 @@
 //!   make it several times faster. The `block_matches_per_sample_reference`
 //!   test gates the equivalence.
 
-use std::simd::{f32x16, StdFloat};
+use std::simd::{StdFloat, f32x16};
 
 use crate::coloration::{Dictionary, OnePole, Q};
 use crate::sequence::VelvetSequence;

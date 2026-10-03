@@ -5,9 +5,9 @@
 //!
 //! See `docs/superpowers/specs/2026-05-19-multosis-phase-2c-design.md` §3.
 
-use crate::editor::grid_view::{GUTTER, MARGIN, STATUS_H, TRACK_PANEL_W};
 use crate::editor::WINDOW_WIDTH;
-use crate::effects::{Effect, EffectKind, TrackEffect, MAX_EFFECT_PARAMS};
+use crate::editor::grid_view::{GUTTER, MARGIN, STATUS_H, TRACK_PANEL_W};
+use crate::effects::{Effect, EffectKind, MAX_EFFECT_PARAMS, TrackEffect};
 use crate::modulation::TriggerSource;
 use tiny_skia::Pixmap;
 use tiny_skia_widgets as widgets;
@@ -552,10 +552,10 @@ pub fn kind_items() -> KindItems {
     let mut prev_family: Option<&'static str> = None;
     for (i, k) in EffectKind::ALL.iter().enumerate() {
         let fam = k.family();
-        if fam != prev_family {
-            if let Some(name) = fam {
-                sections.push((i, name));
-            }
+        if fam != prev_family
+            && let Some(name) = fam
+        {
+            sections.push((i, name));
         }
         prev_family = fam;
     }

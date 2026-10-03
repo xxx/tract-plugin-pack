@@ -1,6 +1,6 @@
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use tiny_skia::{Color, Pixmap};
 use tiny_skia_widgets::{draw_rect, fill_column_opaque, fill_pixmap_opaque};
 

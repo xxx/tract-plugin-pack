@@ -10,9 +10,9 @@
 //! Computed audio-side via exponentially-smoothed cross-spectrum and auto-spectra.
 //! Published as `1 - γ²` per log-spaced bin (high = decorrelated/wide, low = coherent).
 
-use rustfft::{num_complex::Complex32, Fft, FftPlanner};
-use std::sync::atomic::{AtomicU32, Ordering};
+use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const FFT_SIZE: usize = 1024;
 pub const HOP: usize = 1024;

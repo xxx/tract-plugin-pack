@@ -1,11 +1,11 @@
 //! Per-band strip: Width slider (vertical), Stereoize knob, Mode I/II, Solo.
 //! 4-up grid.
 
-use crate::theme;
 use crate::ImagineParams;
+use crate::theme;
 use std::sync::Arc;
 use tiny_skia::{Color, Paint, Pixmap, PixmapMut, Transform};
-use tiny_skia_widgets::{fill_rect_i, stroke_rect_i, TextRenderer};
+use tiny_skia_widgets::{TextRenderer, fill_rect_i, stroke_rect_i};
 
 /// Reserved height for the band header row ("B1"–"B4") at the top of each panel.
 pub const HEADER_H: i32 = 14;

@@ -30,6 +30,8 @@ Each plugin is a crate (`<plugin>/`). Plus: `tiny-skia-widgets/` (shared CPU-ren
 
 Requires **nightly Rust** (enforced by `rust-toolchain.toml`) for portable SIMD (`std::simd::f32x16`).
 
+Workspace packages inherit the Rust 2024 edition from `[workspace.package]`; the workspace uses Cargo resolver 3.
+
 ```bash
 cargo nih-plug bundle <plugin> --release   # VST3 + CLAP bundle
 cargo build --bin <plugin> --release       # standalone

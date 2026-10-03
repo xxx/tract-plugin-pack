@@ -8,7 +8,7 @@
 
 use crate::editor::grid_view::{CELL, GUTTER, MARGIN, STATUS_H, TRACK_PANEL_W};
 use crate::effects::{EffectKind, TrackEffect};
-use crate::grid::{Grid, COLS, ROWS};
+use crate::grid::{COLS, Grid, ROWS};
 use crate::modulation::TrackModulation;
 use tiny_skia::Pixmap;
 use tiny_skia_widgets as widgets;
@@ -306,15 +306,15 @@ pub fn draw_track_list(
 
     // Draw the drop-target outline last so it overlays the source dim and
     // the selection highlight. Skip when target == source (no movement yet).
-    if let Some(t) = drag_target {
-        if drag_source != Some(t) {
-            let (x, y, w, h) = track_entry_rect(t, scale);
-            let t_px = (2.0 * scale).max(1.0);
-            widgets::draw_rect(pixmap, x, y, w, t_px, drag_target_outline);
-            widgets::draw_rect(pixmap, x, y + h - t_px, w, t_px, drag_target_outline);
-            widgets::draw_rect(pixmap, x, y, t_px, h, drag_target_outline);
-            widgets::draw_rect(pixmap, x + w - t_px, y, t_px, h, drag_target_outline);
-        }
+    if let Some(t) = drag_target
+        && drag_source != Some(t)
+    {
+        let (x, y, w, h) = track_entry_rect(t, scale);
+        let t_px = (2.0 * scale).max(1.0);
+        widgets::draw_rect(pixmap, x, y, w, t_px, drag_target_outline);
+        widgets::draw_rect(pixmap, x, y + h - t_px, w, t_px, drag_target_outline);
+        widgets::draw_rect(pixmap, x, y, t_px, h, drag_target_outline);
+        widgets::draw_rect(pixmap, x + w - t_px, y, t_px, h, drag_target_outline);
     }
 }
 
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn swap_rows_pure_exchanges_grid_effects_and_modulation() {
-        use crate::effects::{default_params_for_kind, EffectKind, TrackEffect};
+        use crate::effects::{EffectKind, TrackEffect, default_params_for_kind};
         use crate::modulation::{TrackModulation, TriggerSource};
         // Default `Cell` is `enabled: true` everywhere. Blank row 2 entirely
         // while leaving row 9 at its default all-on state so the swap's effect

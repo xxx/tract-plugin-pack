@@ -3,9 +3,9 @@
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §4.3.
 
-use crate::effects::{norm_to_value, Effect, EffectInstance, EffectKind, ParamFormat, TrackEffect};
+use crate::effects::{Effect, EffectInstance, EffectKind, ParamFormat, TrackEffect, norm_to_value};
 use crate::grid::Grid;
-use crate::modulation::{switch_effect_kind, TrackModulation};
+use crate::modulation::{TrackModulation, switch_effect_kind};
 
 /// Deterministic xorshift32 PRNG — no dependency, seeded per call. Matches the
 /// MSEG widget's `randomize` PRNG.
@@ -150,7 +150,7 @@ pub fn randomize_activations(grid: &mut Grid, seed: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effects::{default_params_for_kind, MAX_EFFECT_PARAMS};
+    use crate::effects::{MAX_EFFECT_PARAMS, default_params_for_kind};
     use crate::grid::LoopRegion;
 
     fn fresh_track_effect(kind: EffectKind) -> TrackEffect {

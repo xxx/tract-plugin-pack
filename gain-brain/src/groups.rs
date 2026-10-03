@@ -173,9 +173,9 @@ mod tests {
     #[test]
     fn test_add_delta_returns_old_cumulative_and_new_generation() {
         reset_slots(&[3]);
-        let (old, gen) = add_delta(3, 300);
+        let (old, generation) = add_delta(3, 300);
         assert_eq!(old, 0);
-        assert_eq!(gen, 1);
+        assert_eq!(generation, 1);
         let (old2, gen2) = add_delta(3, 200);
         assert_eq!(old2, 300);
         assert_eq!(gen2, 2);

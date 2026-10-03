@@ -18,13 +18,13 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use nap::engine::{ReverbChannel, BLOCK};
+use nap::engine::{BLOCK, ReverbChannel};
 use nap::ir::{IrBaker, IrSpectra};
 use nap::sequence::{
-    default_decay_curve, default_tone_curve, default_width_curve, generate, GenParams,
-    VelvetSequence,
+    GenParams, VelvetSequence, default_decay_curve, default_tone_curve, default_width_curve,
+    generate,
 };
-use tract_dsp::partitioned_conv::{PartitionedConvolver, BINS, P};
+use tract_dsp::partitioned_conv::{BINS, P, PartitionedConvolver};
 
 const SAMPLE_RATE: f32 = 48_000.0;
 const SECONDS: f32 = 5.0;

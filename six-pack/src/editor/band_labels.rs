@@ -4,7 +4,7 @@
 //! Algo/Mode cycles to the next option, right-clicking Freq/Gain/Q opens
 //! the text-edit overlay.
 
-use crate::editor::{band_color, BandLabelField, HitAction, SixPackWindow};
+use crate::editor::{BandLabelField, HitAction, SixPackWindow, band_color};
 use nih_plug::prelude::Param;
 use tiny_skia_widgets as widgets;
 

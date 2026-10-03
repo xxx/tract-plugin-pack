@@ -863,10 +863,16 @@ impl baseview::WindowHandler for NapWindow {
                     // Route the move to whichever pane the cursor is in.
                     let rect = pane_rects(w, h, s)[p];
                     let changed = {
-                        if let Ok(mut curve) = self.curves[p].lock() {
-                            self.states[p].on_mouse_move(x, y, &mut curve, rect, s, self.shift_held)
-                        } else {
-                            None
+                        match self.curves[p].lock() {
+                            Ok(mut curve) => self.states[p].on_mouse_move(
+                                x,
+                                y,
+                                &mut curve,
+                                rect,
+                                s,
+                                self.shift_held,
+                            ),
+                            _ => None,
                         }
                     };
                     if changed == Some(MsegEdit::Changed) {
@@ -888,17 +894,16 @@ impl baseview::WindowHandler for NapWindow {
                     for p in 0..3 {
                         let rect = pane_rects(w, h, s)[p];
                         let changed = {
-                            if let Ok(mut curve) = self.curves[p].lock() {
-                                self.states[p].on_mouse_move(
+                            match self.curves[p].lock() {
+                                Ok(mut curve) => self.states[p].on_mouse_move(
                                     x,
                                     y,
                                     &mut curve,
                                     rect,
                                     s,
                                     self.shift_held,
-                                )
-                            } else {
-                                None
+                                ),
+                                _ => None,
                             }
                         };
                         if changed == Some(MsegEdit::Changed) {
@@ -938,15 +943,17 @@ impl baseview::WindowHandler for NapWindow {
                     // double-click on the same widget — see `check_double_click`.)
                     let is_double = !on_strip && self.double_click_check(x, y);
                     let changed = {
-                        if let Ok(mut curve) = self.curves[p].lock() {
-                            if is_double {
-                                self.states[p].on_double_click(x, y, &mut curve, rect, s)
-                            } else {
-                                let ctrl = modifiers.contains(keyboard_types::Modifiers::CONTROL);
-                                self.states[p].on_mouse_down(x, y, &mut curve, rect, s, ctrl)
+                        match self.curves[p].lock() {
+                            Ok(mut curve) => {
+                                if is_double {
+                                    self.states[p].on_double_click(x, y, &mut curve, rect, s)
+                                } else {
+                                    let ctrl =
+                                        modifiers.contains(keyboard_types::Modifiers::CONTROL);
+                                    self.states[p].on_mouse_down(x, y, &mut curve, rect, s, ctrl)
+                                }
                             }
-                        } else {
-                            None
+                            _ => None,
                         }
                     };
                     if changed == Some(MsegEdit::Changed) {
@@ -1014,10 +1021,9 @@ impl baseview::WindowHandler for NapWindow {
                 for p in 0..3 {
                     let rect = pane_rects(w, h, s)[p];
                     let changed = {
-                        if let Ok(mut curve) = self.curves[p].lock() {
-                            self.states[p].on_mouse_up(&mut curve, rect, s)
-                        } else {
-                            None
+                        match self.curves[p].lock() {
+                            Ok(mut curve) => self.states[p].on_mouse_up(&mut curve, rect, s),
+                            _ => None,
                         }
                     };
                     if changed == Some(MsegEdit::Changed) {
@@ -1058,10 +1064,11 @@ impl baseview::WindowHandler for NapWindow {
                 if let Some(p) = pane_at(y, h, s) {
                     let rect = pane_rects(w, h, s)[p];
                     let changed = {
-                        if let Ok(mut curve) = self.curves[p].lock() {
-                            self.states[p].on_right_click(x, y, &mut curve, rect, s)
-                        } else {
-                            None
+                        match self.curves[p].lock() {
+                            Ok(mut curve) => {
+                                self.states[p].on_right_click(x, y, &mut curve, rect, s)
+                            }
+                            _ => None,
                         }
                     };
                     if changed == Some(MsegEdit::Changed) {
@@ -1072,13 +1079,13 @@ impl baseview::WindowHandler for NapWindow {
                 } else {
                     // Right-click on a dial opens text entry; mode selector has none.
                     self.commit_text_edit();
-                    if let Some(region) = self.drag.hit_test().cloned() {
-                        if let HitAction::Dial(id) = region.action {
-                            let initial = self.dial_value_without_unit(id);
-                            self.text_edit.begin(HitAction::Dial(id), &initial);
-                        }
-                        // HitAction::ModeSelector: no text entry on the mode selector.
+                    if let Some(region) = self.drag.hit_test().cloned()
+                        && let HitAction::Dial(id) = region.action
+                    {
+                        let initial = self.dial_value_without_unit(id);
+                        self.text_edit.begin(HitAction::Dial(id), &initial);
                     }
+                    // HitAction::ModeSelector: no text entry on the mode selector.
                 }
             }
 
@@ -1109,10 +1116,9 @@ impl baseview::WindowHandler for NapWindow {
                         // Delete the selection in whichever pane has the cursor.
                         let (_, y) = self.drag.mouse_pos();
                         if let Some(p) = pane_at(y, h, s) {
-                            let changed = if let Ok(mut curve) = self.curves[p].lock() {
-                                self.states[p].delete_selection(&mut curve)
-                            } else {
-                                None
+                            let changed = match self.curves[p].lock() {
+                                Ok(mut curve) => self.states[p].delete_selection(&mut curve),
+                                _ => None,
                             };
                             if changed == Some(MsegEdit::Changed) {
                                 self.regenerate();

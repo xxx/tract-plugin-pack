@@ -107,11 +107,7 @@ impl LimiterEffect {
     fn gain_computer_db(input_db: f32, knee_db: f32) -> f32 {
         if knee_db < 0.01 {
             // Hard knee.
-            if input_db <= 0.0 {
-                0.0
-            } else {
-                -input_db
-            }
+            if input_db <= 0.0 { 0.0 } else { -input_db }
         } else {
             let half = knee_db * 0.5;
             if input_db < -half {
@@ -215,7 +211,7 @@ mod tests {
         e.set_sample_rate(48_000.0);
         e.set_param(0, -3.0);
         e.set_param(3, 0.0); // hard knee
-                             // Drive at -12 dBFS -- well below the -3 dB threshold.
+        // Drive at -12 dBFS -- well below the -3 dB threshold.
         let x = 0.25;
         for _ in 0..1024 {
             let (l, r) = e.process_sample(x, -x);

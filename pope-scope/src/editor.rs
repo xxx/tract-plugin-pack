@@ -2,15 +2,15 @@
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::PopeScopeParams;
 use crate::controls;
 use crate::renderer;
 use crate::snapshot::{self, WaveSnapshot};
 use crate::store;
 use crate::theme;
-use crate::PopeScopeParams;
 use tiny_skia_widgets as widgets;
 
 const WINDOW_WIDTH: u32 = 800;
@@ -837,55 +837,53 @@ impl PopeScopeWindow {
             for region in self.drag.regions() {
                 if let HitAction::Control(controls::ControlAction::HoverName(slot_idx)) =
                     region.action
+                    && mx >= region.x
+                    && mx < region.x + region.w
+                    && my >= region.y
+                    && my < region.y + region.h
                 {
-                    if mx >= region.x
-                        && mx < region.x + region.w
-                        && my >= region.y
-                        && my < region.y + region.h
-                    {
-                        // Read full name from the store
-                        let slot = store::slot(slot_idx);
-                        let full_name = slot
-                            .metadata
-                            .track_name
-                            .lock()
-                            .map(|n| n.clone())
-                            .unwrap_or_default();
-                        if !full_name.is_empty() {
-                            let tip_font = 12.0 * s;
-                            let tip_pad = 4.0 * s;
-                            let tip_w = tr.text_width(&full_name, tip_font) + tip_pad * 2.0;
-                            let tip_h = tip_font + tip_pad * 2.0;
-                            let tip_x = (mx - tip_w / 2.0).max(0.0);
-                            let tip_y = region.y + region.h + 2.0 * s;
-                            tiny_skia_widgets::draw_rect(
-                                &mut self.surface.pixmap,
-                                tip_x,
-                                tip_y,
-                                tip_w,
-                                tip_h,
-                                theme::to_color(theme::BORDER),
-                            );
-                            tiny_skia_widgets::draw_rect_outline(
-                                &mut self.surface.pixmap,
-                                tip_x,
-                                tip_y,
-                                tip_w,
-                                tip_h,
-                                theme::to_color(theme::FG),
-                                1.0,
-                            );
-                            tr.draw_text(
-                                &mut self.surface.pixmap,
-                                tip_x + tip_pad,
-                                tip_y + tip_pad + tip_font,
-                                &full_name,
-                                tip_font,
-                                theme::to_color(theme::FG),
-                            );
-                        }
-                        break;
+                    // Read full name from the store
+                    let slot = store::slot(slot_idx);
+                    let full_name = slot
+                        .metadata
+                        .track_name
+                        .lock()
+                        .map(|n| n.clone())
+                        .unwrap_or_default();
+                    if !full_name.is_empty() {
+                        let tip_font = 12.0 * s;
+                        let tip_pad = 4.0 * s;
+                        let tip_w = tr.text_width(&full_name, tip_font) + tip_pad * 2.0;
+                        let tip_h = tip_font + tip_pad * 2.0;
+                        let tip_x = (mx - tip_w / 2.0).max(0.0);
+                        let tip_y = region.y + region.h + 2.0 * s;
+                        tiny_skia_widgets::draw_rect(
+                            &mut self.surface.pixmap,
+                            tip_x,
+                            tip_y,
+                            tip_w,
+                            tip_h,
+                            theme::to_color(theme::BORDER),
+                        );
+                        tiny_skia_widgets::draw_rect_outline(
+                            &mut self.surface.pixmap,
+                            tip_x,
+                            tip_y,
+                            tip_w,
+                            tip_h,
+                            theme::to_color(theme::FG),
+                            1.0,
+                        );
+                        tr.draw_text(
+                            &mut self.surface.pixmap,
+                            tip_x + tip_pad,
+                            tip_y + tip_pad + tip_font,
+                            &full_name,
+                            tip_font,
+                            theme::to_color(theme::FG),
+                        );
                     }
+                    break;
                 }
             }
         }
@@ -1728,9 +1726,11 @@ mod text_entry_tests {
     #[test]
     fn text_edit_roundtrip_for_timebase_action() {
         let mut text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Timebase))
-            .is_none());
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Timebase))
+                .is_none()
+        );
 
         text_edit.begin(HitAction::Dial(ParamId::Timebase), "100");
         assert_eq!(
@@ -1747,23 +1747,31 @@ mod text_entry_tests {
         let (action, buffer) = text_edit.commit().unwrap();
         assert_eq!(action, HitAction::Dial(ParamId::Timebase));
         assert_eq!(buffer, "1000");
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Timebase))
-            .is_none());
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Timebase))
+                .is_none()
+        );
     }
 
     #[test]
     fn state_starts_inactive() {
         let text_edit: widgets::TextEditState<HitAction> = widgets::TextEditState::new();
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::Timebase))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::MinDb))
-            .is_none());
-        assert!(text_edit
-            .active_for(&HitAction::Dial(ParamId::MaxDb))
-            .is_none());
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::Timebase))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::MinDb))
+                .is_none()
+        );
+        assert!(
+            text_edit
+                .active_for(&HitAction::Dial(ParamId::MaxDb))
+                .is_none()
+        );
     }
 }
 

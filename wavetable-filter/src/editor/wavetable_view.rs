@@ -1,7 +1,7 @@
 //! Wavetable visualization — 2D face-on or 3D overhead stack.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::wavetable::Wavetable;

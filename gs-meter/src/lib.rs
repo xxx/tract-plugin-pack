@@ -1,14 +1,14 @@
 #![feature(portable_simd)]
 
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod editor;
 pub mod lufs;
 pub mod meter;
 
-use meter::{linear_to_db, StereoMeter};
+use meter::{StereoMeter, linear_to_db};
 
 /// Shared meter readings for the GUI (written by audio thread, read by GUI).
 pub struct MeterReadings {

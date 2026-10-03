@@ -2,7 +2,7 @@
 //!
 //! See `docs/superpowers/specs/2026-05-17-multosis-phase-1-design.md` §4.3.
 
-use crate::grid::{Cell, Grid, COLS, ROWS};
+use crate::grid::{COLS, Cell, Grid, ROWS};
 
 /// A rectangular block of cells lifted from a grid's loop region. A
 /// GUI-thread clipboard value — it owns a `Vec` and never crosses to the

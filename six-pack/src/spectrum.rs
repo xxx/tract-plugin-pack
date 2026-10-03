@@ -4,7 +4,7 @@
 //! pushed, runs an FFT once and writes magnitude bins to atomic storage.
 //! GUI thread reads bins lock-free.
 
-use rustfft::{num_complex::Complex32, Fft, FftPlanner};
+use rustfft::{Fft, FftPlanner, num_complex::Complex32};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 const FFT_SIZE: usize = 2048;

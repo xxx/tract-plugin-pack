@@ -7,8 +7,8 @@
 //! See `docs/superpowers/specs/2026-05-16-mseg-editor-widget-design.md`.
 
 use crate::dropdown::{DropdownEvent, DropdownState};
-use crate::mseg::randomize::RandomStyle;
 use crate::mseg::MsegData;
+use crate::mseg::randomize::RandomStyle;
 use crate::text_edit::TextEditState;
 
 /// Default grid option pairs used when no custom list is supplied.
@@ -226,7 +226,7 @@ impl MsegEditState {
         self.grid_options
             .iter()
             .enumerate()
-            .min_by_key(|(_, &(t, v))| {
+            .min_by_key(|&(_, &(t, v))| {
                 let dt = (data.time_divisions as i64 - t as i64).unsigned_abs();
                 let dv = (data.value_steps as i64 - v as i64).unsigned_abs();
                 dt + dv
@@ -343,7 +343,7 @@ impl MsegEditState {
         scale: f32,
         ctrl: bool,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{mseg_hit_test, mseg_layout, MsegHit};
+        use crate::mseg::render::{MsegHit, mseg_hit_test, mseg_layout};
         let layout = mseg_layout(rect, self.curve_only, scale);
 
         // If a dropdown is open, route the click to it first.
@@ -528,7 +528,7 @@ impl MsegEditState {
         scale: f32,
         fine: bool,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
+        use crate::mseg::render::{MsegHit, mseg_hit_test, mseg_layout, x_to_phase, y_to_value};
         let layout = mseg_layout(rect, self.curve_only, scale);
 
         // Route moves to the open dropdown for hover-highlight updates.
@@ -609,33 +609,33 @@ impl MsegEditState {
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{mseg_layout, phase_to_x, value_to_y};
         self.dropdown.on_mouse_up();
-        if matches!(self.drag, Some(DragTarget::Marquee)) {
-            if let Some((ax, ay, cx, cy)) = self.marquee {
-                let (rx, ry) = (ax.min(cx), ay.min(cy));
-                let (rw, rh) = ((cx - ax).abs(), (cy - ay).abs());
-                // A marquee that never really moved is a plain click on empty
-                // canvas — clear the selection (unless Ctrl preserved it).
-                let moved = rw > 2.0 * scale || rh > 2.0 * scale;
-                if !moved {
-                    if !self.marquee_ctrl {
-                        self.clear_selection();
-                    }
-                } else {
-                    let layout = mseg_layout(rect, self.curve_only, scale);
-                    if !self.marquee_ctrl {
-                        self.clear_selection();
-                    }
-                    for (i, n) in data.active().iter().enumerate() {
-                        let nx = phase_to_x(&layout, n.time);
-                        let ny = value_to_y(&layout, n.value);
-                        if nx >= rx
-                            && nx <= rx + rw
-                            && ny >= ry
-                            && ny <= ry + rh
-                            && i < crate::mseg::MAX_NODES
-                        {
-                            self.selection |= 1u128 << i;
-                        }
+        if matches!(self.drag, Some(DragTarget::Marquee))
+            && let Some((ax, ay, cx, cy)) = self.marquee
+        {
+            let (rx, ry) = (ax.min(cx), ay.min(cy));
+            let (rw, rh) = ((cx - ax).abs(), (cy - ay).abs());
+            // A marquee that never really moved is a plain click on empty
+            // canvas — clear the selection (unless Ctrl preserved it).
+            let moved = rw > 2.0 * scale || rh > 2.0 * scale;
+            if !moved {
+                if !self.marquee_ctrl {
+                    self.clear_selection();
+                }
+            } else {
+                let layout = mseg_layout(rect, self.curve_only, scale);
+                if !self.marquee_ctrl {
+                    self.clear_selection();
+                }
+                for (i, n) in data.active().iter().enumerate() {
+                    let nx = phase_to_x(&layout, n.time);
+                    let ny = value_to_y(&layout, n.value);
+                    if nx >= rx
+                        && nx <= rx + rw
+                        && ny >= ry
+                        && ny <= ry + rh
+                        && i < crate::mseg::MAX_NODES
+                    {
+                        self.selection |= 1u128 << i;
                     }
                 }
             }
@@ -658,7 +658,7 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{mseg_hit_test, mseg_layout, x_to_phase, y_to_value, MsegHit};
+        use crate::mseg::render::{MsegHit, mseg_hit_test, mseg_layout, x_to_phase, y_to_value};
         let layout = mseg_layout(rect, self.curve_only, scale);
         match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
             MsegHit::Node(i) | MsegHit::SelectedNode(i) if data.remove_node(i) => {
@@ -691,7 +691,7 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{mseg_hit_test_with_selection, mseg_layout, x_to_phase, MsegHit};
+        use crate::mseg::render::{MsegHit, mseg_hit_test_with_selection, mseg_layout, x_to_phase};
         let layout = mseg_layout(rect, self.curve_only, scale);
         let hit = mseg_hit_test_with_selection(&layout, data, self.curve_only, scale, x, y, self);
         // A right-click on a selected node opens the transform menu instead of
@@ -994,8 +994,8 @@ impl Default for MsegEditState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mseg::render::{mseg_layout, phase_to_x, value_to_y};
     use crate::mseg::MsegData;
+    use crate::mseg::render::{mseg_layout, phase_to_x, value_to_y};
 
     // Widened from 400 to match a realistic embed: the MSEG strip's fixed
     // per-button widths + group gap need a strip ~700+ px wide before its
@@ -1328,11 +1328,12 @@ mod tests {
         state.on_mouse_up(&mut data, RECT, 1.0);
         assert!(data.node_count > before, "stepped-draw inserted no nodes");
         // Painted nodes are stepped.
-        assert!(data
-            .active()
-            .iter()
-            .take(data.node_count - 1)
-            .any(|n| n.stepped));
+        assert!(
+            data.active()
+                .iter()
+                .take(data.node_count - 1)
+                .any(|n| n.stepped)
+        );
     }
 
     #[test]
@@ -1442,8 +1443,8 @@ mod tests {
 
     #[test]
     fn distinct_seeds_make_sibling_editors_randomize_independently() {
-        use crate::mseg::render::strip_buttons;
         use crate::mseg::RandomStyle;
+        use crate::mseg::render::strip_buttons;
         // Curve-only randomize button centre (the rightmost strip button).
         let l = mseg_layout(RECT, true, 1.0);
         let b = strip_buttons(l.strip, 1.0, false);
@@ -1496,8 +1497,8 @@ mod tests {
 
     #[test]
     fn polarity_button_toggles_between_unipolar_and_bipolar() {
-        use crate::mseg::render::strip_buttons;
         use crate::mseg::Polarity;
+        use crate::mseg::render::strip_buttons;
         let mut data = MsegData::default();
         assert_eq!(data.polarity, Polarity::Unipolar, "default is unipolar");
         let mut state = MsegEditState::new();
@@ -1517,8 +1518,8 @@ mod tests {
 
     #[test]
     fn play_mode_strip_toggle_flips_cyclic_and_triggered() {
-        use crate::mseg::render::strip_buttons;
         use crate::mseg::PlayMode;
+        use crate::mseg::render::strip_buttons;
         let mut data = MsegData::default();
         data.play_mode = PlayMode::Cyclic;
         let mut state = MsegEditState::new();
@@ -1566,8 +1567,8 @@ mod tests {
         // nap builds curve-only editors and calls set_show_polarity(false): the
         // polarity rect collapses to 0×0 (so it never hit-tests) and a click
         // where it used to sit is a no-op, leaving the polarity at its default.
-        use crate::mseg::render::{strip_buttons_ex, StripButtons};
         use crate::mseg::Polarity;
+        use crate::mseg::render::{StripButtons, strip_buttons_ex};
         let mut data = MsegData::default();
         let mut state = MsegEditState::new_curve_only();
         state.set_show_polarity(false);
@@ -2152,7 +2153,7 @@ mod tests {
     #[test]
     fn hit_test_returns_selected_node_when_click_lands_on_a_selected_node() {
         use crate::mseg::render::{
-            mseg_hit_test, mseg_hit_test_with_selection, mseg_layout, MsegHit,
+            MsegHit, mseg_hit_test, mseg_hit_test_with_selection, mseg_layout,
         };
         use crate::mseg::{MsegData, MsegEditState};
         let mut data = MsegData::default();

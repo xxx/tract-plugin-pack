@@ -90,7 +90,7 @@ impl Default for PhaselessChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::{bake, MAG_BINS};
+    use crate::kernel::{MAG_BINS, bake};
     use tiny_skia_widgets::mseg::MsegData;
 
     /// Build a `Kernel` directly from explicit taps, bypassing the curve bake.

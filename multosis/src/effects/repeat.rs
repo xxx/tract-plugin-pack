@@ -410,7 +410,7 @@ mod tests {
         r.set_sample_rate(48_000.0);
         r.set_param(1, 14.0); // Snap → Free
         r.set_param(0, 0.5); // Rate → 0.5 Hz (2 s loop)
-                             // First 100 samples should pass dry through verbatim.
+        // First 100 samples should pass dry through verbatim.
         for i in 0..100 {
             let dry = 0.1 + i as f32 * 0.001;
             let (l, ri) = r.process_sample(dry, -dry);
@@ -440,7 +440,7 @@ mod tests {
         r.set_param(2, 13.0); // 1/1.
         r.set_bpm(30.0);
         r.set_param(3, 0.0); // Smooth = 0 so we can compare exact samples
-                             // Feed a recognisable sequence (sample i = i as f32 * 0.001).
+        // Feed a recognisable sequence (sample i = i as f32 * 0.001).
         let mut last_output = 0.0;
         let mut wrapped_at_least_once = false;
         let mut samples_at_wrap = 0usize;
@@ -480,9 +480,9 @@ mod tests {
         // Snap = 1/2 (large), Refresh = 1/16 (small).
         r.set_param(1, 10.0); // Snap → 1/2 note
         r.set_param(2, 4.0); // Refresh → 1/16 note
-                             // After enough samples to prime, the loop_length must be ≤
-                             // the 1/16-note window (= 60/120/4 × 48000 ≈ 6000 samples) not
-                             // the 1/2-note value (24000 samples).
+        // After enough samples to prime, the loop_length must be ≤
+        // the 1/16-note window (= 60/120/4 × 48000 ≈ 6000 samples) not
+        // the 1/2-note value (24000 samples).
         for _ in 0..24_000 {
             let _ = r.process_sample(0.5, 0.5);
         }

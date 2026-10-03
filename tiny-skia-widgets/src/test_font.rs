@@ -169,7 +169,7 @@ pub fn test_font_data() -> Vec<u8> {
     push_u16!(buf, 1u16); // platformID (Macintosh)
     push_u16!(buf, 0u16); // encodingID (Roman)
     push_u32!(buf, 12u32); // offset to subtable
-                           // Format 0 subtable
+    // Format 0 subtable
     push_u16!(buf, 0u16); // format
     push_u16!(buf, 262u16); // length (6 + 256)
     push_u16!(buf, 0u16); // language

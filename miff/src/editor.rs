@@ -599,17 +599,16 @@ impl baseview::WindowHandler for MiffWindow {
                         // even outside the rect, which matches the node-drag
                         // intention; for controls there's no drag into MSEG).
                         let changed = {
-                            if let Ok(mut curve) = self.params.curve.lock() {
-                                self.mseg_state.on_mouse_move(
+                            match self.params.curve.lock() {
+                                Ok(mut curve) => self.mseg_state.on_mouse_move(
                                     x,
                                     y,
                                     &mut curve,
                                     mseg_rect,
                                     s,
                                     self.shift_held,
-                                )
-                            } else {
-                                None
+                                ),
+                                _ => None,
                             }
                         };
                         if changed == Some(MsegEdit::Changed) {
@@ -669,17 +668,16 @@ impl baseview::WindowHandler for MiffWindow {
                     // No controls drag active — forward pointer move to MSEG state
                     // so node drags that stray outside the MSEG rect keep tracking.
                     let changed = {
-                        if let Ok(mut curve) = self.params.curve.lock() {
-                            self.mseg_state.on_mouse_move(
+                        match self.params.curve.lock() {
+                            Ok(mut curve) => self.mseg_state.on_mouse_move(
                                 x,
                                 y,
                                 &mut curve,
                                 mseg_rect,
                                 s,
                                 self.shift_held,
-                            )
-                        } else {
-                            None
+                            ),
+                            _ => None,
                         }
                     };
                     if changed == Some(MsegEdit::Changed) {
@@ -715,11 +713,11 @@ impl baseview::WindowHandler for MiffWindow {
                         let is_double = !on_strip && self.mseg_double_click_check(x, y);
                         if is_double {
                             let changed = {
-                                if let Ok(mut curve) = self.params.curve.lock() {
-                                    self.mseg_state
-                                        .on_double_click(x, y, &mut curve, mseg_rect, s)
-                                } else {
-                                    None
+                                match self.params.curve.lock() {
+                                    Ok(mut curve) => self
+                                        .mseg_state
+                                        .on_double_click(x, y, &mut curve, mseg_rect, s),
+                                    _ => None,
                                 }
                             };
                             if changed == Some(MsegEdit::Changed) {
@@ -727,17 +725,16 @@ impl baseview::WindowHandler for MiffWindow {
                             }
                         } else {
                             let changed = {
-                                if let Ok(mut curve) = self.params.curve.lock() {
-                                    self.mseg_state.on_mouse_down(
+                                match self.params.curve.lock() {
+                                    Ok(mut curve) => self.mseg_state.on_mouse_down(
                                         x,
                                         y,
                                         &mut curve,
                                         mseg_rect,
                                         s,
                                         modifiers.contains(keyboard_types::Modifiers::CONTROL),
-                                    )
-                                } else {
-                                    None
+                                    ),
+                                    _ => None,
                                 }
                             };
                             if changed == Some(MsegEdit::Changed) {
@@ -870,10 +867,9 @@ impl baseview::WindowHandler for MiffWindow {
 
                 // End any MSEG drag.
                 let changed = {
-                    if let Ok(mut curve) = self.params.curve.lock() {
-                        self.mseg_state.on_mouse_up(&mut curve, mseg_rect, s)
-                    } else {
-                        None
+                    match self.params.curve.lock() {
+                        Ok(mut curve) => self.mseg_state.on_mouse_up(&mut curve, mseg_rect, s),
+                        _ => None,
                     }
                 };
                 if changed == Some(MsegEdit::Changed) {
@@ -913,11 +909,11 @@ impl baseview::WindowHandler for MiffWindow {
                     EventTarget::Mseg => {
                         // Right-click in MSEG: toggle segment stepped flag.
                         let changed = {
-                            if let Ok(mut curve) = self.params.curve.lock() {
-                                self.mseg_state
-                                    .on_right_click(x, y, &mut curve, mseg_rect, s)
-                            } else {
-                                None
+                            match self.params.curve.lock() {
+                                Ok(mut curve) => self
+                                    .mseg_state
+                                    .on_right_click(x, y, &mut curve, mseg_rect, s),
+                                _ => None,
                             }
                         };
                         if changed == Some(MsegEdit::Changed) {
@@ -972,10 +968,9 @@ impl baseview::WindowHandler for MiffWindow {
                 }
                 match &ev.key {
                     keyboard_types::Key::Delete | keyboard_types::Key::Backspace => {
-                        let changed = if let Ok(mut curve) = self.params.curve.lock() {
-                            self.mseg_state.delete_selection(&mut curve)
-                        } else {
-                            None
+                        let changed = match self.params.curve.lock() {
+                            Ok(mut curve) => self.mseg_state.delete_selection(&mut curve),
+                            _ => None,
                         };
                         if changed == Some(MsegEdit::Changed) {
                             self.rebake();
@@ -1183,8 +1178,8 @@ mod tests {
         // Draw into a Pixmap directly to verify the draw path doesn't panic and
         // leaves a non-zero-alpha pixel inside the MSEG region.
         use tiny_skia::Pixmap;
-        use tiny_skia_widgets::mseg::{draw_mseg, MsegEditState};
-        use tiny_skia_widgets::{color_bg, TextRenderer};
+        use tiny_skia_widgets::mseg::{MsegEditState, draw_mseg};
+        use tiny_skia_widgets::{TextRenderer, color_bg};
 
         // Use the embedded font (same as MiffWindow::new).
         let font_data = include_bytes!("fonts/DejaVuSans.ttf");

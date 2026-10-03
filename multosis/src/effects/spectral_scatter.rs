@@ -13,7 +13,7 @@
 
 use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
 use rustfft::num_complex::Complex;
-use tract_dsp::spectral_engine::{SpectralEngine, SpectralTransform, FFT_SIZES};
+use tract_dsp::spectral_engine::{FFT_SIZES, SpectralEngine, SpectralTransform};
 
 /// Per-channel max delay depth in HOPS. Matches SpectralCascade.
 const MAX_DELAY_HOPS: usize = 128;

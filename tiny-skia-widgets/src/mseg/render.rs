@@ -4,8 +4,8 @@
 
 use crate::dropdown::draw_dropdown_popup;
 use crate::dropdown::draw_dropdown_trigger;
-use crate::mseg::editor::{style_items, MsegEditState, StripId};
-use crate::mseg::{value_at_phase, HoldMode, MsegData};
+use crate::mseg::editor::{MsegEditState, StripId, style_items};
+use crate::mseg::{HoldMode, MsegData, value_at_phase};
 use crate::primitives::{
     color_bg, color_border, color_control_bg, color_muted, color_text, draw_rect, draw_rect_outline,
 };
@@ -275,18 +275,19 @@ fn draw_canvas(
     draw_nodes(pixmap, layout, data, state, scale, value_color);
 
     // Marquee selection rectangle (drawn over the curve and nodes).
-    if let Some((mx, my, mw, mh)) = state.marquee_rect() {
-        if mw > 0.0 && mh > 0.0 {
-            let fill = tiny_skia::Color::from_rgba(
-                value_color.red(),
-                value_color.green(),
-                value_color.blue(),
-                0x30 as f32 / 255.0,
-            )
-            .unwrap_or(tiny_skia::Color::from_rgba8(0x4f, 0xc3, 0xf7, 0x30));
-            draw_rect(pixmap, mx, my, mw, mh, fill);
-            draw_rect_outline(pixmap, mx, my, mw, mh, value_color, 1.0);
-        }
+    if let Some((mx, my, mw, mh)) = state.marquee_rect()
+        && mw > 0.0
+        && mh > 0.0
+    {
+        let fill = tiny_skia::Color::from_rgba(
+            value_color.red(),
+            value_color.green(),
+            value_color.blue(),
+            0x30 as f32 / 255.0,
+        )
+        .unwrap_or(tiny_skia::Color::from_rgba8(0x4f, 0xc3, 0xf7, 0x30));
+        draw_rect(pixmap, mx, my, mw, mh, fill);
+        draw_rect_outline(pixmap, mx, my, mw, mh, value_color, 1.0);
     }
 
     draw_rect_outline(pixmap, cx, cy, cw, ch, color_border(), 1.0);
@@ -326,7 +327,7 @@ fn draw_node_tooltip(
     let box_w = max_tw + 2.0 * pad_x;
     let box_h = n_lines * text_size + (n_lines - 1.0).max(0.0) * line_gap + 2.0 * pad_y;
     let gap = 10.0 * scale; // distance from node centre to tooltip edge
-                            // Default above; flip below when the node is in the top quarter.
+    // Default above; flip below when the node is in the top quarter.
     let above = n.value < 0.75;
     let box_y = if above { cy - gap - box_h } else { cy + gap };
     let mut box_x = cx - box_w * 0.5;

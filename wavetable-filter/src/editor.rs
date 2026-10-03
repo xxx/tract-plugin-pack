@@ -224,12 +224,11 @@ impl WavetableFilterWindow {
         use nih_plug::nih_log;
 
         let mut dialog = rfd::FileDialog::new().add_filter("Wavetable files", &["wav", "wt"]);
-        if let Ok(current) = self.params.wavetable_path.lock() {
-            if let Some(dir) = std::path::Path::new(current.as_str()).parent() {
-                if dir.exists() {
-                    dialog = dialog.set_directory(dir);
-                }
-            }
+        if let Ok(current) = self.params.wavetable_path.lock()
+            && let Some(dir) = std::path::Path::new(current.as_str()).parent()
+            && dir.exists()
+        {
+            dialog = dialog.set_directory(dir);
         }
         let Some(path) = dialog.pick_file() else {
             return;

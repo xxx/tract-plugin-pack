@@ -463,8 +463,8 @@ mod tests {
         }
         let crossings = count_crossings(&out);
         let measured_hz = crossings as f32 / 2.0; // 1 s window
-                                                  // Expected 440 Hz +/- 10 % for granular artifacts at the
-                                                  // grain boundaries.
+        // Expected 440 Hz +/- 10 % for granular artifacts at the
+        // grain boundaries.
         assert!(
             (measured_hz - 440.0).abs() < 44.0,
             "expected ~440 Hz, got {measured_hz} Hz ({crossings} crossings/s)"

@@ -323,7 +323,7 @@ mod tests {
         d.set_param(1, 14.0); // Time → Free
         d.set_param(2, 0.0); // Feedback = 0
         d.set_param(3, 0.0); // Duck = 0
-                             // Impulse at sample 0, then silence — count where the echo lands.
+        // Impulse at sample 0, then silence — count where the echo lands.
         let (l, _r) = d.process_sample(1.0, 1.0);
         // At t=0 the input is dry + (whatever the delay tap reads from
         // the still-empty buffer), so just the dry pass-through.

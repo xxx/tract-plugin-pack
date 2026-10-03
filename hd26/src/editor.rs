@@ -9,8 +9,8 @@ use nih_plug::prelude::*;
 // (mirrors gain-brain). If the compiler flags this as a redundant import under
 // `-D warnings` because the prelude glob already provides it, delete this line.
 use nih_plug::prelude::Param;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{DimensionMode, Hd26Params, Telemetry};
 use tiny_skia_widgets as widgets;

@@ -363,7 +363,7 @@ mod tests {
         c.set_param(0, 1_000.0); // Pitch = 1 kHz → D = 48 samples
         c.set_param(1, 1.0); // Mode = Notch
         c.set_param(2, 90.0); // Depth = 90 % (would resonate in FB mode)
-                              // Drive impulse, sum |output| over a long tail.
+        // Drive impulse, sum |output| over a long tail.
         let (first, _) = c.process_sample(1.0, 1.0);
         let mut energy: f32 = first.abs();
         for _ in 0..2_000 {

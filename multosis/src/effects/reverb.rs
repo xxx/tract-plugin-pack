@@ -555,7 +555,7 @@ mod tests {
             r.set_param(0, 70.0);
             r.set_param(1, damping);
             r.set_param(2, 0.0); // No LFO modulation — keep test deterministic
-                                 // Warm up with pseudo-noise input
+            // Warm up with pseudo-noise input
             let mut prng: u32 = 1;
             for _ in 0..24_000 {
                 prng = prng.wrapping_mul(1_103_515_245).wrapping_add(12_345);

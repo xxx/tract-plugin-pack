@@ -18,7 +18,7 @@
 
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 /// Per-sample benches process one block at a time so Criterion's throughput
 /// figures read in samples/s — the unit that matters for an audio hot path.
@@ -338,7 +338,7 @@ fn bench_stft_analysis(c: &mut Criterion) {
 
 #[cfg(feature = "stft-analysis")]
 fn bench_spectral_clipper(c: &mut Criterion) {
-    use tract_dsp::spectral_clipper::{saturate_td, saturate_td_with_tanh_fast, SpectralClipper};
+    use tract_dsp::spectral_clipper::{SpectralClipper, saturate_td, saturate_td_with_tanh_fast};
 
     let xs: Vec<f32> = (0..BLOCK)
         .map(|i| (2.0 * std::f32::consts::PI * 200.0 * i as f32 / 48_000.0).sin() * 1.8)

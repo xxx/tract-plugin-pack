@@ -1,12 +1,12 @@
 //! Spectrum view: input |M| backdrop + 3 draggable splits + coherence bar.
 
+use crate::ImagineParams;
 use crate::spectrum::NUM_LOG_BINS;
 use crate::theme;
-use crate::ImagineParams;
 use std::sync::Arc;
 use tiny_skia::Pixmap;
 use tiny_skia_widgets as widgets;
-use tiny_skia_widgets::{fill_rect_i, stroke_rect_i, TextRenderer};
+use tiny_skia_widgets::{TextRenderer, fill_rect_i, stroke_rect_i};
 
 /// Format a frequency in Hz as a short display string.
 /// Examples: 80 -> "80 Hz", 1000 -> "1.0 kHz", 8400 -> "8.4 kHz".

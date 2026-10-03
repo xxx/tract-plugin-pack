@@ -403,8 +403,8 @@ mod tests {
             lp.set_param(3, poles_idx); // Poles index (slot 3)
             let sr = 48_000.0_f32;
             let f_test = 10_000.0_f32; // one decade above cutoff
-                                       // Warm up the cascade, then measure 4096 samples of the
-                                       // single-channel RMS.
+            // Warm up the cascade, then measure 4096 samples of the
+            // single-channel RMS.
             for i in 0..2048 {
                 let s = (std::f32::consts::TAU * f_test * i as f32 / sr).sin();
                 lp.process_sample(s, s);
@@ -421,10 +421,10 @@ mod tests {
         let rms_4 = measure_rms_decade_above(1.0); // 4 poles
         let rms_6 = measure_rms_decade_above(2.0); // 6 poles
         let rms_8 = measure_rms_decade_above(3.0); // 8 poles
-                                                   // Strict ordering: each step adds at least some attenuation. (The
-                                                   // exact ratio is 1 / 4^N for N additional 2-pole stages — but
-                                                   // even with shared coefficients we expect a clear monotone
-                                                   // ordering on a steady sine well above cutoff.)
+        // Strict ordering: each step adds at least some attenuation. (The
+        // exact ratio is 1 / 4^N for N additional 2-pole stages — but
+        // even with shared coefficients we expect a clear monotone
+        // ordering on a steady sine well above cutoff.)
         assert!(
             rms_2 > rms_4 && rms_4 > rms_6 && rms_6 > rms_8,
             "rolloff at 10× cutoff should strictly steepen with pole count \

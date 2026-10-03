@@ -2,7 +2,7 @@
 //!
 //! See `docs/superpowers/specs/2026-05-16-mseg-editor-widget-design.md`.
 
-use crate::mseg::{HoldMode, MsegData, MsegNode, MAX_NODES};
+use crate::mseg::{HoldMode, MAX_NODES, MsegData, MsegNode};
 
 /// Randomizer character. Each style biases node count, values, tension, and
 /// stepping differently.

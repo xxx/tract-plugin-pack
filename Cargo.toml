@@ -5,7 +5,10 @@ members = ["wavetable-filter", "gs-meter", "gain-brain", "tinylimit", "satch", "
 # (xcb 0.9.0 in particular, which trips a future-incompat lint) don't enter
 # the workspace lock file. The source is kept on disk for reference only.
 exclude = ["nih-plug", "nih-plug-widgets"]
-resolver = "2"
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
 
 [profile.release]
 lto = true

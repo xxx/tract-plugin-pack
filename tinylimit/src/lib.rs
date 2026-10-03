@@ -1,6 +1,6 @@
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 mod editor;
 pub mod limiter;

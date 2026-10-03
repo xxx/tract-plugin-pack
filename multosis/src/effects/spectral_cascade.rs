@@ -11,7 +11,7 @@
 
 use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
 use rustfft::num_complex::Complex;
-use tract_dsp::spectral_engine::{SpectralEngine, SpectralTransform, FFT_SIZES};
+use tract_dsp::spectral_engine::{FFT_SIZES, SpectralEngine, SpectralTransform};
 
 /// Max delay depth in HOPS. At 48 kHz with the largest FFT (4096-pt,
 /// hop = 2048), 128 hops = 128 * 2048 / 48000 = 5.4 s of buffer, which
@@ -275,8 +275,8 @@ mod tests {
         e.set_param(0, 10.0); // Length = 10 ms (slot 0)
         e.set_param(1, 0.0); // Feedback = 0 (slot 1)
         e.set_param(2, 20_000.0); // Centre at Nyquist (slot 2) -> nearly every bin is
-                                  // BELOW centre -> dk clamped to 0 -> read
-                                  // current frame -> passthrough.
+        // BELOW centre -> dk clamped to 0 -> read
+        // current frame -> passthrough.
         let f = 1000.0;
         let sr = 48_000.0;
         let n = 4096;

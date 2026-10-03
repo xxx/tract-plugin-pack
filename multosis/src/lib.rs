@@ -301,16 +301,16 @@ impl Plugin for Multosis {
 
         // Re-bridge edited config into the engine. Clear the dirty flag only
         // after a successful re-bridge so no edit is lost on lock contention.
-        if self.config_dirty.load(std::sync::atomic::Ordering::Relaxed) {
-            if let (Ok(eff), Ok(modu)) = (
+        if self.config_dirty.load(std::sync::atomic::Ordering::Relaxed)
+            && let (Ok(eff), Ok(modu)) = (
                 self.params.track_effects.try_lock(),
                 self.params.track_modulation.try_lock(),
-            ) {
-                self.engine.set_effects(&eff);
-                self.engine.set_modulation(&modu);
-                self.config_dirty
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-            }
+            )
+        {
+            self.engine.set_effects(&eff);
+            self.engine.set_modulation(&modu);
+            self.config_dirty
+                .store(false, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Drain any pending track-swap from the editor. Swapped AFTER the

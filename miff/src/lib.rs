@@ -330,17 +330,16 @@ impl Plugin for Miff {
                     &mut self.input_fft_scratch,
                 )
                 .is_ok()
+                && let Ok(mut shared) = self.input_spectrum.try_lock()
             {
-                if let Ok(mut shared) = self.input_spectrum.try_lock() {
-                    let peak = self
-                        .input_fft_freq
-                        .iter()
-                        .map(|c| c.norm())
-                        .fold(0.0_f32, f32::max)
-                        .max(1e-10);
-                    for (dst, c) in shared.iter_mut().zip(self.input_fft_freq.iter()) {
-                        *dst = c.norm() / peak;
-                    }
+                let peak = self
+                    .input_fft_freq
+                    .iter()
+                    .map(|c| c.norm())
+                    .fold(0.0_f32, f32::max)
+                    .max(1e-10);
+                for (dst, c) in shared.iter_mut().zip(self.input_fft_freq.iter()) {
+                    *dst = c.norm() / peak;
                 }
             }
         }

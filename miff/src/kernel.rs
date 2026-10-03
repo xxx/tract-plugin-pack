@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use realfft::RealFftPlanner;
 use rustfft::num_complex::Complex;
-use tiny_skia_widgets::mseg::{warp, MsegData, MsegNode};
+use tiny_skia_widgets::mseg::{MsegData, MsegNode, warp};
 
 /// Maximum kernel length, and the fixed Phaseless STFT frame size.
 pub const MAX_KERNEL: usize = 4096;

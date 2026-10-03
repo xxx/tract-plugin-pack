@@ -14,7 +14,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use multosis::effects::{default_params_for_kind, Effect, EffectInstance, EffectKind};
+use multosis::effects::{Effect, EffectInstance, EffectKind, default_params_for_kind};
 
 const SAMPLE_RATE: f32 = 48_000.0;
 const BLOCK: usize = 512;

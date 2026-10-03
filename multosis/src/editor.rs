@@ -5,9 +5,10 @@
 
 use baseview::{WindowOpenOptions, WindowScalePolicy};
 use nih_plug::prelude::*;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
+use crate::MultosisParams;
 use crate::editor::effect_editor::EffectHit;
 use crate::editor::toolbar::{ToolbarControl, ToolbarOp};
 use crate::editor::track_list::TrackDrag;
@@ -19,7 +20,6 @@ use crate::playhead_display::PlayheadDisplay;
 use crate::region::RegionSnapshot;
 use crate::seq_status::SeqStatusDisplay;
 use crate::undo::{ConfigSnapshot, UndoHistory};
-use crate::MultosisParams;
 use tiny_skia_widgets as widgets;
 
 pub mod effect_editor;
@@ -553,10 +553,9 @@ impl MultosisWindow {
     /// The track-effect kinds, for the track listing. Reads the persisted
     /// config; falls back to row defaults on lock contention.
     fn track_kinds(&self) -> [crate::effects::EffectKind; crate::grid::ROWS] {
-        if let Ok(cfg) = self.params.track_effects.lock() {
-            std::array::from_fn(|r| cfg[r].kind)
-        } else {
-            std::array::from_fn(|r| crate::effects::TrackEffect::default_for_row(r).kind)
+        match self.params.track_effects.lock() {
+            Ok(cfg) => std::array::from_fn(|r| cfg[r].kind),
+            _ => std::array::from_fn(|r| crate::effects::TrackEffect::default_for_row(r).kind),
         }
     }
 
@@ -565,13 +564,12 @@ impl MultosisWindow {
     /// row soloed) so a contended frame draws indistinguishable from the
     /// default state rather than a misleading mute/solo display.
     fn track_mute_solo(&self) -> ([bool; crate::grid::ROWS], [bool; crate::grid::ROWS]) {
-        if let Ok(cfg) = self.params.track_effects.lock() {
-            (
+        match self.params.track_effects.lock() {
+            Ok(cfg) => (
                 std::array::from_fn(|r| cfg[r].muted),
                 std::array::from_fn(|r| cfg[r].soloed),
-            )
-        } else {
-            ([false; crate::grid::ROWS], [false; crate::grid::ROWS])
+            ),
+            _ => ([false; crate::grid::ROWS], [false; crate::grid::ROWS]),
         }
     }
 
@@ -585,14 +583,15 @@ impl MultosisWindow {
         }
         let snap = self.snapshot();
         let opened = self.undo.begin_capture(snap);
-        let changed = if let Ok(mut cfg) = self.params.track_effects.try_lock() {
-            match button {
-                track_list::TrackButton::Mute => cfg[row].muted = !cfg[row].muted,
-                track_list::TrackButton::Solo => cfg[row].soloed = !cfg[row].soloed,
+        let changed = match self.params.track_effects.try_lock() {
+            Ok(mut cfg) => {
+                match button {
+                    track_list::TrackButton::Mute => cfg[row].muted = !cfg[row].muted,
+                    track_list::TrackButton::Solo => cfg[row].soloed = !cfg[row].soloed,
+                }
+                true
             }
-            true
-        } else {
-            false
+            _ => false,
         };
         if changed {
             self.mark_config_dirty();
@@ -738,17 +737,18 @@ impl MultosisWindow {
         let lay = effect_editor::effect_layout(self.scale_factor);
         if effect_editor::in_rect(lay.mseg_pane, px, py) {
             let sel = self.selected_mseg.min(3);
-            let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
-                let row = self.selected_track;
-                self.mseg_edit.on_right_click(
-                    px,
-                    py,
-                    &mut modu[row].msegs[sel],
-                    lay.mseg_pane,
-                    self.scale_factor,
-                )
-            } else {
-                None
+            let changed = match self.params.track_modulation.lock() {
+                Ok(mut modu) => {
+                    let row = self.selected_track;
+                    self.mseg_edit.on_right_click(
+                        px,
+                        py,
+                        &mut modu[row].msegs[sel],
+                        lay.mseg_pane,
+                        self.scale_factor,
+                    )
+                }
+                _ => None,
             };
             if changed == Some(widgets::mseg::MsegEdit::Changed) {
                 self.mark_config_dirty();
@@ -761,10 +761,9 @@ impl MultosisWindow {
     /// row default if the mutex is contended.
     fn selected_track_effect(&self) -> crate::effects::TrackEffect {
         let row = self.selected_track;
-        if let Ok(cfg) = self.params.track_effects.lock() {
-            cfg[row]
-        } else {
-            crate::effects::TrackEffect::default_for_row(row)
+        match self.params.track_effects.lock() {
+            Ok(cfg) => cfg[row],
+            _ => crate::effects::TrackEffect::default_for_row(row),
         }
     }
 
@@ -772,10 +771,9 @@ impl MultosisWindow {
     /// its row default if the mutex is contended.
     fn selected_track_modulation(&self) -> crate::modulation::TrackModulation {
         let row = self.selected_track;
-        if let Ok(cfg) = self.params.track_modulation.lock() {
-            cfg[row].clone()
-        } else {
-            crate::modulation::TrackModulation::default_for_row(row)
+        match self.params.track_modulation.lock() {
+            Ok(cfg) => cfg[row].clone(),
+            _ => crate::modulation::TrackModulation::default_for_row(row),
         }
     }
 
@@ -1092,28 +1090,29 @@ impl MultosisWindow {
             EffectHit::MsegPane => {
                 let sel = self.selected_mseg.min(3);
                 let is_double = self.mseg_double_click_check(px, py);
-                let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
-                    let row = self.selected_track;
-                    if is_double {
-                        self.mseg_edit.on_double_click(
-                            px,
-                            py,
-                            &mut modu[row].msegs[sel],
-                            lay.mseg_pane,
-                            self.scale_factor,
-                        )
-                    } else {
-                        self.mseg_edit.on_mouse_down(
-                            px,
-                            py,
-                            &mut modu[row].msegs[sel],
-                            lay.mseg_pane,
-                            self.scale_factor,
-                            ctrl,
-                        )
+                let changed = match self.params.track_modulation.lock() {
+                    Ok(mut modu) => {
+                        let row = self.selected_track;
+                        if is_double {
+                            self.mseg_edit.on_double_click(
+                                px,
+                                py,
+                                &mut modu[row].msegs[sel],
+                                lay.mseg_pane,
+                                self.scale_factor,
+                            )
+                        } else {
+                            self.mseg_edit.on_mouse_down(
+                                px,
+                                py,
+                                &mut modu[row].msegs[sel],
+                                lay.mseg_pane,
+                                self.scale_factor,
+                                ctrl,
+                            )
+                        }
                     }
-                } else {
-                    None
+                    _ => None,
                 };
                 if changed == Some(widgets::mseg::MsegEdit::Changed) {
                     self.mark_config_dirty();
@@ -1620,12 +1619,11 @@ impl MultosisWindow {
     /// Reset the `Transient` Hold dial to its default. No-op when the active
     /// trigger source is not `Transient`. Marks dirty.
     fn reset_trigger_aux_to_default(&mut self) {
-        if let Ok(mut cfg) = self.params.track_modulation.lock() {
-            if let TriggerSource::Transient { hold_ms, .. } = &mut cfg[self.selected_track].trigger
-            {
-                *hold_ms = crate::modulation::TRANSIENT_HOLD_MS_DEFAULT;
-                self.mark_config_dirty();
-            }
+        if let Ok(mut cfg) = self.params.track_modulation.lock()
+            && let TriggerSource::Transient { hold_ms, .. } = &mut cfg[self.selected_track].trigger
+        {
+            *hold_ms = crate::modulation::TRANSIENT_HOLD_MS_DEFAULT;
+            self.mark_config_dirty();
         }
     }
 
@@ -1637,12 +1635,11 @@ impl MultosisWindow {
             crate::modulation::TRANSIENT_HOLD_MS_MAX,
             effects::ParamScaling::Log,
         );
-        if let Ok(mut cfg) = self.params.track_modulation.lock() {
-            if let TriggerSource::Transient { hold_ms, .. } = &mut cfg[self.selected_track].trigger
-            {
-                *hold_ms = new_hold_ms;
-                self.mark_config_dirty();
-            }
+        if let Ok(mut cfg) = self.params.track_modulation.lock()
+            && let TriggerSource::Transient { hold_ms, .. } = &mut cfg[self.selected_track].trigger
+        {
+            *hold_ms = new_hold_ms;
+            self.mark_config_dirty();
         }
     }
 
@@ -1941,18 +1938,19 @@ impl baseview::WindowHandler for MultosisWindow {
                 if self.view == View::Effect {
                     let lay = effect_editor::effect_layout(self.scale_factor);
                     let sel = self.selected_mseg.min(3);
-                    let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
-                        let row = self.selected_track;
-                        self.mseg_edit.on_mouse_move(
-                            px,
-                            py,
-                            &mut modu[row].msegs[sel],
-                            lay.mseg_pane,
-                            self.scale_factor,
-                            shift,
-                        )
-                    } else {
-                        None
+                    let changed = match self.params.track_modulation.lock() {
+                        Ok(mut modu) => {
+                            let row = self.selected_track;
+                            self.mseg_edit.on_mouse_move(
+                                px,
+                                py,
+                                &mut modu[row].msegs[sel],
+                                lay.mseg_pane,
+                                self.scale_factor,
+                                shift,
+                            )
+                        }
+                        _ => None,
                     };
                     if changed == Some(widgets::mseg::MsegEdit::Changed) {
                         self.mark_config_dirty();
@@ -2194,11 +2192,11 @@ impl baseview::WindowHandler for MultosisWindow {
                 // position). Same-row or off-list releases just cancel.
                 if let Some(drag) = self.track_drag.take() {
                     let (px, py) = self.mouse_pos;
-                    if let Some(to) = track_list::track_at(px, py, self.scale_factor) {
-                        if to != drag.from {
-                            self.swap_tracks(drag.from, to);
-                            self.selected_track = to;
-                        }
+                    if let Some(to) = track_list::track_at(px, py, self.scale_factor)
+                        && to != drag.from
+                    {
+                        self.swap_tracks(drag.from, to);
+                        self.selected_track = to;
                     }
                 }
                 // A release always terminates any in-flight MSEG node drag,
@@ -2206,15 +2204,16 @@ impl baseview::WindowHandler for MultosisWindow {
                 if self.view == View::Effect {
                     let sel = self.selected_mseg.min(3);
                     let lay = effect_editor::effect_layout(self.scale_factor);
-                    let changed = if let Ok(mut modu) = self.params.track_modulation.lock() {
-                        let row = self.selected_track;
-                        self.mseg_edit.on_mouse_up(
-                            &mut modu[row].msegs[sel],
-                            lay.mseg_pane,
-                            self.scale_factor,
-                        )
-                    } else {
-                        None
+                    let changed = match self.params.track_modulation.lock() {
+                        Ok(mut modu) => {
+                            let row = self.selected_track;
+                            self.mseg_edit.on_mouse_up(
+                                &mut modu[row].msegs[sel],
+                                lay.mseg_pane,
+                                self.scale_factor,
+                            )
+                        }
+                        _ => None,
                     };
                     if changed == Some(widgets::mseg::MsegEdit::Changed) {
                         self.mark_config_dirty();
@@ -2354,12 +2353,12 @@ impl baseview::WindowHandler for MultosisWindow {
                             let snap = self.snapshot();
                             let opened = self.undo.begin_capture(snap);
                             let sel = self.selected_mseg.min(3);
-                            let changed = if let Ok(mut modu) = self.params.track_modulation.lock()
-                            {
-                                let row = self.selected_track;
-                                self.mseg_edit.delete_selection(&mut modu[row].msegs[sel])
-                            } else {
-                                None
+                            let changed = match self.params.track_modulation.lock() {
+                                Ok(mut modu) => {
+                                    let row = self.selected_track;
+                                    self.mseg_edit.delete_selection(&mut modu[row].msegs[sel])
+                                }
+                                _ => None,
                             };
                             if changed == Some(widgets::mseg::MsegEdit::Changed) {
                                 self.mark_config_dirty();
