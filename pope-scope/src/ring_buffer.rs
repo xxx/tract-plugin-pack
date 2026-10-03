@@ -28,15 +28,15 @@ pub struct MinMax {
 fn minmax_slice(s: &[f32]) -> MinMax {
     let mut vmin = f32x16::splat(f32::MAX);
     let mut vmax = f32x16::splat(f32::MIN);
-    let mut chunks = s.chunks_exact(16);
-    for chunk in chunks.by_ref() {
-        let v = f32x16::from_slice(chunk);
+    let (chunks, remainder) = s.as_chunks::<16>();
+    for chunk in chunks {
+        let v = f32x16::from_array(*chunk);
         vmin = vmin.simd_min(v);
         vmax = vmax.simd_max(v);
     }
     let mut min = vmin.reduce_min();
     let mut max = vmax.reduce_max();
-    for &x in chunks.remainder() {
+    for &x in remainder {
         min = min.min(x);
         max = max.max(x);
     }

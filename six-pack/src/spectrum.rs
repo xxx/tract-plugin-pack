@@ -86,8 +86,8 @@ impl SpectrumAnalyzer {
             let lo = ((log_min + frac_lo * (log_max - log_min)).exp() as usize).max(1);
             let hi = ((log_min + frac_hi * (log_max - log_min)).exp() as usize).min(n_freq_bins);
             let mut max_mag = 0.0_f32;
-            for j in lo..hi {
-                let m = self.fft_input[j].norm();
+            for bin in &self.fft_input[lo..hi] {
+                let m = bin.norm();
                 if m > max_mag {
                     max_mag = m;
                 }

@@ -890,7 +890,7 @@ impl MultosisWindow {
             mseg_color(sel),
             tooltip_ref,
         );
-        for m in 0..4 {
+        for (m, mseg) in modu.msegs.iter().enumerate() {
             if m != sel {
                 let c = mseg_color(m);
                 // Pack the slot colour with ghost alpha (~0x60).
@@ -901,7 +901,7 @@ impl MultosisWindow {
                 widgets::mseg::draw_mseg_ghost(
                     &mut self.surface.pixmap,
                     lay.mseg_pane,
-                    &modu.msegs[m],
+                    mseg,
                     &self.mseg_edit,
                     self.scale_factor,
                     packed,

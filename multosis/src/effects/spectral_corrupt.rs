@@ -86,8 +86,8 @@ impl SpectralTransform for TransformCtx<'_> {
         }
 
         // Rank bins by magnitude using the pre-allocated index scratch.
-        for k in 0..count {
-            self.chan.bin_indices[k] = k as u16;
+        for (k, index) in self.chan.bin_indices[..count].iter_mut().enumerate() {
+            *index = k as u16;
         }
         self.chan.bin_indices[..count].sort_unstable_by(|&a, &b| {
             let ma = spectrum[a as usize].norm();

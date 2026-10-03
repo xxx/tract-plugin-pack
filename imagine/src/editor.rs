@@ -354,8 +354,7 @@ impl ImagineWindow {
     /// clamping so no band's `baseline + clamped_delta` leaves [0, 1].
     fn apply_link_widths(&self, setter: &ParamSetter, requested_delta: f32) {
         let mut clamped_delta = requested_delta;
-        for b in 0..NUM_BANDS {
-            let baseline = self.link_baseline.widths[b];
+        for &baseline in &self.link_baseline.widths {
             let max_up = 1.0 - baseline;
             let max_down = -baseline;
             clamped_delta = clamped_delta.clamp(max_down, max_up);
@@ -370,8 +369,7 @@ impl ImagineWindow {
     /// clamping.
     fn apply_link_stzs(&self, setter: &ParamSetter, requested_delta: f32) {
         let mut clamped_delta = requested_delta;
-        for b in 0..NUM_BANDS {
-            let baseline = self.link_baseline.stzs[b];
+        for &baseline in &self.link_baseline.stzs {
             let max_up = 1.0 - baseline;
             let max_down = -baseline;
             clamped_delta = clamped_delta.clamp(max_down, max_up);
@@ -656,9 +654,9 @@ impl ImagineWindow {
                 setter.begin_set_parameter(p);
                 if self.params.link_bands.value() {
                     // Begin set on all 4 bands' widths so all get end_set_parameter at end.
-                    for b in 0..NUM_BANDS {
+                    for (b, params) in self.params.bands.iter().enumerate() {
                         if b != band {
-                            setter.begin_set_parameter(&self.params.bands[b].width);
+                            setter.begin_set_parameter(&params.width);
                         }
                     }
                 }
@@ -714,10 +712,10 @@ impl ImagineWindow {
                     setter.set_parameter(p, false);
                     setter.end_set_parameter(p);
                 } else {
-                    for b in 0..NUM_BANDS {
-                        let p = &self.params.bands[b].solo;
+                    for (b, params) in self.params.bands.iter().enumerate() {
+                        let p = &params.solo;
                         let target = b == band;
-                        if self.params.bands[b].solo.value() != target {
+                        if p.value() != target {
                             setter.begin_set_parameter(p);
                             setter.set_parameter(p, target);
                             setter.end_set_parameter(p);
@@ -793,9 +791,9 @@ impl ImagineWindow {
             HitAction::BandWidth { band } => {
                 setter.end_set_parameter(&self.params.bands[band].width);
                 if self.params.link_bands.value() {
-                    for b in 0..NUM_BANDS {
+                    for (b, params) in self.params.bands.iter().enumerate() {
                         if b != band {
-                            setter.end_set_parameter(&self.params.bands[b].width);
+                            setter.end_set_parameter(&params.width);
                         }
                     }
                 }
