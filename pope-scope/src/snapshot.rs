@@ -975,17 +975,17 @@ mod tests {
     fn test_hold_buffer_clears_back_after_promotion() {
         let hb = HoldBuffer::new();
         // Bar 1: fill with [1.0, 2.0, 3.0]
-        hb.update(&vec![vec![1.0, 2.0, 3.0]], 0.5, 3);
-        hb.update(&vec![vec![1.0, 2.0, 3.0]], 0.9, 3);
+        hb.update(&[vec![1.0, 2.0, 3.0]], 0.5, 3);
+        hb.update(&[vec![1.0, 2.0, 3.0]], 0.9, 3);
         // Promote bar 1 to front
-        hb.update(&vec![vec![9.0, 0.0, 0.0]], 0.05, 1);
+        hb.update(&[vec![9.0, 0.0, 0.0]], 0.05, 1);
 
         // Bar 2: only write first sample (valid_count=1).
         // Back buffer should be zeros for [1..3], NOT leftover bar 1 data.
-        hb.update(&vec![vec![9.0, 0.0, 0.0]], 0.5, 1);
-        hb.update(&vec![vec![9.0, 0.0, 0.0]], 0.9, 1);
+        hb.update(&[vec![9.0, 0.0, 0.0]], 0.5, 1);
+        hb.update(&[vec![9.0, 0.0, 0.0]], 0.9, 1);
         // Promote bar 2
-        let front = hb.update(&vec![vec![0.0, 0.0, 0.0]], 0.05, 0).unwrap();
+        let front = hb.update(&[vec![0.0, 0.0, 0.0]], 0.05, 0).unwrap();
         // Only sample[0] was ever written as valid; rest should be zeros
         assert_eq!(front[0], vec![9.0, 0.0, 0.0]);
     }

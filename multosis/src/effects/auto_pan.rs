@@ -211,8 +211,8 @@ mod tests {
         e.set_param(1, 100.0);
         for _ in 0..48_000 {
             let (l, r) = e.process_sample(1.0, 1.0);
-            assert!(l <= 1.0 + 1e-6 && l >= -1e-6, "L out of range: {l}");
-            assert!(r <= 1.0 + 1e-6 && r >= -1e-6, "R out of range: {r}");
+            assert!((-1e-6..=1.0 + 1e-6).contains(&l), "L out of range: {l}");
+            assert!((-1e-6..=1.0 + 1e-6).contains(&r), "R out of range: {r}");
         }
     }
 

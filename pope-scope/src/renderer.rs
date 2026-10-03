@@ -773,20 +773,20 @@ mod tests {
     #[test]
     fn test_time_grid_divisions() {
         let (div, n) = time_grid_divisions(1000.0);
-        assert!(n >= 4 && n <= 10);
+        assert!((4..=10).contains(&n));
         assert!((div * n as f32 - 1000.0).abs() < div);
     }
 
     #[test]
     fn test_time_grid_divisions_small() {
         let (_div, n) = time_grid_divisions(10.0);
-        assert!(n >= 4 && n <= 10);
+        assert!((4..=10).contains(&n));
     }
 
     #[test]
     fn test_time_grid_divisions_large() {
         let (_div, n) = time_grid_divisions(10000.0);
-        assert!(n >= 4 && n <= 10);
+        assert!((4..=10).contains(&n));
     }
 
     // ── decimate_to_columns tests ────────────────────────────────────────────

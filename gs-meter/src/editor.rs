@@ -666,57 +666,6 @@ impl GsMeterWindow {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_gain_match_reference_minus_reading() {
-        // Reference -14 LUFS, reading -20 LUFS -> need +6 dB gain
-        assert_eq!(gain_match_db(-14.0, -20.0), Some(6.0));
-    }
-
-    #[test]
-    fn test_gain_match_negative_gain() {
-        // Reference -23 LUFS, reading -14 LUFS -> need -9 dB gain (too loud)
-        assert_eq!(gain_match_db(-23.0, -14.0), Some(-9.0));
-    }
-
-    #[test]
-    fn test_gain_match_zero_when_matched() {
-        // Already at target -> 0 dB gain
-        assert_eq!(gain_match_db(-14.0, -14.0), Some(0.0));
-    }
-
-    #[test]
-    fn test_gain_match_invalid_reading_returns_none() {
-        // Reading at or below floor -> no valid measurement
-        assert_eq!(gain_match_db(-14.0, -100.0), None);
-        assert_eq!(gain_match_db(-14.0, -200.0), None);
-    }
-
-    #[test]
-    fn test_gain_match_just_above_floor() {
-        // Reading just above -100 dB floor -> valid measurement
-        let result = gain_match_db(-14.0, -99.99);
-        assert!(result.is_some());
-        let gain = result.unwrap();
-        assert!((gain - 85.99).abs() < 0.02);
-    }
-
-    #[test]
-    fn test_gain_match_works_for_db_mode_too() {
-        // dB mode: reference 0 dBFS, peak at -3 dB -> need +3 dB
-        assert_eq!(gain_match_db(0.0, -3.0), Some(3.0));
-    }
-
-    #[test]
-    fn test_gain_match_positive_reading() {
-        // Reading above 0 (clipping) -> large negative gain
-        assert_eq!(gain_match_db(-14.0, 2.0), Some(-16.0));
-    }
-}
-
 /// Compute the gain *adjustment* (delta in dB) needed to bring a meter reading to a reference.
 /// The caller must add this to the current gain: `new_gain = current_gain + delta`.
 /// Returns None if the reading is below the -100 dB floor (no valid measurement).
@@ -1011,4 +960,55 @@ impl Editor for GsMeterEditor {
     fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
     fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
     fn param_values_changed(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gain_match_reference_minus_reading() {
+        // Reference -14 LUFS, reading -20 LUFS -> need +6 dB gain
+        assert_eq!(gain_match_db(-14.0, -20.0), Some(6.0));
+    }
+
+    #[test]
+    fn test_gain_match_negative_gain() {
+        // Reference -23 LUFS, reading -14 LUFS -> need -9 dB gain (too loud)
+        assert_eq!(gain_match_db(-23.0, -14.0), Some(-9.0));
+    }
+
+    #[test]
+    fn test_gain_match_zero_when_matched() {
+        // Already at target -> 0 dB gain
+        assert_eq!(gain_match_db(-14.0, -14.0), Some(0.0));
+    }
+
+    #[test]
+    fn test_gain_match_invalid_reading_returns_none() {
+        // Reading at or below floor -> no valid measurement
+        assert_eq!(gain_match_db(-14.0, -100.0), None);
+        assert_eq!(gain_match_db(-14.0, -200.0), None);
+    }
+
+    #[test]
+    fn test_gain_match_just_above_floor() {
+        // Reading just above -100 dB floor -> valid measurement
+        let result = gain_match_db(-14.0, -99.99);
+        assert!(result.is_some());
+        let gain = result.unwrap();
+        assert!((gain - 85.99).abs() < 0.02);
+    }
+
+    #[test]
+    fn test_gain_match_works_for_db_mode_too() {
+        // dB mode: reference 0 dBFS, peak at -3 dB -> need +3 dB
+        assert_eq!(gain_match_db(0.0, -3.0), Some(3.0));
+    }
+
+    #[test]
+    fn test_gain_match_positive_reading() {
+        // Reading above 0 (clipping) -> large negative gain
+        assert_eq!(gain_match_db(-14.0, 2.0), Some(-16.0));
+    }
 }

@@ -276,7 +276,7 @@ mod tests {
         let delay = 48; // 1 ms at 48 kHz
 
         let m_pulse: Vec<f32> = std::iter::once(1.0)
-            .chain(std::iter::repeat(0.0).take(100))
+            .chain(std::iter::repeat_n(0.0, 100))
             .collect();
 
         // Width=0 (S unchanged), Stereoize on at 1 ms, Mode I.
@@ -292,7 +292,7 @@ mod tests {
             .unwrap()
             .0;
         assert!(
-            (max_idx as i32 - delay as i32).abs() <= 1,
+            (max_idx as i32 - delay).abs() <= 1,
             "max at {max_idx}, expected {delay}"
         );
     }

@@ -1029,7 +1029,7 @@ mod tests {
         s.open(
             A::Algorithm,
             ANCHOR,
-            DropdownList::flat(&vec!["x"; 6]),
+            DropdownList::flat(&["x"; 6]),
             0,
             false,
             WIN,
@@ -1126,7 +1126,7 @@ mod tests {
         s.open(
             A::Wavetable,
             edge_anchor,
-            DropdownList::flat(&vec!["x"; 3]),
+            DropdownList::flat(&["x"; 3]),
             0,
             false,
             WIN,
@@ -1176,7 +1176,7 @@ mod tests {
         s.open(
             A::Wavetable,
             ANCHOR,
-            DropdownList::flat(&vec!["x"; 4]),
+            DropdownList::flat(&["x"; 4]),
             0,
             true,
             WIN,
@@ -1210,7 +1210,7 @@ mod tests {
         s.open(
             A::Wavetable,
             ANCHOR,
-            DropdownList::flat(&vec!["x"; 5]),
+            DropdownList::flat(&["x"; 5]),
             3,
             false,
             WIN,
@@ -1226,7 +1226,7 @@ mod tests {
         s.open(
             A::Wavetable,
             ANCHOR,
-            DropdownList::flat(&vec!["x"; 3]),
+            DropdownList::flat(&["x"; 3]),
             2,
             false,
             WIN,
@@ -1260,7 +1260,7 @@ mod tests {
         s.open(
             A::Wavetable,
             ANCHOR,
-            DropdownList::flat(&vec!["x"; 5]),
+            DropdownList::flat(&["x"; 5]),
             2,
             false,
             WIN,
@@ -1288,7 +1288,7 @@ mod tests {
         s.open(
             A::Wavetable,
             ANCHOR,
-            DropdownList::flat(&vec!["x"; 4]),
+            DropdownList::flat(&["x"; 4]),
             1,
             true,
             WIN,
@@ -1305,7 +1305,7 @@ mod tests {
         s.open(
             A::Wavetable,
             ANCHOR,
-            DropdownList::flat(&vec!["x"; 4]),
+            DropdownList::flat(&["x"; 4]),
             0,
             true,
             WIN,
@@ -1323,7 +1323,7 @@ mod tests {
         s.open(
             A::Wavetable,
             ANCHOR,
-            DropdownList::flat(&vec!["x"; 4]),
+            DropdownList::flat(&["x"; 4]),
             0,
             true,
             WIN,
@@ -1370,7 +1370,7 @@ mod tests {
         s.open(
             A::Wavetable,
             ANCHOR,
-            DropdownList::flat(&vec!["x"; 4]),
+            DropdownList::flat(&["x"; 4]),
             3,
             true,
             WIN,

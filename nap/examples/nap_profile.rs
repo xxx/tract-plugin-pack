@@ -91,7 +91,7 @@ fn run_efficient(label: &str, seq: &VelvetSequence) {
     let target_samples = (SECONDS * SAMPLE_RATE) as usize;
     let n_blocks = target_samples / BLOCK;
     // Round up so we don't drop the last partial partition when BLOCK < P.
-    let conv_blocks = (n_blocks * BLOCK + P - 1) / P;
+    let conv_blocks = (n_blocks * BLOCK).div_ceil(P);
     let real_samples = n_blocks * BLOCK;
 
     let start = Instant::now();
