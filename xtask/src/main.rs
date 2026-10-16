@@ -2,13 +2,19 @@ use anyhow::Result;
 use std::env;
 use std::process::Command;
 
+mod bundle;
+
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     let task = args.next();
     let rest: Vec<String> = args.collect();
     match task.as_deref() {
-        Some("bundle") => bundle()?,
-        Some("bundle-universal") => bundle_universal()?,
+        Some("bundle" | "bundle-universal")
+            if rest.iter().any(|arg| arg == "--help" || arg == "-h") =>
+        {
+            print_help()
+        }
+        Some(task @ ("bundle" | "bundle-universal")) => bundle::run(task, &rest)?,
         Some("native") => run_native(&rest)?,
         Some("bench-compare") => bench_compare()?,
         _ => print_help(),
@@ -19,8 +25,12 @@ fn main() -> Result<()> {
 fn print_help() {
     eprintln!(
         "Tasks:
-  bundle                      Build plugin bundles
-  bundle-universal            Build universal (multi-architecture) plugin bundles
+  bundle [--native | --redistributable] [cargo build args...]
+                              Build all plugins (VST3 + CLAP + standalone), release by default.
+                              Redistributable is the default and uses the generic target CPU.
+                              Native uses the same CPU detection as the native wrapper below.
+  bundle-universal [cargo build args...]
+                              Build all plugins for both macOS architectures (redistributable).
   native <cargo args...>      Run `cargo <args>` with target-cpu auto-tuned to the build host.
                               On x86_64 with AVX2+FMA+BMI2 this sets -C target-cpu=haswell,
                               which lets tiny-skia and auto-vectorized code use AVX2 paths.
@@ -28,6 +38,10 @@ fn print_help() {
                               print criterion's delta report.
 
 Examples:
+  cargo xtask bundle --redistributable
+  cargo xtask bundle --native
+  cargo xtask bundle --profile profiling
+  cargo xtask bundle-universal
   cargo xtask native nih-plug bundle wavetable-filter --release
   cargo xtask native build --release --bin gs-meter
   cargo xtask bench-compare"
@@ -126,37 +140,5 @@ fn bench_compare() -> Result<()> {
     // Rerun with RUSTFLAGS matching the haswell build so the binary doesn't get
     // rebuilt, and point criterion at the saved baseline for % deltas.
     run("compare", "haswell", &["--baseline", "baseline"])?;
-    Ok(())
-}
-
-fn bundle() -> Result<()> {
-    println!("Building plugin bundles...");
-
-    for plugin in &["wavetable-filter", "miff"] {
-        let status = Command::new("cargo")
-            .args(["xtask", "bundle", plugin, "--release"])
-            .status()?;
-        if !status.success() {
-            anyhow::bail!("Build failed for {}", plugin);
-        }
-    }
-
-    println!("Build complete!");
-    Ok(())
-}
-
-fn bundle_universal() -> Result<()> {
-    println!("Building universal plugin bundles...");
-
-    for plugin in &["wavetable-filter", "miff"] {
-        let status = Command::new("cargo")
-            .args(["xtask", "bundle-universal", plugin, "--release"])
-            .status()?;
-        if !status.success() {
-            anyhow::bail!("Build failed for {}", plugin);
-        }
-    }
-
-    println!("Build complete!");
     Ok(())
 }
