@@ -191,8 +191,8 @@ sudo apt install libxcb1-dev libx11-xcb-dev libx11-dev libxcursor-dev \
 ## Building
 
 ```bash
-# Install the bundler once
-cargo install --git https://github.com/xxx/nih-plug.git --branch finish-vst3-pr cargo-nih-plug
+# Install or update the bundler
+cargo install --force --locked --git https://github.com/xxx/nih-plug.git --rev 2882e1642946103f39a5e068c8c8ebc901a6599e cargo-nih-plug
 
 # Build the entire collection (VST3 + CLAP + standalone, release mode)
 cargo xtask bundle --redistributable
@@ -221,7 +221,7 @@ cargo xtask native build --release --bin gs-meter
 
 On supported x86_64 hosts, native binaries require Haswell-compatible CPUs. Use `cargo xtask bundle --redistributable` for the collection's portable builds.
 
-The bundler outputs plugin bundles to `target/bundled/` (or `<target-dir>/bundled/` when overriding Cargo's target directory). All standalone executables are built in `target/release/`; a custom profile or cross-compilation target changes that build directory. The upstream bundler also copies some standalones into `bundled/`, but currently skips executable names containing hyphens. CI uploads the VST3 and CLAP bundles.
+The bundler outputs plugin bundles and standalone applications to `target/bundled/` (or `<target-dir>/bundled/` when overriding Cargo's target directory). The pinned bundler revision preserves hyphens in standalone executable names such as `gs-meter`. Standalone executables are also available in `target/release/`; a custom profile or cross-compilation target changes that build directory. CI uploads the complete bundled collection.
 
 Copy either the `.vst3` or `.clap` file (you only need one -- use whichever your DAW supports) to your plugin directory:
 
