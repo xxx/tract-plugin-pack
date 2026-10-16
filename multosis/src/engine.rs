@@ -208,7 +208,12 @@ impl AudioEngine {
     /// is transparent (rather than zeroing the chain — `NoneEffect` outputs
     /// silence). Inactive rows (cell off at the playhead column or outside
     /// the loop zone) are likewise skipped.
-    fn process_sample(&mut self, dry_l: f32, dry_r: f32, active: u16) -> (f32, f32) {
+    fn process_sample<const MODULATE_MIX: bool>(
+        &mut self,
+        dry_l: f32,
+        dry_r: f32,
+        active: u16,
+    ) -> (f32, f32) {
         let mut cur_l = dry_l;
         let mut cur_r = dry_r;
         for r in 0..ROWS {
@@ -219,7 +224,11 @@ impl AudioEngine {
                 continue;
             }
             let (eff_l, eff_r) = self.effects[r].process_sample(cur_l, cur_r);
-            let mix = self.track_effects[r].mix;
+            let mix = if MODULATE_MIX {
+                self.modulation.next_mix(r, self.track_effects[r].mix)
+            } else {
+                self.track_effects[r].mix
+            };
             let lane_l = cur_l + (eff_l - cur_l) * mix;
             let lane_r = cur_r + (eff_r - cur_r) * mix;
             let amp = self.modulation.amplitude(r);
@@ -227,6 +236,22 @@ impl AudioEngine {
             cur_r = amp * lane_r;
         }
         (cur_l, cur_r)
+    }
+
+    fn process_segment<const MODULATE_MIX: bool>(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        active: u16,
+        mix: f32,
+    ) {
+        for (left, right) in left.iter_mut().zip(right) {
+            let (dry_l, dry_r) = (*left, *right);
+            let (wet_l, wet_r) = self.process_sample::<MODULATE_MIX>(dry_l, dry_r, active);
+            let (cw_l, cw_r) = self.compressor.process_sample(wet_l, wet_r);
+            *left = dry_l + (cw_l - dry_l) * mix;
+            *right = dry_r + (cw_r - dry_r) * mix;
+        }
     }
 
     /// Process one stereo block in place. `left`/`right` carry the dry input
@@ -313,13 +338,20 @@ impl AudioEngine {
                 &self.track_effects,
             );
             let active_audio = active & !mute_mask;
-            for i in cursor..seg_end {
-                let (dry_l, dry_r) = (left[i], right[i]);
-                let (wet_l, wet_r) = self.process_sample(dry_l, dry_r, active_audio);
-                // Limit the chain output on the wet bus, then mix dry/wet.
-                let (cw_l, cw_r) = self.compressor.process_sample(wet_l, wet_r);
-                left[i] = dry_l + (cw_l - dry_l) * mix;
-                right[i] = dry_r + (cw_r - dry_r) * mix;
+            if self.modulation.mix_is_active() {
+                self.process_segment::<true>(
+                    &mut left[cursor..seg_end],
+                    &mut right[cursor..seg_end],
+                    active_audio,
+                    mix,
+                );
+            } else {
+                self.process_segment::<false>(
+                    &mut left[cursor..seg_end],
+                    &mut right[cursor..seg_end],
+                    active_audio,
+                    mix,
+                );
             }
             cursor = seg_end;
             if bi < n_boundaries {
@@ -1169,6 +1201,85 @@ mod tests {
     }
 
     #[test]
+    fn row_mix_mseg_changes_the_blend_without_changing_its_base() {
+        use crate::effects::{EffectKind, default_params_for_kind};
+        use crate::modulation::ModulationTarget;
+        let build = |mix| {
+            let mut engine = AudioEngine::new();
+            engine.set_sample_rate(48000.0);
+            let mut tracks = [TrackEffect::default(); ROWS];
+            tracks[0] = TrackEffect {
+                kind: EffectKind::Bitcrush,
+                params: default_params_for_kind(EffectKind::Bitcrush),
+                mix,
+                ..TrackEffect::default()
+            };
+            tracks[0].params[0] = 4.0;
+            engine.set_effects(&tracks);
+            let mut config = std::array::from_fn(TrackModulation::default_for_row);
+            for row in &mut config {
+                row.targets = [None; 3];
+            }
+            if mix == 0.0 {
+                config[0].targets[0] = Some(ModulationTarget::Mix);
+                config[0].depths[0] = 1.0;
+                for node in &mut config[0].msegs[1].nodes {
+                    node.value = 1.0;
+                }
+            }
+            engine.set_modulation(&config);
+            engine
+        };
+        let mut wet = build(1.0);
+        let mut modulated = build(0.0);
+        let (mut wl, mut wr, mut ml, mut mr) = ([0.6; 32], [0.6; 32], [0.6; 32], [0.6; 32]);
+        let grid = Grid::default();
+        wet.process(&mut wl, &mut wr, true, 1000.0, 120.0, 1.0, &grid);
+        modulated.process(&mut ml, &mut mr, true, 1000.0, 120.0, 1.0, &grid);
+        assert!((ml[31] - wl[31]).abs() < 1e-6);
+        assert!((ml[0] - 0.6).abs() < (wl[0] - 0.6).abs());
+        assert_eq!(modulated.track_effects_for_test()[0].mix, 0.0);
+    }
+
+    #[test]
+    fn reactivated_row_resumes_its_current_mix_modulation() {
+        use crate::effects::{EffectKind, default_params_for_kind};
+        use crate::modulation::ModulationTarget;
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48000.0);
+        let mut tracks = [TrackEffect::default(); ROWS];
+        tracks[0].kind = EffectKind::Bitcrush;
+        tracks[0].params = default_params_for_kind(EffectKind::Bitcrush);
+        tracks[0].params[0] = 4.0;
+        tracks[0].mix = 0.0;
+        engine.set_effects(&tracks);
+        let mut modulation = std::array::from_fn(TrackModulation::default_for_row);
+        modulation[0].targets[0] = Some(ModulationTarget::Mix);
+        modulation[0].depths[0] = 1.0;
+        for node in &mut modulation[0].msegs[1].nodes {
+            node.value = 1.0;
+        }
+        engine.set_modulation(&modulation);
+        let mut grid = Grid::default();
+        grid.cell_mut(0, 0).enabled = false;
+        let (mut left, mut right) = ([0.6; 4], [0.6; 4]);
+        engine.process(&mut left, &mut right, false, 1000.0, 120.0, 1.0, &grid);
+        assert_eq!(left, [0.6; 4]);
+
+        for node in &mut modulation[0].msegs[1].nodes {
+            node.value = 0.0;
+        }
+        engine.set_modulation(&modulation);
+        grid.cell_mut(0, 0).enabled = true;
+        engine.process(&mut left, &mut right, false, 1000.0, 120.0, 1.0, &grid);
+        assert!(
+            left[0] > 0.6001,
+            "the blend should ramp from the preceding endpoint"
+        );
+        assert!((left[3] - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
     fn per_track_mix_zero_makes_an_active_track_contribute_dry() {
         // Row 0 runs a Bitcrush effect (audibly alters the signal) at mix 0.0;
         // the lane must collapse to the dry input. Compared against the same
@@ -1253,9 +1364,9 @@ mod tests {
         let mut e_wet = build(1.0);
 
         // Active mask = row 0 only.
-        let dry = e_dry.process_sample(0.6, 0.6, 1 << 0).0;
-        let half = e_half.process_sample(0.6, 0.6, 1 << 0).0;
-        let wet = e_wet.process_sample(0.6, 0.6, 1 << 0).0;
+        let dry = e_dry.process_sample::<false>(0.6, 0.6, 1 << 0).0;
+        let half = e_half.process_sample::<false>(0.6, 0.6, 1 << 0).0;
+        let wet = e_wet.process_sample::<false>(0.6, 0.6, 1 << 0).0;
 
         // mix 0 → the lane is the dry input.
         assert!((dry - 0.6).abs() < 1e-6, "mix 0.0 should be dry: dry={dry}");

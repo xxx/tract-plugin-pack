@@ -63,7 +63,10 @@ pub fn draw_effect_section(
         editing_dial,
         editing_mix,
         open_param_dropdown,
-        modulated_norms,
+        &tract_effects::editor::view::ModulationDisplay {
+            parameters: *modulated_norms,
+            mix: None,
+        },
         scale,
         &effect_layout(scale),
     );
@@ -128,7 +131,7 @@ pub fn draw_modulation_controls(
         tr,
         slot,
         kind,
-        target,
+        target.map(tract_effects::modulation::ModulationTarget::EffectParameter),
         depth,
         open,
         scale,

@@ -101,6 +101,7 @@ pub struct EditSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tract_effects::modulation::ModulationTarget;
 
     #[test]
     fn all_effects_have_neutral_independent_defaults() {
@@ -124,12 +125,27 @@ mod tests {
         let mut bank = ModulationBank::default();
         let mut modulation = bank.get(EffectKind::Svf).clone();
         modulation.trigger = TriggerSource::CellStep;
-        modulation.targets = [Some(99); 3];
+        modulation.targets = [Some(ModulationTarget::EffectParameter(99)); 3];
         bank.entries[bank_index(EffectKind::Svf)] = modulation;
         let restored: ModulationBank =
             serde_json::from_str(&serde_json::to_string(&bank).unwrap()).unwrap();
         assert_eq!(restored.get(EffectKind::Svf).trigger, TriggerSource::Free);
         assert_eq!(restored.get(EffectKind::Svf).targets, [None; 3]);
+    }
+
+    #[test]
+    fn mix_assignment_round_trips_even_for_none() {
+        let mut bank = ModulationBank::default();
+        let mut modulation = neutral_modulation();
+        modulation.targets[0] = Some(ModulationTarget::Mix);
+        bank.set(EffectKind::None, modulation);
+        let json = serde_json::to_string(&bank).unwrap();
+        let restored: ModulationBank = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, bank);
+        assert_eq!(
+            restored.get(EffectKind::None).targets[0],
+            Some(ModulationTarget::Mix)
+        );
     }
 
     #[test]

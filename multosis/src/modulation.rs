@@ -42,6 +42,14 @@ impl Modulation {
         self.states[row].amplitude()
     }
 
+    pub fn next_mix(&mut self, row: usize, base: f32) -> f32 {
+        self.states[row].next_mix(base)
+    }
+
+    pub fn mix_is_active(&self) -> bool {
+        self.states.iter().any(ModulationState::mix_is_active)
+    }
+
     pub fn phase(&self, row: usize, slot: usize) -> f32 {
         self.states[row].phase(slot)
     }
@@ -165,7 +173,7 @@ mod tests {
     fn default_for_row_assigns_one_assignable_and_varies_by_row() {
         let a = TrackModulation::default_for_row(0);
         let b = TrackModulation::default_for_row(7);
-        assert_eq!(a.targets[0], Some(0));
+        assert_eq!(a.targets[0], Some(ModulationTarget::EffectParameter(0)));
         assert_eq!(a.targets[1], None);
         assert!(a.depths[0] != 0.0);
         assert_eq!(a.depths[1], 0.0);
@@ -430,15 +438,29 @@ mod tests {
     #[test]
     fn clamp_targets_clears_out_of_range_targets() {
         let mut tm = TrackModulation::default_for_row(0);
-        tm.targets = [Some(0), Some(5), Some(3)];
+        tm.targets = [
+            Some(ModulationTarget::EffectParameter(0)),
+            Some(ModulationTarget::EffectParameter(5)),
+            Some(ModulationTarget::EffectParameter(3)),
+        ];
         // An effect with 2 parameters: target 0 survives, targets 5 and 3
         // are out of range.
         tm.clamp_targets(2);
-        assert_eq!(tm.targets, [Some(0), None, None]);
+        assert_eq!(
+            tm.targets,
+            [Some(ModulationTarget::EffectParameter(0)), None, None]
+        );
         // A target exactly at the count is out of range.
-        tm.targets = [Some(2), None, Some(1)];
+        tm.targets = [
+            Some(ModulationTarget::EffectParameter(2)),
+            None,
+            Some(ModulationTarget::EffectParameter(1)),
+        ];
         tm.clamp_targets(2);
-        assert_eq!(tm.targets, [None, None, Some(1)]);
+        assert_eq!(
+            tm.targets,
+            [None, None, Some(ModulationTarget::EffectParameter(1))]
+        );
     }
 
     #[test]
@@ -620,7 +642,7 @@ mod tests {
             soloed: false,
         };
         let mut modulation = TrackModulation::default_for_row(0);
-        modulation.targets[0] = Some(1);
+        modulation.targets[0] = Some(ModulationTarget::EffectParameter(1));
 
         // Switch to None (0 parameters).
         switch_effect_kind(&mut effect, &mut modulation, EffectKind::None);
@@ -650,14 +672,14 @@ mod tests {
             soloed: false,
         };
         let mut modulation = TrackModulation::default_for_row(0);
-        modulation.targets[0] = Some(0);
+        modulation.targets[0] = Some(ModulationTarget::EffectParameter(0));
 
         switch_effect_kind(&mut effect, &mut modulation, EffectKind::Bitcrush);
 
         assert_eq!(effect.kind, EffectKind::Bitcrush);
         assert_eq!(
             modulation.targets[0],
-            Some(0),
+            Some(ModulationTarget::EffectParameter(0)),
             "index 0 is in range for Bitcrush — target preserved"
         );
     }

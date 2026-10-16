@@ -182,10 +182,12 @@ These controls appear in a strip above the curve canvas; some appear only condit
 - **Rate** (Free Hz trigger) — appears beside the Trigger dropdown only when **Free Hz** is selected. Sets the re-fire frequency in Hz.
 - **Sens** (Transient trigger) — appears beside the Trigger dropdown only when **Transient** is selected. Sets the onset detection threshold; right = more sensitive (lower threshold).
 - **Hold** (Transient trigger) — appears to the right of **Sens** when **Transient** is selected. Sets the post-fire refractory period (in ms) during which further onsets are ignored, so the transient's tail doesn't trigger repeated re-fires.
-- **Target** — dropdown shown for the three assignable MSEGs (`1` / `2` / `3`). Lists `(none)` plus the names of every parameter on the current effect. Picking one routes that MSEG to that param. Not shown for `Amp`.
+- **Target** — dropdown shown for the three assignable MSEGs (`1` / `2` / `3`). Lists `(none)`, the names of every parameter on the current effect, and **Mix**. Mix targets the row's dry/wet blend, independently of the master Mix. Not shown for `Amp`.
 - **Depth** — bipolar `-1..+1` dial shown for the three assignable MSEGs. Double-click resets to 0. Drag-only (no text entry).
 - **Sync mode** — 2-tab `Time` / `Beat`. Sets whether the MSEG's loop length is given in seconds or in musical subdivisions.
 - **Length** — slider whose range depends on Sync mode. **Time** mode is continuous (0.05–32 s, log). **Beat** mode snaps to an 11-step ladder: `1/16` note, `1/8`, `1/4`, `1/2`, `1 bar`, `2 bars`, `4 bars`, `8 bars`, `16 bars`, `32 bars`, `64 bars`.
+
+To make a unipolar curve control the full dry/wet range, select **Mix**, set the row's base Mix to **0%**, and set Depth to **+100%**. From Mix **100%**, use negative depth to move toward dry. Modulation is clamped to 0–100%, ramps smoothly between updates, and leaves the base Mix setting unchanged. The Mix dial's colored arc shows the effective blend, and routed node tooltips show percentages. Mix assignments survive effect-kind changes and are saved with the project.
 
 A strip of mode controls runs along the bottom of the MSEG editor, beneath the curve canvas. Left to right:
 
