@@ -297,7 +297,7 @@ Install nextest via `cargo install cargo-nextest --locked`. Config lives in `.co
 - [HD26 Manual](docs/hd26/hd26-manual.md)
 - [Imagine Manual](docs/imagine/imagine-manual.md)
 - [Miff Manual](docs/miff/miff-manual.md)
-- [Minitosis Manual](docs/minitosis/minitosis-manual.md)
+- [Minitosis Manual](docs/minitosis/minitosis-manual.md) · [PDF](docs/minitosis/minitosis-manual.pdf)
 - [Multosis Manual](docs/multosis/multosis-manual.md)
 - [Nap Manual](docs/nap/nap-manual.md)
 - [Pope Scope Manual](docs/pope-scope/pope-scope-manual.md)

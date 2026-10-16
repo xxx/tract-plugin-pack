@@ -1,8 +1,16 @@
-# Minitosis
+---
+title: "Minitosis"
+subtitle: "User Manual"
+author: "Michael Dungan"
+geometry: margin=2.5cm
+colorlinks: true
+---
+
+# Minitosis Manual
 
 Minitosis runs one Multosis effect continuously, with three assignable MSEGs and an amplitude envelope. It shares Multosis's effect library and editor, without the sequencer or track list. Available as VST3, CLAP, and standalone.
 
-![Minitosis editor](screenshot.png)
+![Minitosis editor](screenshot.png){ width=80% }
 
 ## Getting started
 
