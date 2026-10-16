@@ -17,7 +17,7 @@ Minitosis runs one Multosis effect continuously, with three assignable MSEGs and
 1. Insert Minitosis on a stereo track. A fresh instance selects **None** and passes audio through.
 2. Open the effect picker and select an effect. Effects are grouped into the same families as Multosis.
 3. Set the effect's parameters. Their names, ranges, and defaults match the [Multosis effect reference](../multosis/multosis-manual.md).
-4. To modulate a parameter, choose MSEG **1**, **2**, or **3**, select a **Target**, and raise **Depth** from its default zero.
+4. To modulate a parameter, choose MSEG **1**, **2**, or **3**, select a **Target**, and change **Depth** from its default zero. At **0% Depth**, the MSEG has no effect on the target, even while the curve is running. Try **+30%** or **−30%** for a sweep in either direction. A hint in the modulation header reminds you when Depth is zero.
 5. Draw a curve and adjust **Time/Beat** and **Length**. All four envelopes continue running while the host transport is stopped.
 
 ## Effect controls

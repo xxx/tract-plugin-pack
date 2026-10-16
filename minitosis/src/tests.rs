@@ -195,6 +195,87 @@ fn initialize_restores_selected_effect_and_invalidates_queued_work() {
 }
 
 #[test]
+fn phaser_filter_cutoff_mseg_changes_audio_after_a_live_modulation_edit() {
+    let mut reference = Minitosis::default();
+    let mut modulated = Minitosis::default();
+    for plugin in [&mut reference, &mut modulated] {
+        select(plugin, EffectKind::PhaserFilter);
+        initialize(plugin, &mut Context::default());
+    }
+
+    let mut modulation = state::neutral_modulation();
+    modulation.targets[0] = Some(0);
+    modulation.depths[0] = 0.6;
+    modulation.msegs[1].sync_mode = tiny_skia_widgets::SyncMode::Time;
+    modulation.msegs[1].time_seconds = 0.5;
+    modulation.msegs[1].polarity = tiny_skia_widgets::Polarity::Bipolar;
+    modulated
+        .params
+        .modulation
+        .lock()
+        .unwrap()
+        .set(EffectKind::PhaserFilter, modulation);
+    modulated
+        .shared
+        .modulation_dirty
+        .store(true, Ordering::Release);
+
+    let base = modulated
+        .params
+        .controls_for(EffectKind::PhaserFilter)
+        .p0
+        .value();
+    let context = Context::default();
+    let mut difference = 0.0_f64;
+    let mut signal_energy = 0.0_f64;
+    for block in 0..128 {
+        let input: [f32; 512] = std::array::from_fn(|i| {
+            let time = (block * 512 + i) as f32 / 48000.0;
+            [200.0, 1000.0, 5000.0]
+                .into_iter()
+                .map(|hz| (std::f32::consts::TAU * hz * time).sin() * 0.1)
+                .sum()
+        });
+        let mut reference_left = input;
+        let mut reference_right = input;
+        let mut modulated_left = input;
+        let mut modulated_right = input;
+        assert_no_alloc::assert_no_alloc(|| {
+            reference.render(
+                &mut reference_left,
+                &mut reference_right,
+                false,
+                120.0,
+                &context,
+            );
+            modulated.render(
+                &mut modulated_left,
+                &mut modulated_right,
+                false,
+                120.0,
+                &context,
+            );
+        });
+        for (reference, modulated) in reference_left.into_iter().zip(modulated_left) {
+            difference += f64::from(modulated - reference).powi(2);
+            signal_energy += f64::from(reference).powi(2);
+        }
+    }
+    assert!(
+        difference > signal_energy * 0.01,
+        "cutoff modulation should change the rendered audio: difference={difference}, signal={signal_energy}"
+    );
+    assert_eq!(
+        modulated
+            .params
+            .controls_for(EffectKind::PhaserFilter)
+            .p0
+            .value(),
+        base
+    );
+}
+
+#[test]
 fn modulation_does_not_write_to_automated_base_parameters() {
     let mut plugin = Minitosis::default();
     let mut context = Context::default();

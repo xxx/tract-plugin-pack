@@ -19,7 +19,7 @@ Figma: none provided. The existing Multosis Effect view is the approved visual a
 3. Exactly one effect is selected and active. Audio processing continues when the transport is stopped; there is no grid, track list, step clock, mute/solo routing, or additional wet-bus compressor.
 4. A fresh instance selects None, has Mix at 100%, Output at 0 dB, and bypass off. None passes audio through; the output control remains available.
 5. The modulation section retains the 1, 2, 3, Amp tabs, target/depth routing, ghost curves, live dial arcs, curve editing, snapping, curve randomization, Time/Beat clocks, Cyclic/One-shot modes, and polarity controls.
-6. Fresh Amp curves are flat at full level. All three assignable depths default to zero, so selecting an effect initially reveals its base sound.
+6. Fresh Amp curves are flat at full level. All three assignable depths default to zero, so selecting an effect initially reveals its base sound. When the selected assignable MSEG has a valid Target and zero Depth, show a hint explaining that Depth must be changed from zero to apply modulation; hide the hint when Depth is nonzero or the MSEG is unassigned. Amp does not show this hint.
 7. Available trigger choices are Free run, Free Hz, and Transient. Cell light and Cell step do not appear.
 8. All clocks continue while stopped. Beat clocks use host tempo with 120 BPM fallback; Time clocks retain their duration independently of tempo.
 9. A global Retrig on play toggle optionally restarts the four modulation envelopes when the host starts playback. It defaults off. A Reset control restarts modulation without clearing delay/reverb tails.

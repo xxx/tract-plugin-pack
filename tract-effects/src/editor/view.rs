@@ -831,7 +831,7 @@ pub fn draw_trigger_controls(
 
 /// Draw the MODULATION section: the MSEG selector, and — for an assignable
 /// MSEG — the target dropdown trigger and depth dial. `selected_mseg` is
-/// 0 (amplitude) / 1 / 2; `target` and `depth` belong to the active assignable
+/// 0 (amplitude) / 1 / 2 / 3; `target` and `depth` belong to the active assignable
 /// MSEG (ignored when `selected_mseg == 0`). The MSEG pane itself is drawn by
 /// the caller (it needs the window's `MsegEditState`).
 #[allow(clippy::too_many_arguments)]
@@ -873,13 +873,8 @@ pub fn draw_modulation_controls(
         Some(&mseg_segment_colors),
     );
     if selected_mseg != 0 {
-        let label = match target {
-            None => "(none)",
-            Some(i) => crate::effects::parameter_specs(kind)
-                .get(i)
-                .map(|s| s.name)
-                .unwrap_or("(none)"),
-        };
+        let spec = target.and_then(|i| crate::effects::parameter_specs(kind).get(i));
+        let label = spec.map_or("(none)", |s| s.name);
         widgets::dropdown::draw_dropdown_trigger(
             pixmap,
             tr,
@@ -900,6 +895,29 @@ pub fn draw_modulation_controls(
             &format!("{:+.0}%", depth * 100.0),
             norm,
         );
+        if spec.is_some() && depth == 0.0 {
+            let hint = "Depth is 0% — change it to apply modulation";
+            let size = 12.0 * scale;
+            let width = tr.text_width(hint, size);
+            let (_, y, _, h) = lay.modulation_header;
+            let x = lay.mseg_selector.0;
+            widgets::draw_rect(
+                pixmap,
+                x - 6.0 * scale,
+                y,
+                width + 12.0 * scale,
+                h,
+                widgets::color_control_bg(),
+            );
+            tr.draw_text(
+                pixmap,
+                x,
+                y + (h + size) * 0.5 - 2.0,
+                hint,
+                size,
+                super::mseg_color(selected_mseg),
+            );
+        }
     }
 }
 
