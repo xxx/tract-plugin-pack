@@ -159,22 +159,38 @@ mod tests {
 
     #[test]
     fn every_effect_processes_and_resets_without_audio_thread_allocations() {
-        let input = [0.1; 256];
+        let input = [0.1; 512];
         for kind in EffectKind::ALL {
-            let (mut p, track) = processor(kind);
-            assert_no_alloc::assert_no_alloc(|| {
-                p.begin_block(&track, &input, &input, 123.0);
-                for _ in 0..256 {
-                    assert!(
-                        p.process_sample([0.1, -0.1], 1.0, false)
-                            .iter()
-                            .all(|v| v.is_finite())
-                    );
+            let (mut p, mut track) = processor(kind);
+            if kind == EffectKind::Satch {
+                // Detail=0 skips the spectral path.
+                track.params[2] = 50.0;
+            }
+            let fft_param = tract_effects::effects::parameter_specs(kind)
+                .iter()
+                .position(|spec| spec.name == "FFT");
+            let fft_settings = if fft_param.is_some() { 4 } else { 1 };
+            for fft in 0..fft_settings {
+                if let Some(index) = fft_param {
+                    track.params[index] = fft as f32;
                 }
-                p.reset_modulation();
-                p.reset();
-            });
-            assert!(p.latency() <= MAX_LATENCY);
+                assert_no_alloc::assert_no_alloc(|| {
+                    // Four frames even at the largest supported 4096-point FFT.
+                    for _ in 0..32 {
+                        p.begin_block(&track, &input, &input, 123.0);
+                        for _ in 0..input.len() {
+                            assert!(
+                                p.process_sample([0.1, -0.1], 1.0, false)
+                                    .iter()
+                                    .all(|v| v.is_finite())
+                            );
+                        }
+                    }
+                    p.reset_modulation();
+                    p.reset();
+                });
+                assert!(p.latency() <= MAX_LATENCY);
+            }
         }
     }
 
