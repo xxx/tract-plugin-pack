@@ -13,7 +13,7 @@ pub struct StereoWidenerEffect {
 }
 
 impl StereoWidenerEffect {
-    const PARAMS: [ParamSpec; 1] = [ParamSpec {
+    pub(super) const PARAMS: [ParamSpec; 1] = [ParamSpec {
         name: "Width",
         min: 0.0,
         max: 200.0,

@@ -42,7 +42,7 @@ impl WarpZoneEffect {
     /// peak above unity.
     const FB_CLAMP: f32 = 4.0;
 
-    const PARAMS: [ParamSpec; 5] = [
+    pub(super) const PARAMS: [ParamSpec; 5] = [
         ParamSpec {
             name: "Shift",
             min: -24.0,

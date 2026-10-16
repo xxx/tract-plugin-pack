@@ -245,3 +245,31 @@ fn translated_layout_routes_edits_to_the_same_parameter() {
     assert!(h.click(rect).changed);
     assert_eq!(h.effect.mix, 1.0);
 }
+
+#[test]
+fn overflowing_mix_text_is_rejected_without_changing_the_base_value() {
+    let mut h = Harness::new();
+    h.effect.mix = 0.42;
+    let rect = h.geometry.layout.mix;
+    h.move_to(rect.0 + 30.0, rect.1 + 30.0, Modifiers::empty());
+    h.press(MouseButton::Right);
+    h.type_replacement("1e100");
+    assert!(!h.key(Key::Enter).changed);
+    assert_eq!(h.effect.mix, 0.42);
+}
+
+#[test]
+fn canceled_interaction_rebases_a_dial_drag_without_another_pointer_move() {
+    fn drag(cancel: bool) -> f32 {
+        let mut h = Harness::new();
+        let rect = h.geometry.layout.dials[0];
+        h.move_to(rect.0 + 30.0, rect.1 + 50.0, Modifiers::empty());
+        if cancel {
+            h.editor.cancel_interaction();
+        }
+        h.press(MouseButton::Left);
+        h.move_to(rect.0 + 30.0, rect.1 + 49.0, Modifiers::empty());
+        h.effect.params[0]
+    }
+    assert_eq!(drag(true), drag(false));
+}

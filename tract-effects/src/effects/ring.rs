@@ -43,7 +43,7 @@ impl RingEffect {
     const SHAPE_LABELS: &'static [&'static str] = &["Sine", "Triangle"];
     const SHAPE_TRIANGLE: usize = 1;
 
-    const PARAMS: [ParamSpec; 4] = [
+    pub(super) const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Freq",
             min: Self::FREQ_MIN_HZ,

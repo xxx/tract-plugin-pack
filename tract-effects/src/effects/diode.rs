@@ -70,7 +70,7 @@ impl DiodeEffect {
     /// useful self-oscillation region near the top of the knob.
     const MAX_RES: f32 = 17.0;
 
-    const PARAMS: [ParamSpec; 3] = [
+    pub(super) const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
             name: "Cutoff",
             min: 20.0,

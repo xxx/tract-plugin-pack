@@ -133,7 +133,7 @@ const MAX_BIAS: f32 = 2.0;
 const ADAA_EPS: f32 = 1e-5;
 
 impl WavefolderEffect {
-    const PARAMS: [ParamSpec; 3] = [
+    pub(super) const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
             name: "Drive",
             min: 0.0,

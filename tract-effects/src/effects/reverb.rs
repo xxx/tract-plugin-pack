@@ -140,7 +140,7 @@ impl ReverbEffect {
     /// over-damp the tail into uselessness.
     const DAMP_MAX: f32 = 0.5;
 
-    const PARAMS: [ParamSpec; 5] = [
+    pub(super) const PARAMS: [ParamSpec; 5] = [
         ParamSpec {
             name: "Decay",
             min: 0.0,

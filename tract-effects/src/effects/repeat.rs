@@ -84,7 +84,11 @@ impl RepeatEffect {
         "1/2.", "1/1", "1/1.",
     ];
 
-    const PARAMS: [ParamSpec; 4] = [
+    pub(super) fn snap_is_synced(value: f32) -> bool {
+        value.round() as usize != Self::SNAP_FREE_IDX
+    }
+
+    pub(super) const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Rate",
             min: Self::RATE_MIN_HZ,
@@ -349,8 +353,7 @@ impl Effect for RepeatEffect {
         if index != 0 {
             return false;
         }
-        let idx = self.snap_idx.round() as usize;
-        idx != Self::SNAP_FREE_IDX
+        Self::snap_is_synced(self.snap_idx)
     }
 }
 

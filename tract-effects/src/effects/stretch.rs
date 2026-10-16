@@ -108,7 +108,7 @@ impl StretchEffect {
         "1/2.", "1/1", "1/1.",
     ];
 
-    const PARAMS: [ParamSpec; 4] = [
+    pub(super) const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Pace",
             min: Self::PACE_MIN,

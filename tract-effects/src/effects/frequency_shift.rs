@@ -269,7 +269,7 @@ impl FrequencyShiftEffect {
     const SHIFT_MAX_HZ: f32 = 1_000.0;
     const FB_CAP: f32 = 0.95;
 
-    const PARAMS: [ParamSpec; 4] = [
+    pub(super) const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Shift",
             min: Self::SHIFT_MIN_HZ,

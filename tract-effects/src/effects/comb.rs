@@ -67,7 +67,7 @@ impl CombEffect {
     const MODE_NOTCH: usize = 1;
     const MODE_ALLPASS: usize = 2;
 
-    const PARAMS: [ParamSpec; 5] = [
+    pub(super) const PARAMS: [ParamSpec; 5] = [
         ParamSpec {
             name: "Pitch",
             min: Self::PITCH_MIN_HZ,

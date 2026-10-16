@@ -50,7 +50,7 @@ impl TransientShaperEffect {
     /// Maximum gain offset (dB) Attack / Sustain at +/- 100 %.
     const MAX_DB: f32 = 12.0;
 
-    const PARAMS: [ParamSpec; 2] = [
+    pub(super) const PARAMS: [ParamSpec; 2] = [
         ParamSpec {
             name: "Attack",
             min: -100.0,

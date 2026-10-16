@@ -172,7 +172,7 @@ impl VocoderEffect {
         3335.2, 4467.4, 5983.6, 8014.1,
     ];
 
-    const PARAMS: [ParamSpec; 4] = [
+    pub(super) const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Carrier",
             min: 0.0,

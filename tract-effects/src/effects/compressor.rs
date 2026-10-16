@@ -29,7 +29,7 @@ pub struct CompressorEffect {
 }
 
 impl CompressorEffect {
-    const PARAMS: [ParamSpec; 2] = [
+    pub(super) const PARAMS: [ParamSpec; 2] = [
         ParamSpec {
             name: "Threshold",
             min: -60.0,

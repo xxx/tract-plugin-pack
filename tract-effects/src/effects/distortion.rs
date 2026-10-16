@@ -66,7 +66,7 @@ impl DistortionEffect {
     /// boundary across the most-audible band.
     const TILT_PIVOT_HZ: f32 = 700.0;
 
-    const PARAMS: [ParamSpec; 4] = [
+    pub(super) const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Drive",
             min: 0.0,

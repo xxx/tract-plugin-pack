@@ -44,7 +44,7 @@ impl VibratoEffect {
     /// the linear-interp pair. Round up to 2048 for cache friendliness.
     const DELAY_BUF_LEN: usize = 2048;
 
-    const PARAMS: [ParamSpec; 3] = [
+    pub(super) const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
             name: "Rate",
             min: Self::RATE_MIN_HZ,

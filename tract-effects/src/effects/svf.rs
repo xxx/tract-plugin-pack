@@ -53,7 +53,7 @@ const SVF_TYPE_BP: usize = 1;
 impl SvfEffect {
     const MAX_STAGES: usize = 4;
 
-    const PARAMS: [ParamSpec; 4] = [
+    pub(super) const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Cutoff",
             min: 20.0,

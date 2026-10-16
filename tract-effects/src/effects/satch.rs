@@ -50,7 +50,7 @@ impl SatchEffect {
     /// Hop size — 75 % overlap = 4× redundancy with Hann window.
     const HOP_SIZE: usize = 512;
 
-    const PARAMS: [ParamSpec; 4] = [
+    pub(super) const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Gain",
             min: 0.0,

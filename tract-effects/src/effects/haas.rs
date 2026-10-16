@@ -34,7 +34,7 @@ impl HaasEffect {
     const RING_CAP: usize = 8_192;
     const RING_MASK: usize = Self::RING_CAP - 1;
 
-    const PARAMS: [ParamSpec; 1] = [ParamSpec {
+    pub(super) const PARAMS: [ParamSpec; 1] = [ParamSpec {
         name: "Position",
         min: -25.0,
         max: 25.0,

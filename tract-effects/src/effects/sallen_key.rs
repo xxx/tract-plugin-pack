@@ -69,7 +69,7 @@ impl SallenKeyEffect {
     /// `Resonance = 0` UX.
     const K_MIN: f32 = 0.01;
 
-    const PARAMS: [ParamSpec; 4] = [
+    pub(super) const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Cutoff",
             min: 20.0,

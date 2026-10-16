@@ -49,7 +49,7 @@ impl GateEffect {
     /// to open.
     const ENV_FOLLOW_MS: f32 = 5.0;
 
-    const PARAMS: [ParamSpec; 4] = [
+    pub(super) const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Threshold",
             min: -80.0,

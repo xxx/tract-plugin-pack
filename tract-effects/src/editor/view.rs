@@ -1,6 +1,6 @@
 //! Shared effect controls, layout, and hit testing.
 
-use crate::effects::{Effect, EffectKind, MAX_EFFECT_PARAMS, TrackEffect};
+use crate::effects::{EffectKind, MAX_EFFECT_PARAMS, TrackEffect};
 use crate::modulation::TriggerSource;
 use tiny_skia::Pixmap;
 use tiny_skia_widgets as widgets;
@@ -380,15 +380,7 @@ pub fn draw_effect_section(
     // dropdown trigger — uniform widget for any N-option discrete selector,
     // whatever the option count.
     //
-    // The instance is constructed at the track's CURRENT param values (not
-    // defaults) so `param_dimmed(i)` reflects the live state — e.g. Delay
-    // dims its Free dial only when Time is on a sync subdivision, which the
-    // default instance (Time = Free) would never report.
-    let mut instance = crate::effects::EffectInstance::new(track.kind);
-    let specs = instance.parameters();
-    for (i, _) in specs.iter().enumerate() {
-        instance.set_param(i, track.params[i]);
-    }
+    let specs = crate::effects::parameter_specs(track.kind);
     for (i, spec) in specs.iter().enumerate() {
         let (dx, dy, dw, dh) = lay.dials[i];
         let value = track.params[i];
@@ -432,7 +424,7 @@ pub fn draw_effect_section(
         // entry point swaps the accent-blue value arc for muted grey;
         // everything else (modulation arc, text-edit overlay, hit-testing)
         // is identical.
-        let dimmed = instance.param_dimmed(i);
+        let dimmed = crate::effects::parameter_dimmed(track.kind, i, &track.params);
         let draw_dial = if dimmed {
             widgets::param_dial::draw_dial_dimmed_ex
         } else {
@@ -537,9 +529,8 @@ pub fn kind_items() -> KindItems {
 /// The target-dropdown items for `kind`: `(none)` followed by each parameter
 /// name, in parameter-index order.
 pub fn target_items(kind: EffectKind) -> Vec<&'static str> {
-    let instance = crate::effects::EffectInstance::new(kind);
     let mut items = vec!["(none)"];
-    items.extend(instance.parameters().iter().map(|s| s.name));
+    items.extend(crate::effects::parameter_specs(kind).iter().map(|s| s.name));
     items
 }
 
@@ -884,8 +875,7 @@ pub fn draw_modulation_controls(
     if selected_mseg != 0 {
         let label = match target {
             None => "(none)",
-            Some(i) => crate::effects::EffectInstance::new(kind)
-                .parameters()
+            Some(i) => crate::effects::parameter_specs(kind)
                 .get(i)
                 .map(|s| s.name)
                 .unwrap_or("(none)"),

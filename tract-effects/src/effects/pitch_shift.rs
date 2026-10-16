@@ -121,7 +121,7 @@ impl PitchShiftEffect {
     /// overlap (~2 grains at 50 % each = sum 1.0) is unaffected.
     const NORM_FLOOR: f32 = 0.01;
 
-    const PARAMS: [ParamSpec; 5] = [
+    pub(super) const PARAMS: [ParamSpec; 5] = [
         ParamSpec {
             name: "Pitch",
             min: Self::PITCH_MIN_SEMI,

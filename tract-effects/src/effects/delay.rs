@@ -88,7 +88,11 @@ impl DelayEffect {
     const DUCK_RELEASE_MS: f32 = 150.0;
     const FEEDBACK_CAP: f32 = 0.95;
 
-    const PARAMS: [ParamSpec; 4] = [
+    pub(super) fn time_is_synced(value: f32) -> bool {
+        delay_time_beats(value.round() as usize).is_some()
+    }
+
+    pub(super) const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Free",
             min: Self::MIN_DELAY_MS,
@@ -281,8 +285,7 @@ impl Effect for DelayEffect {
         if index != 0 {
             return false;
         }
-        let idx = self.time_idx.round() as usize;
-        delay_time_beats(idx).is_some()
+        Self::time_is_synced(self.time_idx)
     }
 }
 

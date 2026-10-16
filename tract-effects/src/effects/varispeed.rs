@@ -138,7 +138,7 @@ impl VarispeedEffect {
     /// trivially-finite without audibly progressing.
     const MIN_ABS_RATE: f32 = 1e-4;
 
-    const PARAMS: [ParamSpec; 5] = [
+    pub(super) const PARAMS: [ParamSpec; 5] = [
         ParamSpec {
             name: "Speed",
             min: Self::SPEED_MIN_PCT,

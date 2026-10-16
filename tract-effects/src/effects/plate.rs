@@ -152,7 +152,7 @@ impl PlateEffect {
     /// and the effect feels broken.
     const DECAY_FLOOR: f32 = 0.10;
 
-    const PARAMS: [ParamSpec; 5] = [
+    pub(super) const PARAMS: [ParamSpec; 5] = [
         ParamSpec {
             name: "Pre-Delay",
             min: 0.0,

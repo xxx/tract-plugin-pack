@@ -202,6 +202,7 @@ pub fn parse_value(text: &str, format: ParamFormat) -> Option<f32> {
             t.parse::<f32>().ok()
         }
     }
+    .filter(|value| value.is_finite())
 }
 
 /// The standardized audio-effect contract. Implemented by each effect struct;
@@ -856,17 +857,84 @@ impl EffectKind {
     }
 }
 
+/// Static parameter metadata; does not construct or allocate an effect engine.
+pub fn parameter_specs(kind: EffectKind) -> &'static [ParamSpec] {
+    match kind {
+        EffectKind::None => &[],
+        EffectKind::Svf => &SvfEffect::PARAMS,
+        EffectKind::Bitcrush => &BitcrushEffect::PARAMS,
+        EffectKind::Fm => &FmEffect::PARAMS,
+        EffectKind::Delay => &DelayEffect::PARAMS,
+        EffectKind::Phaser => &PhaserEffect::PARAMS,
+        EffectKind::WarpZone => &WarpZoneEffect::PARAMS,
+        EffectKind::Satch => &SatchEffect::PARAMS,
+        EffectKind::Repeat => &RepeatEffect::PARAMS,
+        EffectKind::Stretch => &StretchEffect::PARAMS,
+        EffectKind::Comb => &CombEffect::PARAMS,
+        EffectKind::Ring => &RingEffect::PARAMS,
+        EffectKind::Reverb => &ReverbEffect::PARAMS,
+        EffectKind::Distortion => &DistortionEffect::PARAMS,
+        EffectKind::Chorus => &ChorusEffect::PARAMS,
+        EffectKind::PitchShift => &PitchShiftEffect::PARAMS,
+        EffectKind::Compressor => &CompressorEffect::PARAMS,
+        EffectKind::Flanger => &FlangerEffect::PARAMS,
+        EffectKind::FrequencyShift => &FrequencyShiftEffect::PARAMS,
+        EffectKind::Downsample => &DownsampleEffect::PARAMS,
+        EffectKind::Varispeed => &VarispeedEffect::PARAMS,
+        EffectKind::Vocoder => &VocoderEffect::PARAMS,
+        EffectKind::SpectralRotate => &SpectralRotateEffect::PARAMS,
+        EffectKind::SpectralBandpass => &SpectralBandpassEffect::PARAMS,
+        EffectKind::SpectralMirror => &SpectralMirrorEffect::PARAMS,
+        EffectKind::SpectralShift => &SpectralShiftEffect::PARAMS,
+        EffectKind::SpectralSmear => &SpectralSmearEffect::PARAMS,
+        EffectKind::SpectralSpread => &SpectralSpreadEffect::PARAMS,
+        EffectKind::SpectralLofi => &SpectralLofiEffect::PARAMS,
+        EffectKind::SpectralCorrupt => &SpectralCorruptEffect::PARAMS,
+        EffectKind::SpectralCompress => &SpectralCompressEffect::PARAMS,
+        EffectKind::SpectralCascade => &SpectralCascadeEffect::PARAMS,
+        EffectKind::SpectralReverb => &SpectralReverbEffect::PARAMS,
+        EffectKind::SpectralScatter => &SpectralScatterEffect::PARAMS,
+        EffectKind::SpectralTwist => &SpectralTwistEffect::PARAMS,
+        EffectKind::SpectralStretch => &SpectralStretchEffect::PARAMS,
+        EffectKind::PhaserFilter => &PhaserFilterEffect::PARAMS,
+        EffectKind::Ladder => &LadderEffect::PARAMS,
+        EffectKind::Diode => &DiodeEffect::PARAMS,
+        EffectKind::Tremolo => &TremoloEffect::PARAMS,
+        EffectKind::AutoPan => &AutoPanEffect::PARAMS,
+        EffectKind::Vibrato => &VibratoEffect::PARAMS,
+        EffectKind::Wavefolder => &WavefolderEffect::PARAMS,
+        EffectKind::Plate => &PlateEffect::PARAMS,
+        EffectKind::SallenKey => &SallenKeyEffect::PARAMS,
+        EffectKind::Limiter => &LimiterEffect::PARAMS,
+        EffectKind::Gate => &GateEffect::PARAMS,
+        EffectKind::TransientShaper => &TransientShaperEffect::PARAMS,
+        EffectKind::StereoWidener => &StereoWidenerEffect::PARAMS,
+        EffectKind::Haas => &HaasEffect::PARAMS,
+    }
+}
+
+/// Whether a control is inactive under the current base parameter settings.
+pub fn parameter_dimmed(kind: EffectKind, index: usize, params: &[f32; MAX_EFFECT_PARAMS]) -> bool {
+    if index != 0 {
+        return false;
+    }
+    match kind {
+        EffectKind::Delay => DelayEffect::time_is_synced(params[1]),
+        EffectKind::Repeat => RepeatEffect::snap_is_synced(params[1]),
+        _ => false,
+    }
+}
+
 /// The number of modulatable parameters effect `kind` declares.
 pub fn param_count(kind: EffectKind) -> usize {
-    EffectInstance::new(kind).parameters().len()
+    parameter_specs(kind).len()
 }
 
 /// The default parameter values for effect `kind`, laid out in the
 /// `TrackEffect::params` slot order (slots past the kind's parameter count are
 /// zero). Used when a track switches effect kind.
 pub fn default_params_for_kind(kind: EffectKind) -> [f32; MAX_EFFECT_PARAMS] {
-    let instance = EffectInstance::new(kind);
-    let specs = instance.parameters();
+    let specs = parameter_specs(kind);
     let mut params = [0.0; MAX_EFFECT_PARAMS];
     for (i, spec) in specs.iter().enumerate() {
         params[i] = spec.default;
@@ -2202,6 +2270,52 @@ mod tests {
             let e = EffectInstance::new(kind);
             for i in 0..MAX_EFFECT_PARAMS {
                 assert!(!e.param_dimmed(i), "{:?} slot {i} should not dim", kind);
+            }
+        }
+    }
+    #[test]
+    fn static_parameter_metadata_and_dimming_match_live_effects() {
+        for kind in EffectKind::ALL {
+            let mut instance = EffectInstance::new(kind);
+            let specs = parameter_specs(kind);
+            assert_eq!(specs.len(), instance.parameters().len());
+            for (metadata, live) in specs.iter().zip(instance.parameters()) {
+                assert_eq!(metadata.name, live.name);
+                assert_eq!(metadata.min, live.min);
+                assert_eq!(metadata.max, live.max);
+                assert_eq!(metadata.default, live.default);
+                assert_eq!(metadata.scaling, live.scaling);
+                assert_eq!(metadata.format, live.format);
+            }
+            for value in [0.0_f32, 14.0] {
+                let mut params = default_params_for_kind(kind);
+                if specs.len() > 1 {
+                    params[1] = value.clamp(specs[1].min, specs[1].max);
+                }
+                for (i, _) in specs.iter().enumerate() {
+                    instance.set_param(i, params[i]);
+                }
+                for i in 0..specs.len() {
+                    assert_eq!(parameter_dimmed(kind, i, &params), instance.param_dimmed(i));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_parameter_values_reject_nonfinite_numbers() {
+        for format in [
+            ParamFormat::Hertz,
+            ParamFormat::Number {
+                decimals: 2,
+                unit: "",
+            },
+            ParamFormat::Enum {
+                labels: &["A", "B"],
+            },
+        ] {
+            for text in ["NaN", "inf", "-inf", "1e100"] {
+                assert_eq!(parse_value(text, format), None);
             }
         }
     }

@@ -83,7 +83,7 @@ impl DownsampleEffect {
     /// pushed above SR.
     const MIN_PERIOD: f32 = 1.0;
 
-    const PARAMS: [ParamSpec; 4] = [
+    pub(super) const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Rate",
             min: Self::RATE_MIN_HZ,

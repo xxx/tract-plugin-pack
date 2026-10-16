@@ -81,7 +81,7 @@ impl ChorusEffect {
     /// up to a clean power-of-2-ish number for cache friendliness.
     const DELAY_BUF_LEN: usize = 11_264;
 
-    const PARAMS: [ParamSpec; 5] = [
+    pub(super) const PARAMS: [ParamSpec; 5] = [
         ParamSpec {
             name: "Rate",
             min: Self::RATE_MIN_HZ,

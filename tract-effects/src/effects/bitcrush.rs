@@ -13,7 +13,7 @@ pub struct BitcrushEffect {
 }
 
 impl BitcrushEffect {
-    const PARAMS: [ParamSpec; 2] = [
+    pub(super) const PARAMS: [ParamSpec; 2] = [
         ParamSpec {
             name: "Bit Depth",
             min: 1.0,

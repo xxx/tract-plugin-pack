@@ -29,7 +29,7 @@ impl AutoPanEffect {
     const RATE_MIN_HZ: f32 = 0.05;
     const RATE_MAX_HZ: f32 = 20.0;
 
-    const PARAMS: [ParamSpec; 3] = [
+    pub(super) const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
             name: "Rate",
             min: Self::RATE_MIN_HZ,

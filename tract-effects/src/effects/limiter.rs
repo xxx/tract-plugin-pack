@@ -28,7 +28,7 @@ pub struct LimiterEffect {
 }
 
 impl LimiterEffect {
-    const PARAMS: [ParamSpec; 4] = [
+    pub(super) const PARAMS: [ParamSpec; 4] = [
         ParamSpec {
             name: "Threshold",
             min: -24.0,

@@ -60,7 +60,7 @@ impl LadderEffect {
     /// enter the knee. Lifted from CSound5's port; sub-perceptual fiddling.
     const THERMAL: f32 = 0.000025;
 
-    const PARAMS: [ParamSpec; 3] = [
+    pub(super) const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
             name: "Cutoff",
             min: 20.0,

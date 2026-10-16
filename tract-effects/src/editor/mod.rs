@@ -1,6 +1,6 @@
 //! Effect and MSEG editing independent of plugin window and sequencer state.
 
-use crate::effects::{self, Effect, EffectKind, MAX_EFFECT_PARAMS, ParamSpec, TrackEffect};
+use crate::effects::{self, EffectKind, MAX_EFFECT_PARAMS, ParamSpec, TrackEffect};
 use crate::modulation::{TrackModulation, TriggerSource};
 use tiny_skia_widgets as widgets;
 
@@ -105,6 +105,20 @@ impl EffectEditor {
         self.mseg_edit.clear_selection();
     }
 
+    /// Cancel gestures tied to configuration that the host has replaced.
+    pub fn cancel_interaction(&mut self) {
+        let selected_mseg = self.selected_mseg;
+        *self = Self::new(self.trigger_choices);
+        self.selected_mseg = selected_mseg;
+    }
+
+    /// Commit a typed value before focus moves to a host-owned control.
+    pub fn finish_text_edit(&mut self, context: EditorContext<'_>) -> EditorResponse {
+        let mut session = Session::new(self, context);
+        session.finalize_dial_edit_for_press(f32::NEG_INFINITY, f32::NEG_INFINITY);
+        session.response
+    }
+
     pub fn captures_keyboard(&self) -> bool {
         self.effect_dropdown.is_open() || self.text_edit.is_active()
     }
@@ -186,6 +200,10 @@ struct Session<'a> {
 
 impl<'a> Session<'a> {
     fn new(state: &'a mut EffectEditor, context: EditorContext<'a>) -> Self {
+        state.mouse_pos = context.pointer_position;
+        state
+            .effect_dial_drag
+            .set_mouse(context.pointer_position.0, context.pointer_position.1);
         Self {
             mouse_pos: context.pointer_position,
             state,
@@ -460,7 +478,7 @@ impl<'a> Session<'a> {
 
     fn compute_modulated_norms(&self) -> [Option<(f32, u8)>; MAX_EFFECT_PARAMS] {
         let mut result = [None; MAX_EFFECT_PARAMS];
-        let specs = effects::EffectInstance::new(self.effect.kind).parameters();
+        let specs = effects::parameter_specs(self.effect.kind);
         for k in 1..4 {
             let Some(target) = self.modulation.targets[k - 1] else {
                 continue;
@@ -630,11 +648,8 @@ impl<'a> Session<'a> {
                 let target = modu.targets[k];
                 let depth = modu.depths[k];
                 let polarity = modu.msegs[sel].polarity;
-                let spec = target.and_then(|t| {
-                    use crate::effects::Effect as _;
-                    let inst = crate::effects::EffectInstance::new(track.kind);
-                    inst.parameters().get(t).copied()
-                });
+                let spec = target
+                    .and_then(|t| crate::effects::parameter_specs(track.kind).get(t).copied());
                 let base = target.map(|t| track.params[t]).unwrap_or(0.0);
                 (spec, base, Some((depth, polarity)))
             };
@@ -1042,10 +1057,9 @@ impl<'a> Session<'a> {
     }
 
     fn param_spec(&self, i: usize) -> Option<ParamSpec> {
-        use crate::effects::Effect;
-        let kind = self.effect_config().kind;
-        let instance = crate::effects::EffectInstance::new(kind);
-        instance.parameters().get(i).copied()
+        crate::effects::parameter_specs(self.effect_config().kind)
+            .get(i)
+            .copied()
     }
 
     fn commit_dial_text_edit(&mut self, i: usize, text: &str) {
@@ -1064,7 +1078,9 @@ impl<'a> Session<'a> {
 
     fn commit_mix_text_edit(&mut self, text: &str) {
         let cleaned = text.trim();
-        if let Ok(pct) = cleaned.parse::<f32>() {
+        if let Ok(pct) = cleaned.parse::<f32>()
+            && pct.is_finite()
+        {
             let value = (pct / 100.0).clamp(0.0, 1.0);
 
             self.effect.mix = value;
@@ -1133,9 +1149,8 @@ impl<'a> Session<'a> {
     }
 
     fn param_enum_labels(&self, i: usize) -> Option<&'static [&'static str]> {
-        use crate::effects::Effect;
         let kind = self.effect_config().kind;
-        let specs = crate::effects::EffectInstance::new(kind).parameters();
+        let specs = crate::effects::parameter_specs(kind);
         let spec = specs.get(i)?;
         match spec.format {
             crate::effects::ParamFormat::Enum { labels } => Some(labels),
@@ -1144,9 +1159,8 @@ impl<'a> Session<'a> {
     }
 
     fn effect_param_format(&self, i: usize) -> crate::effects::ParamFormat {
-        use crate::effects::Effect;
         let kind = self.effect_config().kind;
-        let specs = crate::effects::EffectInstance::new(kind).parameters();
+        let specs = crate::effects::parameter_specs(kind);
         specs
             .get(i)
             .map(|s| s.format)
@@ -1313,8 +1327,7 @@ fn dropdown_items(state: &EffectEditor, effect: &TrackEffect) -> Vec<&'static st
             .effect_dropdown
             .is_open_for(EffectAction::ParamDropdown(i))
     }) {
-        match effects::EffectInstance::new(effect.kind)
-            .parameters()
+        match effects::parameter_specs(effect.kind)
             .get(i)
             .map(|s| s.format)
         {

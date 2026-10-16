@@ -102,7 +102,7 @@ impl FmEffect {
     // so the first param is what fresh tracks modulate. Freq is the natural
     // first audible-modulation target; Mode and Topology are Enum-format
     // selectors the editor renders as dropdowns rather than dials.
-    const PARAMS: [ParamSpec; 5] = [
+    pub(super) const PARAMS: [ParamSpec; 5] = [
         ParamSpec {
             name: "Freq",
             min: 20.0,

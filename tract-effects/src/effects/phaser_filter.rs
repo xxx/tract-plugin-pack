@@ -48,7 +48,7 @@ impl PhaserFilterEffect {
     /// Vital's `kClearRatio`.
     const CLEAR_RATIO: f32 = 20.0;
 
-    const PARAMS: [ParamSpec; 3] = [
+    pub(super) const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
             name: "Cutoff",
             min: 20.0,

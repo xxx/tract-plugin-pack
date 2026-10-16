@@ -93,7 +93,7 @@ impl FlangerEffect {
     /// max Manual + 5 ms max Depth swing). Round up.
     const DELAY_BUF_LEN: usize = 4_096;
 
-    const PARAMS: [ParamSpec; 5] = [
+    pub(super) const PARAMS: [ParamSpec; 5] = [
         ParamSpec {
             name: "Rate",
             min: Self::RATE_MIN_HZ,

@@ -40,7 +40,7 @@ impl PhaserEffect {
     /// dislocated. 100 % * 0.005 = 0.5 → ±0.5 octaves.
     const STEREO_OCT_PER_PCT: f32 = 0.005;
 
-    const PARAMS: [ParamSpec; 3] = [
+    pub(super) const PARAMS: [ParamSpec; 3] = [
         ParamSpec {
             name: "Center",
             min: 50.0,
