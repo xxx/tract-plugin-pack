@@ -42,7 +42,7 @@ jobs:
           key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install cargo-nih-plug
-        run: cargo install --force --git https://github.com/xxx/nih-plug.git --branch finish-vst3-pr cargo-nih-plug
+        run: cargo install --force --locked --git https://github.com/xxx/nih-plug.git --rev 2882e1642946103f39a5e068c8c8ebc901a6599e cargo-nih-plug
 
       - name: Build all plugins and standalones
         run: cargo xtask bundle --redistributable --locked
@@ -51,6 +51,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: plugins-${{ matrix.name }}
-          path: |
-            target/bundled/*.clap
-            target/bundled/*.vst3
+          path: target/bundled/
