@@ -36,6 +36,8 @@ Uses **stable Rust** (selected by `rust-toolchain.toml`) with `fearless_simd::f3
 Workspace packages inherit the Rust 2024 edition from `[workspace.package]`; the workspace uses Cargo resolver 3.
 
 ```bash
+cargo xtask bundle --redistributable       # all plugins: VST3 + CLAP + standalone, release
+cargo xtask bundle --native                # all plugins, host-optimized release
 cargo nih-plug bundle <plugin> --release   # VST3 + CLAP bundle
 cargo build --bin <plugin> --release       # standalone
 cargo build --bin <plugin>                 # debug standalone (GUI testing without DAW)

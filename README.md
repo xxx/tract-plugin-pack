@@ -191,51 +191,39 @@ sudo apt install libxcb1-dev libx11-xcb-dev libx11-dev libxcursor-dev \
 ## Building
 
 ```bash
-# Build all plugins (VST3 + CLAP)
-cargo nih-plug bundle gain-brain --release
-cargo nih-plug bundle gs-meter --release
-cargo nih-plug bundle hd26 --release
-cargo nih-plug bundle imagine --release
-cargo nih-plug bundle miff --release
-cargo nih-plug bundle minitosis --release
-cargo nih-plug bundle multosis --release
-cargo nih-plug bundle nap --release
-cargo nih-plug bundle pope-scope --release
-cargo nih-plug bundle satch --release
-cargo nih-plug bundle six-pack --release
-cargo nih-plug bundle tinylimit --release
-cargo nih-plug bundle warp-zone --release
-cargo nih-plug bundle wavetable-filter --release
+# Install the bundler once
+cargo install --git https://github.com/xxx/nih-plug.git --branch finish-vst3-pr cargo-nih-plug
 
-# Standalone binaries
-cargo build --bin gain-brain --release
+# Build the entire collection (VST3 + CLAP + standalone, release mode)
+cargo xtask bundle --redistributable
+
+# Build the entire collection optimized for this machine
+cargo xtask bundle --native
+
+# Build one plugin or standalone individually
+cargo nih-plug bundle gs-meter --release
 cargo build --bin gs-meter --release
-cargo build --bin hd26 --release
-cargo build --bin imagine --release
-cargo build --bin miff --release
-cargo build --bin minitosis --release
-cargo build --bin multosis --release
-cargo build --bin nap --release
-cargo build --bin pope-scope --release
-cargo build --bin satch --release
-cargo build --bin six-pack --release
-cargo build --bin tinylimit --release
-cargo build --bin warp-zone --release
-cargo build --bin wavetable-filter --release
 ```
+
+`cargo xtask bundle` defaults to `--redistributable`. It discovers all workspace crates with a `cdylib` target and passes them to one bundler invocation, so newly added plugins are included automatically. Both modes replace inherited `target-cpu` and `target-feature` settings; redistributable builds use the generic target CPU, including when your Cargo config enables host optimizations. Other flags from `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` are preserved; Cargo config rustflags are overridden.
+
+Additional Cargo build options are forwarded, for example `cargo xtask bundle --redistributable --locked` or `cargo xtask bundle --profile profiling`. Without an explicit profile, the command uses `--release`. On macOS, `cargo xtask bundle-universal` builds the whole collection for Intel and Apple Silicon; both Rust targets must be installed. Universal builds use redistributable mode.
 
 ### Host-optimized builds
 
 For local builds that exploit your CPU's SIMD (tiny-skia's AVX2 raster paths, auto-vectorized DSP code), wrap any cargo invocation with `cargo xtask native`. It detects AVX2+FMA+BMI2 on the build host and, when present, sets `RUSTFLAGS=-C target-cpu=haswell` for the child cargo process. On non-x86_64 or older x86_64 hosts it falls back to the default target-cpu.
 
 ```bash
+cargo xtask bundle --native
 cargo xtask native nih-plug bundle wavetable-filter --release
 cargo xtask native build --release --bin gs-meter
 ```
 
-The resulting binaries are NOT portable to pre-Haswell machines -- use plain `cargo nih-plug bundle ...` for distributable bundles.
+On supported x86_64 hosts, native binaries require Haswell-compatible CPUs. Use `cargo xtask bundle --redistributable` for the collection's portable builds.
 
-The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` file (you only need one -- use whichever your DAW supports) to your plugin directory:
+The bundler outputs plugin bundles to `target/bundled/` (or `<target-dir>/bundled/` when overriding Cargo's target directory). All standalone executables are built in `target/release/`; a custom profile or cross-compilation target changes that build directory. The upstream bundler also copies some standalones into `bundled/`, but currently skips executable names containing hyphens. CI uploads the VST3 and CLAP bundles.
+
+Copy either the `.vst3` or `.clap` file (you only need one -- use whichever your DAW supports) to your plugin directory:
 
 - **Linux**: `~/.vst3/` or `~/.clap/`
 - **macOS**: `~/Library/Audio/Plug-Ins/VST3/` or `~/Library/Audio/Plug-Ins/CLAP/`
