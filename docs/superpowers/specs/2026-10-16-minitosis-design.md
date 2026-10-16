@@ -1,4 +1,8 @@
-# Minitosis
+# Minitosis Design Spec
+
+- **Date:** 2026-10-16
+- **Status:** Implemented
+- **Implementation plan:** [Minitosis implementation plan](../plans/2026-10-16-minitosis.md)
 
 ## Summary
 

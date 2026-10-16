@@ -1,8 +1,12 @@
-# Minitosis implementation
+# Minitosis Implementation Plan
+
+- **Date:** 2026-10-16
+- **Status:** Implemented
+- **Design spec:** [Minitosis design spec](../specs/2026-10-16-minitosis-design.md)
 
 ## Context
 
-Behavior is approved in PRODUCT.md and the conversation. The preceding refactor is committed as f4f7a41 on feature/minitosis. `tract-effects/src/effects/mod.rs`, `tract-effects/src/modulation.rs`, and `tract-effects/src/editor/mod.rs` supply the registry/DSP, single-effect modulation state, and shared controller. `multosis/src/editor.rs` demonstrates nih-plug window integration. Minitosis must depend on the shared library rather than the Multosis plugin.
+The design spec records the approved behavior. The shared-effects refactor is recorded in commit `f4f7a41`. `tract-effects/src/effects/mod.rs`, `tract-effects/src/modulation.rs`, and `tract-effects/src/editor/mod.rs` supply the registry/DSP, single-effect modulation state, and shared controller. `multosis/src/editor.rs` demonstrates nih-plug window integration. Minitosis must depend on the shared library rather than the Multosis plugin.
 
 ## Proposed changes
 
@@ -18,10 +22,10 @@ Behavior is approved in PRODUCT.md and the conversation. The preceding refactor 
 
 ## Testing and validation
 
-- PRODUCT 1–3: debug standalone and CLAP/VST3 bundle builds; render a representative editor frame and exercise the existing shared interaction tests.
-- PRODUCT 4–10: inline processor/state tests for neutral defaults, None identity, all effect kinds, continuous clocks while stopped, tempo, one-shots/retrigger, modulation-only reset, per-effect recall, and fresh DSP on switches.
-- PRODUCT 11, 17: test mailbox generations, contention, rapid switches, retired-engine ownership, and processing under the existing allocation guard.
-- PRODUCT 12–13: regression manifest for unique stable parameter IDs, parameter normalization/formatting, host-state save/load, and host base values remaining untouched by modulation.
-- PRODUCT 14: impulse tests for dry/wet latency alignment and bypass at several FFT sizes, plus output gain/Mix behavior.
-- PRODUCT 15–16: state round trips, sanitization, undo/redo, shared input/host gesture tests, and pending-switch state restoration.
+- Behavior 1–3: debug standalone and CLAP/VST3 bundle builds; render a representative editor frame and exercise the existing shared interaction tests.
+- Behavior 4–10: inline processor/state tests for neutral defaults, None identity, all effect kinds, continuous clocks while stopped, tempo, one-shots/retrigger, modulation-only reset, per-effect recall, and fresh DSP on switches.
+- Behavior 11, 17: test mailbox generations, contention, rapid switches, retired-engine ownership, and processing under the existing allocation guard.
+- Behavior 12–13: regression manifest for unique stable parameter IDs, parameter normalization/formatting, host-state save/load, and host base values remaining untouched by modulation.
+- Behavior 14: impulse tests for dry/wet latency alignment and bypass at several FFT sizes, plus output gain/Mix behavior.
+- Behavior 15–16: state round trips, sanitization, undo/redo, shared input/host gesture tests, and pending-switch state restoration.
 - Run cargo nextest run --workspace, cargo clippy --workspace -- -D warnings, cargo fmt --check, and native release bundle/standalone builds. Dispatch a read-only implementation review before completion.
