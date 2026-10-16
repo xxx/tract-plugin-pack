@@ -11,3 +11,7 @@ fail-fast = false
 failure-output = "final"
 # Retry flaky ones once before giving up -- DSP tests occasionally trip on timing.
 retries = 1
+
+[profile.mutants]
+fail-fast = true
+retries = 0

@@ -1,0 +1,9 @@
+# Keep --file available for narrowing a run: configured globs would be unioned
+# with CLI globs. Mutation names begin with workspace-relative source paths.
+examine_re = ["^tract-dsp/src/"]
+all_features = true
+test_tool = "nextest"
+profile = "mutants"
+additional_cargo_args = ["--locked"]
+additional_cargo_test_args = ["--profile=mutants"]
+gitignore = true

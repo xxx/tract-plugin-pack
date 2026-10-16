@@ -1,0 +1,46 @@
+name: Mutation testing
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tract-dsp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install mutation test tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: mutants-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+
+      - name: Mutate tract-dsp
+        run: cargo mutants -p tract-dsp --in-place
+
+      - name: Upload mutation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tract-dsp-mutants
+          path: mutants.out/
+          if-no-files-found: warn
+          retention-days: 14

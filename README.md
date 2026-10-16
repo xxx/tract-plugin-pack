@@ -278,6 +278,62 @@ cargo clippy --workspace        # Lint check
 
 Install nextest via `cargo install cargo-nextest --locked`. Config lives in `.config/nextest.toml`.
 
+### Mutation testing
+
+Mutation testing starts with **tract-dsp only**. [cargo-mutants](https://mutants.rs/)
+changes production code in a scratch copy and checks whether the tests catch each
+change. Other crates will be added individually after reviewing this first pass.
+
+```bash
+cargo install cargo-mutants --version 27.1.0 --locked
+cargo mutants -p tract-dsp --list    # Preview mutations without running tests
+cargo mutants -p tract-dsp          # Full pass, all tract-dsp features enabled
+
+# Focus on one module while strengthening its tests
+cargo mutants -p tract-dsp --file tract-dsp/src/boxcar.rs
+```
+
+Run these commands from the workspace root. `.cargo/mutants.toml` limits mutation
+targets to `tract-dsp/src/`, enables every feature (including the FFT modules),
+and runs nextest using the `mutants` profile: fail fast, no retries. The Cargo
+profile of the same name disables debug symbols to reduce rebuild cost. Use
+`-j 2` to run two mutation jobs concurrently if resources permit.
+Use `--file` to narrow a run; `--re` adds alternatives to the configured crate
+regex rather than narrowing it.
+
+Results are written to the ignored `mutants.out/` directory. Read `missed.txt`
+for changes that survived, `timeout.txt` for tests that exceeded their time limit,
+and `unviable.txt` for changes that could not compile. Per-mutation diffs and logs,
+plus `outcomes.json`, are retained there. A timeout is not evidence that an
+assertion caught the change. Review survivors against the intended behavior;
+some mutations are equivalent within the documented numerical tolerance.
+
+The **Mutation testing** GitHub Actions workflow runs this same crate on manual
+dispatch and uploads `mutants.out/` even on failure. It fails when mutations
+survive or time out; it is not a pull-request gate during the initial rollout.
+There are no blanket exclusions for surviving mutations. When moving to another
+crate, update the target paths and workflow together, select that package with
+`-p`, and review its baseline before adding automated gates.
+
+The first rollout adds 14 tests and strengthens reset, signal-polarity, threshold,
+fast-path, and sample-rate coverage. The SPSC concurrency test now bounds the
+writer to one ring capacity: live snapshots may mix generations when overwritten,
+so requiring a contiguous sequence after the writer laps the reader caused false
+mutation detections. The corrected test passed 200 stress iterations.
+
+Baseline on 2026-10-16 with cargo-mutants 27.1.0, all features, and 130 tests
+(`cargo mutants -p tract-dsp -j 4`, about 9 minutes locally):
+
+| Candidates | Caught | Survived | Timed out | Unbuildable |
+|---|---|---|---|---|
+| 765 | 658 | 87 | 3 | 17 |
+
+The next pass stays in `tract-dsp`: `spectral_shifter.rs` accounts for 68 of the
+87 survivors, particularly bin remapping and phase wrapping. Review the STFT
+framing cases and the three hop-counter timeouts too. Some survivors are exact
+equivalents, such as constructing complex zero with `Complex::from(0.0)` and
+updating a peak with `>=` instead of `>`; classify these explicitly during review.
+
 ## Documentation
 
 - [Gain Brain Manual](docs/gain-brain/gain-brain-manual.md)

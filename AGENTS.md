@@ -45,7 +45,16 @@ cargo build --bin <plugin>                 # debug standalone (GUI testing witho
 cargo nextest run --workspace              # all tests (parallel runner)
 cargo clippy --workspace -- -D warnings    # lint (CI uses -D warnings)
 cargo fmt --check
+
+cargo mutants -p tract-dsp                 # mutation testing pilot, all tract-dsp features
 ```
+
+Mutation testing currently targets only `tract-dsp`; add other crates individually.
+Install with `cargo install cargo-mutants --version 27.1.0 --locked` and run from
+the workspace root. `.cargo/mutants.toml` selects the crate and nextest's `mutants`
+profile (fail-fast, no retries). Use `--file tract-dsp/src/<module>.rs` to focus a
+run. Review `mutants.out/missed.txt` and `timeout.txt`; do not hide survivors with
+blanket exclusions. The Mutation testing workflow is manual during this rollout.
 
 For focused Multosis effect/editor verification, run `cargo nextest run -p multosis -p tract-effects`; effect DSP and shared editor tests now live in `tract-effects`.
 

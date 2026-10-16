@@ -242,6 +242,50 @@ mod tests {
     }
 
     #[test]
+    fn fir_rotates_sine_to_negative_cosine_after_latency() {
+        let mut h = HilbertFir::new(65);
+        let angular_frequency = std::f32::consts::TAU * 5000.0 / 48000.0;
+        for i in 0..512 {
+            let output = h.process((angular_frequency * i as f32).sin());
+            if i >= 128 {
+                let expected = -(angular_frequency * (i - h.latency_samples()) as f32).cos();
+                assert!(
+                    (output - expected).abs() < 0.05,
+                    "sample {i}: {output}, expected {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fir_reset_restarts_without_old_tail() {
+        let mut used = HilbertFir::new(65);
+        let mut fresh = HilbertFir::new(65);
+        for _ in 0..77 {
+            used.process(1.0);
+        }
+        used.reset();
+        for i in 0..130 {
+            let input = if i == 0 { 1.0 } else { 0.0 };
+            assert_eq!(used.process(input), fresh.process(input), "sample {i}");
+        }
+    }
+
+    #[test]
+    fn analytic_signal_reset_restarts_both_branches_without_old_tail() {
+        let mut used = AnalyticSignal::new(65);
+        let mut fresh = AnalyticSignal::new(65);
+        for _ in 0..77 {
+            used.process(1.0);
+        }
+        used.reset();
+        for i in 0..130 {
+            let input = if i == 0 { 1.0 } else { 0.0 };
+            assert_eq!(used.process(input), fresh.process(input), "sample {i}");
+        }
+    }
+
+    #[test]
     fn fir_linearity_under_input_scaling() {
         let sr = 48000.0;
         let mut h = HilbertFir::new(65);

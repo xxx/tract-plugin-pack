@@ -404,6 +404,90 @@ mod tests {
 
     const SR: f32 = 48000.0;
 
+    #[test]
+    fn saturation_variants_match_at_nonunit_thresholds() {
+        for threshold in [0.25, 0.8, 2.0] {
+            for gain in [0.5, 3.0] {
+                for knee in [0.0, 0.4, 1.0] {
+                    for input in [-1.2, -0.1, 0.0, 0.3, 1.2] {
+                        let expected = saturate_td(input, gain, threshold, knee);
+                        let expected_tanh = (f64::from(input) * f64::from(gain)
+                            / f64::from(threshold))
+                        .tanh() as f32;
+                        for (output, tanh) in [
+                            saturate_td_with_tanh(input, gain, threshold, knee),
+                            saturate_td_with_tanh_fast(
+                                input,
+                                gain,
+                                threshold,
+                                1.0 / threshold,
+                                knee,
+                            ),
+                        ] {
+                            assert!((output - expected).abs() < 1e-6);
+                            assert!((tanh - expected_tanh).abs() < 1e-6);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fast_processing_matches_reference_across_fft_skip_transitions() {
+        let mut reference = SpectralClipper::new(64, 16);
+        let mut fast = SpectralClipper::new(64, 16);
+        let threshold = 0.37;
+        for i in 0..1024 {
+            let input = (i as f32 * 0.17).sin();
+            let (expected, output) = if (256..512).contains(&i) {
+                (
+                    reference.process_sample_skip_fft(input, 1.5, threshold, 0.4),
+                    fast.process_sample_skip_fft_fast(input, 1.5, threshold, 1.0 / threshold, 0.4),
+                )
+            } else {
+                (
+                    reference.process_sample(input, 1.5, threshold, 0.4),
+                    fast.process_sample_fast(input, 1.5, threshold, 1.0 / threshold, 0.4),
+                )
+            };
+            assert_eq!(output, expected, "sample {i}");
+        }
+    }
+
+    #[test]
+    fn reset_restarts_clipper_without_old_tail() {
+        let mut used = SpectralClipper::new(64, 16);
+        let mut fresh = SpectralClipper::new(64, 16);
+        for i in 0..263 {
+            used.process_sample((i as f32 * 0.17).sin(), 1.5, 0.37, 0.4);
+        }
+        used.reset();
+        for i in 0..512 {
+            let input = (i as f32 * 0.23).cos();
+            assert_eq!(
+                used.process_sample(input, 1.5, 0.37, 0.4),
+                fresh.process_sample(input, 1.5, 0.37, 0.4),
+                "sample {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn soft_knee_normalizes_by_nonunit_threshold_after_reconstruction() {
+        let mut clipper = SpectralClipper::new(64, 16);
+        let expected = 0.37 * (1.5_f32 * 0.8 / 0.37).tanh();
+        for i in 0..512 {
+            let output = clipper.process_sample(0.8, 1.5, 0.37, 1.0);
+            if i >= 256 {
+                assert!(
+                    (output - expected).abs() < 1e-5,
+                    "sample {i}: {output}, expected {expected}"
+                );
+            }
+        }
+    }
+
     fn make_sine(freq: f32, amplitude: f32, num_samples: usize) -> Vec<f32> {
         (0..num_samples)
             .map(|i| amplitude * (2.0 * PI * freq * i as f32 / SR).sin())

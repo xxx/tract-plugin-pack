@@ -145,6 +145,28 @@ mod tests {
     }
 
     #[test]
+    fn silence_threshold_includes_both_signed_endpoints() {
+        let threshold = 1e-6_f32;
+        for sample in [
+            0.0,
+            threshold / 2.0,
+            -threshold / 2.0,
+            threshold,
+            -threshold,
+        ] {
+            let mut ring = FirRing::new(16);
+            ring.push(sample);
+            assert!(ring.is_silent(), "sample {sample} should remain silent");
+        }
+        let above = f32::from_bits(threshold.to_bits() + 1);
+        for sample in [above, -above] {
+            let mut ring = FirRing::new(16);
+            ring.push(sample);
+            assert!(!ring.is_silent(), "sample {sample} should clear silence");
+        }
+    }
+
+    #[test]
     fn wraparound_keeps_window_contiguous() {
         // Push far more than capacity; the most-recent-16 MAC must still be
         // correct (double-buffer keeps the window a single slice).

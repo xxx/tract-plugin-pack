@@ -336,6 +336,49 @@ mod tests {
     use rustfft::FftPlanner;
 
     #[test]
+    fn reset_restarts_nonidentity_shifter_without_old_tail() {
+        let mut used = SpectralShifter::new(64, 16);
+        let mut fresh = SpectralShifter::new(64, 16);
+        for i in 0..263 {
+            used.process_sample((i as f32 * 0.17).sin(), 3.0, 1.2, false, 2, 24);
+        }
+        used.reset();
+        for i in 0..512 {
+            let input = (i as f32 * 0.23).cos();
+            assert_eq!(
+                used.process_sample(input, 3.0, 1.2, false, 2, 24),
+                fresh.process_sample(input, 3.0, 1.2, false, 2, 24),
+                "sample {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn nonidentity_processing_preserves_silence() {
+        let mut shifter = SpectralShifter::new(64, 16);
+        for i in 0..512 {
+            let output = shifter.process_sample(0.0, 3.0, 1.2, false, 0, usize::MAX);
+            assert_eq!(output, 0.0, "sample {i}");
+        }
+    }
+
+    #[test]
+    fn output_magnitudes_report_the_windowed_sine_and_reset_to_zero() {
+        let mut shifter = SpectralShifter::new(64, 16);
+        for i in 0..64 {
+            let input = 0.8 * (TAU * 5.0 * i as f32 / 64.0).sin();
+            shifter.process_sample(input, 0.0, 1.0, false, 0, usize::MAX);
+        }
+        let magnitudes = shifter.output_magnitudes();
+        assert_eq!(magnitudes.len(), 33);
+        // Hann's coherent gain is 0.5; the identity path also trims by 3 dB.
+        let expected = 0.8 * 0.5 * 10.0_f32.powf(-3.0 / 20.0);
+        assert!((magnitudes[5] - expected).abs() < 1e-5);
+        shifter.reset();
+        assert!(shifter.output_magnitudes().iter().all(|&m| m == 0.0));
+    }
+
+    #[test]
     fn test_identity_passthrough() {
         let fft_size = 4096;
         let hop_size = 1024;
