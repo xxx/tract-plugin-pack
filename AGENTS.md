@@ -24,7 +24,7 @@ Tract Plugin Pack — a Cargo workspace of audio effect plugins (VST3, CLAP, sta
 
 ## Workspace Structure
 
-Each plugin is a crate (`<plugin>/`). Plus: `tiny-skia-widgets/` (shared CPU-rendered widgets), `tract-dsp/` (shared GUI-free DSP primitives), `docs/` (manuals md+PDF), `xtask/` (build tooling), `nih-plug-widgets/` (legacy vizia widgets, workspace-excluded so its old transitive deps stay out of the lock file).
+Each plugin is a crate (`<plugin>/`). Plus: `tiny-skia-widgets/` (shared CPU-rendered widgets), `tract-dsp/` (shared GUI-free DSP primitives), `tract-effects/` (shared effect library, modulation, and effect editor), `docs/` (manuals md+PDF), `xtask/` (build tooling), `nih-plug-widgets/` (legacy vizia widgets, workspace-excluded so its old transitive deps stay out of the lock file).
 
 ## Build / Test / Lint
 
@@ -41,6 +41,8 @@ cargo nextest run --workspace              # all tests (parallel runner)
 cargo clippy --workspace -- -D warnings    # lint (CI uses -D warnings)
 cargo fmt --check
 ```
+
+For focused Multosis effect/editor verification, run `cargo nextest run -p multosis -p tract-effects`; effect DSP and shared editor tests now live in `tract-effects`.
 
 For local release/profile/bundle builds, prefix with `cargo xtask native` (auto-detects host CPU → `-C target-cpu=haswell`). Install the test runner via `cargo install cargo-nextest --locked`; config in `.config/nextest.toml`, CI uses the `ci` profile (retries=1). No doctests. Tests are inline `#[cfg(test)]` modules. Fixtures in `wavetable-filter/tests/fixtures/`.
 
@@ -92,6 +94,8 @@ Common shape per plugin: `lib.rs` (plugin struct, params, `process()`), `editor.
 **nap** — `sequence.rs` (velvet sequence generation: `GenParams`, `generate`, forward-only `curve_value` cursor, energy normalization; `VelvetSequence` pre-allocated parallel arrays); `engine.rs` (`ReverbChannel` — input ring + Q-filter excitation scatter + post-LP + DC blocker; `MAX_RING_SAMPLES`); `coloration.rs` (`Dictionary` of Q=6 one-pole lowpass filters log-spaced dark→bright; `OnePole`); `handoff.rs` (`SequenceHandoff` — `Arc<Mutex<VelvetSequence>>` + generation counter, `try_lock` audio-thread consume; `IrHandoff` — same shape for the baked IR spectra pair, L+R, published by `IrBaker` and consumed by the Efficient engine); `ir.rs` (`IrBaker` — GUI-thread analytic IR bake: per-filter pulse scatter + one-pole cascade + post-LP + DC blocker over the full IR, then UPOLS partition spectra; `IrSpectra` — pre-allocated partition-spectra buffer, `resize_for` grows on sample-rate change; `max_ir_len` — IR length cap rounded up to a whole P-sample partition); `lib.rs` (`NapMode { ZeroLatency, Efficient }` non-automatable Engine param; `DryDelay` P-sample ring for dry-path alignment in Efficient mode; `PartitionedConvolver` left/right instances; `bake_ir` GUI-thread helper); `rng.rs` (SplitMix64 seedable RNG); `editor.rs` (triple-MSEG editor, `pane_rects`/`pane_at` layout, regenerate-on-edit trigger, Engine stepped-selector, drag-deferred IR bake); `editor/tail_view.rs` (`decimate` — max-|coeff|-per-column decimation for bounded render cost, live pulse-field viz).
 
 **hd26** — `delay.rs` (modulated fractional delay line, 4-pt Catmull-Rom interp); `lfo.rs` (phase-in-turns sine `Phasor`); `transient.rs` (fast/slow-envelope onset detector + refractory, drives Retrig); `hyper.rs` (per-channel voice bank, `HyperParams`, `voice_depth` trough clamp); `dimension.rs` (`DimMode` AM/Pitch, `OnePoleHp` wet HPF, antisymmetric mono-safe sum); `editor.rs` (knob panel + lock-free retrig LED/level-bar telemetry).
+
+**tract-effects** (shared) — `effects/` (Multosis effect DSP, registry, parameter metadata, and persisted `TrackEffect`); `modulation.rs` (`TrackModulation`, compatible legacy deserialization, and allocation-free single-effect `ModulationState`); `editor/` (`EffectEditor` interaction state, supplied layout, configurable trigger menu, and edit/navigation results); `randomize.rs` (effect randomization); `undo.rs` (generic bounded history); `compressor.rs` (shared compressor DSP). Multosis re-exports its former effect/compressor paths and keeps the 16-row modulation wrapper, grid, host automation, locks, dirty flags, and undo snapshots. New effects belong in this shared crate. Constructing an `EffectInstance` may allocate; construction and kind switching must not be assumed audio-thread-safe.
 
 **tiny-skia-widgets** (shared) — `primitives.rs` (color palette, `draw_rect` opaque fast-path, `fill_pixmap_opaque`, `fill_column_opaque`); `text.rs` (fontdue glyph cache); `controls.rs` (button/slider/stepped-selector); `param_dial.rs` (rotary dial); `editor_base.rs` (EditorState size persistence, SurfaceState); `drag.rs` (DragState hit regions, `mouse_in_window`); `text_edit.rs` (`TextEditState<A>` right-click-to-type machine).
 

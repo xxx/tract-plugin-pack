@@ -1333,13 +1333,12 @@ dependencies = [
  "nih_plug",
  "raw-window-handle 0.5.2",
  "raw-window-handle 0.6.2",
- "rustfft",
  "serde",
  "serde_json",
  "softbuffer",
  "tiny-skia",
  "tiny-skia-widgets",
- "tract-dsp",
+ "tract-effects",
 ]
 
 [[package]]
@@ -2461,6 +2460,20 @@ dependencies = [
  "fearless_simd",
  "realfft",
  "rustfft",
+]
+
+[[package]]
+name = "tract-effects"
+version = "0.1.0"
+dependencies = [
+ "baseview",
+ "keyboard-types",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "tiny-skia",
+ "tiny-skia-widgets",
+ "tract-dsp",
 ]
 
 [[package]]

@@ -249,6 +249,7 @@ tract-plugin-pack/
 ├── nih-plug-widgets/       # Legacy vizia widgets (no longer used; kept on disk for reference, excluded from the workspace build)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets, editor base scaffolding
 ├── tract-dsp/              # Shared GUI-free DSP primitives (true-peak, FIR, STFT, ...)
+├── tract-effects/          # Shared effects, modulation runtime, and effect/MSEG editor
 ├── docs/                   # Plugin manuals
 │   ├── gain-brain/
 │   ├── gs-meter/
