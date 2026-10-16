@@ -61,6 +61,16 @@ A convolution filter whose FIR kernel you draw by hand with an MSEG editor — a
 - A flat default curve bakes to an all-zero kernel — a fresh instance is clean dry passthrough
 - CPU-rendered GUI (tiny-skia + softbuffer), freely resizable
 
+### Minitosis
+
+One continuously active Multosis effect with the same effect picker, parameter controls, and four MSEGs, without the sequencer.
+
+- All 49 effects plus None passthrough, sharing the Multosis DSP and editor
+- Three assignable MSEGs plus Amp; Time/Beat clocks, Free run/Free Hz/Transient triggers
+- Per-effect settings recall and stable, named DAW automation parameters
+- One Mix, Output gain, latency-aligned bypass, and optional transport retrigger
+- CPU-rendered, freely resizable GUI; VST3, CLAP, and standalone
+
 ### Multosis
 
 A 16-row grid sequencer where each row runs a different audio effect driven by per-row MSEG modulators. Effects process serially — row 1's output feeds row 2 and so on — so the grid composes a programmable chain whose parameters sweep in time with the host.
@@ -187,6 +197,7 @@ cargo nih-plug bundle gs-meter --release
 cargo nih-plug bundle hd26 --release
 cargo nih-plug bundle imagine --release
 cargo nih-plug bundle miff --release
+cargo nih-plug bundle minitosis --release
 cargo nih-plug bundle multosis --release
 cargo nih-plug bundle nap --release
 cargo nih-plug bundle pope-scope --release
@@ -202,6 +213,7 @@ cargo build --bin gs-meter --release
 cargo build --bin hd26 --release
 cargo build --bin imagine --release
 cargo build --bin miff --release
+cargo build --bin minitosis --release
 cargo build --bin multosis --release
 cargo build --bin nap --release
 cargo build --bin pope-scope --release
@@ -238,6 +250,7 @@ tract-plugin-pack/
 ├── hd26/                   # Unison-detune chorus + pseudo-stereo widener (Serum-inspired)
 ├── imagine/                # Multiband stereo imager modeled on Ozone Imager
 ├── miff/                   # MSEG hand-drawn FIR convolution filter
+├── minitosis/              # Single-effect processor with four MSEGs
 ├── multosis/               # 16-row grid sequencer with per-row effects + MSEGs
 ├── nap/                    # EDVN velvet-noise character reverb with drawn curves
 ├── pope-scope/             # Multichannel real-time oscilloscope
@@ -249,12 +262,14 @@ tract-plugin-pack/
 ├── nih-plug-widgets/       # Legacy vizia widgets (no longer used; kept on disk for reference, excluded from the workspace build)
 ├── tiny-skia-widgets/      # Shared CPU-rendered widgets, editor base scaffolding
 ├── tract-dsp/              # Shared GUI-free DSP primitives (true-peak, FIR, STFT, ...)
+├── tract-effects/          # Shared effects, modulation runtime, and effect/MSEG editor
 ├── docs/                   # Plugin manuals
 │   ├── gain-brain/
 │   ├── gs-meter/
 │   ├── hd26/
 │   ├── imagine/
 │   ├── miff/
+│   ├── minitosis/
 │   ├── multosis/
 │   ├── nap/
 │   ├── pope-scope/
@@ -282,6 +297,7 @@ Install nextest via `cargo install cargo-nextest --locked`. Config lives in `.co
 - [HD26 Manual](docs/hd26/hd26-manual.md)
 - [Imagine Manual](docs/imagine/imagine-manual.md)
 - [Miff Manual](docs/miff/miff-manual.md)
+- [Minitosis Manual](docs/minitosis/minitosis-manual.md) · [PDF](docs/minitosis/minitosis-manual.pdf)
 - [Multosis Manual](docs/multosis/multosis-manual.md)
 - [Nap Manual](docs/nap/nap-manual.md)
 - [Pope Scope Manual](docs/pope-scope/pope-scope-manual.md)

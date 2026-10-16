@@ -5,9 +5,9 @@
 //! sequencer, and the step clock. No GUI, no audio, no nih-plug.
 
 pub mod clock;
-pub mod compressor;
+pub use tract_effects::compressor;
 pub mod editor;
-pub mod effects;
+pub use tract_effects::effects;
 pub mod engine;
 pub mod grid;
 pub mod handoff;

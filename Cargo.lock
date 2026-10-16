@@ -1304,6 +1304,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
+name = "minitosis"
+version = "0.1.0"
+dependencies = [
+ "assert_no_alloc",
+ "baseview",
+ "keyboard-types",
+ "nih_plug",
+ "raw-window-handle 0.5.2",
+ "raw-window-handle 0.6.2",
+ "serde",
+ "serde_json",
+ "softbuffer",
+ "tiny-skia",
+ "tiny-skia-widgets",
+ "tract-effects",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1333,13 +1351,12 @@ dependencies = [
  "nih_plug",
  "raw-window-handle 0.5.2",
  "raw-window-handle 0.6.2",
- "rustfft",
  "serde",
  "serde_json",
  "softbuffer",
  "tiny-skia",
  "tiny-skia-widgets",
- "tract-dsp",
+ "tract-effects",
 ]
 
 [[package]]
@@ -2461,6 +2478,20 @@ dependencies = [
  "fearless_simd",
  "realfft",
  "rustfft",
+]
+
+[[package]]
+name = "tract-effects"
+version = "0.1.0"
+dependencies = [
+ "baseview",
+ "keyboard-types",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "tiny-skia",
+ "tiny-skia-widgets",
+ "tract-dsp",
 ]
 
 [[package]]

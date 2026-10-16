@@ -1,565 +1,57 @@
-//! The modulation engine — Phase 2 Milestone 2b. Three MSEGs per track row
-//! (one amplitude + two assignable), free-running on their own clocks,
-//! driving the 2a effect-parameter and amplitude seams.
-//!
-//! See `docs/superpowers/specs/2026-05-19-multosis-phase-2b-design.md`.
+//! Sequencer orchestration of the shared per-effect modulation runtime.
 
-use crate::effects::{
-    Effect, EffectInstance, EffectKind, ParamScaling, ParamSpec, TrackEffect,
-    default_params_for_kind, norm_to_value, param_count, value_to_norm,
-};
+pub use tract_effects::modulation::*;
+
+use crate::effects::{EffectInstance, TrackEffect};
 use crate::grid::ROWS;
-use tiny_skia_widgets::{
-    MsegData, MsegNode, PlayMode, Polarity, SyncMode, advance, value_at_phase,
-};
 
-/// Default threshold for a fresh `TriggerSource::Transient` (≈ +3.5 dB on the
-/// fast/slow envelope ratio — fires on clear percussive onsets without
-/// over-triggering on sustained material).
-pub const TRANSIENT_THRESHOLD_DEFAULT: f32 = 1.5;
-/// Threshold knob range (linear ratio). `1.05` ≈ +0.4 dB on the envelope
-/// ratio (very sensitive); `6.0` ≈ +15.6 dB (only firm onsets fire).
-pub const TRANSIENT_THRESHOLD_MIN: f32 = 1.05;
-pub const TRANSIENT_THRESHOLD_MAX: f32 = 6.0;
-/// Default refractory after a fire (milliseconds) — enough to swallow a
-/// snare's body without missing 16ths at 200 bpm (≈ 75 ms).
-pub const TRANSIENT_HOLD_MS_DEFAULT: f32 = 50.0;
-pub const TRANSIENT_HOLD_MS_MIN: f32 = 5.0;
-pub const TRANSIENT_HOLD_MS_MAX: f32 = 500.0;
-
-/// Internal envelope-follower time constants for the transient detector.
-/// Fast envelope rises quickly to track the peak; slow envelope rises slowly
-/// so it doesn't catch up to a transient before the ratio test fires.
-const TRANSIENT_FAST_ATTACK_MS: f32 = 0.5;
-const TRANSIENT_FAST_RELEASE_MS: f32 = 5.0;
-const TRANSIENT_SLOW_ATTACK_MS: f32 = 30.0;
-const TRANSIENT_SLOW_RELEASE_MS: f32 = 200.0;
-/// Below this slow-envelope floor, the ratio test is inhibited — otherwise
-/// digital noise floors produce huge ratios on near-silence. ≈ −60 dBFS.
-const TRANSIENT_NOISE_FLOOR: f32 = 1e-3;
-
-/// Per-row dual-envelope onset detector backing `TriggerSource::Transient`.
-/// State is preserved across config changes (matches FreeHz's `hz_phases`)
-/// and zeroed by `Modulation::reset`.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TransientDetector {
-    fast_env: f32,
-    slow_env: f32,
-    /// Samples remaining until the detector is re-armed after a fire.
-    refractory: u32,
-}
-
-impl TransientDetector {
-    /// Process one mono input sample. Returns `true` exactly on the sample a
-    /// transient is detected — fast envelope exceeds slow envelope by
-    /// `threshold`, the slow envelope is above the inhibit floor, and the
-    /// detector is not in its refractory window. After a fire the detector
-    /// is gated for `hold_ms` regardless of the signal.
-    pub fn process_sample(
-        &mut self,
-        input: f32,
-        threshold: f32,
-        hold_ms: f32,
-        sample_rate: f32,
-    ) -> bool {
-        let target = input.abs();
-        let fast_a = one_pole_coef(TRANSIENT_FAST_ATTACK_MS, sample_rate);
-        let fast_r = one_pole_coef(TRANSIENT_FAST_RELEASE_MS, sample_rate);
-        let slow_a = one_pole_coef(TRANSIENT_SLOW_ATTACK_MS, sample_rate);
-        let slow_r = one_pole_coef(TRANSIENT_SLOW_RELEASE_MS, sample_rate);
-        let fast_coef = if target > self.fast_env {
-            fast_a
-        } else {
-            fast_r
-        };
-        let slow_coef = if target > self.slow_env {
-            slow_a
-        } else {
-            slow_r
-        };
-        self.fast_env = target + (self.fast_env - target) * fast_coef;
-        self.slow_env = target + (self.slow_env - target) * slow_coef;
-        if self.refractory > 0 {
-            self.refractory -= 1;
-            return false;
-        }
-        if self.slow_env < TRANSIENT_NOISE_FLOOR {
-            return false;
-        }
-        if self.fast_env > self.slow_env * threshold {
-            let hold = (hold_ms.max(0.0) * 0.001 * sample_rate) as u32;
-            self.refractory = hold.max(1);
-            return true;
-        }
-        false
-    }
-
-    /// Zero the detector — both envelopes back to silence, refractory cleared.
-    pub fn reset(&mut self) {
-        self.fast_env = 0.0;
-        self.slow_env = 0.0;
-        self.refractory = 0;
-    }
-}
-
-/// One-pole envelope-follower coefficient for the given time constant. Larger
-/// `time_ms` → coefficient closer to 1 → smoother follower.
-fn one_pole_coef(time_ms: f32, sample_rate: f32) -> f32 {
-    if time_ms <= 0.0 || sample_rate <= 0.0 {
-        return 0.0;
-    }
-    (-1.0 / (time_ms * 0.001 * sample_rate)).exp()
-}
-
-/// The event that causes a track's three MSEG phases to reset to 0.
-///
-/// * `Free` — free-running default, never resets.
-/// * `CellLight` — fires on the row's inactive→active edge at the playhead.
-/// * `CellStep` — fires on every step the row is lit.
-/// * `FreeHz { hz }` — fires every `1.0/hz` seconds, independent of sync.
-/// * `Transient { threshold, hold_ms }` — dual-envelope ratio onset detector
-///   on the plugin's input. Fires when the fast envelope exceeds the slow
-///   envelope by `threshold`; the `hold_ms` refractory window suppresses
-///   re-fires while the transient's tail decays.
-#[derive(Clone, Copy, PartialEq, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub enum TriggerSource {
-    #[default]
-    Free,
-    CellLight,
-    CellStep,
-    FreeHz {
-        hz: f32,
-    },
-    Transient {
-        /// Fast / slow envelope ratio required to fire (e.g. 1.5 = +3.5 dB).
-        threshold: f32,
-        /// Refractory period in milliseconds.
-        hold_ms: f32,
-    },
-}
-
-/// One track row's modulation: four MSEGs and the three assignable MSEGs'
-/// targets and depths. `msegs[0]` is the amplitude MSEG; `msegs[1..=3]` are
-/// the assignable MSEGs — `targets[k]` / `depths[k]` belong to
-/// `msegs[k + 1]`.
-///
-/// Backward compat: legacy presets persisted three MSEGs and two
-/// targets/depths. A custom `Deserialize` impl below accepts both
-/// shapes -- short arrays are padded with default cyclic MSEGs and
-/// no-target / zero-depth assignable slots.
-#[derive(Clone, PartialEq, Debug, serde::Serialize)]
-pub struct TrackModulation {
-    pub msegs: [MsegData; 4],
-    /// Target effect-parameter index for each assignable MSEG, or `None`.
-    pub targets: [Option<usize>; 3],
-    /// Bipolar modulation depth (−1..1) for each assignable MSEG.
-    pub depths: [f32; 3],
-    /// The event that resets all four of this row's MSEG phases.
-    #[serde(default)]
-    pub trigger: TriggerSource,
-}
-
-impl TrackModulation {
-    /// The default modulation for track row `row`. The amplitude MSEG is flat
-    /// at 1.0 (no level change); `msegs[1]` is a cyclic triangle assigned to
-    /// effect parameter 0, its loop length spread by row so each track drifts
-    /// at its own rate; `msegs[2]` and `msegs[3]` are unused cyclic defaults.
-    pub fn default_for_row(row: usize) -> Self {
-        // All four MSEGs on a row default to the SAME beat-synced length so
-        // their playheads visibly stay in lockstep. The length varies by row
-        // (4..34 beats) for audible per-track variety. The user can re-tune
-        // any single MSEG's clock via its strip.
-        let beats = 4.0 + row as f32 * 2.0;
-
-        // msegs[0] — amplitude: flat at 1.0.
-        let mut amplitude = MsegData::default();
-        amplitude.nodes[0].value = 1.0;
-        amplitude.nodes[1].value = 1.0;
-        amplitude.play_mode = PlayMode::Cyclic;
-        amplitude.sync_mode = SyncMode::Beat;
-        amplitude.beats = beats;
-
-        // msegs[1] — assignable: a cyclic triangle.
-        let mut sweep = MsegData::default(); // nodes (0,0) and (1,1)
-        let _ = sweep.insert_node(0.5, 1.0); // -> (0,0) (0.5,1.0) (1,1.0)
-        sweep.move_node(2, 1.0, 0.0); // last node value -> 0: triangle
-        sweep.play_mode = PlayMode::Cyclic;
-        sweep.sync_mode = SyncMode::Beat;
-        sweep.beats = beats;
-
-        // msegs[2] — assignable: unused cyclic default, same clock as
-        // the others. Flat-line at 0..1 with no curvature.
-        let spare = MsegData {
-            play_mode: PlayMode::Cyclic,
-            sync_mode: SyncMode::Beat,
-            beats,
-            ..MsegData::default()
-        };
-
-        // msegs[3] — assignable: a 5-node sine-approximating cycle
-        // (mid -> peak -> mid -> trough -> mid). Each segment has
-        // tension applied to round its corner so the rendered curve
-        // looks sinusoidal rather than triangular. Magnitude 0.5
-        // is enough to clearly distinguish the bowed shape from a
-        // straight line without going so far it warps into a
-        // saw / hold profile.
-        let mut sine = MsegData {
-            play_mode: PlayMode::Cyclic,
-            sync_mode: SyncMode::Beat,
-            beats,
-            ..MsegData::default()
-        };
-        // The default Mseg has 2 nodes; overwrite with 5.
-        sine.node_count = 5;
-        // Sign convention (see `warp` in tiny-skia-widgets/mseg):
-        //   tension > 0 = slow-start  (concave bow)
-        //   tension < 0 = fast-start  (convex bow)
-        // For a rising sine quarter, value moves FAST near the
-        // midline and SLOWS into the peak -> fast-start = neg.
-        // For the falling quarter from the peak, value moves SLOW
-        // near the peak and ACCELERATES downward -> slow-start = pos.
-        sine.nodes[0] = MsegNode {
-            time: 0.0,
-            value: 0.5,
-            tension: -0.5,
-            stepped: false,
-        };
-        sine.nodes[1] = MsegNode {
-            time: 0.25,
-            value: 1.0,
-            tension: 0.5,
-            stepped: false,
-        };
-        sine.nodes[2] = MsegNode {
-            time: 0.5,
-            value: 0.5,
-            tension: -0.5,
-            stepped: false,
-        };
-        sine.nodes[3] = MsegNode {
-            time: 0.75,
-            value: 0.0,
-            tension: 0.5,
-            stepped: false,
-        };
-        sine.nodes[4] = MsegNode {
-            time: 1.0,
-            value: 0.5,
-            tension: 0.0,
-            stepped: false,
-        };
-
-        TrackModulation {
-            msegs: [amplitude, sweep, spare, sine],
-            targets: [Some(0), None, None],
-            depths: [0.4, 0.0, 0.0],
-            trigger: TriggerSource::Free,
-        }
-    }
-
-    /// Clear any assignable-MSEG target that points past `param_count`
-    /// parameters. Called after a track's effect kind changes so a target can
-    /// never reference a parameter the new effect does not have.
-    pub fn clamp_targets(&mut self, param_count: usize) {
-        for target in &mut self.targets {
-            if let Some(i) = *target
-                && i >= param_count
-            {
-                *target = None;
-            }
-        }
-    }
-}
-
-/// Backward-compatible deserializer for `TrackModulation`.
-///
-/// Legacy presets (before the MSEG count grew from 3 to 4) serialize
-/// `msegs` as a 3-element array and `targets` / `depths` as 2-element
-/// arrays. Modern serialization uses 4 / 3 / 3. This impl accepts
-/// either shape: it deserializes the fields as Vec<_>, validates
-/// the per-field lengths against the legacy or modern length, and
-/// pads short arrays with sensible defaults (a cyclic spare MSEG
-/// matching the existing default-style for new assignable slots,
-/// no-target / zero-depth for the new assignable's bookkeeping).
-impl<'de> serde::Deserialize<'de> for TrackModulation {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // Intermediate shape: same fields as TrackModulation but with
-        // Vec lengths so we can accept either the legacy or current
-        // sizes. Deserialized with serde's derive machinery via a
-        // local Helper struct.
-        #[derive(serde::Deserialize)]
-        struct Helper {
-            msegs: Vec<MsegData>,
-            targets: Vec<Option<usize>>,
-            depths: Vec<f32>,
-            #[serde(default)]
-            trigger: TriggerSource,
-        }
-        let h = Helper::deserialize(deserializer)?;
-
-        // Pad / truncate the mseg array to exactly 4 entries. Use a
-        // cyclic-default spare for any short-form padding, matching
-        // what `default_for_row` does for fresh tracks.
-        let mut msegs: [MsegData; 4] = std::array::from_fn(|_| MsegData {
-            play_mode: PlayMode::Cyclic,
-            sync_mode: SyncMode::Beat,
-            beats: 4.0,
-            ..MsegData::default()
-        });
-        for (i, m) in h.msegs.into_iter().take(4).enumerate() {
-            msegs[i] = m;
-        }
-
-        // Pad targets / depths to 3 (the 3 assignable slots) with
-        // "unassigned, no depth" defaults.
-        let mut targets: [Option<usize>; 3] = [None; 3];
-        for (i, t) in h.targets.into_iter().take(3).enumerate() {
-            targets[i] = t;
-        }
-        let mut depths: [f32; 3] = [0.0; 3];
-        for (i, d) in h.depths.into_iter().take(3).enumerate() {
-            depths[i] = d;
-        }
-
-        Ok(TrackModulation {
-            msegs,
-            targets,
-            depths,
-            trigger: h.trigger,
-        })
-    }
-}
-
-impl Default for TrackModulation {
-    fn default() -> Self {
-        Self::default_for_row(0)
-    }
-}
-
-/// The phase delta (0..1 space) one `block_len`-sample process block advances
-/// `mseg`, given the host `bpm` and `sample_rate`. Honours the MSEG's
-/// `sync_mode`: `Time` uses `time_seconds`, `Beat` converts `beats` via the
-/// tempo. Returns 0.0 for a degenerate (zero/negative) length — a `bpm` of 0
-/// or below is treated as such (the modulation simply freezes).
-pub fn mseg_phase_delta(mseg: &MsegData, block_len: usize, bpm: f64, sample_rate: f64) -> f32 {
-    let length_samples = match mseg.sync_mode {
-        SyncMode::Time => mseg.time_seconds as f64 * sample_rate,
-        // A non-positive `bpm` gives a degenerate length (freezes below).
-        SyncMode::Beat if bpm > 0.0 => mseg.beats as f64 * (60.0 / bpm) * sample_rate,
-        SyncMode::Beat => 0.0,
-    };
-    if length_samples.is_finite() && length_samples > 0.0 {
-        (block_len as f64 / length_samples) as f32
-    } else {
-        0.0
-    }
-}
-
-/// The effective effect-parameter value for an assignable MSEG modulating
-/// parameter `spec` around `base`. `mseg_value` is the MSEG's 0..1 output;
-/// `depth` is the modulation depth (−1..1); `polarity` decides where the
-/// MSEG's zero-deviation reference sits. The result is clamped to the
-/// parameter's range.
-///
-/// - `Bipolar`: the MSEG midline (value 0.5) leaves the parameter at `base`;
-///   the curve sweeps ±`depth` either side of it.
-/// - `Unipolar`: value 0 references `base` (no modulation) and the curve is
-///   additive — value 1 reaches `base + depth·range`. With an open Cutoff
-///   and positive depth a Unipolar curve only ever pushes up, so it clamps
-///   silently instead of pulling the filter closed.
-///
-/// Honours `spec.scaling`: Linear params modulate in value-space (`depth` is
-/// a fraction of the full value range); Log params modulate in norm-space
-/// (`depth` is a fraction of the log range), so a log-scaled cutoff sweeps
-/// audibly even-handed across its decades instead of being clamped at the
-/// dark end half the time.
-pub fn assignable_value(
-    mseg_value: f32,
-    base: f32,
-    depth: f32,
-    spec: ParamSpec,
-    polarity: Polarity,
-) -> f32 {
-    // Signed deviation factor: Bipolar centres on the midline (0.5 → 0),
-    // Unipolar references `base` at value 0 (the raw 0..1 output).
-    let factor = match polarity {
-        Polarity::Bipolar => mseg_value * 2.0 - 1.0,
-        Polarity::Unipolar => mseg_value,
-    };
-    match spec.scaling {
-        ParamScaling::Linear => {
-            let deviation = factor * depth * (spec.max - spec.min);
-            (base + deviation).clamp(spec.min, spec.max)
-        }
-        ParamScaling::Log => {
-            let norm_base = value_to_norm(base, spec.min, spec.max, ParamScaling::Log);
-            let norm_eff = (norm_base + factor * depth).clamp(0.0, 1.0);
-            norm_to_value(norm_eff, spec.min, spec.max, ParamScaling::Log)
-        }
-    }
-}
-
-/// Switch one track to effect `kind`: set the kind, reset its parameters to
-/// the kind's defaults, and clamp the track's assignable-MSEG targets to the
-/// new kind's parameter count (so a target can never reference a parameter
-/// the new effect lacks). The composable core of the editor's kind-switch.
-pub fn switch_effect_kind(
-    effect: &mut TrackEffect,
-    modulation: &mut TrackModulation,
-    kind: EffectKind,
-) {
-    effect.kind = kind;
-    effect.params = default_params_for_kind(kind);
-    modulation.clamp_targets(param_count(kind));
-}
-
-/// The modulation runtime owned by the audio engine — the per-track config,
-/// each MSEG's free-running phase, and the latest per-row amplitude gain.
+/// Sixteen independent modulation states, with sequencer trigger dispatch.
 pub struct Modulation {
     config: [TrackModulation; ROWS],
-    /// Free-running phase per `[row][mseg]`.
-    phases: [[f32; 4]; ROWS],
-    /// Latest per-row amplitude gain, set by `begin_block` / `advance_segment`.
-    amplitudes: [f32; ROWS],
-    /// Free-Hz oscillator phase per row, advances 0..1 and wraps modulo 1.
-    hz_phases: [f32; ROWS],
-    /// Onset detectors backing `TriggerSource::Transient` per row.
-    transient_state: [TransientDetector; ROWS],
-    /// The rows that fired this block (bit `r` set). Zeroed by `begin_block`,
-    /// then accumulated by the FreeHz / Transient paths and by `fire`.
-    fires: u16,
+    states: [ModulationState; ROWS],
 }
 
 impl Modulation {
-    /// A runtime with the default per-row modulation and zeroed phases.
     pub fn new() -> Self {
         Self {
             config: std::array::from_fn(TrackModulation::default_for_row),
-            phases: [[0.0; 4]; ROWS],
-            amplitudes: [1.0; ROWS],
-            hz_phases: [0.0; ROWS],
-            transient_state: [TransientDetector::default(); ROWS],
-            fires: 0,
+            states: std::array::from_fn(|_| ModulationState::default()),
         }
     }
 
-    /// Replace the per-track modulation config (bridged from persisted state
-    /// at init, and again on each live edit — off the audio thread).
-    ///
-    /// Runtime state (`phases`, `hz_phases`, `amplitudes`) is deliberately
-    /// preserved across config changes so editing a parameter or switching
-    /// trigger source mid-playback does not glitch the modulation. Only
-    /// `reset()` clears that state.
+    /// Replace configuration while preserving envelope and detector state.
     pub fn set_config(&mut self, config: &[TrackModulation; ROWS]) {
         self.config = config.clone();
     }
 
-    /// Swap rows `a` and `b` — both the config and every piece of runtime
-    /// state attached to those row indices. Called from the audio thread
-    /// when the editor's drag-and-drop reorder posts a swap; pairing this
-    /// with `AudioEngine::swap_tracks` keeps the in-flight MSEG phase
-    /// glued to its track so the swap doesn't audibly glitch.
     pub fn swap_rows(&mut self, a: usize, b: usize) {
         if a == b || a >= ROWS || b >= ROWS {
             return;
         }
         self.config.swap(a, b);
-        self.phases.swap(a, b);
-        self.amplitudes.swap(a, b);
-        self.hz_phases.swap(a, b);
-        self.transient_state.swap(a, b);
-        // `fires` is a u16 bitmask — swap the two bits in place. `fires` is
-        // also zeroed at the start of every block, so this only matters if
-        // the swap lands mid-block (it shouldn't with the current handoff,
-        // but the cost is one xor and it future-proofs the helper).
-        let ba = (self.fires >> a) & 1;
-        let bb = (self.fires >> b) & 1;
-        let mask = (1u16 << a) | (1u16 << b);
-        self.fires = (self.fires & !mask) | (ba << b) | (bb << a);
+        self.states.swap(a, b);
     }
 
-    /// Reset every MSEG phase to 0.
     pub fn reset(&mut self) {
-        self.phases = [[0.0; 4]; ROWS];
-        self.hz_phases = [0.0; ROWS];
-        for det in &mut self.transient_state {
-            det.reset();
+        for state in &mut self.states {
+            state.reset();
         }
-        self.fires = 0;
     }
 
-    /// The latest amplitude gain for `row` (set by the modulation update).
     pub fn amplitude(&self, row: usize) -> f32 {
-        self.amplitudes[row]
+        self.states[row].amplitude()
     }
 
-    /// The current free-running phase of MSEG `k` (`0..4`) on `row` (`0..ROWS`).
-    /// Published to the editor for the playhead overlay.
-    pub fn phase(&self, row: usize, k: usize) -> f32 {
-        self.phases[row][k]
+    pub fn phase(&self, row: usize, slot: usize) -> f32 {
+        self.states[row].phase(slot)
     }
 
-    /// Block-rate modulation setup, run once at the top of a process block.
-    /// Zeroes `fires`, then handles the per-block trigger sources:
-    ///
-    /// * `FreeHz` — advance the oscillator by the whole block; on a wrap, fire
-    ///   (resetting the row's three MSEG phases). Multiple wraps count as one
-    ///   fire (the fractional remainder is kept for the next block).
-    /// * `Transient` — run the row's dual-envelope detector across every input
-    ///   sample. The first detection in the block fires the row; the detector
-    ///   keeps running for the rest of the block so its envelope state is
-    ///   correct for the next call.
-    ///
-    /// Block-aligned: a `Transient` row that detects an onset at sample N in
-    /// this block fires at the START of the next-to-be-processed block range
-    /// (i.e. the whole block sees the reset phase). Trade-off accepted in
-    /// exchange for keeping the audio engine's per-segment loop simple — the
-    /// 10 ms jitter at 512 / 48k is sub-perceptual for envelope retriggers.
-    ///
-    /// Between fires, every row's MSEGs are advanced by `advance_segment` at
-    /// each MSEG's own sync/length — `FreeHz` / `Transient` are trigger
-    /// sources, not clock overrides.
     pub fn begin_block(&mut self, left: &[f32], right: &[f32], sample_rate: f64) {
-        let block_len = left.len().min(right.len());
-        self.fires = 0;
-        let sr_f32 = sample_rate as f32;
-        for row in 0..ROWS {
-            match self.config[row].trigger {
-                TriggerSource::FreeHz { hz } if hz > 0.0 => {
-                    self.hz_phases[row] += (block_len as f32 * hz) / sr_f32;
-                    if self.hz_phases[row] >= 1.0 {
-                        self.hz_phases[row] -= self.hz_phases[row].floor();
-                        self.fires |= 1 << row;
-                        self.phases[row] = [0.0; 4];
-                    }
-                }
-                TriggerSource::Transient { threshold, hold_ms } => {
-                    let det = &mut self.transient_state[row];
-                    let mut fired = false;
-                    for i in 0..block_len {
-                        let mono = (left[i] + right[i]) * 0.5;
-                        let trip = det.process_sample(mono, threshold, hold_ms, sr_f32);
-                        if trip && !fired {
-                            self.fires |= 1 << row;
-                            self.phases[row] = [0.0; 4];
-                            fired = true;
-                        }
-                    }
-                }
-                _ => {}
-            }
+        for (state, config) in self.states.iter_mut().zip(&self.config) {
+            state.begin_block(config, left, right, sample_rate);
         }
     }
 
-    /// Advance every row's three MSEGs by one segment of `seg_len` samples,
-    /// then evaluate and apply them. Called once per segment from the
-    /// engine's step-boundary segment loop. A zero-length segment is a no-op.
-    ///
-    /// Splitting a block into per-segment advances yields the same end-of-block
-    /// phase as one whole-block advance only because every multosis MSEG is
-    /// `PlayMode::Cyclic` — its phase wrap is additively decomposable. A
-    /// `OneShot`-mode MSEG clamps non-linearly and could land differently
-    /// across segments; revisit this if a `play_mode` control is ever exposed.
     pub fn advance_segment(
         &mut self,
         seg_len: usize,
@@ -568,163 +60,40 @@ impl Modulation {
         effects: &mut [EffectInstance; ROWS],
         track_effects: &[TrackEffect; ROWS],
     ) {
-        if seg_len == 0 {
-            return;
-        }
         for row in 0..ROWS {
-            for k in 0..4 {
-                let mseg = self.config[row].msegs[k];
-                let dt = mseg_phase_delta(&mseg, seg_len, bpm, sample_rate);
-                let (next, _finished) = advance(&mseg, self.phases[row][k], dt, false);
-                self.phases[row][k] = next;
-                self.apply_mseg(row, k, effects, track_effects);
-            }
+            self.states[row].advance_segment(
+                &self.config[row],
+                &track_effects[row],
+                &mut effects[row],
+                seg_len,
+                bpm,
+                sample_rate,
+            );
         }
     }
 
-    /// Fire the per-step modulation triggers at a step boundary. `newly_rows`
-    /// is the inactive→active edge mask (bit `r` = row `r` first lit this
-    /// step); `active_rows` is the post-tick active mask (bit `r` = row `r`
-    /// has a lit, enabled cell under the playhead now). A `CellLight` row
-    /// fires if it is in `newly_rows`; a `CellStep` row fires if it is in
-    /// `active_rows`; `Free`, `FreeHz`, and `Transient` rows never fire from
-    /// a step boundary (the latter two fire from `begin_block` instead). A
-    /// firing row's three MSEG phases reset to 0 and its `fires` bit is set.
-    /// Called at a step boundary, so the reset takes effect on the very next
-    /// segment.
+    /// Dispatch cell triggers; other trigger sources run in `begin_block`.
     pub fn fire(&mut self, newly_rows: u16, active_rows: u16) {
         for row in 0..ROWS {
             let reset = match self.config[row].trigger {
                 TriggerSource::CellLight => newly_rows & (1 << row) != 0,
                 TriggerSource::CellStep => active_rows & (1 << row) != 0,
-                TriggerSource::Free
-                | TriggerSource::FreeHz { .. }
-                | TriggerSource::Transient { .. } => false,
+                _ => false,
             };
             if reset {
-                self.phases[row] = [0.0; 4];
-                self.fires |= 1 << row;
+                self.states[row].trigger();
             }
         }
     }
 
-    /// Evaluate MSEG `k` on `row` at its current phase and apply it: the
-    /// amplitude MSEG (`k == 0`) sets `amplitudes[row]`; an assignable MSEG
-    /// with a target writes that effect parameter via `set_param`.
-    fn apply_mseg(
-        &mut self,
-        row: usize,
-        k: usize,
-        effects: &mut [EffectInstance; ROWS],
-        track_effects: &[TrackEffect; ROWS],
-    ) {
-        // `MsegData` is `Copy`; copy what we need so the immutable
-        // `self.config` borrow does not span the `self.amplitudes` / `effects`
-        // writes below.
-        let mseg = self.config[row].msegs[k];
-        let value = value_at_phase(&mseg, self.phases[row][k]);
-        if k == 0 {
-            // Amplitude MSEG.
-            self.amplitudes[row] = value;
-        } else if let Some(target) = self.config[row].targets[k - 1] {
-            // Assignable MSEG -> a target effect parameter.
-            if let Some(&spec) = effects[row].parameters().get(target) {
-                let base = track_effects[row].params[target];
-                let depth = self.config[row].depths[k - 1];
-                effects[row].set_param(
-                    target,
-                    assignable_value(value, base, depth, spec, mseg.polarity),
-                );
-            }
-        }
-    }
-
-    /// Test helper: true when every MSEG phase is 0.
-    #[cfg(test)]
-    pub fn phases_all_zero(&self) -> bool {
-        self.phases.iter().flatten().all(|&p| p == 0.0)
-    }
-
-    /// Test helper: the rows that fired this block.
-    #[cfg(test)]
+    /// Rows triggered since the last block began.
     pub fn fires_last_block(&self) -> u16 {
-        self.fires
-    }
-
-    /// Test helper: the current phase for `[row][k]`.
-    #[cfg(test)]
-    pub fn phase_for_test(&self, row: usize, k: usize) -> f32 {
-        self.phases[row][k]
-    }
-
-    /// Test helper: true when every Free-Hz oscillator phase is 0.
-    #[cfg(test)]
-    pub fn hz_phases_all_zero(&self) -> bool {
-        self.hz_phases.iter().all(|&p| p == 0.0)
-    }
-
-    /// Test helper: the current Free-Hz oscillator phase for `row`.
-    #[cfg(test)]
-    pub fn hz_phase_for_test(&self, row: usize) -> f32 {
-        self.hz_phases[row]
-    }
-
-    /// Test helper: shared access to row `row`'s stored config.
-    #[cfg(test)]
-    pub fn config_for_test(&self, row: usize) -> &TrackModulation {
-        &self.config[row]
-    }
-
-    /// Test helper: shared access to row `row`'s transient detector.
-    #[cfg(test)]
-    pub fn transient_detector_for_test(&self, row: usize) -> &TransientDetector {
-        &self.transient_state[row]
-    }
-
-    /// Test helper: the cached amplitude gain for `row`.
-    #[cfg(test)]
-    pub fn amplitude_for_test(&self, row: usize) -> f32 {
-        self.amplitudes[row]
-    }
-
-    /// Test helper: drive `begin_block` with a silent input buffer of length
-    /// `block_len`. Lets tests that exercise `FreeHz`/`CellLight`/`CellStep`
-    /// state machines stay agnostic about the new audio-input argument.
-    #[cfg(test)]
-    pub fn begin_block_silent(&mut self, block_len: usize, sample_rate: f64) {
-        let silence = vec![0.0_f32; block_len];
-        self.begin_block(&silence, &silence, sample_rate);
-    }
-
-    /// Test helper: write directly into the runtime state for `row`. Lets
-    /// the swap-rows test prime distinct phases/amplitudes without driving
-    /// audio through the engine.
-    #[cfg(test)]
-    pub fn force_runtime_state_for_test(
-        &mut self,
-        row: usize,
-        phases: [f32; 4],
-        amplitude: f32,
-        hz_phase: f32,
-        fired: bool,
-    ) {
-        self.phases[row] = phases;
-        self.amplitudes[row] = amplitude;
-        self.hz_phases[row] = hz_phase;
-        if fired {
-            self.fires |= 1 << row;
-        } else {
-            self.fires &= !(1u16 << row);
-        }
-    }
-}
-
-#[cfg(test)]
-impl TransientDetector {
-    /// Test helper: the detector's fast envelope, slow envelope, and
-    /// refractory-sample counter, in that order.
-    pub fn state_for_test(&self) -> (f32, f32, u32) {
-        (self.fast_env, self.slow_env, self.refractory)
+        self.states
+            .iter()
+            .enumerate()
+            .fold(0, |mask, (row, state)| {
+                mask | (u16::from(state.fired()) << row)
+            })
     }
 }
 
@@ -735,8 +104,39 @@ impl Default for Modulation {
 }
 
 #[cfg(test)]
+impl Modulation {
+    pub fn phases_all_zero(&self) -> bool {
+        self.states
+            .iter()
+            .all(|s| (0..4).all(|k| s.phase(k) == 0.0))
+    }
+
+    pub fn phase_for_test(&self, row: usize, slot: usize) -> f32 {
+        self.phase(row, slot)
+    }
+
+    pub fn hz_phases_all_zero(&self) -> bool {
+        self.states.iter().all(|s| s.hz_phase() == 0.0)
+    }
+
+    pub fn hz_phase_for_test(&self, row: usize) -> f32 {
+        self.states[row].hz_phase()
+    }
+
+    pub fn config_for_test(&self, row: usize) -> &TrackModulation {
+        &self.config[row]
+    }
+
+    pub fn begin_block_silent(&mut self, block_len: usize, sample_rate: f64) {
+        let silence = vec![0.0; block_len];
+        self.begin_block(&silence, &silence, sample_rate);
+    }
+}
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::effects::{Effect, EffectKind, ParamSpec};
+    use tiny_skia_widgets::{MsegData, Polarity, SyncMode, advance};
 
     #[test]
     fn track_modulation_serde_round_trips() {
@@ -1502,34 +902,23 @@ mod tests {
     #[test]
     fn swap_rows_exchanges_config_and_runtime_state() {
         let mut m = Modulation::new();
-        let mut cfg: [TrackModulation; ROWS] =
-            std::array::from_fn(TrackModulation::default_for_row);
-        // Mark rows 3 and 7 with distinct configs (different trigger sources).
-        cfg[3].trigger = TriggerSource::CellLight;
+        let mut cfg = std::array::from_fn(TrackModulation::default_for_row);
+        cfg[3].trigger = TriggerSource::FreeHz { hz: 2.0 };
         cfg[7].trigger = TriggerSource::CellStep;
         m.set_config(&cfg);
-        // Distinct runtime state on both rows.
-        m.force_runtime_state_for_test(3, [0.10, 0.20, 0.30, 0.40], 0.55, 0.42, true);
-        m.force_runtime_state_for_test(7, [0.70, 0.80, 0.90, 0.95], 0.85, 0.97, false);
-
+        m.begin_block_silent(1200, 48_000.0);
+        let mut effects = std::array::from_fn(|_| EffectInstance::new(EffectKind::None));
+        let tracks = std::array::from_fn(TrackEffect::default_for_row);
+        m.advance_segment(1200, 120.0, 48_000.0, &mut effects, &tracks);
+        m.fire(0, 1 << 7);
+        let before_3 = m.states[3].clone();
+        let before_7 = m.states[7].clone();
+        assert_ne!(before_3, before_7);
         m.swap_rows(3, 7);
-
-        // Config moved.
-        assert_eq!(m.config_for_test(3).trigger, TriggerSource::CellStep);
-        assert_eq!(m.config_for_test(7).trigger, TriggerSource::CellLight);
-        // Phases moved.
-        assert!((m.phase_for_test(3, 0) - 0.70).abs() < 1e-6);
-        assert!((m.phase_for_test(3, 1) - 0.80).abs() < 1e-6);
-        assert!((m.phase_for_test(3, 2) - 0.90).abs() < 1e-6);
-        assert!((m.phase_for_test(7, 0) - 0.10).abs() < 1e-6);
-        // Amplitude and Free-Hz phase moved.
-        assert!((m.amplitude_for_test(3) - 0.85).abs() < 1e-6);
-        assert!((m.amplitude_for_test(7) - 0.55).abs() < 1e-6);
-        assert!((m.hz_phase_for_test(3) - 0.97).abs() < 1e-6);
-        assert!((m.hz_phase_for_test(7) - 0.42).abs() < 1e-6);
-        // The `fires` bit followed the row.
-        assert_eq!(m.fires_last_block() & (1 << 3), 0);
-        assert_ne!(m.fires_last_block() & (1 << 7), 0);
+        assert_eq!(m.config_for_test(3), &cfg[7]);
+        assert_eq!(m.config_for_test(7), &cfg[3]);
+        assert_eq!(m.states[3], before_7);
+        assert_eq!(m.states[7], before_3);
     }
 
     #[test]
@@ -1629,7 +1018,10 @@ mod tests {
             m.begin_block(&warm, &warm, sr);
         }
         // Force non-zero phases so the fire-reset is observable.
-        m.force_runtime_state_for_test(2, [0.4, 0.5, 0.6, 0.7], 0.9, 0.0, false);
+        let mut effects = std::array::from_fn(|_| EffectInstance::new(EffectKind::None));
+        let tracks = std::array::from_fn(TrackEffect::default_for_row);
+        m.advance_segment(2400, 120.0, sr, &mut effects, &tracks);
+        assert!(m.phase(2, 0) > 0.0);
         // Hit block: a sharp click in the middle.
         let mut left = vec![0.05_f32; 1024];
         let mut right = vec![0.05_f32; 1024];
@@ -1650,39 +1042,15 @@ mod tests {
     }
 
     #[test]
-    fn modulation_reset_zeroes_transient_detector_state() {
-        let mut m = Modulation::new();
-        let mut cfg: [TrackModulation; ROWS] =
-            std::array::from_fn(TrackModulation::default_for_row);
-        cfg[0].trigger = TriggerSource::Transient {
-            threshold: 1.5,
-            hold_ms: 50.0,
-        };
-        m.set_config(&cfg);
-        // Run a hot block to charge the detector envelopes + refractory.
-        let hot = vec![0.9_f32; 1024];
-        m.begin_block(&hot, &hot, 48_000.0);
-        let (fast, slow, refr) = m.transient_detector_for_test(0).state_for_test();
-        assert!(
-            fast > 0.0 || slow > 0.0 || refr > 0,
-            "the hot block must have left state on the detector"
-        );
-        m.reset();
-        let (fast, slow, refr) = m.transient_detector_for_test(0).state_for_test();
-        assert_eq!(fast, 0.0, "reset must clear the fast envelope");
-        assert_eq!(slow, 0.0, "reset must clear the slow envelope");
-        assert_eq!(refr, 0, "reset must clear the refractory counter");
-    }
-
-    #[test]
     fn swap_rows_is_a_noop_for_self_or_out_of_range_indices() {
         let mut m = Modulation::new();
-        m.force_runtime_state_for_test(4, [0.11, 0.22, 0.33, 0.44], 0.5, 0.1, true);
+        m.fire(0, 1 << 4);
+        let before = m.states[4].clone();
         m.swap_rows(4, 4);
-        assert!((m.phase_for_test(4, 0) - 0.11).abs() < 1e-6);
+        assert_eq!(m.states[4], before);
         m.swap_rows(4, ROWS + 5);
-        assert!((m.phase_for_test(4, 0) - 0.11).abs() < 1e-6);
+        assert_eq!(m.states[4], before);
         m.swap_rows(ROWS + 5, 4);
-        assert!((m.phase_for_test(4, 0) - 0.11).abs() < 1e-6);
+        assert_eq!(m.states[4], before);
     }
 }

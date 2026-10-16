@@ -30,3 +30,5 @@ pub use param_dial::*;
 pub use primitives::*;
 pub use text::*;
 pub use text_edit::*;
+/// Shared bundled font for CPU-rendered plugin editors.
+pub const DEFAULT_FONT: &[u8] = include_bytes!("../test_data/DejaVuSans.ttf");

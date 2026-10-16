@@ -1,0 +1,18 @@
+[package]
+name = "tract-effects"
+version = "0.1.0"
+edition.workspace = true
+description = "Shared effect DSP, modulation, and CPU editor for Multosis and Minitosis"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+rustfft = "6.2"
+tract-dsp = { path = "../tract-dsp", features = ["stft-analysis", "spectral-engine"] }
+tiny-skia-widgets = { path = "../tiny-skia-widgets" }
+tiny-skia = "0.12"
+keyboard-types = "0.6"
+baseview = { git = "https://github.com/RustAudio/baseview.git", tag = "v0.1.1", features = ["opengl"] }
+
+[dev-dependencies]
+serde_json = "1.0"

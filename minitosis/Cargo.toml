@@ -1,0 +1,35 @@
+[package]
+name = "minitosis"
+version = "0.1.0"
+edition.workspace = true
+description = "A single-effect processor with drawable modulation"
+license = "GPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "minitosis"
+path = "src/main.rs"
+
+[dependencies]
+nih_plug = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr", features = ["standalone", "assert_process_allocs"] }
+serde = { version = "1.0", features = ["derive"] }
+baseview = { git = "https://github.com/RustAudio/baseview.git", tag = "v0.1.1", features = ["opengl"] }
+keyboard-types = "0.6"
+softbuffer = { version = "0.4", default-features = false, features = ["kms", "x11"] }
+raw-window-handle = "0.5"
+raw-window-handle-06 = { package = "raw-window-handle", version = "0.6" }
+tiny-skia = "0.12"
+tiny-skia-widgets = { path = "../tiny-skia-widgets" }
+tract-effects = { path = "../tract-effects" }
+
+[dev-dependencies]
+serde_json = "1.0"
+assert_no_alloc = { git = "https://github.com/robbert-vdh/rust-assert-no-alloc.git", branch = "feature/nested-permit-forbid" }
+[package.metadata.bundler]
+name = "Minitosis"
+company = "mpd"
+description = "A single-effect processor with drawable modulation"
+license = "GPL-3.0-or-later"
+version = "0.1.0"
