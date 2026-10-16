@@ -92,11 +92,11 @@ impl Processor {
             return dry;
         }
         let wet = self.effect.process_sample(input[0], input[1]);
+        let mix = self.state.next_mix(mix).clamp(0.0, 1.0);
         if bypass {
             return dry;
         }
         let amp = self.state.amplitude();
-        let mix = mix.clamp(0.0, 1.0);
         [
             dry[0] * (1.0 - mix) + wet.0 * amp * mix,
             dry[1] * (1.0 - mix) + wet.1 * amp * mix,
@@ -128,6 +128,7 @@ mod tests {
     use crate::state::neutral_modulation;
     use tiny_skia_widgets::SyncMode;
     use tract_effects::effects::default_params_for_kind;
+    use tract_effects::modulation::ModulationTarget;
 
     fn processor(kind: EffectKind) -> (Processor, TrackEffect) {
         let track = TrackEffect {
@@ -145,6 +146,35 @@ mod tests {
             neutral_modulation(),
         );
         (p, track)
+    }
+
+    #[test]
+    fn mix_mseg_ramps_the_audio_blend_without_allocating_or_editing_the_base() {
+        let (mut modulated, mut track) = processor(EffectKind::Bitcrush);
+        track.params[0] = 4.0;
+        track.mix = 0.0;
+        modulated.modulation.targets[0] = Some(ModulationTarget::Mix);
+        modulated.modulation.depths[0] = 1.0;
+        modulated.modulation.msegs[1].polarity = tiny_skia_widgets::Polarity::Unipolar;
+        for node in &mut modulated.modulation.msegs[1].nodes {
+            node.value = 1.0;
+        }
+        let (mut wet, mut wet_track) = processor(EffectKind::Bitcrush);
+        wet_track.params = track.params;
+        wet_track.mix = 1.0;
+        let input = [0.6; 8];
+        assert_no_alloc::assert_no_alloc(|| {
+            modulated.begin_block(&track, &input, &input, 120.0);
+            wet.begin_block(&wet_track, &input, &input, 120.0);
+            for sample in 0..input.len() {
+                let wet = wet.process_sample([0.6; 2], 1.0, false);
+                let actual = modulated.process_sample([0.6; 2], track.mix, false);
+                let mix = (sample + 1) as f32 / input.len() as f32;
+                assert!((actual[0] - (0.6 + (wet[0] - 0.6) * mix)).abs() < 1e-6);
+                assert!((actual[1] - actual[0]).abs() < 1e-6);
+            }
+        });
+        assert_eq!(track.mix, 0.0);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use super::*;
 use std::cell::Cell;
 use tract_effects::effects::EffectKind;
+use tract_effects::modulation::ModulationTarget;
 
 #[derive(Default)]
 struct Context {
@@ -130,6 +131,32 @@ fn closed_editor_switch_prepares_and_adopts_without_audio_thread_allocation() {
 }
 
 #[test]
+fn pending_switch_stays_dry_when_the_previous_effect_has_a_mix_assignment() {
+    let mut plugin = Minitosis::default();
+    select(&mut plugin, EffectKind::Bitcrush);
+    let params = Arc::get_mut(&mut plugin.params).unwrap();
+    params.effects[state::bank_index(EffectKind::Bitcrush)].p0 =
+        FloatParam::new("Bits", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 });
+    let mut modulation = state::neutral_modulation();
+    modulation.targets[0] = Some(ModulationTarget::Mix);
+    modulation.depths[0] = 1.0;
+    for node in &mut modulation.msegs[1].nodes {
+        node.value = 1.0;
+    }
+    params
+        .modulation
+        .lock()
+        .unwrap()
+        .set(EffectKind::Bitcrush, modulation);
+    let mut context = Context::default();
+    initialize(&mut plugin, &mut context);
+    let dry = ([0.25; 512], [-0.5; 512]);
+    assert_ne!(render(&mut plugin, &context, false), dry);
+    select(&mut plugin, EffectKind::Svf);
+    assert_eq!(render(&mut plugin, &context, false), dry);
+}
+
+#[test]
 fn rapid_a_b_a_switch_discards_b_and_installs_a_fresh_processor() {
     let mut plugin = Minitosis::default();
     let mut context = Context::default();
@@ -195,84 +222,89 @@ fn initialize_restores_selected_effect_and_invalidates_queued_work() {
 }
 
 #[test]
-fn phaser_filter_cutoff_mseg_changes_audio_after_a_live_modulation_edit() {
-    let mut reference = Minitosis::default();
-    let mut modulated = Minitosis::default();
-    for plugin in [&mut reference, &mut modulated] {
-        select(plugin, EffectKind::PhaserFilter);
-        initialize(plugin, &mut Context::default());
-    }
-
-    let mut modulation = state::neutral_modulation();
-    modulation.targets[0] = Some(0);
-    modulation.depths[0] = 0.6;
-    modulation.msegs[1].sync_mode = tiny_skia_widgets::SyncMode::Time;
-    modulation.msegs[1].time_seconds = 0.5;
-    modulation.msegs[1].polarity = tiny_skia_widgets::Polarity::Bipolar;
-    modulated
-        .params
-        .modulation
-        .lock()
-        .unwrap()
-        .set(EffectKind::PhaserFilter, modulation);
-    modulated
-        .shared
-        .modulation_dirty
-        .store(true, Ordering::Release);
-
-    let base = modulated
-        .params
-        .controls_for(EffectKind::PhaserFilter)
-        .p0
-        .value();
-    let context = Context::default();
-    let mut difference = 0.0_f64;
-    let mut signal_energy = 0.0_f64;
-    for block in 0..128 {
-        let input: [f32; 512] = std::array::from_fn(|i| {
-            let time = (block * 512 + i) as f32 / 48000.0;
-            [200.0, 1000.0, 5000.0]
-                .into_iter()
-                .map(|hz| (std::f32::consts::TAU * hz * time).sin() * 0.1)
-                .sum()
-        });
-        let mut reference_left = input;
-        let mut reference_right = input;
-        let mut modulated_left = input;
-        let mut modulated_right = input;
-        assert_no_alloc::assert_no_alloc(|| {
-            reference.render(
-                &mut reference_left,
-                &mut reference_right,
-                false,
-                120.0,
-                &context,
-            );
-            modulated.render(
-                &mut modulated_left,
-                &mut modulated_right,
-                false,
-                120.0,
-                &context,
-            );
-        });
-        for (reference, modulated) in reference_left.into_iter().zip(modulated_left) {
-            difference += f64::from(modulated - reference).powi(2);
-            signal_energy += f64::from(reference).powi(2);
+fn phaser_filter_cutoff_and_mix_msegs_change_audio_after_live_edits() {
+    for target in [ModulationTarget::EffectParameter(0), ModulationTarget::Mix] {
+        let mut reference = Minitosis::default();
+        let mut modulated = Minitosis::default();
+        for plugin in [&mut reference, &mut modulated] {
+            select(plugin, EffectKind::PhaserFilter);
+            Arc::get_mut(&mut plugin.params).unwrap().mix =
+                FloatParam::new("Mix", 0.25, FloatRange::Linear { min: 0.0, max: 1.0 });
+            initialize(plugin, &mut Context::default());
         }
-    }
-    assert!(
-        difference > signal_energy * 0.01,
-        "cutoff modulation should change the rendered audio: difference={difference}, signal={signal_energy}"
-    );
-    assert_eq!(
+
+        let mut modulation = state::neutral_modulation();
+        modulation.targets[0] = Some(target);
+        modulation.depths[0] = 0.6;
+        modulation.msegs[1].sync_mode = tiny_skia_widgets::SyncMode::Time;
+        modulation.msegs[1].time_seconds = 0.5;
+        modulation.msegs[1].polarity = tiny_skia_widgets::Polarity::Bipolar;
         modulated
+            .params
+            .modulation
+            .lock()
+            .unwrap()
+            .set(EffectKind::PhaserFilter, modulation);
+        modulated
+            .shared
+            .modulation_dirty
+            .store(true, Ordering::Release);
+
+        let base = modulated
             .params
             .controls_for(EffectKind::PhaserFilter)
             .p0
-            .value(),
-        base
-    );
+            .value();
+        let context = Context::default();
+        let mut difference = 0.0_f64;
+        let mut signal_energy = 0.0_f64;
+        for block in 0..128 {
+            let input: [f32; 512] = std::array::from_fn(|i| {
+                let time = (block * 512 + i) as f32 / 48000.0;
+                [200.0, 1000.0, 5000.0]
+                    .into_iter()
+                    .map(|hz| (std::f32::consts::TAU * hz * time).sin() * 0.1)
+                    .sum()
+            });
+            let mut reference_left = input;
+            let mut reference_right = input;
+            let mut modulated_left = input;
+            let mut modulated_right = input;
+            assert_no_alloc::assert_no_alloc(|| {
+                reference.render(
+                    &mut reference_left,
+                    &mut reference_right,
+                    false,
+                    120.0,
+                    &context,
+                );
+                modulated.render(
+                    &mut modulated_left,
+                    &mut modulated_right,
+                    false,
+                    120.0,
+                    &context,
+                );
+            });
+            for (reference, modulated) in reference_left.into_iter().zip(modulated_left) {
+                difference += f64::from(modulated - reference).powi(2);
+                signal_energy += f64::from(reference).powi(2);
+            }
+        }
+        assert!(
+            difference > signal_energy * 0.01,
+            "{target:?} modulation should change the rendered audio: difference={difference}, signal={signal_energy}"
+        );
+        assert_eq!(
+            modulated
+                .params
+                .controls_for(EffectKind::PhaserFilter)
+                .p0
+                .value(),
+            base
+        );
+        assert_eq!(modulated.params.mix.value(), 0.25);
+    }
 }
 
 #[test]
@@ -305,6 +337,18 @@ fn bypass_ignores_output_gain_and_still_matches_installed_latency() {
     let params = Arc::get_mut(&mut plugin.params).unwrap();
     params.bypass = BoolParam::new("Bypass", true);
     params.output = FloatParam::new("Output", 2.0, FloatRange::Linear { min: 0.0, max: 4.0 });
+    params.mix = FloatParam::new("Mix", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 });
+    let mut modulation = state::neutral_modulation();
+    modulation.targets[0] = Some(ModulationTarget::Mix);
+    modulation.depths[0] = 1.0;
+    for node in &mut modulation.msegs[1].nodes {
+        node.value = 1.0;
+    }
+    params
+        .modulation
+        .lock()
+        .unwrap()
+        .set(EffectKind::SpectralShift, modulation);
     initialize(&mut plugin, &mut context);
     let latency = context.latency.get() as usize;
     let mut left = vec![0.0; latency + 2];

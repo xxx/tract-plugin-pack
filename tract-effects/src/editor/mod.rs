@@ -1,7 +1,7 @@
 //! Effect and MSEG editing independent of plugin window and sequencer state.
 
 use crate::effects::{self, EffectKind, MAX_EFFECT_PARAMS, ParamSpec, TrackEffect};
-use crate::modulation::{TrackModulation, TriggerSource};
+use crate::modulation::{ModulationTarget, TrackModulation, TriggerSource};
 use tiny_skia_widgets as widgets;
 
 pub mod view;
@@ -476,29 +476,32 @@ impl<'a> Session<'a> {
         }
     }
 
-    fn compute_modulated_norms(&self) -> [Option<(f32, u8)>; MAX_EFFECT_PARAMS] {
-        let mut result = [None; MAX_EFFECT_PARAMS];
-        let specs = effects::parameter_specs(self.effect.kind);
+    fn compute_modulated_norms(&self) -> view::ModulationDisplay {
+        let mut result = view::ModulationDisplay::default();
         for k in 1..4 {
             let Some(target) = self.modulation.targets[k - 1] else {
                 continue;
             };
-            let Some(&spec) = specs.get(target) else {
+            let Some(spec) = target.spec(self.effect.kind) else {
                 continue;
             };
             let mseg = &self.modulation.msegs[k];
             let value = widgets::mseg::value_at_phase(mseg, self.phases[k]);
             let modulated = crate::modulation::assignable_value(
                 value,
-                self.effect.params[target],
+                target.base_value(self.effect),
                 self.modulation.depths[k - 1],
                 spec,
                 mseg.polarity,
             );
-            result[target] = Some((
+            let display = Some((
                 effects::value_to_norm(modulated, spec.min, spec.max, spec.scaling),
                 k as u8,
             ));
+            match target {
+                ModulationTarget::EffectParameter(index) => result.parameters[index] = display,
+                ModulationTarget::Mix => result.mix = display,
+            }
         }
         result
     }
@@ -648,9 +651,10 @@ impl<'a> Session<'a> {
                 let target = modu.targets[k];
                 let depth = modu.depths[k];
                 let polarity = modu.msegs[sel].polarity;
-                let spec = target
-                    .and_then(|t| crate::effects::parameter_specs(track.kind).get(t).copied());
-                let base = target.map(|t| track.params[t]).unwrap_or(0.0);
+                let spec = target.and_then(|target| target.spec(track.kind));
+                let base = target
+                    .map(|target| target.base_value(&track))
+                    .unwrap_or(0.0);
                 (spec, base, Some((depth, polarity)))
             };
             let text =
@@ -843,7 +847,7 @@ impl<'a> Session<'a> {
                     0
                 } else {
                     let modu = self.modulation.clone();
-                    effect_editor::target_to_item(modu.targets[self.state.selected_mseg - 1])
+                    effect_editor::target_to_item(kind, modu.targets[self.state.selected_mseg - 1])
                 };
                 let win = (self.physical_width, self.physical_height);
                 self.state.effect_dropdown.open(
@@ -1184,7 +1188,7 @@ impl<'a> Session<'a> {
         if self.state.selected_mseg == 0 {
             return;
         }
-        let target = effect_editor::target_from_item(item);
+        let target = effect_editor::target_from_item(self.effect.kind, item);
         let k = self.state.selected_mseg - 1;
 
         self.modulation.targets[k] = target;
@@ -1476,6 +1480,25 @@ mod tests {
             let b = (c.blue() * 255.0).round() as u8;
             (r, g, b)
         }
+    }
+
+    #[test]
+    fn mix_node_tooltip_formats_the_effective_blend_as_a_percentage() {
+        let data = widgets::MsegData::default();
+        let track = TrackEffect {
+            mix: 0.25,
+            ..TrackEffect::default()
+        };
+        let target = ModulationTarget::Mix;
+        let text = mseg_node_tooltip_text(
+            1,
+            &data,
+            1,
+            target.spec(track.kind),
+            target.base_value(&track),
+            Some((0.5, widgets::Polarity::Unipolar)),
+        );
+        assert!(text.ends_with("75 %"), "unexpected Mix tooltip: {text}");
     }
 
     #[test]

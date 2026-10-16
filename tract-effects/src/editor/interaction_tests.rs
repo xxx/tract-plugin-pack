@@ -152,6 +152,21 @@ fn text_entry_commits_parsed_value_and_captures_key_releases() {
 }
 
 #[test]
+fn mix_is_selectable_as_an_mseg_target_without_editing_the_base_mix() {
+    let mut h = Harness::new();
+    let rect = h.geometry.layout.target;
+    h.move_to(rect.0 + 20.0, rect.1 + 15.0, Modifiers::empty());
+    h.press(MouseButton::Left);
+    h.key(Key::End);
+    h.key(Key::Enter);
+    assert_eq!(
+        h.modulation.targets[0],
+        Some(crate::modulation::ModulationTarget::Mix)
+    );
+    assert_eq!(h.effect.mix, 1.0);
+}
+
+#[test]
 fn click_outside_commits_mix_text_without_consuming_host_control() {
     let mut h = Harness::new();
     let r = h.geometry.layout.mix;

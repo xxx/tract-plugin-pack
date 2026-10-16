@@ -4,7 +4,7 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use multosis::effects::{EffectKind, TrackEffect, default_params_for_kind};
 use multosis::engine::AudioEngine;
 use multosis::grid::Grid;
-use multosis::modulation::TrackModulation;
+use multosis::modulation::{ModulationTarget, TrackModulation};
 
 /// Build an engine with the default modulation on every row and `kind`
 /// installed on every row (or `None` for the all-silence baseline).
@@ -123,6 +123,21 @@ fn bench_process(c: &mut Criterion) {
         let mut right = vec![0.3_f32; 512];
         group.throughput(Throughput::Elements(left.len() as u64));
         group.bench_function("process_512samp_mixed", |b| {
+            b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid));
+        });
+    }
+
+    {
+        let mut engine = engine_mixed();
+        let mut modulation = std::array::from_fn(TrackModulation::default_for_row);
+        for row in &mut modulation {
+            row.targets[0] = Some(ModulationTarget::Mix);
+            row.depths[0] = -0.8;
+        }
+        engine.set_modulation(&modulation);
+        let mut left = vec![0.3_f32; 512];
+        let mut right = vec![0.3_f32; 512];
+        group.bench_function("process_512samp_mix_modulated", |b| {
             b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid));
         });
     }

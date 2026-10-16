@@ -166,12 +166,8 @@ impl Minitosis {
         for i in 0..samples {
             let wet = self.processor.process_sample(
                 [left[i], right[i]],
-                if pending {
-                    0.0
-                } else {
-                    self.params.mix.value()
-                },
-                bypass,
+                self.params.mix.value(),
+                bypass || pending,
             );
             let gain = self.params.output.smoothed.next();
             let gain = if bypass { 1.0 } else { gain };

@@ -145,13 +145,79 @@ pub enum TriggerSource {
 #[derive(Clone, PartialEq, Debug, serde::Serialize)]
 pub struct TrackModulation {
     pub msegs: [MsegData; 4],
-    /// Target effect-parameter index for each assignable MSEG, or `None`.
-    pub targets: [Option<usize>; 3],
+    /// Effect parameter or Mix assigned to each MSEG, or `None`.
+    pub targets: [Option<ModulationTarget>; 3],
     /// Bipolar modulation depth (−1..1) for each assignable MSEG.
     pub depths: [f32; 3],
     /// The event that resets all four of this row's MSEG phases.
     #[serde(default)]
     pub trigger: TriggerSource,
+}
+
+/// A persisted routing destination, independent of dropdown ordering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModulationTarget {
+    EffectParameter(usize),
+    Mix,
+}
+
+impl ModulationTarget {
+    pub fn spec(self, kind: EffectKind) -> Option<ParamSpec> {
+        match self {
+            Self::EffectParameter(index) => {
+                crate::effects::parameter_specs(kind).get(index).copied()
+            }
+            Self::Mix => Some(ParamSpec {
+                name: "Mix",
+                min: 0.0,
+                max: 100.0,
+                default: 100.0,
+                scaling: ParamScaling::Linear,
+                format: crate::effects::ParamFormat::Number {
+                    decimals: 0,
+                    unit: "%",
+                },
+            }),
+        }
+    }
+
+    pub fn base_value(self, track: &TrackEffect) -> f32 {
+        match self {
+            Self::EffectParameter(index) => track.params.get(index).copied().unwrap_or(0.0),
+            Self::Mix => track.mix * 100.0,
+        }
+    }
+}
+
+impl serde::Serialize for ModulationTarget {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::EffectParameter(index) => serde::Serialize::serialize(index, serializer),
+            Self::Mix => serializer.serialize_str("mix"),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ModulationTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        enum NamedTarget {
+            #[serde(rename = "mix")]
+            Mix,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum SavedTarget {
+            Parameter(usize),
+            Named(NamedTarget),
+        }
+        Ok(
+            match <SavedTarget as serde::Deserialize>::deserialize(deserializer)? {
+                SavedTarget::Parameter(index) => Self::EffectParameter(index),
+                SavedTarget::Named(NamedTarget::Mix) => Self::Mix,
+            },
+        )
+    }
 }
 
 impl TrackModulation {
@@ -246,7 +312,7 @@ impl TrackModulation {
 
         TrackModulation {
             msegs: [amplitude, sweep, spare, sine],
-            targets: [Some(0), None, None],
+            targets: [Some(ModulationTarget::EffectParameter(0)), None, None],
             depths: [0.4, 0.0, 0.0],
             trigger: TriggerSource::Free,
         }
@@ -257,7 +323,7 @@ impl TrackModulation {
     /// never reference a parameter the new effect does not have.
     pub fn clamp_targets(&mut self, param_count: usize) {
         for target in &mut self.targets {
-            if let Some(i) = *target
+            if let Some(ModulationTarget::EffectParameter(i)) = *target
                 && i >= param_count
             {
                 *target = None;
@@ -285,7 +351,7 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
         #[derive(serde::Deserialize)]
         struct Helper {
             msegs: Vec<MsegData>,
-            targets: Vec<Option<usize>>,
+            targets: Vec<Option<ModulationTarget>>,
             depths: Vec<f32>,
             #[serde(default)]
             trigger: TriggerSource,
@@ -307,7 +373,7 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
 
         // Pad targets / depths to 3 (the 3 assignable slots) with
         // "unassigned, no depth" defaults.
-        let mut targets: [Option<usize>; 3] = [None; 3];
+        let mut targets = [None; 3];
         for (i, t) in h.targets.into_iter().take(3).enumerate() {
             targets[i] = t;
         }
@@ -417,6 +483,16 @@ pub struct ModulationState {
     hz_phase: f32,
     transient: TransientDetector,
     fired: bool,
+    mix: Option<MixRamp>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MixRamp {
+    current: f32,
+    target: f32,
+    step: f32,
+    remaining: usize,
+    release: bool,
 }
 
 impl Default for ModulationState {
@@ -427,6 +503,7 @@ impl Default for ModulationState {
             hz_phase: 0.0,
             transient: TransientDetector::default(),
             fired: false,
+            mix: None,
         }
     }
 }
@@ -492,6 +569,7 @@ impl ModulationState {
         if seg_len == 0 {
             return;
         }
+        let mut mix = None;
         for k in 0..4 {
             let mseg = &config.msegs[k];
             let dt = mseg_phase_delta(mseg, seg_len, bpm, sample_rate);
@@ -500,21 +578,69 @@ impl ModulationState {
             let value = value_at_phase(mseg, next);
             if k == 0 {
                 self.amplitude = value;
-            } else if let Some(target) = config.targets[k - 1]
-                && let Some(&spec) = effect.parameters().get(target)
-            {
-                effect.set_param(
-                    target,
-                    assignable_value(
-                        value,
-                        track.params[target],
-                        config.depths[k - 1],
-                        spec,
-                        mseg.polarity,
-                    ),
+            } else if let Some(target) = config.targets[k - 1] {
+                let spec = match target {
+                    ModulationTarget::EffectParameter(index) => {
+                        effect.parameters().get(index).copied()
+                    }
+                    ModulationTarget::Mix => target.spec(track.kind),
+                };
+                let Some(spec) = spec else {
+                    continue;
+                };
+                let effective = assignable_value(
+                    value,
+                    target.base_value(track),
+                    config.depths[k - 1],
+                    spec,
+                    mseg.polarity,
                 );
+                match target {
+                    ModulationTarget::EffectParameter(index) => effect.set_param(index, effective),
+                    ModulationTarget::Mix => mix = Some(effective * 0.01),
+                }
             }
         }
+        if mix.is_some() || self.mix.is_some() {
+            let target = mix.unwrap_or(track.mix).clamp(0.0, 1.0);
+            // The previous endpoint follows the clock even if the row skipped audio.
+            let current = self.mix.as_ref().map_or(track.mix, |ramp| ramp.target);
+            self.mix = if mix.is_none() && current == target {
+                None
+            } else {
+                Some(MixRamp {
+                    current,
+                    target,
+                    step: (target - current) / seg_len as f32,
+                    remaining: seg_len,
+                    release: mix.is_none(),
+                })
+            };
+        }
+    }
+
+    /// Resolve one sample's blend without changing the base Mix control.
+    pub fn next_mix(&mut self, base: f32) -> f32 {
+        let Some(ramp) = self.mix.as_mut() else {
+            return base;
+        };
+        if ramp.remaining > 0 {
+            ramp.remaining -= 1;
+            ramp.current = if ramp.remaining == 0 {
+                ramp.target
+            } else {
+                ramp.current + ramp.step
+            };
+        }
+        let value = ramp.current.clamp(0.0, 1.0);
+        if ramp.release && ramp.remaining == 0 {
+            self.mix = None;
+        }
+        value
+    }
+
+    pub fn mix_is_active(&self) -> bool {
+        self.mix.is_some()
     }
 
     pub fn phase(&self, slot: usize) -> f32 {
@@ -565,9 +691,118 @@ mod tests {
     }
 
     #[test]
+    fn mix_targets_keep_legacy_parameter_ids_and_round_trip() {
+        let mut config = TrackModulation::default();
+        config.targets = [
+            Some(ModulationTarget::EffectParameter(0)),
+            Some(ModulationTarget::Mix),
+            None,
+        ];
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["targets"], serde_json::json!([0, "mix", null]));
+        assert_eq!(
+            serde_json::from_value::<TrackModulation>(json).unwrap(),
+            config
+        );
+    }
+
+    #[test]
+    fn mix_modulation_ramps_to_the_effective_value_without_editing_the_base() {
+        let mut config = TrackModulation::default();
+        config.targets[0] = Some(ModulationTarget::Mix);
+        config.depths[0] = 1.0;
+        config.msegs[1].polarity = Polarity::Unipolar;
+        for node in &mut config.msegs[1].nodes {
+            node.value = 1.0;
+        }
+        let track = TrackEffect {
+            mix: 0.25,
+            ..TrackEffect::default()
+        };
+        let mut effect = ProbeEffect(0.5);
+        let mut state = ModulationState::default();
+        state.advance_segment(&config, &track, &mut effect, 4, 120.0, 48000.0);
+        let actual: [f32; 4] = std::array::from_fn(|_| state.next_mix(track.mix));
+        assert_eq!(actual, [0.4375, 0.625, 0.8125, 1.0]);
+        assert_eq!(track.mix, 0.25);
+        assert_eq!(effect.0, 0.5);
+
+        config.targets[0] = None;
+        state.advance_segment(&config, &track, &mut effect, 4, 120.0, 48000.0);
+        let restored: [f32; 4] = std::array::from_fn(|_| state.next_mix(track.mix));
+        assert_eq!(restored, [0.8125, 0.625, 0.4375, 0.25]);
+        assert_eq!(state.next_mix(0.75), 0.75);
+    }
+
+    #[test]
+    fn mix_ramp_follows_the_clock_even_when_an_inactive_row_skips_audio() {
+        let mut config = TrackModulation::default();
+        config.targets[0] = Some(ModulationTarget::Mix);
+        config.depths[0] = 1.0;
+        config.msegs[1].polarity = Polarity::Unipolar;
+        for node in &mut config.msegs[1].nodes {
+            node.value = 1.0;
+        }
+        let track = TrackEffect {
+            mix: 0.0,
+            ..TrackEffect::default()
+        };
+        let mut effect = ProbeEffect(0.5);
+        let mut state = ModulationState::default();
+        state.advance_segment(&config, &track, &mut effect, 4, 120.0, 48000.0);
+        for node in &mut config.msegs[1].nodes {
+            node.value = 0.0;
+        }
+        state.advance_segment(&config, &track, &mut effect, 4, 120.0, 48000.0);
+        assert_eq!(state.next_mix(0.0), 0.75);
+    }
+
+    #[test]
+    fn mix_modulation_honors_signed_depth_polarity_clamps_and_last_slot_wins() {
+        for (base, value, depth, polarity, expected) in [
+            (1.0, 1.0, -1.0, Polarity::Unipolar, 0.0),
+            (0.0, 1.0, 1.0, Polarity::Unipolar, 1.0),
+            (0.5, 0.0, 0.25, Polarity::Bipolar, 0.25),
+            (0.75, 1.0, 1.0, Polarity::Bipolar, 1.0),
+            (0.25, 0.0, 1.0, Polarity::Bipolar, 0.0),
+            (0.3, 1.0, 0.0, Polarity::Unipolar, 0.3),
+        ] {
+            let mut config = TrackModulation::default();
+            config.targets = [Some(ModulationTarget::Mix); 3];
+            config.depths = [1.0, 1.0, depth];
+            config.msegs[3].polarity = polarity;
+            for node in &mut config.msegs[3].nodes {
+                node.value = value;
+            }
+            let track = TrackEffect {
+                mix: base,
+                ..TrackEffect::default()
+            };
+            let mut state = ModulationState::default();
+            let mut effect = ProbeEffect(0.5);
+            state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+            assert!((state.next_mix(base) - expected).abs() < 1e-6);
+            assert_eq!(effect.0, 0.5);
+        }
+    }
+
+    #[test]
+    fn mix_assignment_survives_switching_to_an_effect_without_parameters() {
+        let mut config = TrackModulation::default();
+        config.targets = [
+            Some(ModulationTarget::Mix),
+            Some(ModulationTarget::EffectParameter(0)),
+            None,
+        ];
+        let mut track = TrackEffect::default_for_row(0);
+        switch_effect_kind(&mut track, &mut config, EffectKind::None);
+        assert_eq!(config.targets, [Some(ModulationTarget::Mix), None, None]);
+    }
+
+    #[test]
     fn single_effect_runtime_advances_then_applies_last_assignable_slot() {
         let mut config = TrackModulation::default();
-        config.targets = [Some(0); 3];
+        config.targets = [Some(ModulationTarget::EffectParameter(0)); 3];
         config.depths = [1.0; 3];
         for (i, mseg) in config.msegs.iter_mut().enumerate() {
             mseg.sync_mode = SyncMode::Time;

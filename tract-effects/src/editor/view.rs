@@ -1,13 +1,19 @@
 //! Shared effect controls, layout, and hit testing.
 
 use crate::effects::{EffectKind, MAX_EFFECT_PARAMS, TrackEffect};
-use crate::modulation::TriggerSource;
+use crate::modulation::{ModulationTarget, TriggerSource};
 use tiny_skia::Pixmap;
 use tiny_skia_widgets as widgets;
 
 /// The number of parameter-dial slots the layout reserves. Matches the widest
 /// effect's parameter count headroom.
 pub const DIAL_SLOTS: usize = MAX_EFFECT_PARAMS;
+
+#[derive(Default)]
+pub struct ModulationDisplay {
+    pub parameters: [Option<(f32, u8)>; MAX_EFFECT_PARAMS],
+    pub mix: Option<(f32, u8)>,
+}
 
 /// All physical-pixel sub-rects of the effect editor at `scale`. Computed once;
 /// consumed by both hit-testing and drawing.
@@ -350,7 +356,7 @@ pub fn draw_effect_section(
     // so the arc can be coloured per-MSEG. Drives `draw_dial_ex`'s arc
     // indicator so the user can see the live modulation envelope on
     // the same dial whose base value they're editing.
-    modulated_norms: &[Option<(f32, u8)>; MAX_EFFECT_PARAMS],
+    modulated_norms: &ModulationDisplay,
     scale: f32,
     lay: &EffectLayout,
 ) {
@@ -412,7 +418,7 @@ pub fn draw_effect_section(
             continue;
         }
         let norm = crate::effects::value_to_norm(value, spec.min, spec.max, spec.scaling);
-        let (mod_arc, mod_color) = match modulated_norms.get(i).copied().flatten() {
+        let (mod_arc, mod_color) = match modulated_norms.parameters.get(i).copied().flatten() {
             Some((n, slot)) => (Some(n), super::mseg_color(slot as usize)),
             None => (
                 None,
@@ -472,29 +478,25 @@ pub fn draw_effect_section(
     let mix_cy = my + mh / 2.0;
     let mix_radius = (mw.min(mh) / 2.0) - 8.0 * scale;
     let mix_pct = format!("{}%", (track.mix * 100.0).round() as i32);
-    match editing_mix {
-        Some((buf, caret_on)) => {
-            widgets::param_dial::draw_dial_ex(
-                pixmap,
-                tr,
-                mix_cx,
-                mix_cy,
-                mix_radius,
-                "Mix",
-                &mix_pct,
-                track.mix,
-                None,
-                Some(buf),
-                caret_on,
-                tiny_skia::Color::from_rgba8(255, 160, 50, 255),
-            );
-        }
-        None => {
-            widgets::param_dial::draw_dial(
-                pixmap, tr, mix_cx, mix_cy, mix_radius, "Mix", &mix_pct, track.mix,
-            );
-        }
-    }
+    let (mod_arc, mod_color) = modulated_norms
+        .mix
+        .map_or((None, super::mseg_color(1)), |(norm, slot)| {
+            (Some(norm), super::mseg_color(slot as usize))
+        });
+    widgets::param_dial::draw_dial_ex(
+        pixmap,
+        tr,
+        mix_cx,
+        mix_cy,
+        mix_radius,
+        "Mix",
+        &mix_pct,
+        track.mix,
+        mod_arc,
+        editing_mix.map(|(text, _)| text),
+        editing_mix.is_some_and(|(_, caret)| caret),
+        mod_color,
+    );
 }
 
 /// The list of effect-kind names for the kind dropdown, in `EffectKind::ALL`
@@ -527,23 +529,36 @@ pub fn kind_items() -> KindItems {
 }
 
 /// The target-dropdown items for `kind`: `(none)` followed by each parameter
-/// name, in parameter-index order.
+/// name in parameter-index order, followed by Mix.
 pub fn target_items(kind: EffectKind) -> Vec<&'static str> {
     let mut items = vec!["(none)"];
     items.extend(crate::effects::parameter_specs(kind).iter().map(|s| s.name));
+    items.push("Mix");
     items
 }
 
 /// The `targets` value for target-dropdown item `item` (0 = `(none)`).
-pub fn target_from_item(item: usize) -> Option<usize> {
-    item.checked_sub(1)
+pub fn target_from_item(kind: EffectKind, item: usize) -> Option<ModulationTarget> {
+    let index = item.checked_sub(1)?;
+    let count = crate::effects::param_count(kind);
+    if index < count {
+        Some(ModulationTarget::EffectParameter(index))
+    } else if index == count {
+        Some(ModulationTarget::Mix)
+    } else {
+        None
+    }
 }
 
 /// The target-dropdown item index for a `targets` value.
-pub fn target_to_item(target: Option<usize>) -> usize {
+pub fn target_to_item(kind: EffectKind, target: Option<ModulationTarget>) -> usize {
     match target {
         None => 0,
-        Some(i) => i + 1,
+        Some(ModulationTarget::EffectParameter(i)) if i < crate::effects::param_count(kind) => {
+            i + 1
+        }
+        Some(ModulationTarget::Mix) => crate::effects::param_count(kind) + 1,
+        _ => 0,
     }
 }
 
@@ -840,7 +855,7 @@ pub fn draw_modulation_controls(
     tr: &mut widgets::TextRenderer,
     selected_mseg: usize,
     kind: EffectKind,
-    target: Option<usize>,
+    target: Option<ModulationTarget>,
     depth: f32,
     target_dropdown_open: bool,
     scale: f32,
@@ -873,7 +888,7 @@ pub fn draw_modulation_controls(
         Some(&mseg_segment_colors),
     );
     if selected_mseg != 0 {
-        let spec = target.and_then(|i| crate::effects::parameter_specs(kind).get(i));
+        let spec = target.and_then(|target| target.spec(kind));
         let label = spec.map_or("(none)", |s| s.name);
         widgets::dropdown::draw_dropdown_trigger(
             pixmap,
@@ -1042,19 +1057,24 @@ mod tests {
         assert_eq!(items[2], "Resonance");
         assert_eq!(items[3], "Type");
         assert_eq!(items[4], "Poles");
-        assert_eq!(items.len(), 5);
+        assert_eq!(items[5], "Mix");
+        assert_eq!(items.len(), 6);
     }
 
     #[test]
     fn target_index_round_trips_through_the_dropdown_indexing() {
-        // Dropdown item 0 => None; item i+1 => Some(i).
-        assert_eq!(target_from_item(0), None);
-        assert_eq!(target_from_item(1), Some(0));
-        assert_eq!(target_from_item(3), Some(2));
-        // And back: None => 0; Some(i) => i+1.
-        assert_eq!(target_to_item(None), 0);
-        assert_eq!(target_to_item(Some(0)), 1);
-        assert_eq!(target_to_item(Some(2)), 3);
+        for kind in EffectKind::ALL {
+            assert_eq!(target_from_item(kind, 0), None);
+            for index in 0..crate::effects::param_count(kind) {
+                let target = Some(ModulationTarget::EffectParameter(index));
+                assert_eq!(target_from_item(kind, index + 1), target);
+                assert_eq!(target_to_item(kind, target), index + 1);
+            }
+            let item = crate::effects::param_count(kind) + 1;
+            assert_eq!(target_from_item(kind, item), Some(ModulationTarget::Mix));
+            assert_eq!(target_to_item(kind, Some(ModulationTarget::Mix)), item);
+            assert_eq!(target_from_item(kind, item + 1), None);
+        }
     }
 
     #[test]
