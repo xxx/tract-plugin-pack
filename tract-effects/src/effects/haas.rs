@@ -119,11 +119,123 @@ mod tests {
     use super::*;
 
     #[test]
+    fn impulse_timing_tracks_sample_rate_and_nearest_sample_rounding() {
+        for (sample_rate, position, delay) in [
+            (44_100.0, 10.0, 441),
+            (44_100.0, 0.1, 4),
+            (96_000.0, 0.125, 12),
+            (192_000.0, 25.0, 4_800),
+            (8_000.0, 0.061, 0),
+            (8_000.0, 0.0625, 1),
+        ] {
+            for sign in [-1.0, 1.0] {
+                let mut effect = HaasEffect::new();
+                effect.set_sample_rate(sample_rate);
+                effect.set_param(0, position * sign);
+                for sample in 0..delay + 3 {
+                    let input = if sample == 0 {
+                        (0.75, -0.25)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let delayed = if sample == delay {
+                        (0.75, -0.25)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let expected = if sign > 0.0 {
+                        (input.0, delayed.1)
+                    } else {
+                        (delayed.0, input.1)
+                    };
+                    assert_eq!(
+                        effect.process_sample(input.0, input.1),
+                        expected,
+                        "{sample_rate} Hz, position {}, sample {sample}",
+                        position * sign
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn position_clamps_to_25_ms_and_delay_stays_within_available_history() {
+        for (sample_rate, position, delay) in [
+            (8_000.0, 100.0, 200),
+            (8_000.0, -100.0, 200),
+            (384_000.0, 25.0, 8_191),
+            (384_000.0, -25.0, 8_191),
+        ] {
+            let mut effect = HaasEffect::new();
+            effect.set_sample_rate(sample_rate);
+            effect.set_param(0, position);
+            for sample in 0..delay + 3 {
+                let input = if sample == 0 {
+                    (0.5, -0.75)
+                } else {
+                    (0.0, 0.0)
+                };
+                let delayed = if sample == delay {
+                    (0.5, -0.75)
+                } else {
+                    (0.0, 0.0)
+                };
+                let expected = if position > 0.0 {
+                    (input.0, delayed.1)
+                } else {
+                    (delayed.0, input.1)
+                };
+                assert_eq!(
+                    effect.process_sample(input.0, input.1),
+                    expected,
+                    "{sample_rate} Hz, position {position}, sample {sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn direction_changes_preserve_both_histories_across_ring_wraps() {
+        let mut effect = HaasEffect::new();
+        effect.set_sample_rate(8_000.0);
+        let input: Vec<_> = (0..25_000)
+            .map(|sample| {
+                let left = ((sample * 17) % 257) as f32 / 256.0 - 0.5;
+                let right = ((sample * 29 + 3) % 251) as f32 / 256.0 - 0.25;
+                (left, right)
+            })
+            .collect();
+        for (sample, &(left, right)) in input.iter().enumerate() {
+            let (position, left_delay, right_delay) = match (sample / 127) % 3 {
+                0 => (0.0, 0, 0),
+                1 => (1.0, 0, 8),
+                _ => (-2.0, 16, 0),
+            };
+            effect.set_param(0, position);
+            let expected_left = sample
+                .checked_sub(left_delay)
+                .map_or(0.0, |index| input[index].0);
+            let expected_right = sample
+                .checked_sub(right_delay)
+                .map_or(0.0, |index| input[index].1);
+            assert_eq!(
+                effect.process_sample(left, right),
+                (expected_left, expected_right),
+                "position {position}, sample {sample}"
+            );
+        }
+    }
+
+    #[test]
     fn parameters_are_declared() {
         let e = HaasEffect::new();
         let specs = e.parameters();
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].name, "Position");
+        assert_eq!(specs[0].min, -25.0);
+        assert_eq!(specs[0].max, 25.0);
+        assert_eq!(specs[0].default, 0.0);
     }
 
     #[test]
@@ -212,9 +324,11 @@ mod tests {
     #[test]
     fn set_param_out_of_range_is_ignored() {
         let mut e = HaasEffect::new();
-        e.set_sample_rate(48_000.0);
-        e.set_param(99, 1.0);
-        let (l, _) = e.process_sample(0.25, 0.25);
-        assert!(l.is_finite());
+        e.set_sample_rate(1_000.0);
+        e.set_param(0, -2.0);
+        e.set_param(99, 25.0);
+        assert_eq!(e.process_sample(0.75, -0.25), (0.0, -0.25));
+        assert_eq!(e.process_sample(0.0, 0.0), (0.0, 0.0));
+        assert_eq!(e.process_sample(0.0, 0.0), (0.75, 0.0));
     }
 }
