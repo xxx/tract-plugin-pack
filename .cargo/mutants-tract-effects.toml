@@ -1,7 +1,8 @@
-# Shared runtime and dynamics effects; expand the remaining effects separately.
+# Shared runtime, dynamics, and distortion; expand remaining families separately.
 examine_re = [
     '^tract-effects/src/(compressor|modulation|randomize|undo)\.rs:',
     '^tract-effects/src/effects/(compressor|limiter|gate|transient_shaper)\.rs:',
+    '^tract-effects/src/effects/(bitcrush|distortion|downsample|wavefolder)\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -31,4 +32,14 @@ exclude_re = [
     '^tract-effects/src/effects/limiter\.rs:\d+:25: replace < with <= in LimiterEffect::gain_computer_db$',
     # Equal peaks only change fast-follower rounding; slow attack/release are equal.
     '^tract-effects/src/effects/transient_shaper\.rs:\d+:29: replace > with >= in TransientShaperEffect::follower_step$',
+    # The fallback applies the same hard clip as the explicit Hard arm.
+    '^tract-effects/src/effects/distortion\.rs:\d+:13: delete match arm Self::TYPE_HARD in DistortionEffect::shape$',
+    # At the fold boundary, both branches return exactly 1.
+    '^tract-effects/src/effects/distortion\.rs:\d+:25: replace < with <= in DistortionEffect::shape$',
+    # The setter already bounds stored types to 0..4 before this defensive cap.
+    '^tract-effects/src/effects/distortion\.rs:\d+:85: replace - with (\+|/) in <impl Effect for DistortionEffect>::process_sample$',
+    # At either threshold, the outer integral subtracts the identical bp() value.
+    '^tract-effects/src/effects/wavefolder\.rs:\d+:20: replace > with >= in FolderCell::func_ad1$',
+    # The outer region has signum +/-1, so multiplication and division agree.
+    '^tract-effects/src/effects/wavefolder\.rs:\d+:33: replace \* with / in FolderCell::func$',
 ]

@@ -277,6 +277,108 @@ mod tests {
     use crate::effects::{Effect, ParamFormat};
 
     #[test]
+    fn every_shape_matches_its_half_scale_transfer_value() {
+        for (shape, expected) in [
+            (0.0, 0.5),
+            (1.0, 0.462_117_17),
+            (2.0, 0.6875),
+            (3.0, std::f32::consts::FRAC_1_SQRT_2),
+            (4.0, 0.5),
+        ] {
+            let mut effect = DistortionEffect::new();
+            effect.set_param(0, 0.0);
+            effect.set_param(1, shape);
+            let output = effect.process_sample(0.5, -0.5);
+            assert!(
+                (output.0 - expected).abs() < 1e-6,
+                "shape {shape}: {output:?}"
+            );
+            assert!((output.1 + expected).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn saturated_cubic_clipping_preserves_both_polarities() {
+        let mut effect = DistortionEffect::new();
+        effect.set_param(0, 6.0);
+        effect.set_param(1, 2.0);
+        assert_eq!(effect.process_sample(-1.0, 1.0), (-1.0, 1.0));
+    }
+
+    #[test]
+    fn unknown_shape_falls_back_to_hard_clipping() {
+        for shape in [5, usize::MAX] {
+            for (input, expected) in [
+                (-2.0, -1.0),
+                (-0.5, -0.5),
+                (0.0, 0.0),
+                (0.5, 0.5),
+                (2.0, 1.0),
+            ] {
+                assert_eq!(DistortionEffect::shape(input, shape), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn bias_changes_the_transfer_curve_without_adding_its_dc_value() {
+        for (shape, expected_left, expected_right) in [
+            (0.0, 0.1, -0.1),
+            (1.0, 0.074_932_41, -0.082_168_19),
+            (2.0, 0.1045, -0.1195),
+            (3.0, 0.101_910_21, -0.119_321_53),
+            (4.0, 0.1, -0.1),
+        ] {
+            let mut effect = DistortionEffect::new();
+            effect.set_param(0, 0.0);
+            effect.set_param(1, shape);
+            effect.set_param(2, 50.0);
+            let output = effect.process_sample(0.1, -0.1);
+            assert!(
+                (output.0 - expected_left).abs() < 1e-6,
+                "shape {shape}: {output:?}"
+            );
+            assert!((output.1 - expected_right).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn drive_gain_precedes_bias_and_clipping() {
+        let mut effect = DistortionEffect::new();
+        effect.set_param(0, 20.0);
+        effect.set_param(1, 0.0);
+        effect.set_param(2, 50.0);
+        let output = effect.process_sample(0.08, -0.03);
+        assert!((output.0 - 0.5).abs() < 1e-6);
+        assert!((output.1 + 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tone_impulse_matches_the_700_hz_tilt_response_at_different_rates() {
+        for sample_rate in [24_000.0, 96_000.0] {
+            for tone in [-50.0, 50.0] {
+                let mut effect = DistortionEffect::new();
+                effect.set_sample_rate(sample_rate);
+                effect.set_param(0, 0.0);
+                effect.set_param(1, 0.0);
+                effect.set_param(3, tone);
+                let a = (-2.0 * std::f64::consts::PI * 700.0 / f64::from(sample_rate)).exp();
+                let high = 2.0_f64.powf(f64::from(tone) / 100.0);
+                for sample in 0..32 {
+                    let input = if sample == 0 { 0.25 } else { 0.0 };
+                    let output = effect.process_sample(input, -input * 0.5);
+                    let mut expected = (1.0 / high - high) * 0.25 * (1.0 - a) * a.powi(sample);
+                    if sample == 0 {
+                        expected += 0.25 * high;
+                    }
+                    assert!((f64::from(output.0) - expected).abs() < 2e-6);
+                    assert!((f64::from(output.1) + expected * 0.5).abs() < 2e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn distortion_lists_four_parameters_with_the_expected_specs() {
         let d = DistortionEffect::new();
         let specs = d.parameters();
@@ -289,6 +391,7 @@ mod tests {
             ParamFormat::Number { unit: "dB", .. }
         ));
         assert_eq!(specs[1].name, "Type");
+        assert_eq!(specs[1].max, 4.0);
         assert!(matches!(specs[1].format, ParamFormat::Enum { .. }));
         assert_eq!(specs[1].default, 1.0); // Soft
         assert_eq!(specs[2].name, "Bias");

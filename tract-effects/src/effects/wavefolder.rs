@@ -56,8 +56,10 @@ impl FolderCell {
     /// Continuity offset: `0.5*G*thresh^2 - B*thresh`. The antiderivative
     /// needs this subtracted so it matches the inner-region's zero at
     /// the threshold boundary.
-    const fn bp(&self) -> f32 {
-        0.5 * self.g * self.thresh * self.thresh - self.b * self.thresh
+    const fn bp(&self) -> f64 {
+        let g = self.g as f64;
+        let threshold = self.thresh as f64;
+        0.5 * g * threshold * threshold - self.b as f64 * threshold
     }
 
     /// Shape contribution at `x`.
@@ -73,9 +75,10 @@ impl FolderCell {
     /// First antiderivative of `func` at `x` (the `F` in ADAA1). Made
     /// continuous at the threshold by subtracting `Bp`.
     #[inline]
-    fn func_ad1(&self, x: f32) -> f32 {
+    fn func_ad1(&self, x: f32) -> f64 {
         if x.abs() > self.thresh {
-            0.5 * self.g * x * x - self.b * x.abs() - self.bp()
+            let x = f64::from(x);
+            0.5 * f64::from(self.g) * x * x - f64::from(self.b) * x.abs() - self.bp()
         } else {
             0.0
         }
@@ -211,11 +214,13 @@ impl WavefolderEffect {
 
     /// First antiderivative of [`shape`] -- the `F` in ADAA1's
     /// `(F(x) - F(x_n1)) / (x - x_n1)`.
+    /// f64 preserves the small difference between nearby antiderivatives.
     #[inline]
-    fn shape_ad1(&self, x: f32) -> f32 {
-        let mut y = 0.5 * X_MIX * x * x;
+    fn shape_ad1(&self, x: f32) -> f64 {
+        let x64 = f64::from(x);
+        let mut y = 0.5 * f64::from(X_MIX) * x64 * x64;
         for cell in CELLS.iter() {
-            y += self.fold_scale * cell.mix * cell.func_ad1(x);
+            y += f64::from(self.fold_scale) * f64::from(cell.mix) * cell.func_ad1(x);
         }
         y
     }
@@ -225,11 +230,11 @@ impl WavefolderEffect {
     /// direct shape when `|dx|` is below the numerical threshold.
     #[inline]
     fn adaa1(&self, x: f32, x_n1: f32) -> f32 {
-        let dx = x - x_n1;
-        if dx.abs() < ADAA_EPS {
+        let dx = f64::from(x) - f64::from(x_n1);
+        if dx.abs() < f64::from(ADAA_EPS) {
             self.shape(x)
         } else {
-            (self.shape_ad1(x) - self.shape_ad1(x_n1)) / dx
+            ((self.shape_ad1(x) - self.shape_ad1(x_n1)) / dx) as f32
         }
     }
 
@@ -300,6 +305,224 @@ impl Effect for WavefolderEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reference_average(start: f32, end: f32, fold: f64) -> f64 {
+        let low = f64::from(start.min(end));
+        let high = f64::from(start.max(end));
+        let mut boundaries = vec![low, high];
+        for cell in &CELLS {
+            for boundary in [-f64::from(cell.thresh), f64::from(cell.thresh)] {
+                if low < boundary && boundary < high {
+                    boundaries.push(boundary);
+                }
+            }
+        }
+        boundaries.sort_by(f64::total_cmp);
+        // Midpoint quadrature is exact on each linear segment of the shape.
+        let integral: f64 = boundaries
+            .windows(2)
+            .map(|interval| {
+                let midpoint = (interval[0] + interval[1]) * 0.5;
+                let mut value = 5.0 * midpoint;
+                for cell in &CELLS {
+                    if midpoint.abs() > f64::from(cell.thresh) {
+                        value += fold
+                            * f64::from(cell.mix)
+                            * (f64::from(cell.g) * midpoint
+                                - f64::from(cell.b) * midpoint.signum());
+                    }
+                }
+                value * (interval[1] - interval[0])
+            })
+            .sum();
+        integral / (high - low)
+    }
+
+    #[test]
+    fn adaa_matches_piecewise_linear_integration_including_nearby_samples() {
+        for fold in [0.0, 37.0, 100.0] {
+            let mut effect = WavefolderEffect::new();
+            effect.set_param(1, fold);
+            for (start, end) in [
+                (-7.0, 6.0),
+                (0.2, 1.0),
+                (1.4, 2.3),
+                (2.8, 3.4),
+                (3.8, 4.4),
+                (5.2, 6.0),
+                (6.0, 6.000012),
+                (-6.000012, -6.0),
+                (10.0, 10.000012),
+            ] {
+                let expected = reference_average(start, end, f64::from(fold) * 0.01);
+                for (current, previous) in [(end, start), (start, end)] {
+                    let actual = f64::from(effect.adaa1(current, previous));
+                    assert!(
+                        (actual - expected).abs() < 2e-5,
+                        "fold {fold}, {previous} -> {current}: {actual}, expected {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn driven_nearby_samples_do_not_create_cancellation_spikes() {
+        let mut effect = WavefolderEffect::new();
+        effect.set_param(0, 24.0);
+        effect.set_param(1, 100.0);
+        let drive = 10.0_f32.powf(24.0 / 20.0);
+        let first = 5.999988 / drive;
+        let second = 6.0 / drive;
+        let x0 = drive * first;
+        let x1 = drive * second;
+        let initial = reference_average(0.0, x0, 1.0) / 5.0;
+        let next = reference_average(x0, x1, 1.0) / 5.0;
+        let dc_r = 1.0 - 2.0 * std::f64::consts::PI * 10.0 / 48_000.0;
+        effect.process_sample(first, -first);
+        let output = effect.process_sample(second, -second);
+        let expected = (next + (dc_r - 1.0) * initial) as f32;
+        assert!(
+            (output.0 - expected).abs() < 1e-5,
+            "{output:?}, expected {expected}"
+        );
+        assert!((output.1 + expected).abs() < 1e-5);
+    }
+
+    #[test]
+    fn cell_shape_stays_zero_at_both_threshold_boundaries() {
+        for cell in &CELLS {
+            assert_eq!(cell.func(cell.thresh), 0.0);
+            assert_eq!(cell.func(-cell.thresh), 0.0);
+        }
+    }
+
+    #[test]
+    fn cell_shape_matches_known_linear_segments() {
+        let cell = FolderCell {
+            g: 2.0,
+            b: 1.0,
+            thresh: 0.5,
+            mix: 1.0,
+        };
+        for (input, expected) in [
+            (-2.0, -3.0),
+            (-0.75, -0.5),
+            (-0.5, 0.0),
+            (-0.25, 0.0),
+            (0.0, 0.0),
+            (0.25, 0.0),
+            (0.5, 0.0),
+            (0.75, 0.5),
+            (2.0, 3.0),
+        ] {
+            assert_eq!(cell.func(input), expected);
+        }
+    }
+
+    #[test]
+    fn steady_adaa_matches_the_local_linear_shape() {
+        for fold in [0.0, 37.0, 100.0] {
+            let mut effect = WavefolderEffect::new();
+            effect.set_param(1, fold);
+            for input in [-6.0, -4.5, -3.5, -2.3, -0.9, 0.9, 2.3, 3.5, 4.5, 6.0] {
+                let expected =
+                    reference_average(input - 0.01, input + 0.01, f64::from(fold) * 0.01);
+                let actual = f64::from(effect.adaa1(input, input));
+                assert!(
+                    (actual - expected).abs() < 2e-5,
+                    "fold {fold}, steady input {input}: {actual}, expected {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn folded_shape_matches_reference_points() {
+        let mut effect = WavefolderEffect::new();
+        effect.set_param(1, 100.0);
+        for (input, expected) in [(0.9, 1.500_360_2), (3.5, 0.432_209_7), (6.0, 2.487_611_3)] {
+            assert!((effect.adaa1(input, input) - expected).abs() < 2e-5);
+            assert!((effect.adaa1(-input, -input) + expected).abs() < 2e-5);
+        }
+    }
+
+    #[test]
+    fn cell_antiderivative_matches_the_translated_integral() {
+        for cell in &CELLS {
+            for distance in [0.0, 0.01, 0.5, 2.0] {
+                for sign in [-1.0, 1.0] {
+                    let input = (cell.thresh + distance) * sign;
+                    let d = f64::from(input.abs()) - f64::from(cell.thresh);
+                    let expected = 0.5 * f64::from(cell.g) * d * d
+                        + (f64::from(cell.g) * f64::from(cell.thresh) - f64::from(cell.b)) * d;
+                    let actual = cell.func_ad1(input);
+                    assert!((actual - expected).abs() < 1e-10 * (1.0 + expected.abs()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn adaa_fallback_stops_strictly_below_epsilon() {
+        let mut effect = WavefolderEffect::new();
+        effect.set_param(1, 0.0);
+        assert_eq!(effect.adaa1(0.0, 0.0), 0.0);
+        for sign in [-1.0, 1.0] {
+            let half_epsilon = sign * ADAA_EPS * 0.5;
+            assert!((effect.adaa1(half_epsilon, 0.0) - 5.0 * half_epsilon).abs() < 1e-10);
+            let epsilon = sign * ADAA_EPS;
+            assert!((effect.adaa1(epsilon, 0.0) - 2.5 * epsilon).abs() < 1e-10);
+            assert!((effect.adaa1(sign * 0.2, sign * 0.2) - sign).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn unfolded_impulse_matches_sample_averaging_and_the_dc_blocker() {
+        for sample_rate in [24_000.0, 96_000.0] {
+            for drive_db in [0.0, 12.0] {
+                let mut effect = WavefolderEffect::new();
+                effect.set_sample_rate(sample_rate);
+                effect.set_param(0, drive_db);
+                effect.set_param(1, 0.0);
+                let drive = 10.0_f64.powf(f64::from(drive_db) / 20.0);
+                let r = 1.0 - 2.0 * std::f64::consts::PI * 10.0 / f64::from(sample_rate);
+                for sample in 0..32 {
+                    let input = if sample == 0 { 0.125 } else { 0.0 };
+                    let output = effect.process_sample(input, -input * 0.5);
+                    let response = match sample {
+                        0 => 0.5,
+                        1 => 0.5 * r,
+                        _ => 0.5 * (r * r - 1.0) * r.powi(sample - 2),
+                    };
+                    let expected = 0.125 * drive * response;
+                    assert!((f64::from(output.0) - expected).abs() < 2e-6);
+                    assert!((f64::from(output.1) + expected * 0.5).abs() < 2e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unfolded_bias_transient_matches_the_dc_blocker_response() {
+        for bias_pct in [-37.0, 37.0] {
+            let mut effect = WavefolderEffect::new();
+            effect.set_param(1, 0.0);
+            effect.set_param(2, bias_pct);
+            let bias = f64::from(bias_pct) * 0.02;
+            let r = 1.0 - 2.0 * std::f64::consts::PI * 10.0 / 48_000.0;
+            for sample in 0..32 {
+                let output = effect.process_sample(0.0, 0.0);
+                let expected = if sample == 0 {
+                    bias * 0.5
+                } else {
+                    bias * 0.5 * (1.0 + r) * r.powi(sample - 1)
+                };
+                assert!((f64::from(output.0) - expected).abs() < 5e-6);
+                assert!((f64::from(output.1) - expected).abs() < 5e-6);
+            }
+        }
+    }
 
     #[test]
     fn parameters_are_declared() {

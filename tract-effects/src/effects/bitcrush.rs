@@ -46,7 +46,7 @@ impl BitcrushEffect {
             rate_reduction: Self::PARAMS[1].default,
             levels: bit_depth.exp2(),
             held: [0.0; 2],
-            phase: [Self::PARAMS[1].default; 2],
+            phase: [Self::PARAMS[1].default - 1.0; 2],
         }
     }
 
@@ -82,7 +82,7 @@ impl Effect for BitcrushEffect {
 
     fn reset(&mut self) {
         self.held = [0.0; 2];
-        self.phase = [self.rate_reduction; 2];
+        self.phase = [self.rate_reduction - 1.0; 2];
     }
 
     fn parameters(&self) -> &'static [ParamSpec] {
@@ -105,6 +105,69 @@ impl Effect for BitcrushEffect {
 mod tests {
     use super::*;
     use crate::effects::{Effect, ParamFormat};
+
+    #[test]
+    fn quantization_matches_three_bit_reference_levels_in_both_channels() {
+        let mut effect = BitcrushEffect::new();
+        effect.set_param(0, 3.0);
+        for (input, expected) in [
+            (0.12, 0.0),
+            (0.13, 0.25),
+            (0.375, 0.5),
+            (-0.375, -0.5),
+            (0.99, 1.0),
+            (-0.99, -1.0),
+        ] {
+            assert_eq!(effect.process_sample(input, -input), (expected, -expected));
+        }
+    }
+
+    #[test]
+    fn reset_starts_a_complete_integer_or_fractional_hold() {
+        for (period, captures) in [
+            (2.0, &[0, 2, 4, 6, 8, 10, 12, 14][..]),
+            (4.0, &[0, 4, 8, 12][..]),
+            (2.5, &[0, 3, 5, 8, 10, 13, 15][..]),
+        ] {
+            let mut effect = BitcrushEffect::new();
+            effect.set_param(1, period);
+            effect.process_sample(-1.0, 0.75);
+            effect.reset();
+            for sample in 0..16 {
+                let input = (sample + 1) as f32 / 32.0;
+                let capture = *captures
+                    .iter()
+                    .take_while(|&&index| index <= sample)
+                    .last()
+                    .unwrap();
+                let expected = (capture + 1) as f32 / 32.0;
+                assert_eq!(
+                    effect.process_sample(input, -input * 0.5),
+                    (expected, -expected * 0.5),
+                    "period {period}, sample {sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn changing_from_default_rate_starts_a_full_hold_after_the_last_capture() {
+        let mut effect = BitcrushEffect::new();
+        assert_eq!(effect.process_sample(0.75, -0.375), (0.75, -0.375));
+        effect.set_param(1, 4.0);
+        for sample in 1..=8 {
+            let input = sample as f32 / 16.0;
+            let expected = match sample {
+                1..=3 => 0.75,
+                4..=7 => 0.25,
+                _ => 0.5,
+            };
+            assert_eq!(
+                effect.process_sample(input, -input * 0.5),
+                (expected, -expected * 0.5)
+            );
+        }
+    }
 
     #[test]
     fn bitcrush_effect_parameters_are_declared() {

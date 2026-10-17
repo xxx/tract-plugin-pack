@@ -292,6 +292,122 @@ mod tests {
     use crate::effects::{Effect, ParamFormat, ParamScaling};
 
     #[test]
+    fn capture_clocks_match_the_rate_and_stereo_width() {
+        for (sample_rate, width, left_captures, right_captures) in [
+            (
+                6_000.0,
+                0.0,
+                &[5, 11, 17, 23, 29][..],
+                &[5, 11, 17, 23, 29][..],
+            ),
+            (12_000.0, 0.0, &[11, 23][..], &[11, 23][..]),
+            (
+                6_000.0,
+                100.0,
+                &[5, 9, 13, 17, 21, 25, 29][..],
+                &[5, 17, 29][..],
+            ),
+        ] {
+            let mut effect = DownsampleEffect::new();
+            effect.set_param(0, 1_000.0);
+            effect.set_param(3, width);
+            effect.reset();
+            effect.set_sample_rate(sample_rate);
+            for sample in 0..32 {
+                let input = (sample + 1) as f32 / 64.0;
+                let output = effect.process_sample(input, -input * 0.5);
+                let captured = |captures: &[usize]| {
+                    captures
+                        .iter()
+                        .take_while(|&&index| index <= sample)
+                        .last()
+                        .map_or(0.0, |&index| (index + 1) as f32 / 64.0)
+                };
+                assert_eq!(
+                    output,
+                    (captured(left_captures), -captured(right_captures) * 0.5),
+                    "{sample_rate} Hz, width {width}, sample {sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn smoothing_matches_the_closed_form_step_response() {
+        for sample_rate in [6_000.0, 12_000.0] {
+            for smoothing in [0.0, 37.0, 100.0] {
+                let mut effect = DownsampleEffect::new();
+                effect.set_sample_rate(sample_rate);
+                effect.set_param(0, 1_000.0);
+                effect.set_param(1, smoothing);
+                effect.reset();
+                let first_capture = (sample_rate / 1_000.0) as i32 - 1;
+                for sample in 0..40 {
+                    let output = effect.process_sample(0.75, -0.25);
+                    let expected = if sample < first_capture {
+                        0.0
+                    } else {
+                        let elapsed =
+                            f64::from(sample - first_capture + 1) / f64::from(sample_rate);
+                        1.0 - f64::from(smoothing)
+                            * 0.01
+                            * (-std::f64::consts::PI * 1_000.0 * elapsed).exp()
+                    };
+                    assert!((f64::from(output.0) - 0.75 * expected).abs() < 1e-6);
+                    assert!((f64::from(output.1) + 0.25 * expected).abs() < 1e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_rng_matches_the_xorshift32_reference_stream() {
+        let mut effect = DownsampleEffect::new();
+        for expected in [
+            0x510c_4619,
+            0xe02e_553e,
+            0x7bb9_8f3a,
+            0x0183_a8b5,
+            0xe633_6d1f,
+            0xf989_d237,
+        ] {
+            assert_eq!(effect.rng_next(), expected);
+        }
+    }
+
+    #[test]
+    fn jitter_periods_preserve_the_stream_while_disabled_and_across_reset() {
+        for jitter in [25.0, 100.0] {
+            let mut effect = DownsampleEffect::new();
+            effect.set_param(2, jitter);
+            for (index, draw) in [
+                -0.366_812_944_412_231_45,
+                0.751_413_941_383_361_8,
+                -0.033_399_701_118_469_24,
+                -0.988_169_670_104_980_5,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if index == 2 {
+                    effect.set_param(2, 0.0);
+                    for _ in 0..16 {
+                        assert_eq!(effect.next_period(20.0), 20.0);
+                    }
+                    effect.reset();
+                    effect.set_param(2, jitter);
+                }
+                let expected = 20.0 * (1.0 + draw * f64::from(jitter) * 0.003);
+                let actual = effect.next_period(20.0);
+                assert!(
+                    (f64::from(actual) - expected).abs() < 2e-6,
+                    "jitter {jitter}, draw {index}: {actual}, expected {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn downsample_lists_four_parameters_with_the_expected_specs() {
         let d = DownsampleEffect::new();
         let specs = d.parameters();
