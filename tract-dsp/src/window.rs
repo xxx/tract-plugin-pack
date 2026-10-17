@@ -41,6 +41,10 @@ mod tests {
     fn hann_symmetric_endpoints_and_symmetry() {
         let w = hann_symmetric(9);
         assert_eq!(w.len(), 9);
+        assert!(
+            (w[4] - 1.0).abs() < 1e-6,
+            "symmetric Hann peaks at its center"
+        );
         assert!(w[0].abs() < 1e-6, "symmetric Hann starts at 0");
         assert!(w[8].abs() < 1e-6, "symmetric Hann ends at 0");
         for i in 0..9 {
@@ -66,5 +70,6 @@ mod tests {
         assert!(hann_periodic(0).is_empty());
         assert!(hann_symmetric(0).is_empty());
         assert_eq!(hann_symmetric(1), vec![1.0]);
+        assert_eq!(hann_symmetric(2), vec![0.0, 0.0]);
     }
 }

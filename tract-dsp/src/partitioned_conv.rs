@@ -174,6 +174,19 @@ impl PartitionedConvolver {
 mod tests {
     use super::*;
 
+    #[test]
+    fn missing_or_empty_ir_produces_silence() {
+        let mut convolver = PartitionedConvolver::new(P);
+        for clear_ir in [false, true] {
+            if clear_ir {
+                convolver.set_ir(&[], 0);
+            }
+            let mut output = vec![1.0; 3 * P + 17];
+            convolver.process(&vec![0.75; output.len()], &mut output);
+            assert!(output.iter().all(|&sample| sample == 0.0));
+        }
+    }
+
     /// Direct time-domain convolution reference: out[n] = Σ_k ir[k]·in[n-k].
     fn direct_conv(input: &[f32], ir: &[f32]) -> Vec<f32> {
         let mut out = vec![0.0f32; input.len()];
@@ -278,13 +291,42 @@ mod tests {
         let (spectra, k) = bake_spectra(&ir);
         let mut conv = PartitionedConvolver::new(ir.len());
         conv.set_ir(&spectra, k);
-        let mut out = vec![0.0f32; 2000];
-        let mut input = vec![0.0f32; 2000];
-        input[0] = 1.0;
+        // Reset with a queued tail and a partially filled input partition.
+        let mut out = vec![0.0f32; 2 * P + 17];
+        let input = vec![1.0f32; out.len()];
         conv.process(&input, &mut out);
         conv.reset();
         let mut z = vec![0.0f32; 2000];
         conv.process(&vec![0.0f32; 2000], &mut z);
         assert!(z.iter().all(|&v| v.abs() <= 1e-6), "reset should silence");
+    }
+
+    #[test]
+    fn reset_preserves_ir_and_restarts_latency() {
+        let mut ir = vec![0.0; 3 * P + 17];
+        ir[0] = 0.5;
+        ir[P + 3] = -0.25;
+        ir[3 * P + 16] = 0.125;
+        let (spectra, k) = bake_spectra(&ir);
+        let mut conv = PartitionedConvolver::new(ir.len());
+        conv.set_ir(&spectra, k);
+        conv.process(&vec![0.25; P + 31], &mut vec![0.0; P + 31]);
+        conv.reset();
+
+        let mut input = vec![0.0; P + ir.len() + P];
+        input[0] = 1.0;
+        let mut output = vec![0.0; input.len()];
+        conv.process(&input, &mut output);
+        for (i, &sample) in output.iter().enumerate() {
+            let expected = i
+                .checked_sub(P)
+                .and_then(|tap| ir.get(tap))
+                .copied()
+                .unwrap_or(0.0);
+            assert!(
+                (sample - expected).abs() < 1e-6,
+                "sample {i}: {sample}, expected {expected}"
+            );
+        }
     }
 }

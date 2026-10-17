@@ -404,6 +404,148 @@ mod tests {
 
     const SR: f32 = 48000.0;
 
+    #[test]
+    fn hard_knee_preserves_bipolar_sign_below_the_threshold() {
+        for input in [-0.25, 0.25] {
+            let mut clipper = SpectralClipper::new(32, 8);
+            for i in 0..128 {
+                let output = clipper.process_sample(input, 1.0, 0.5, 0.0);
+                if i >= 64 {
+                    assert!((output - input).abs() < 1e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn quiet_detail_is_bounded_by_the_safety_ceiling() {
+        for sign in [-1.0, 1.0] {
+            let mut clipper = SpectralClipper::new(32, 8);
+            clipper.loud_output_ring[0] = -3.0 * sign;
+            clipper.quiet_output_ring[0] = 3.2 * sign;
+            let output = clipper.process_sample(0.0, 1.0, 0.4, 0.0);
+            assert!((output - 0.6 * sign as f32).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn transition_band_uses_peak_relative_linear_interpolation() {
+        let mut clipper = SpectralClipper::new(64, 16);
+        for i in 0..64 {
+            let angle = std::f32::consts::TAU * i as f32 / 64.0;
+            clipper
+                .stft
+                .write((4.0 * angle).cos() + 0.3 * (12.0 * angle).cos());
+        }
+        clipper.process_frame();
+        for (i, &actual) in clipper.quiet_output_ring[..64].iter().enumerate() {
+            let angle = std::f32::consts::TAU * i as f32 / 64.0;
+            let quiet = 0.075 * (12.0 * angle).cos()
+                - 0.065625 * ((11.0 * angle).cos() + (13.0 * angle).cos());
+            let synthesis_window = (1.0 - angle.cos()) / 3.0;
+            assert!(
+                (actual as f32 - quiet * synthesis_window).abs() < 1e-6,
+                "sample {i}: {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn fft_runs_only_after_a_complete_hop() {
+        let mut clipper = SpectralClipper::new(32, 8);
+        for i in 1..=17 {
+            clipper.process_sample(0.25, 1.0, 1.0, 0.0);
+            assert_eq!(clipper.hop_counter, i % 8);
+            if i < 8 {
+                assert!(clipper.loud_output_ring.iter().all(|&sample| sample == 0.0));
+            }
+        }
+    }
+
+    #[test]
+    fn saturation_variants_match_at_nonunit_thresholds() {
+        for threshold in [0.25, 0.8, 2.0] {
+            for gain in [0.5, 3.0] {
+                for knee in [0.0, 0.4, 1.0] {
+                    for input in [-1.2, -0.1, 0.0, 0.3, 1.2] {
+                        let expected = saturate_td(input, gain, threshold, knee);
+                        let expected_tanh = (f64::from(input) * f64::from(gain)
+                            / f64::from(threshold))
+                        .tanh() as f32;
+                        for (output, tanh) in [
+                            saturate_td_with_tanh(input, gain, threshold, knee),
+                            saturate_td_with_tanh_fast(
+                                input,
+                                gain,
+                                threshold,
+                                1.0 / threshold,
+                                knee,
+                            ),
+                        ] {
+                            assert!((output - expected).abs() < 1e-6);
+                            assert!((tanh - expected_tanh).abs() < 1e-6);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fast_processing_matches_reference_across_fft_skip_transitions() {
+        let mut reference = SpectralClipper::new(64, 16);
+        let mut fast = SpectralClipper::new(64, 16);
+        let threshold = 0.37;
+        for i in 0..1024 {
+            let input = (i as f32 * 0.17).sin();
+            let (expected, output) = if (256..512).contains(&i) {
+                (
+                    reference.process_sample_skip_fft(input, 1.5, threshold, 0.4),
+                    fast.process_sample_skip_fft_fast(input, 1.5, threshold, 1.0 / threshold, 0.4),
+                )
+            } else {
+                (
+                    reference.process_sample(input, 1.5, threshold, 0.4),
+                    fast.process_sample_fast(input, 1.5, threshold, 1.0 / threshold, 0.4),
+                )
+            };
+            assert_eq!(output, expected, "sample {i}");
+        }
+    }
+
+    #[test]
+    fn reset_restarts_clipper_without_old_tail() {
+        let mut used = SpectralClipper::new(64, 16);
+        let mut fresh = SpectralClipper::new(64, 16);
+        for i in 0..263 {
+            used.process_sample((i as f32 * 0.17).sin(), 1.5, 0.37, 0.4);
+        }
+        used.reset();
+        for i in 0..512 {
+            let input = (i as f32 * 0.23).cos();
+            assert_eq!(
+                used.process_sample(input, 1.5, 0.37, 0.4),
+                fresh.process_sample(input, 1.5, 0.37, 0.4),
+                "sample {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn soft_knee_normalizes_by_nonunit_threshold_after_reconstruction() {
+        let mut clipper = SpectralClipper::new(64, 16);
+        let expected = 0.37 * (1.5_f32 * 0.8 / 0.37).tanh();
+        for i in 0..512 {
+            let output = clipper.process_sample(0.8, 1.5, 0.37, 1.0);
+            if i >= 256 {
+                assert!(
+                    (output - expected).abs() < 1e-5,
+                    "sample {i}: {output}, expected {expected}"
+                );
+            }
+        }
+    }
+
     fn make_sine(freq: f32, amplitude: f32, num_samples: usize) -> Vec<f32> {
         (0..num_samples)
             .map(|i| amplitude * (2.0 * PI * freq * i as f32 / SR).sin())

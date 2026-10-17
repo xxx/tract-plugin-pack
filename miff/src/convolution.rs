@@ -49,10 +49,8 @@ impl Default for RawChannel {
 
 /// Phaseless STFT frame size (fixed — does not track kernel length).
 pub const STFT_FRAME: usize = MAX_KERNEL; // 4096
-/// Overlap-add hop (50% overlap) and the reported Phaseless latency.
-pub const PHASELESS_HOP: usize = STFT_FRAME / 2; // 2048
 /// Reported plugin latency in Phaseless mode, in samples.
-pub const PHASELESS_LATENCY: u32 = PHASELESS_HOP as u32;
+pub const PHASELESS_LATENCY: u32 = STFT_FRAME as u32;
 
 /// Per-channel STFT magnitude-only convolution state. A thin wrapper over
 /// `tract_dsp::stft::StftConvolver` with a fixed `STFT_FRAME`-point transform.
@@ -72,7 +70,7 @@ impl PhaselessChannel {
         self.conv.reset();
     }
 
-    /// Process one sample. Output is always delayed by `PHASELESS_HOP` samples.
+    /// Process one sample. Output is delayed by `PHASELESS_LATENCY` samples.
     ///
     /// A zero kernel maps to per-bin gain 1.0 (identity) — a *delayed* dry
     /// passthrough, never a 0-delay bypass.
@@ -143,8 +141,20 @@ mod tests {
     }
 
     #[test]
-    fn phaseless_reports_fixed_hop_latency() {
-        assert_eq!(crate::convolution::PHASELESS_LATENCY, 2048);
+    fn phaseless_reported_latency_matches_the_impulse_delay() {
+        let mut channel = PhaselessChannel::new();
+        let kernel = Kernel::default();
+        assert_eq!(PHASELESS_LATENCY, 4096);
+        assert_eq!(PHASELESS_LATENCY as usize, channel.conv.latency());
+        for i in 0..2 * STFT_FRAME + 1 {
+            let output = channel.process(if i == 0 { 1.0 } else { 0.0 }, &kernel);
+            let expected = if i == PHASELESS_LATENCY as usize {
+                1.0
+            } else {
+                0.0
+            };
+            assert!((output - expected).abs() < 1e-6, "sample {i}");
+        }
     }
 
     #[test]

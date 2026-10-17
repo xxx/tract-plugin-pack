@@ -235,6 +235,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn instantaneous_peak_matches_scalar_reference_at_sample_rate_boundaries() {
+        let cases: &[(f32, &[usize])] = &[
+            (48_000.0, &[0, 1, 2, 3]),
+            (95_999.0, &[0, 1, 2, 3]),
+            (96_000.0, &[0, 2]),
+            (191_999.0, &[0, 2]),
+            (192_000.0, &[]),
+            (384_000.0, &[]),
+        ];
+        for simd_level in [Level::baseline(), Level::new()] {
+            for &(sample_rate, phases) in cases {
+                let mut detector = TruePeakDetector::new();
+                detector.simd_level = simd_level;
+                detector.set_sample_rate(sample_rate);
+                let mut history = [0.0_f32; TRUE_PEAK_TAPS];
+                let mut expected_max = 0.0_f32;
+                for i in 0..128 {
+                    let input = (i as f32 * 1.7).sin() * (1.0 - i as f32 / 160.0);
+                    history.rotate_right(1);
+                    history[0] = input;
+                    let expected = if phases.is_empty() {
+                        input.abs()
+                    } else {
+                        phases.iter().fold(0.0_f32, |peak, &phase| {
+                            let filtered: f64 = history
+                                .iter()
+                                .zip(ITU_COEFFS[phase])
+                                .map(|(&sample, coefficient)| {
+                                    f64::from(sample) * f64::from(coefficient)
+                                })
+                                .sum();
+                            peak.max(filtered.abs() as f32)
+                        })
+                    };
+                    let peak = detector.process_sample_peak(input);
+                    assert!(
+                        (peak - expected).abs() < 1e-6,
+                        "rate {sample_rate}, sample {i}: {peak}, expected {expected}"
+                    );
+                    expected_max = expected_max.max(expected);
+                    assert!((detector.true_peak_max() - expected_max).abs() < 1e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn accumulating_api_matches_instantaneous_api_in_oversampling_modes() {
+        for sample_rate in [48_000.0, 96_000.0] {
+            let mut accumulating = TruePeakDetector::default();
+            let mut instantaneous = TruePeakDetector::new();
+            accumulating.set_sample_rate(sample_rate);
+            instantaneous.set_sample_rate(sample_rate);
+            for i in 0..128 {
+                let input = (i as f32 * 1.7).sin();
+                accumulating.process_sample(input);
+                instantaneous.process_sample_peak(input);
+                assert_eq!(accumulating.true_peak_max(), instantaneous.true_peak_max());
+            }
+        }
+    }
+
+    #[test]
     fn test_dot12_simd_matches_scalar() {
         let history: [f32; 12] = [
             0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8, 0.9, -1.0, 0.5, -0.3,

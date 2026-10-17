@@ -135,6 +135,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn capacity_remains_the_requested_size_after_wraparound() {
+        for capacity in [1, 7, 256] {
+            let (producer, consumer) = channel(capacity);
+            assert_eq!(consumer.capacity(), capacity);
+            for i in 0..3 * capacity {
+                producer.push(i as f32, -(i as f32));
+            }
+            assert_eq!(consumer.capacity(), capacity);
+        }
+    }
+
+    #[test]
     fn oldest_first_preserves_order() {
         let (prod, cons) = channel(1024);
         for i in 0..1000 {
@@ -160,8 +172,8 @@ mod tests {
         let mut b = vec![0.0; 10];
         let n = cons.snapshot_oldest_first(10, &mut a, &mut b);
         assert_eq!(n, 10);
-        for i in 0..10 {
-            assert_eq!(a[i], (40 + i) as f32);
+        for (i, &sample) in a.iter().enumerate() {
+            assert_eq!(sample, (40 + i) as f32);
         }
     }
 
@@ -175,8 +187,8 @@ mod tests {
         let mut b = vec![0.0; 100];
         let n = cons.snapshot_oldest_first(100, &mut a, &mut b);
         assert_eq!(n, 5);
-        for i in 0..5 {
-            assert_eq!(a[i], i as f32);
+        for (i, &sample) in a.iter().take(5).enumerate() {
+            assert_eq!(sample, i as f32);
         }
     }
 
@@ -193,8 +205,8 @@ mod tests {
         let n = cons.snapshot_oldest_first(100, &mut a, &mut b);
         assert_eq!(n, 100);
         let start = total - 100;
-        for i in 0..100 {
-            assert_eq!(a[i], (start + i) as f32, "i={i}");
+        for (i, &sample) in a.iter().enumerate() {
+            assert_eq!(sample, (start + i) as f32, "i={i}");
         }
     }
 
@@ -243,58 +255,39 @@ mod tests {
         let _ = channel(0);
     }
 
-    // Concurrency stress test. Consolidated here from imagine's vectorscope.rs
-    // (a memory note records it as occasionally flaky under heavy load — a
-    // lone failure is not a regression; re-run before treating it as one).
     #[test]
     fn concurrent_writer_reader_no_torn_index() {
-        use std::sync::atomic::AtomicBool;
         use std::thread;
-        use std::time::Duration;
 
-        let (prod, cons) = channel(65_536);
-        let stop = Arc::new(AtomicBool::new(false));
-
-        let stop_w = stop.clone();
+        let capacity = 65_536;
+        let (prod, cons) = channel(capacity);
+        // Keep the published prefix intact: live snapshots allow overwritten
+        // slots to mix generations, so monotonicity requires no producer lap.
         let writer = thread::spawn(move || {
-            let mut i: u64 = 0;
-            while !stop_w.load(Ordering::Relaxed) {
+            for i in 0..capacity {
                 prod.push(i as f32, -(i as f32));
-                i = i.wrapping_add(1);
-                if i & 0xfff == 0 {
-                    std::hint::spin_loop();
+                if i % 256 == 0 {
+                    thread::yield_now();
                 }
             }
-            i
         });
 
-        let mut a_buf = vec![0.0_f32; 256];
-        let mut b_buf = vec![0.0_f32; 256];
-        let mut snapshots_taken = 0;
-        let mut max_n = 0;
-        for _ in 0..1000 {
+        let mut a_buf = [0.0_f32; 256];
+        let mut b_buf = [0.0_f32; 256];
+        while !writer.is_finished() {
             let n = cons.snapshot_oldest_first(256, &mut a_buf, &mut b_buf);
-            if n > 0 {
-                snapshots_taken += 1;
-                max_n = max_n.max(n);
-                for i in 1..n {
-                    let diff = a_buf[i] - a_buf[i - 1];
-                    assert!(
-                        (diff - 1.0).abs() < 0.5 || a_buf[i] == a_buf[i - 1],
-                        "non-monotone window at i={i}: prev={} cur={}",
-                        a_buf[i - 1],
-                        a_buf[i]
-                    );
-                }
+            for (i, (&a, &b)) in a_buf[..n].iter().zip(&b_buf[..n]).enumerate() {
+                assert_eq!(a, a_buf[0] + i as f32, "non-monotone window at {i}");
+                assert_eq!(b, -a, "unpublished pair at {i}");
             }
-            thread::sleep(Duration::from_micros(50));
+            thread::yield_now();
         }
-        stop.store(true, Ordering::Relaxed);
-        let final_count = writer.join().unwrap();
-        assert!(
-            snapshots_taken > 0,
-            "snapshots never saw data; final writer count: {final_count}"
-        );
-        assert!(max_n > 0);
+        writer.join().unwrap();
+        let n = cons.snapshot_oldest_first(256, &mut a_buf, &mut b_buf);
+        assert_eq!(n, 256);
+        for (i, (&a, &b)) in a_buf.iter().zip(&b_buf).enumerate() {
+            let expected = (capacity - n + i) as f32;
+            assert_eq!((a, b), (expected, -expected));
+        }
     }
 }

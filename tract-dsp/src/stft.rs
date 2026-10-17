@@ -8,7 +8,7 @@ use std::sync::Arc;
 /// Per-channel magnitude-only STFT convolution. A fixed `frame`-point real
 /// transform; each frame's spectrum has its per-bin magnitude scaled (phase
 /// preserved), then inverse-transformed and overlap-added at 50% overlap with
-/// `1/frame` normalisation. Output is delayed by `hop = frame / 2` samples.
+/// `1/frame` normalisation. Output is delayed by one full frame.
 pub struct StftConvolver {
     fft: Arc<dyn RealToComplex<f32>>,
     ifft: Arc<dyn ComplexToReal<f32>>,
@@ -65,15 +65,15 @@ impl StftConvolver {
         self.out_pos = 0;
     }
 
-    /// Inherent latency in samples (`= hop`).
+    /// Inherent latency in samples (`= frame`).
     pub fn latency(&self) -> usize {
-        self.hop
+        self.frame
     }
 
     /// Process one sample. `mags` is the per-bin magnitude gain
     /// (`frame / 2 + 1` bins). When `apply` is false the per-bin multiply is
     /// skipped — a delayed dry passthrough (identity). Output is delayed by
-    /// `hop` samples.
+    /// `frame` samples.
     pub fn process(&mut self, sample: f32, mags: &[f32], apply: bool) -> f32 {
         if self.out_pos == 0 {
             self.out_buf.copy_within(self.hop..self.frame, 0);
@@ -156,9 +156,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn latency_is_half_the_frame() {
-        assert_eq!(StftConvolver::new(4096).latency(), 2048);
-        assert_eq!(StftConvolver::new(2048).latency(), 1024);
+    fn impulse_delay_matches_reported_latency() {
+        let mut convolver = StftConvolver::new(32);
+        let mut output = [0.0; 96];
+        for (i, sample) in output.iter_mut().enumerate() {
+            *sample = convolver.process(if i == 0 { 1.0 } else { 0.0 }, &[1.0; 17], true);
+        }
+        let peak_index = output
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.abs().total_cmp(&b.abs()))
+            .unwrap()
+            .0;
+        assert_eq!(peak_index, convolver.latency(), "measured impulse delay");
+    }
+
+    #[test]
+    fn broadband_signal_has_the_expected_delay_and_nonunit_gain() {
+        let frame = 32;
+        let input: Vec<f32> = (0..6 * frame)
+            .map(|i| (i as f32 * 0.31).sin() + 0.3 * (i as f32 * 1.13).cos())
+            .collect();
+        for apply in [false, true] {
+            let mut convolver = StftConvolver::new(frame);
+            for (i, &sample) in input.iter().enumerate() {
+                let output = convolver.process(sample, &[0.25; 17], apply);
+                let expected = if i < frame {
+                    0.0
+                } else {
+                    input[i - frame] * if apply { 0.25 } else { 1.0 }
+                };
+                assert!(
+                    (output - expected).abs() < 1e-6,
+                    "sample {i}, apply {apply}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn latency_is_the_full_frame() {
+        assert_eq!(StftConvolver::new(4096).latency(), 4096);
+        assert_eq!(StftConvolver::new(2048).latency(), 2048);
     }
 
     #[test]

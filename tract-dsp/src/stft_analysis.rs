@@ -170,8 +170,8 @@ mod tests {
         let mut a = StftAnalyzer::new(2048, 512);
         let analysis = hann_periodic(2048);
         let frame = a.analyze();
-        for i in 0..2048 {
-            let expected = analysis[i] / 1.5;
+        for (i, &sample) in analysis.iter().enumerate() {
+            let expected = sample / 1.5;
             assert!(
                 (frame.synthesis_window[i] - expected).abs() < 1e-6,
                 "synthesis[{i}] = {}, expected {expected}",

@@ -45,7 +45,16 @@ cargo build --bin <plugin>                 # debug standalone (GUI testing witho
 cargo nextest run --workspace              # all tests (parallel runner)
 cargo clippy --workspace -- -D warnings    # lint (CI uses -D warnings)
 cargo fmt --check
+
+cargo mutants -p tract-dsp                 # mutation testing pilot, all tract-dsp features
 ```
+
+Mutation testing currently targets only `tract-dsp`; add other crates individually.
+Install with `cargo install cargo-mutants --version 27.1.0 --locked` and run from
+the workspace root. `.cargo/mutants.toml` selects the crate and nextest's `mutants`
+profile (fail-fast, no retries). Use `--file tract-dsp/src/<module>.rs` to focus a
+run. Review `mutants.out/missed.txt` and `timeout.txt`; do not hide survivors with
+blanket exclusions. The Mutation testing workflow is manual during this rollout.
 
 For focused Multosis effect/editor verification, run `cargo nextest run -p multosis -p tract-effects`; effect DSP and shared editor tests now live in `tract-effects`.
 
@@ -155,7 +164,7 @@ Common shape per plugin: `lib.rs` (plugin struct, params, `process()`), `editor.
 - Bipolar tap map `kernel[i] = 2·value − 1` places the MSEG midline (0.5) at a zero tap → values above 0.5 give positive taps, below give negative; flat-0.5 → all-zero kernel. Enables highpass/bandpass/comb FIRs from a [0,1] editor.
 - Peak-magnitude normalization (not L1): bake taps → MAX_KERNEL FFT → divide by peak bin magnitude. Filter never boosts >0 dB, consistent loudness for any shape. L1 would only be correct for lowpass-ish shapes.
 - Flat-0.5 default bakes to all-zero kernel → `Kernel::is_zero` makes Raw + Phaseless short-circuit to dry passthrough. Safe to insert before drawing.
-- Phaseless mode uses a fixed 4096-pt STFT frame (= MAX_KERNEL) regardless of `Length` → constant 2048-sample latency that never jumps.
+- Phaseless mode uses a fixed 4096-pt STFT frame (= MAX_KERNEL) regardless of `Length` → constant 4096-sample latency that never jumps. STFT overlap-add delays by a full frame, not the half-frame hop.
 - `Length` is non-automatable (`IntParam::non_automatable()`) so the O(N log N) re-bake stays GUI-thread-triggered, off the audio thread.
 - `bake_taps` walks the curve with a forward-only segment cursor, reproducing `mseg::value_at_phase` exactly without its per-tap rescan — O(N + nodes) not O(N·nodes).
 

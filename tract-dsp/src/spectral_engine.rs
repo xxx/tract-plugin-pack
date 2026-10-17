@@ -337,6 +337,16 @@ mod tests {
             amp < 1.0 / 0.708,
             "identity sine amplitude {amp} exceeded 1.41 (3 dB above unity)"
         );
+        let correlation: f32 = out[warmup..]
+            .iter()
+            .enumerate()
+            .map(|(i, &sample)| {
+                let input_phase =
+                    2.0 * std::f32::consts::PI * f * (i + warmup - e.latency_samples()) as f32 / sr;
+                sample * input_phase.sin()
+            })
+            .sum();
+        assert!(correlation > 0.0, "identity must preserve signal polarity");
     }
 
     #[test]
@@ -362,13 +372,17 @@ mod tests {
         // Switch slots so all four get exercised.
         for &size in &FFT_SIZES {
             e.set_fft_size(size);
-            let _ = drive(&mut e, 2048, |i| ((i as f32) * 0.1).sin(), &mut id);
+            let _ = drive(&mut e, 3 * size + 7, |i| ((i as f32) * 0.1).sin(), &mut id);
         }
         e.reset();
-        // Drive silence — output must be exactly zero for the first sample
-        // (no leftover ring content).
-        let first = e.process_sample(0.0, &mut id);
-        assert_eq!(first, 0.0);
+        for &size in &FFT_SIZES {
+            e.set_fft_size(size);
+            let output = drive(&mut e, 3 * size + 4096, |_| 0.0, &mut id);
+            assert!(
+                output.iter().all(|&sample| sample == 0.0),
+                "reset must clear the full tail in every slot, size {size}"
+            );
+        }
     }
 
     #[test]
@@ -392,5 +406,23 @@ mod tests {
             "dc-only transform produced near-zero mean output {mean}"
         );
         assert!(out.iter().all(|x| x.is_finite()));
+        assert!(tail.iter().all(|&sample| (sample - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn analysis_transform_runs_once_at_each_hop_boundary() {
+        struct CountFrames(usize);
+        impl SpectralTransform for CountFrames {
+            fn transform(&mut self, _: &mut [Complex<f32>], _: usize, _: f32) {
+                self.0 += 1;
+            }
+        }
+        let mut engine = SpectralEngine::new(48_000.0);
+        let mut transform = CountFrames(0);
+        let hop = engine.fft_size() / 2;
+        for i in 1..=2 * hop + 1 {
+            engine.process_sample(0.0, &mut transform);
+            assert_eq!(transform.0, i / hop, "after {i} samples");
+        }
     }
 }
