@@ -50,16 +50,9 @@ cargo mutants -p tract-dsp                 # mutation testing pilot, all tract-d
 cargo mutants -p tract-effects --config .cargo/mutants-tract-effects.toml
 ```
 
-Mutation testing covers `tract-dsp` and the shared-runtime portion of
-`tract-effects` (compressor/modulation/randomize/undo); expand scopes individually.
-Install with `cargo install cargo-mutants --version 27.1.0 --locked` and run from
-the workspace root. `.cargo/mutants.toml` selects `tract-dsp`; use
-`.cargo/mutants-tract-effects.toml` for the shared runtime. Both select nextest's
-`mutants` profile (fail-fast, no retries). Use `--file tract-dsp/src/<module>.rs` to
-focus a run. Review `mutants.out/missed.txt` and `timeout.txt`; do not hide survivors with
-blanket exclusions. PR mutation CI uses `--in-diff` against the PR merge base;
-manual dispatch runs full registered scopes. Test-only diffs can select nothing,
-so use full runs to audit coverage after test changes.
+See [Mutation testing](docs/development/mutation-testing.md) for scopes, setup,
+results, and CI behaviour. Do not hide survivors with blanket exclusions. Use
+full runs to audit coverage after test changes; PR CI only mutates changed code.
 
 For focused Multosis effect/editor verification, run `cargo nextest run -p multosis -p tract-effects`; effect DSP and shared editor tests now live in `tract-effects`.
 
