@@ -1,8 +1,9 @@
-# Shared runtime, dynamics, and distortion; expand remaining families separately.
+# Shared runtime and registered effect families; expand remaining families separately.
 examine_re = [
     '^tract-effects/src/(compressor|modulation|randomize|undo)\.rs:',
     '^tract-effects/src/effects/(compressor|limiter|gate|transient_shaper)\.rs:',
     '^tract-effects/src/effects/(bitcrush|distortion|downsample|wavefolder)\.rs:',
+    '^tract-effects/src/effects/(haas|stereo_widener)\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
