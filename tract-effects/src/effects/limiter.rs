@@ -195,6 +195,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gain_computer_matches_hard_and_soft_knee_reference_points() {
+        for (knee, input_db, expected_db) in [
+            (0.0, -1.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 2.0, -2.0),
+            (8.0, -6.0, 0.0),
+            (8.0, -4.0, 0.0),
+            (8.0, -2.0, -0.25),
+            (8.0, 0.0, -1.0),
+            (8.0, 2.0, -2.25),
+            (8.0, 4.0, -4.0),
+            (8.0, 6.0, -6.0),
+            (0.005, 0.0, 0.0),
+            (0.01, 0.0, -0.00125),
+        ] {
+            let actual = LimiterEffect::gain_computer_db(input_db, knee);
+            assert!(
+                (actual - expected_db).abs() < 1e-7,
+                "knee {knee}, input {input_db}: {actual}, expected {expected_db}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_toward_nonzero_reduction_follows_wall_clock_time() {
+        for sample_rate in [24_000.0, 96_000.0] {
+            for release_ms in [10.0, 250.0] {
+                let mut effect = LimiterEffect::new();
+                effect.set_sample_rate(sample_rate);
+                effect.set_param(0, -12.0);
+                effect.set_param(1, release_ms);
+                effect.set_param(3, 0.0);
+                let initial = effect.process_sample(1.0, -0.25);
+                let threshold = 10.0_f32.powf(-12.0 / 20.0);
+                assert!((initial.0 - threshold).abs() < 1e-6);
+                assert!((initial.1 + threshold * 0.25).abs() < 1e-6);
+
+                let samples = (sample_rate * release_ms * 0.001) as usize;
+                let mut output = (0.0, 0.0);
+                for _ in 0..samples {
+                    output = effect.process_sample(-0.25, 0.5);
+                }
+                let target_db = -(20.0 * 0.5_f64.log10() + 12.0);
+                let elapsed = samples as f64 / f64::from(sample_rate);
+                let reduction_db = target_db
+                    + (-12.0 - target_db) * (-elapsed / (f64::from(release_ms) * 0.001)).exp();
+                let gain = 10.0_f64.powf(reduction_db / 20.0) as f32;
+                assert!(
+                    (output.0 + 0.25 * gain).abs() < 5e-5,
+                    "{sample_rate}, {release_ms}: {output:?}"
+                );
+                assert!((output.1 - 0.5 * gain).abs() < 1e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn ceiling_clips_both_polarities_independently_of_threshold() {
+        let mut effect = LimiterEffect::new();
+        effect.set_param(0, 0.0);
+        effect.set_param(2, -6.0);
+        effect.set_param(3, 0.0);
+        let ceiling = 10.0_f32.powf(-6.0 / 20.0);
+        for (left, right) in [(0.8, -0.9), (-0.8, 0.9)] {
+            let output = effect.process_sample(left, right);
+            assert!((output.0 - ceiling.copysign(left)).abs() < 1e-6);
+            assert!((output.1 - ceiling.copysign(right)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn knee_parameter_controls_gain_at_the_threshold() {
+        for (knee, expected_reduction_db) in [(0.0, 0.0), (8.0, -1.0), (12.0, -1.5)] {
+            let mut effect = LimiterEffect::new();
+            effect.set_param(0, -12.0);
+            effect.set_param(3, knee);
+            let threshold = 10.0_f32.powf(-12.0 / 20.0);
+            let gain = 10.0_f32.powf(expected_reduction_db / 20.0);
+            let output = effect.process_sample(-threshold * 0.5, threshold);
+            assert!((output.0 + threshold * 0.5 * gain).abs() < 1e-6);
+            assert!((output.1 - threshold * gain).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn parameters_are_declared() {
         let e = LimiterEffect::new();
         let specs = e.parameters();

@@ -110,6 +110,26 @@ mod tests {
     use crate::effects::{Effect, ParamFormat, ParamScaling};
 
     #[test]
+    fn attack_timing_follows_the_configured_sample_rate() {
+        for sample_rate in [24_000.0, 96_000.0] {
+            let mut effect = CompressorEffect::new();
+            effect.set_sample_rate(sample_rate);
+            effect.set_param(0, -12.0);
+            effect.set_param(1, 4.0);
+            let mut output = (0.0, 0.0);
+            for _ in 0..(sample_rate * 0.005) as usize {
+                output = effect.process_sample(1.0, -0.25);
+            }
+            // After one 5 ms time constant the detector reaches 1 - 1/e.
+            let envelope = 1.0 - (-1.0_f64).exp();
+            let reduction_db = -(20.0 * envelope.log10() + 12.0) * 0.75;
+            let gain = 10.0_f64.powf(reduction_db / 20.0) as f32;
+            assert!((output.0 - gain).abs() < 4e-5, "{sample_rate}: {output:?}");
+            assert!((output.1 + 0.25 * gain).abs() < 1e-5);
+        }
+    }
+
+    #[test]
     fn compressor_lists_two_parameters_with_the_expected_specs() {
         let c = CompressorEffect::new();
         let specs = c.parameters();

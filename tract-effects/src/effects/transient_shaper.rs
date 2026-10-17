@@ -185,6 +185,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mixed_attack_and_sustain_follow_the_envelope_time_constants() {
+        for sample_rate in [24_000.0, 96_000.0] {
+            for duration in [0.001, 0.03, 0.09] {
+                let mut effect = TransientShaperEffect::new();
+                effect.set_sample_rate(sample_rate);
+                effect.set_param(0, 37.0);
+                effect.set_param(1, -61.0);
+                let samples = (sample_rate * duration) as usize;
+                let mut output = (0.0, 0.0);
+                for _ in 0..samples {
+                    output = effect.process_sample(-0.25, 0.5);
+                }
+                let elapsed = samples as f64 / f64::from(sample_rate);
+                let fast = 1.0 - (-elapsed / 0.001).exp();
+                let slow = 1.0 - (-elapsed / 0.03).exp();
+                assert!((f64::from(effect.env_fast) - 0.5 * fast).abs() < 3e-5);
+                assert!((f64::from(effect.env_slow) - 0.5 * slow).abs() < 3e-5);
+                let attack = (20.0 * (fast / slow).log10() / 6.0).clamp(0.0, 1.0);
+                let gain_db = 4.44 * attack - 7.32 * (1.0 - attack);
+                let gain = 10.0_f64.powf(gain_db / 20.0) as f32;
+                assert!(
+                    (output.0 + 0.25 * gain).abs() < 1e-4,
+                    "{sample_rate}, {duration}: {output:?}"
+                );
+                assert!((output.1 - 0.5 * gain).abs() < 2e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn both_envelopes_release_toward_the_current_nonzero_peak() {
+        for sample_rate in [24_000.0, 96_000.0] {
+            let mut effect = TransientShaperEffect::new();
+            effect.set_sample_rate(sample_rate);
+            for _ in 0..(sample_rate * 0.03) as usize {
+                effect.process_sample(0.5, -0.25);
+            }
+            let initial_fast = effect.env_fast;
+            let initial_slow = effect.env_slow;
+            for _ in 0..(sample_rate * 0.03) as usize {
+                effect.process_sample(-0.025, 0.01);
+            }
+            let expected_fast = 0.025 + (initial_fast - 0.025) * (-1.0_f32).exp();
+            let expected_slow = 0.025 + (initial_slow - 0.025) * (-1.0_f32).exp();
+            assert!((effect.env_fast - expected_fast).abs() < 3e-5);
+            assert!((effect.env_slow - expected_slow).abs() < 3e-5);
+        }
+    }
+
+    #[test]
+    fn attack_detection_starts_strictly_above_the_silence_floor() {
+        let mut effect = TransientShaperEffect::new();
+        effect.set_param(0, 100.0);
+        let boundary_peak = 1e-9 / (1.0 - effect.alpha_slow_a);
+        for (scale, expected_gain) in [(0.5, 1.0), (1.0, 1.0), (2.0, 10.0_f32.powf(0.6))] {
+            effect.reset();
+            let input = boundary_peak * scale;
+            let output = effect.process_sample(input, -input * 0.5);
+            if scale == 1.0 {
+                assert_eq!(effect.env_slow, 1e-9);
+            }
+            assert!((output.0 / input - expected_gain).abs() < 1e-6);
+            assert!((output.1 / (-input * 0.5) - expected_gain).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn parameters_are_declared() {
         let e = TransientShaperEffect::new();
         let specs = e.parameters();
