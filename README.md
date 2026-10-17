@@ -278,69 +278,8 @@ cargo clippy --workspace        # Lint check
 
 Install nextest via `cargo install cargo-nextest --locked`. Config lives in `.config/nextest.toml`.
 
-### Mutation testing
-
-Mutation testing starts with **tract-dsp only**. [cargo-mutants](https://mutants.rs/)
-changes production code in a scratch copy and checks whether the tests catch each
-change. Other crates will be added individually after reviewing this first pass.
-
-```bash
-cargo install cargo-mutants --version 27.1.0 --locked
-cargo mutants -p tract-dsp --list    # Preview mutations without running tests
-cargo mutants -p tract-dsp          # Full pass, all tract-dsp features enabled
-
-# Focus on one module while strengthening its tests
-cargo mutants -p tract-dsp --file tract-dsp/src/boxcar.rs
-```
-
-Run these commands from the workspace root. `.cargo/mutants.toml` limits mutation
-targets to `tract-dsp/src/`, enables every feature (including the FFT modules),
-and runs nextest using the `mutants` profile: fail fast, no retries, one test at a
-time within each scenario so failures stop before expensive tests start. The Cargo
-profile of the same name disables debug symbols to reduce rebuild cost. Use
-`-j 2` to run two mutation jobs concurrently if resources permit.
-Use `--file` to narrow a run; `--re` adds alternatives to the configured crate
-regex rather than narrowing it.
-
-Results are written to the ignored `mutants.out/` directory. Read `missed.txt`
-for changes that survived, `timeout.txt` for tests that exceeded their time limit,
-and `unviable.txt` for changes that could not compile. Per-mutation diffs and logs,
-plus `outcomes.json`, are retained there. A timeout is not evidence that an
-assertion caught the change. Review survivors against the intended behavior;
-some mutations are equivalent within the documented numerical tolerance.
-
-The **Mutation testing** GitHub Actions workflow runs this same crate on manual
-dispatch and uploads `mutants.out/` even on failure. It fails when mutations
-survive or time out; it is not a pull-request gate during the initial rollout.
-There are no blanket exclusions for surviving mutations. When moving to another
-crate, update the target paths and workflow together, select that package with
-`-p`, and review its baseline before adding automated gates.
-
-The first rollout adds 14 tests and strengthens reset, signal-polarity, threshold,
-fast-path, and sample-rate coverage. The SPSC concurrency test now bounds the
-writer to one ring capacity: live snapshots may mix generations when overwritten,
-so requiring a contiguous sequence after the writer laps the reader caused false
-mutation detections. The corrected test passed 200 stress iterations.
-
-Results on 2026-10-16 with cargo-mutants 27.1.0 and all features:
-
-| Pass | Tests | Examined | Caught | Survived | Timed out | Unbuildable |
-|---|---|---|---|---|---|---|
-| Initial baseline | 130 | 765 | 658 | 87 | 3 | 17 |
-| After fixes | 147 | 737 | 720 | 0 | 0 | 17 |
-
-The follow-up adds spectral phase/interpolation, collision, Nyquist, window,
-convolution-gain, clipping, and FFT-hop regression tests. It fixes frequency-range
-passthrough and corrects the STFT convolver's full-frame latency report, including
-Miff and Wavetable Filter host compensation. Their manuals and PDFs reflect the
-measured delays of 4096 and 2048 samples respectively.
-
-Redundant shifter buffer writes were removed. Eleven exact equivalent mutations
-are excluded individually by the documented `exclude_re` entries in
-`.cargo/mutants.toml`; meaningful contribution-tie comparisons remain tested.
-Review those explanations when changing the affected expressions. The full
-verification (`cargo mutants -p tract-dsp -j 8`) completed in about 7 minutes
-locally. Mutation coverage remains limited to `tract-dsp`.
+See [Mutation testing](docs/development/mutation-testing.md) for supported crates,
+local commands, and CI behaviour.
 
 ## Documentation
 

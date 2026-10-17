@@ -17,3 +17,4 @@ nih-plug/
 local/
 /mutants.out/
 /mutants.out.old/
+/mutation-reports/

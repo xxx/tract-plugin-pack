@@ -1530,8 +1530,10 @@ mod tests {
 
     #[test]
     fn node_tooltip_text_bipolar_y_maps_value_to_minus_one_plus_one() {
-        let mut data = widgets::MsegData::default();
-        data.polarity = widgets::Polarity::Bipolar;
+        let mut data = widgets::MsegData {
+            polarity: widgets::Polarity::Bipolar,
+            ..widgets::MsegData::default()
+        };
         data.nodes[1].value = 0.5; // midline → 0.00
         let text = mseg_node_tooltip_text(0, &data, 1, None, 0.0, None);
         let pos_line = text.split('\n').next().unwrap();

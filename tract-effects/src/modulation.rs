@@ -664,6 +664,296 @@ impl ModulationState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn transient_followers_match_their_attack_and_release_time_constants() {
+        let mut detector = TransientDetector::default();
+        for _ in 0..10 {
+            detector.process_sample(1.0, 6.0, 3.0, 1000.0);
+        }
+        let fast = 1.0 - (-20.0_f32).exp();
+        let slow = 1.0 - (-1.0_f32 / 3.0).exp();
+        assert!((detector.fast_env - fast).abs() < 1e-6);
+        assert!((detector.slow_env - slow).abs() < 1e-6);
+        for _ in 0..10 {
+            detector.process_sample(0.0, 6.0, 3.0, 1000.0);
+        }
+        assert!((detector.fast_env - fast * (-2.0_f32).exp()).abs() < 1e-6);
+        assert!((detector.slow_env - slow * (-0.05_f32).exp()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn transient_refractory_period_suppresses_exactly_the_requested_samples() {
+        for (hold_ms, expected) in [
+            (3.0, vec![0, 4, 8]),
+            (0.0, vec![0, 2, 4, 6, 8]),
+            (-10.0, vec![0, 2, 4, 6, 8]),
+        ] {
+            let mut detector = TransientDetector::default();
+            let fired: Vec<_> = (0..10)
+                .filter(|_| detector.process_sample(1.0, 1.5, hold_ms, 1000.0))
+                .collect();
+            assert_eq!(fired, expected, "hold {hold_ms} ms");
+        }
+    }
+
+    #[test]
+    fn transient_noise_floor_includes_the_boundary_and_rejects_silence() {
+        for (level, expected) in [(0.0005, false), (0.001, true), (0.002, true)] {
+            let mut detector = TransientDetector {
+                fast_env: 0.01,
+                slow_env: level,
+                refractory: 0,
+            };
+            assert_eq!(detector.process_sample(level, 1.5, 0.0, 1000.0), expected);
+        }
+        let mut detector = TransientDetector::default();
+        for _ in 0..100 {
+            assert!(!detector.process_sample(0.0, 1.5, 3.0, 1000.0));
+            assert!(!detector.process_sample(1e-5, 1.5, 3.0, 1000.0));
+        }
+        assert!(detector.process_sample(-1.0, 6.0, 3.0, 1000.0));
+        detector.reset();
+        assert!(detector.process_sample(1.0, 6.0, 3.0, 1000.0));
+    }
+
+    #[test]
+    fn transient_threshold_requires_strictly_greater_envelope_ratio() {
+        let mut detector = TransientDetector {
+            fast_env: 0.5,
+            slow_env: 0.25,
+            refractory: 0,
+        };
+        let threshold = 1.0 + one_pole_coef(5.0, 1000.0);
+        assert!(!detector.process_sample(0.25, threshold, 0.0, 1000.0));
+    }
+
+    #[test]
+    fn follower_coefficient_handles_invalid_times_and_sample_rates() {
+        for (time_ms, rate) in [(0.0, 1000.0), (-1.0, 1000.0), (1.0, 0.0), (1.0, -1000.0)] {
+            assert_eq!(one_pole_coef(time_ms, rate), 0.0);
+        }
+        assert!((one_pole_coef(10.0, 1000.0) - (-0.1_f32).exp()).abs() < 1e-7);
+    }
+
+    #[test]
+    fn phase_delta_converts_seconds_and_beats_at_the_host_tempo() {
+        let mut mseg = MsegData {
+            sync_mode: SyncMode::Time,
+            time_seconds: 2.0,
+            ..MsegData::default()
+        };
+        assert_eq!(mseg_phase_delta(&mseg, 24_000, 120.0, 48_000.0), 0.25);
+        mseg.sync_mode = SyncMode::Beat;
+        mseg.beats = 4.0;
+        assert_eq!(mseg_phase_delta(&mseg, 24_000, 120.0, 48_000.0), 0.25);
+        assert_eq!(mseg_phase_delta(&mseg, 24_000, 60.0, 48_000.0), 0.125);
+        assert_eq!(mseg_phase_delta(&mseg, 24_000, 120.0, 96_000.0), 0.125);
+    }
+
+    #[test]
+    fn phase_delta_freezes_for_degenerate_lengths_rates_and_tempos() {
+        for sync_mode in [SyncMode::Time, SyncMode::Beat] {
+            for length in [0.0, -1.0, f32::INFINITY, f32::NAN] {
+                let mseg = MsegData {
+                    sync_mode,
+                    time_seconds: length,
+                    beats: length,
+                    ..MsegData::default()
+                };
+                assert_eq!(mseg_phase_delta(&mseg, 100, 120.0, 1000.0), 0.0);
+            }
+        }
+        for beats in [-2.0, 0.0, 4.0] {
+            let mseg = MsegData {
+                sync_mode: SyncMode::Beat,
+                beats,
+                ..MsegData::default()
+            };
+            for bpm in [-120.0, 0.0, f64::NAN] {
+                assert_eq!(mseg_phase_delta(&mseg, 100, bpm, 1000.0), 0.0);
+            }
+        }
+        for rate in [0.0, -1000.0, f64::INFINITY, f64::NAN] {
+            assert_eq!(
+                mseg_phase_delta(&MsegData::default(), 100, 120.0, rate),
+                0.0
+            );
+        }
+    }
+
+    #[test]
+    fn linear_assignments_use_the_full_range_and_honor_polarity_and_depth() {
+        let spec = ParamSpec {
+            name: "Offset range",
+            min: 10.0,
+            max: 110.0,
+            default: 30.0,
+            scaling: ParamScaling::Linear,
+            format: crate::effects::ParamFormat::Number {
+                decimals: 0,
+                unit: "",
+            },
+        };
+        for (value, depth, polarity, expected) in [
+            (1.0, 0.2, Polarity::Unipolar, 50.0),
+            (0.0, 0.2, Polarity::Unipolar, 30.0),
+            (0.0, 0.2, Polarity::Bipolar, 10.0),
+            (0.5, 0.2, Polarity::Bipolar, 30.0),
+            (1.0, -0.2, Polarity::Bipolar, 10.0),
+            (1.0, -1.0, Polarity::Unipolar, 10.0),
+            (1.0, 1.0, Polarity::Bipolar, 110.0),
+        ] {
+            assert!((assignable_value(value, 30.0, depth, spec, polarity) - expected).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn logarithmic_assignments_move_in_decades_and_clamp_at_endpoints() {
+        let spec = ParamSpec {
+            name: "Frequency",
+            min: 20.0,
+            max: 20_000.0,
+            default: 200.0,
+            scaling: ParamScaling::Log,
+            format: crate::effects::ParamFormat::Number {
+                decimals: 0,
+                unit: "Hz",
+            },
+        };
+        for (value, depth, polarity, expected) in [
+            (1.0, 1.0 / 3.0, Polarity::Unipolar, 2000.0),
+            (0.5, 1.0, Polarity::Bipolar, 200.0),
+            (0.0, 1.0 / 3.0, Polarity::Bipolar, 20.0),
+            (1.0, -1.0 / 3.0, Polarity::Unipolar, 20.0),
+            (1.0, 1.0, Polarity::Unipolar, 20_000.0),
+        ] {
+            let actual = assignable_value(value, 200.0, depth, spec, polarity);
+            assert!(
+                (actual - expected).abs() < expected * 2e-6,
+                "{actual} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn row_defaults_share_the_row_clock_and_keep_distinct_envelope_shapes() {
+        let config = TrackModulation::default_for_row(3);
+        for mseg in &config.msegs {
+            assert_eq!(mseg.sync_mode, SyncMode::Beat);
+            assert_eq!(mseg.play_mode, PlayMode::Cyclic);
+            assert_eq!(mseg.beats, 10.0);
+        }
+        for (phase, sweep, sine) in [
+            (0.0, 0.0, 0.5),
+            (0.25, 0.5, 1.0),
+            (0.5, 1.0, 0.5),
+            (0.75, 0.5, 0.0),
+        ] {
+            assert_eq!(value_at_phase(&config.msegs[0], phase), 1.0);
+            assert!((value_at_phase(&config.msegs[1], phase) - sweep).abs() < 1e-6);
+            assert!((value_at_phase(&config.msegs[3], phase) - sine).abs() < 1e-6);
+        }
+        assert!(value_at_phase(&config.msegs[3], 0.125) > 0.75);
+        assert!(value_at_phase(&config.msegs[3], 0.625) < 0.25);
+    }
+
+    #[test]
+    fn legacy_state_preserves_existing_envelopes_and_pads_a_cyclic_spare() {
+        let original = TrackModulation::default_for_row(2);
+        let mut json = serde_json::to_value(&original).unwrap();
+        json["msegs"].as_array_mut().unwrap().truncate(3);
+        json["targets"].as_array_mut().unwrap().truncate(2);
+        json["depths"].as_array_mut().unwrap().truncate(2);
+        json.as_object_mut().unwrap().remove("trigger");
+        let restored: TrackModulation = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.msegs[..3], original.msegs[..3]);
+        assert_eq!(restored.targets[..2], original.targets[..2]);
+        assert_eq!(restored.depths[..2], original.depths[..2]);
+        assert_eq!(restored.targets[2], None);
+        assert_eq!(restored.depths[2], 0.0);
+        assert_eq!(restored.msegs[3].play_mode, PlayMode::Cyclic);
+        assert_eq!(restored.msegs[3].sync_mode, SyncMode::Beat);
+        assert_eq!(restored.msegs[3].beats, 4.0);
+        assert_eq!(restored.trigger, TriggerSource::Free);
+    }
+
+    #[test]
+    fn parameter_target_clamping_preserves_mix_and_depth_settings() {
+        let mut config = TrackModulation {
+            targets: [
+                Some(ModulationTarget::EffectParameter(0)),
+                Some(ModulationTarget::EffectParameter(2)),
+                Some(ModulationTarget::Mix),
+            ],
+            depths: [0.2, -0.3, 0.4],
+            ..TrackModulation::default()
+        };
+        config.clamp_targets(2);
+        assert_eq!(
+            config.targets,
+            [
+                Some(ModulationTarget::EffectParameter(0)),
+                None,
+                Some(ModulationTarget::Mix)
+            ]
+        );
+        assert_eq!(config.depths, [0.2, -0.3, 0.4]);
+        config.targets[0] = Some(ModulationTarget::EffectParameter(3));
+        config.clamp_targets(2);
+        assert_eq!(config.targets[0], None);
+        config.targets[0] = Some(ModulationTarget::EffectParameter(0));
+        config.clamp_targets(0);
+        assert_eq!(config.targets, [None, None, Some(ModulationTarget::Mix)]);
+    }
+
+    #[test]
+    fn free_hz_clock_fires_at_boundaries_preserves_remainders_and_ignores_nonpositive_hz() {
+        let mut config = TrackModulation {
+            trigger: TriggerSource::FreeHz { hz: 2.0 },
+            ..TrackModulation::default()
+        };
+        let samples = [0.0; 1250];
+        let mut state = ModulationState::default();
+        state.begin_block(&config, &samples[..250], &samples[..250], 1000.0);
+        assert_eq!(state.hz_phase(), 0.5);
+        assert!(!state.fired());
+        state.begin_block(&config, &samples[..250], &samples[..250], 1000.0);
+        assert_eq!(state.hz_phase(), 0.0);
+        assert!(state.fired());
+        state.begin_block(&config, &samples, &samples, 1000.0);
+        assert_eq!(state.hz_phase(), 0.5);
+        assert!(state.fired());
+        for hz in [0.0, -2.0] {
+            config.trigger = TriggerSource::FreeHz { hz };
+            state.begin_block(&config, &samples, &samples, 1000.0);
+            assert_eq!(state.hz_phase(), 0.5);
+            assert!(!state.fired());
+        }
+    }
+
+    #[test]
+    fn transient_block_detection_uses_the_stereo_average_and_available_pairs() {
+        let config = TrackModulation {
+            trigger: TriggerSource::Transient {
+                threshold: 6.0,
+                hold_ms: 3.0,
+            },
+            ..TrackModulation::default()
+        };
+        let mut state = ModulationState::default();
+        state.begin_block(&config, &[0.5, 1.0], &[0.25], 1000.0);
+        assert!(state.fired());
+        let expected = 0.375 * (1.0 - (-2.0_f32).exp());
+        assert!((state.transient.fast_env - expected).abs() < 1e-6);
+        state.reset();
+        state.begin_block(&config, &[1.0; 8], &[-1.0; 8], 1000.0);
+        assert!(!state.fired());
+        assert_eq!(state.transient.fast_env, 0.0);
+        state.begin_block(&config, &[1.0], &[], 1000.0);
+        assert!(!state.fired());
+        assert_eq!(state.transient.fast_env, 0.0);
+    }
+
     struct ProbeEffect(f32);
 
     impl Effect for ProbeEffect {
@@ -692,12 +982,14 @@ mod tests {
 
     #[test]
     fn mix_targets_keep_legacy_parameter_ids_and_round_trip() {
-        let mut config = TrackModulation::default();
-        config.targets = [
-            Some(ModulationTarget::EffectParameter(0)),
-            Some(ModulationTarget::Mix),
-            None,
-        ];
+        let config = TrackModulation {
+            targets: [
+                Some(ModulationTarget::EffectParameter(0)),
+                Some(ModulationTarget::Mix),
+                None,
+            ],
+            ..TrackModulation::default()
+        };
         let json = serde_json::to_value(&config).unwrap();
         assert_eq!(json["targets"], serde_json::json!([0, "mix", null]));
         assert_eq!(
@@ -721,17 +1013,75 @@ mod tests {
         };
         let mut effect = ProbeEffect(0.5);
         let mut state = ModulationState::default();
+        assert!(!state.mix_is_active());
         state.advance_segment(&config, &track, &mut effect, 4, 120.0, 48000.0);
+        assert!(state.mix_is_active());
         let actual: [f32; 4] = std::array::from_fn(|_| state.next_mix(track.mix));
         assert_eq!(actual, [0.4375, 0.625, 0.8125, 1.0]);
         assert_eq!(track.mix, 0.25);
         assert_eq!(effect.0, 0.5);
+        for _ in 0..3 {
+            assert_eq!(state.next_mix(0.75), 1.0);
+            assert!(state.mix_is_active());
+        }
 
         config.targets[0] = None;
         state.advance_segment(&config, &track, &mut effect, 4, 120.0, 48000.0);
         let restored: [f32; 4] = std::array::from_fn(|_| state.next_mix(track.mix));
         assert_eq!(restored, [0.8125, 0.625, 0.4375, 0.25]);
+        assert!(!state.mix_is_active());
         assert_eq!(state.next_mix(0.75), 0.75);
+    }
+
+    #[test]
+    fn amplitude_evaluates_flat_curves_and_survives_reset() {
+        let mut state = ModulationState::default();
+        assert_eq!(state.amplitude(), 1.0);
+        let mut config = TrackModulation::default();
+        for node in &mut config.msegs[0].nodes {
+            node.value = 0.375;
+        }
+        config.targets = [
+            Some(ModulationTarget::EffectParameter(usize::MAX)),
+            None,
+            None,
+        ];
+        let mut effect = ProbeEffect(0.5);
+        state.advance_segment(
+            &config,
+            &TrackEffect::default(),
+            &mut effect,
+            100,
+            120.0,
+            48000.0,
+        );
+        assert_eq!(state.amplitude(), 0.375);
+        assert_eq!(effect.0, 0.5, "an invalid parameter target is ignored");
+        state.reset();
+        assert_eq!(state.amplitude(), 0.375);
+    }
+
+    #[test]
+    fn targets_expose_parameter_metadata_and_percent_mix_values() {
+        let mut track = TrackEffect::default_for_row(0);
+        track.kind = EffectKind::Comb;
+        track.params[0] = 321.0;
+        track.mix = 0.375;
+        let parameter = ModulationTarget::EffectParameter(0);
+        assert_eq!(parameter.base_value(&track), 321.0);
+        let spec = parameter.spec(track.kind).unwrap();
+        let declared = crate::effects::parameter_specs(track.kind)[0];
+        assert_eq!(
+            (spec.name, spec.min, spec.max),
+            (declared.name, declared.min, declared.max)
+        );
+        let invalid = ModulationTarget::EffectParameter(usize::MAX);
+        assert_eq!(invalid.base_value(&track), 0.0);
+        assert!(invalid.spec(track.kind).is_none());
+        let mix = ModulationTarget::Mix.spec(track.kind).unwrap();
+        assert_eq!((mix.min, mix.max, mix.default), (0.0, 100.0, 100.0));
+        assert_eq!(mix.scaling, ParamScaling::Linear);
+        assert_eq!(ModulationTarget::Mix.base_value(&track), 37.5);
     }
 
     #[test]
@@ -767,9 +1117,11 @@ mod tests {
             (0.25, 0.0, 1.0, Polarity::Bipolar, 0.0),
             (0.3, 1.0, 0.0, Polarity::Unipolar, 0.3),
         ] {
-            let mut config = TrackModulation::default();
-            config.targets = [Some(ModulationTarget::Mix); 3];
-            config.depths = [1.0, 1.0, depth];
+            let mut config = TrackModulation {
+                targets: [Some(ModulationTarget::Mix); 3],
+                depths: [1.0, 1.0, depth],
+                ..TrackModulation::default()
+            };
             config.msegs[3].polarity = polarity;
             for node in &mut config.msegs[3].nodes {
                 node.value = value;
@@ -788,12 +1140,14 @@ mod tests {
 
     #[test]
     fn mix_assignment_survives_switching_to_an_effect_without_parameters() {
-        let mut config = TrackModulation::default();
-        config.targets = [
-            Some(ModulationTarget::Mix),
-            Some(ModulationTarget::EffectParameter(0)),
-            None,
-        ];
+        let mut config = TrackModulation {
+            targets: [
+                Some(ModulationTarget::Mix),
+                Some(ModulationTarget::EffectParameter(0)),
+                None,
+            ],
+            ..TrackModulation::default()
+        };
         let mut track = TrackEffect::default_for_row(0);
         switch_effect_kind(&mut track, &mut config, EffectKind::None);
         assert_eq!(config.targets, [Some(ModulationTarget::Mix), None, None]);
@@ -801,9 +1155,11 @@ mod tests {
 
     #[test]
     fn single_effect_runtime_advances_then_applies_last_assignable_slot() {
-        let mut config = TrackModulation::default();
-        config.targets = [Some(ModulationTarget::EffectParameter(0)); 3];
-        config.depths = [1.0; 3];
+        let mut config = TrackModulation {
+            targets: [Some(ModulationTarget::EffectParameter(0)); 3],
+            depths: [1.0; 3],
+            ..TrackModulation::default()
+        };
         for (i, mseg) in config.msegs.iter_mut().enumerate() {
             mseg.sync_mode = SyncMode::Time;
             mseg.time_seconds = 1.0;

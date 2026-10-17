@@ -1,0 +1,23 @@
+# First tract-effects pass: shared runtime only. Effect DSP/editor follow later.
+examine_re = ['^tract-effects/src/(compressor|modulation|randomize|undo)\.rs:']
+all_features = true
+test_tool = "nextest"
+profile = "mutants"
+additional_cargo_args = ["--locked"]
+additional_cargo_test_args = ["--profile=mutants"]
+gitignore = true
+
+exclude_re = [
+    # At equal peak/envelope, the attack/release choice multiplies a zero delta.
+    'replace > with >= in Compressor::process_sample$',
+    '^tract-effects/src/modulation\.rs:\d+:35: replace > with >= in TransientDetector::process_sample$',
+    # Public Compressor paths use fixed positive times and sample_rate >= 1.
+    'replace > with >= in time_to_coef$',
+    # At +/-0 BPM, division gives infinity/NaN; the finite-length guard freezes.
+    '^tract-effects/src/modulation\.rs:\d+:31: replace > with >= in mseg_phase_delta$',
+    # At valid audio rates, zero Hz adds zero to a phase already below 1.
+    '^tract-effects/src/modulation\.rs:\d+:48: replace > with >= in ModulationState::begin_block$',
+    # norm < 1 and registered enum sizes make floor(norm*n) <= n-1;
+    # loosening the defensive upper cap cannot change the selected index.
+    '^tract-effects/src/randomize\.rs:\d+:42: replace - with (\+|/) in randomize_track_effect$',
+]

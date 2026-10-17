@@ -17,6 +17,11 @@ Each plugin keeps its user manual under `docs/<plugin>/`:
 | Warp Zone | [warp-zone/warp-zone-manual.md](warp-zone/warp-zone-manual.md) | [warp-zone/warp-zone-manual.pdf](warp-zone/warp-zone-manual.pdf) |
 | Wavetable Filter | [wavetable-filter/wavetable-filter-manual.md](wavetable-filter/wavetable-filter-manual.md) | [wavetable-filter/wavetable-filter-manual.pdf](wavetable-filter/wavetable-filter-manual.pdf) |
 
+## Development
+
+- [Mutation testing](development/mutation-testing.md): supported scopes, local
+  commands, and CI behaviour.
+
 ## Research notes
 
 Build-idea surveys and DSP background that inform future plugins live under `docs/research/`:
