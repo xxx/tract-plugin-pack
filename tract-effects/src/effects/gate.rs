@@ -152,7 +152,7 @@ impl Effect for GateEffect {
             // opens the gate immediately.
             self.env = peak;
         } else {
-            self.env = self.alpha_env * self.env + (1.0 - self.alpha_env) * peak;
+            self.env += (1.0 - self.alpha_env) * (peak - self.env);
         }
 
         // Hysteresis-driven open/close state machine.
@@ -204,6 +204,137 @@ impl Effect for GateEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attack_gain_matches_one_time_constant_at_different_rates() {
+        for sample_rate in [24_000.0, 96_000.0] {
+            let mut effect = GateEffect::new();
+            effect.set_sample_rate(sample_rate);
+            effect.set_param(1, 10.0);
+            let mut output = (0.0, 0.0);
+            for _ in 0..(sample_rate * 0.01) as usize {
+                output = effect.process_sample(-0.25, 1.0);
+            }
+            let gain = 1.0 - (-1.0_f32).exp();
+            assert!((output.0 + 0.25 * gain).abs() < 1e-5);
+            assert!((output.1 - gain).abs() < 4e-5, "{sample_rate}: {output:?}");
+        }
+    }
+
+    #[test]
+    fn detector_release_tracks_a_lower_nonzero_peak() {
+        for sample_rate in [24_000.0, 96_000.0] {
+            let mut effect = GateEffect::new();
+            effect.set_sample_rate(sample_rate);
+            effect.process_sample(0.25, -1.0);
+            assert_eq!(effect.env, 1.0);
+            for _ in 0..(sample_rate * 0.005) as usize {
+                effect.process_sample(-0.02, 0.01);
+            }
+            let expected = 0.02 + 0.98 * (-1.0_f32).exp();
+            assert!(
+                (effect.env - expected).abs() < 4e-5,
+                "{sample_rate}: {}",
+                effect.env
+            );
+        }
+    }
+
+    #[test]
+    fn closed_gate_gain_releases_over_the_selected_duration() {
+        for sample_rate in [24_000.0, 96_000.0] {
+            for release_ms in [20.0, 200.0] {
+                let mut effect = GateEffect::new();
+                effect.set_sample_rate(sample_rate);
+                effect.set_param(0, -20.0);
+                effect.set_param(2, release_ms);
+                for _ in 0..(sample_rate * 0.02) as usize {
+                    effect.process_sample(1.0, -0.25);
+                }
+                for _ in 0..sample_rate as usize {
+                    effect.process_sample(0.0, 0.0);
+                    if !effect.is_open {
+                        break;
+                    }
+                }
+                assert!(!effect.is_open);
+                let initial_gain = effect.gain;
+                assert!(initial_gain > 0.5);
+                let samples = (sample_rate * release_ms * 0.001) as usize;
+                let mut output = (0.0, 0.0);
+                for _ in 0..samples {
+                    output = effect.process_sample(0.001, -0.002);
+                }
+                let elapsed = samples as f64 / f64::from(sample_rate);
+                let gain =
+                    f64::from(initial_gain) * (-elapsed / (f64::from(release_ms) * 0.001)).exp();
+                assert!(
+                    (output.0 / 0.001 - gain as f32).abs() < 2e-4,
+                    "{sample_rate} Hz, {release_ms} ms: gain {}, expected {gain}",
+                    output.0 / 0.001
+                );
+                assert!((output.1 / -0.002 - gain as f32).abs() < 2e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn hysteresis_deadband_retains_both_open_and_closed_states() {
+        let mut effect = GateEffect::new();
+        effect.set_sample_rate(1_000.0);
+        effect.set_param(0, -20.0);
+        effect.set_param(3, 12.0);
+        for _ in 0..100 {
+            effect.process_sample(0.05, -0.025);
+            assert!(!effect.is_open);
+        }
+        effect.process_sample(0.2, -0.1);
+        assert!(effect.is_open);
+        for _ in 0..100 {
+            effect.process_sample(0.05, -0.025);
+            assert!(effect.is_open);
+        }
+        for _ in 0..100 {
+            effect.process_sample(0.01, -0.005);
+        }
+        assert!(!effect.is_open);
+        for _ in 0..100 {
+            effect.process_sample(0.05, -0.025);
+            assert!(!effect.is_open);
+        }
+    }
+
+    #[test]
+    fn opening_and_closing_require_crossing_the_threshold() {
+        let mut effect = GateEffect::new();
+        // At 1 Hz the detector settles in one sample, making the boundary exact.
+        effect.set_sample_rate(1.0);
+        effect.set_param(0, 0.0);
+        effect.set_param(3, 0.0);
+        effect.process_sample(1.0, 0.0);
+        assert!(!effect.is_open);
+        effect.process_sample(1.0_f32.next_up(), 0.0);
+        assert!(effect.is_open);
+        effect.process_sample(1.0, 0.0);
+        assert!(effect.is_open);
+        effect.process_sample(1.0_f32.next_down(), 0.0);
+        assert!(!effect.is_open);
+    }
+
+    #[test]
+    fn steady_input_at_the_threshold_does_not_open_the_gate() {
+        let mut effect = GateEffect::new();
+        effect.set_sample_rate(48_000.0);
+        effect.set_param(0, -5.5);
+        let threshold = 10.0_f32.powf(-5.5 / 20.0);
+        for sample in 0..16 {
+            assert_eq!(
+                effect.process_sample(threshold, -threshold * 0.5),
+                (0.0, 0.0),
+                "gate opened on threshold sample {sample}"
+            );
+        }
+    }
 
     #[test]
     fn parameters_are_declared() {

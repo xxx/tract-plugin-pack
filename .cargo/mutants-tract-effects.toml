@@ -1,5 +1,8 @@
-# First tract-effects pass: shared runtime only. Effect DSP/editor follow later.
-examine_re = ['^tract-effects/src/(compressor|modulation|randomize|undo)\.rs:']
+# Shared runtime and dynamics effects; expand the remaining effects separately.
+examine_re = [
+    '^tract-effects/src/(compressor|modulation|randomize|undo)\.rs:',
+    '^tract-effects/src/effects/(compressor|limiter|gate|transient_shaper)\.rs:',
+]
 all_features = true
 test_tool = "nextest"
 profile = "mutants"
@@ -20,4 +23,12 @@ exclude_re = [
     # norm < 1 and registered enum sizes make floor(norm*n) <= n-1;
     # loosening the defensive upper cap cannot change the selected index.
     '^tract-effects/src/randomize\.rs:\d+:42: replace - with (\+|/) in randomize_track_effect$',
+    # Equal peaks preserve the gate detector exactly with the delta update.
+    '^tract-effects/src/effects/gate\.rs:\d+:17: replace > with >= in <impl Effect for GateEffect>::process_sample$',
+    # At gain 0 or 1, either smoothing coefficient preserves the same endpoint.
+    '^tract-effects/src/effects/gate\.rs:\d+:31: replace > with >= in <impl Effect for GateEffect>::process_sample$',
+    # At the lower knee boundary, both branches give unity audio gain.
+    '^tract-effects/src/effects/limiter\.rs:\d+:25: replace < with <= in LimiterEffect::gain_computer_db$',
+    # Equal peaks only change fast-follower rounding; slow attack/release are equal.
+    '^tract-effects/src/effects/transient_shaper\.rs:\d+:29: replace > with >= in TransientShaperEffect::follower_step$',
 ]
