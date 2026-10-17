@@ -137,6 +137,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn envelope_attack_and_release_follow_wall_clock_time_at_different_rates() {
+        for sample_rate in [24_000.0, 96_000.0] {
+            let mut compressor = Compressor::new();
+            compressor.set_sample_rate(sample_rate);
+            for _ in 0..(sample_rate * 0.005) as usize {
+                compressor.process_sample(1.0, 0.0);
+            }
+            let expected_attack = 1.0 - (-1.0_f32).exp();
+            assert!(
+                (compressor.env - expected_attack).abs() < 4e-5,
+                "attack at {sample_rate} Hz: {}",
+                compressor.env
+            );
+
+            compressor.env = 1.0;
+            for _ in 0..(sample_rate * 0.05) as usize {
+                compressor.process_sample(0.0, 0.0);
+            }
+            assert!(
+                (compressor.env - (-1.0_f32).exp()).abs() < 4e-5,
+                "release at {sample_rate} Hz: {}",
+                compressor.env
+            );
+        }
+    }
+
+    #[test]
+    fn soft_knee_matches_reference_gain_at_and_around_threshold() {
+        let mut compressor = Compressor::new();
+        compressor.set_params(-12.0, 4.0);
+        for (over_db, expected_gain_db) in [
+            (-6.0, 0.0),
+            (-3.0, 0.0),
+            (-1.0, -0.25),
+            (0.0, -0.5625),
+            (1.0, -1.0),
+            (3.0, -2.25),
+            (9.0, -6.75),
+        ] {
+            let envelope = 10.0_f32.powf((-12.0 + over_db) / 20.0);
+            let expected = 10.0_f32.powf(expected_gain_db / 20.0);
+            let actual = compressor.compute_gain(envelope);
+            assert!(
+                (actual - expected).abs() < 1e-6,
+                "{over_db} dB above threshold: {actual}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn stereo_link_uses_the_louder_channel_and_preserves_signed_balance() {
+        for (left, right) in [(-0.5, 1.0), (1.0, -0.5)] {
+            let mut compressor = Compressor::new();
+            compressor.set_params(-12.0, 4.0);
+            let mut output = (0.0, 0.0);
+            for _ in 0..4800 {
+                output = compressor.process_sample(left, right);
+            }
+            let gain = 10.0_f32.powf(-9.0 / 20.0);
+            assert!((output.0 - left * gain).abs() < 1e-5);
+            assert!((output.1 - right * gain).abs() < 1e-5);
+        }
+    }
+
+    #[test]
     fn compressor_passes_signal_below_threshold() {
         let mut c = Compressor::new();
         c.set_sample_rate(48_000.0);

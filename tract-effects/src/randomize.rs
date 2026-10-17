@@ -138,6 +138,52 @@ mod tests {
     use super::*;
     use crate::effects::{MAX_EFFECT_PARAMS, default_params_for_kind};
 
+    #[test]
+    fn xorshift_stream_matches_known_words_and_escapes_the_zero_seed() {
+        for seed in [0, 1] {
+            let mut rng = Rng::new(seed);
+            for expected in [
+                0x510c4619, 0xe02e553e, 0x7bb98f3a, 0x0183a8b5, 0xe6336d1f, 0xf989d237,
+            ] {
+                assert_eq!(rng.next_u32(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn boolean_and_fractional_draws_consume_one_word_each() {
+        let mut booleans = Rng::new(42);
+        let mut fractions = Rng::new(42);
+        let mut words = Rng::new(42);
+        let mut seen = [false; 2];
+        for _ in 0..100 {
+            let word = words.next_u32();
+            let boolean = booleans.bool();
+            seen[usize::from(boolean)] = true;
+            assert_eq!(boolean, word & 1 != 0);
+            let fraction = fractions.next_f32_01();
+            let expected = f64::from(word >> 8) / 16_777_216.0;
+            assert_eq!(f64::from(fraction), expected);
+            assert!((0.0..1.0).contains(&fraction));
+        }
+        assert_eq!(seen, [true, true]);
+        assert_eq!(booleans.next_u32(), words.next_u32());
+    }
+
+    #[test]
+    fn enum_randomization_reaches_each_declared_choice() {
+        let mut types = std::collections::HashSet::new();
+        let mut poles = std::collections::HashSet::new();
+        for seed in 1..=64 {
+            let mut effect = fresh_track_effect(EffectKind::Svf);
+            randomize_track_effect(&mut effect, &mut fresh_modulation(), &[], seed);
+            types.insert(effect.params[2] as usize);
+            poles.insert(effect.params[3] as usize);
+        }
+        assert_eq!(types, (0..3).collect());
+        assert_eq!(poles, (0..4).collect());
+    }
+
     fn fresh_track_effect(kind: EffectKind) -> TrackEffect {
         TrackEffect {
             kind,

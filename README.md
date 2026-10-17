@@ -280,23 +280,33 @@ Install nextest via `cargo install cargo-nextest --locked`. Config lives in `.co
 
 ### Mutation testing
 
-Mutation testing starts with **tract-dsp only**. [cargo-mutants](https://mutants.rs/)
-changes production code in a scratch copy and checks whether the tests catch each
-change. Other crates will be added individually after reviewing this first pass.
+[cargo-mutants](https://mutants.rs/) changes production code in a scratch copy
+and checks whether the tests catch each change. Coverage expands one crate and
+one reviewed scope at a time:
+
+| Package | Registered mutation scope | Configuration |
+|---|---|---|
+| `tract-dsp` | All library modules and FFT features | `.cargo/mutants.toml` |
+| `tract-effects` | Shared compressor, modulation, randomization, and undo | `.cargo/mutants-tract-effects.toml` |
+
+Effect DSP/registry and editor code in `tract-effects` will follow in later passes.
 
 ```bash
 cargo install cargo-mutants --version 27.1.0 --locked
 cargo mutants -p tract-dsp --list    # Preview mutations without running tests
 cargo mutants -p tract-dsp          # Full pass, all tract-dsp features enabled
+cargo mutants -p tract-effects --config .cargo/mutants-tract-effects.toml
 
 # Focus on one module while strengthening its tests
 cargo mutants -p tract-dsp --file tract-dsp/src/boxcar.rs
+cargo mutants -p tract-effects --config .cargo/mutants-tract-effects.toml \
+  --file tract-effects/src/modulation.rs
 ```
 
-Run these commands from the workspace root. `.cargo/mutants.toml` limits mutation
-targets to `tract-dsp/src/`, enables every feature (including the FFT modules),
-and runs nextest using the `mutants` profile: fail fast, no retries, one test at a
-time within each scenario so failures stop before expensive tests start. The Cargo
+Run these commands from the workspace root. Each configuration limits mutations
+to its registered scope, enables all features, and runs nextest using the
+`mutants` profile: fail fast, no retries, one test at a time within each scenario
+so failures stop before expensive tests start. The Cargo
 profile of the same name disables debug symbols to reduce rebuild cost. Use
 `-j 2` to run two mutation jobs concurrently if resources permit.
 Use `--file` to narrow a run; `--re` adds alternatives to the configured crate
@@ -309,12 +319,33 @@ plus `outcomes.json`, are retained there. A timeout is not evidence that an
 assertion caught the change. Review survivors against the intended behavior;
 some mutations are equivalent within the documented numerical tolerance.
 
-The **Mutation testing** GitHub Actions workflow runs this same crate on manual
-dispatch and uploads `mutants.out/` even on failure. It fails when mutations
-survive or time out; it is not a pull-request gate during the initial rollout.
-There are no blanket exclusions for surviving mutations. When moving to another
-crate, update the target paths and workflow together, select that package with
-`-p`, and review its baseline before adding automated gates.
+The **Mutation testing** GitHub Actions workflow has separate jobs for both
+packages. On pull requests it checks out the actual PR head, computes a
+zero-context diff from the PR's merge base, and passes that file to `--in-diff`.
+Only mutations intersecting changed production code within a registered scope
+run. A manual dispatch runs both full registered scopes without a diff filter.
+Both modes fail on survivors or timeouts and upload per-package report artifacts.
+PR artifacts include `pr.diff`; local CI reproductions can use the ignored
+`mutation-reports/` directory.
+
+To check the committed diff on a local branch:
+
+```bash
+git diff --no-ext-diff --no-textconv --no-color --unified=0 \
+  origin/master...HEAD -- > /tmp/tract-mutants.diff
+cargo mutants -p tract-effects --config .cargo/mutants-tract-effects.toml \
+  --in-diff /tmp/tract-mutants.diff
+```
+
+The diff's new text must match the working tree. Test-only, dependency, config,
+and out-of-scope changes can select zero mutations; these runs succeed without a
+baseline build. This also means diff mode cannot detect reduced coverage of
+unchanged production code. Use manual full runs when reviewing test changes or
+coverage policy. Regular workspace tests still run in the normal CI workflow.
+
+There are no blanket exclusions for surviving mutations. When expanding coverage,
+update the configuration and workflow paths together, select the package with
+`-p`, and review its full baseline before relying on diff checks.
 
 The first rollout adds 14 tests and strengthens reset, signal-polarity, threshold,
 fast-path, and sample-rate coverage. The SPSC concurrency test now bounds the
@@ -322,7 +353,7 @@ writer to one ring capacity: live snapshots may mix generations when overwritten
 so requiring a contiguous sequence after the writer laps the reader caused false
 mutation detections. The corrected test passed 200 stress iterations.
 
-Results on 2026-10-16 with cargo-mutants 27.1.0 and all features:
+Results for `tract-dsp` on 2026-10-16 with cargo-mutants 27.1.0 and all features:
 
 | Pass | Tests | Examined | Caught | Survived | Timed out | Unbuildable |
 |---|---|---|---|---|---|---|
@@ -340,7 +371,21 @@ are excluded individually by the documented `exclude_re` entries in
 `.cargo/mutants.toml`; meaningful contribution-tie comparisons remain tested.
 Review those explanations when changing the affected expressions. The full
 verification (`cargo mutants -p tract-dsp -j 8`) completed in about 7 minutes
-locally. Mutation coverage remains limited to `tract-dsp`.
+locally.
+
+Results for the `tract-effects` shared runtime on 2026-10-17:
+
+| Pass | Tests | Examined | Caught | Survived | Timed out | Unbuildable |
+|---|---|---|---|---|---|---|
+| Initial baseline | 457 | 317 | 201 | 109 | 0 | 7 |
+| After test additions | 479 | 309 | 302 | 0 | 0 | 7 |
+
+Twenty-two added tests and stronger Mix endpoint assertions cover the compressor's
+physical attack/release timing and soft knee, transient detection, beat clocks,
+logarithmic modulation, legacy state padding, RNG sequences, and enum choices.
+Undo's existing tests already caught all of its mutations. Eight equivalent
+mutations have individual explanations in its configuration. The full shared
+runtime pass with `-j 8` completed in about 7 minutes locally.
 
 ## Documentation
 
