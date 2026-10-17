@@ -67,11 +67,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn intermediate_widths_match_asymmetric_stereo_reference_values() {
+        for (width, expected) in [
+            (0.0, (0.25, 0.25)),
+            (37.5, (0.4375, 0.0625)),
+            (100.0, (0.75, -0.25)),
+            (150.0, (1.0, -0.5)),
+            (200.0, (1.25, -0.75)),
+        ] {
+            let mut effect = StereoWidenerEffect::new();
+            effect.set_param(0, width);
+            assert_eq!(effect.process_sample(0.75, -0.25), expected);
+            assert_eq!(effect.process_sample(-0.25, 0.75), (expected.1, expected.0));
+        }
+    }
+
+    #[test]
+    fn width_clamps_without_clipping_the_widened_audio() {
+        let mut effect = StereoWidenerEffect::new();
+        effect.set_param(0, -100.0);
+        assert_eq!(effect.process_sample(0.75, -0.25), (0.25, 0.25));
+        effect.set_param(0, 300.0);
+        assert_eq!(effect.process_sample(0.75, -0.25), (1.25, -0.75));
+    }
+
+    #[test]
     fn parameters_are_declared() {
         let e = StereoWidenerEffect::new();
         let specs = e.parameters();
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].name, "Width");
+        assert_eq!(specs[0].min, 0.0);
+        assert_eq!(specs[0].max, 200.0);
+        assert_eq!(specs[0].default, 100.0);
     }
 
     #[test]
@@ -132,9 +160,8 @@ mod tests {
     #[test]
     fn set_param_out_of_range_is_ignored() {
         let mut e = StereoWidenerEffect::new();
-        e.set_sample_rate(48_000.0);
-        e.set_param(99, 1.0);
-        let (l, _) = e.process_sample(0.25, -0.25);
-        assert!(l.is_finite());
+        e.set_param(0, 150.0);
+        e.set_param(99, 0.0);
+        assert_eq!(e.process_sample(0.75, -0.25), (1.0, -0.5));
     }
 }
