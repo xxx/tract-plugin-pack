@@ -102,7 +102,7 @@ Uses Short-Time Fourier Transform (STFT) with 50% overlap-add. The input signal 
 
 - No pre-ringing — transient shape is preserved
 - Slight temporal smearing from the STFT overlap-add (inherent to the technique)
-- Introduces latency of 1024 samples (reported to the host for automatic delay compensation)
+- Introduces latency of 2048 samples (reported to the host for automatic delay compensation)
 - Frequency resolution of ~23.4 Hz per bin at 48 kHz
 
 # Wavetable File Formats

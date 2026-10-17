@@ -55,7 +55,7 @@ A convolution filter whose FIR kernel you draw by hand with an MSEG editor — a
 
 - The drawn curve **is** the FIR impulse response; a bipolar tap map (`2·value − 1`) places the editor's 0.5 midline at a zero tap, enabling highpass/bandpass/comb shapes by drawing above or below centre
 - **Raw Mode**: direct time-domain SIMD convolution (zero latency)
-- **Phaseless Mode**: fixed 4096-point STFT magnitude-only filtering (constant 2048-sample latency)
+- **Phaseless Mode**: fixed 4096-point STFT magnitude-only filtering (constant 4096-sample latency)
 - Adjustable kernel **Length** (64–4096 taps); peak-magnitude normalization keeps loudness consistent and never boosts above 0 dB
 - MSEG editor with grid snap, Alt-drag stepped-draw, and a styled randomizer; frequency-response view with live input-spectrum shadow
 - A flat default curve bakes to an all-zero kernel — a fresh instance is clean dry passthrough
@@ -295,7 +295,8 @@ cargo mutants -p tract-dsp --file tract-dsp/src/boxcar.rs
 
 Run these commands from the workspace root. `.cargo/mutants.toml` limits mutation
 targets to `tract-dsp/src/`, enables every feature (including the FFT modules),
-and runs nextest using the `mutants` profile: fail fast, no retries. The Cargo
+and runs nextest using the `mutants` profile: fail fast, no retries, one test at a
+time within each scenario so failures stop before expensive tests start. The Cargo
 profile of the same name disables debug symbols to reduce rebuild cost. Use
 `-j 2` to run two mutation jobs concurrently if resources permit.
 Use `--file` to narrow a run; `--re` adds alternatives to the configured crate
@@ -321,18 +322,25 @@ writer to one ring capacity: live snapshots may mix generations when overwritten
 so requiring a contiguous sequence after the writer laps the reader caused false
 mutation detections. The corrected test passed 200 stress iterations.
 
-Baseline on 2026-10-16 with cargo-mutants 27.1.0, all features, and 130 tests
-(`cargo mutants -p tract-dsp -j 4`, about 9 minutes locally):
+Results on 2026-10-16 with cargo-mutants 27.1.0 and all features:
 
-| Candidates | Caught | Survived | Timed out | Unbuildable |
-|---|---|---|---|---|
-| 765 | 658 | 87 | 3 | 17 |
+| Pass | Tests | Examined | Caught | Survived | Timed out | Unbuildable |
+|---|---|---|---|---|---|---|
+| Initial baseline | 130 | 765 | 658 | 87 | 3 | 17 |
+| After fixes | 147 | 737 | 720 | 0 | 0 | 17 |
 
-The next pass stays in `tract-dsp`: `spectral_shifter.rs` accounts for 68 of the
-87 survivors, particularly bin remapping and phase wrapping. Review the STFT
-framing cases and the three hop-counter timeouts too. Some survivors are exact
-equivalents, such as constructing complex zero with `Complex::from(0.0)` and
-updating a peak with `>=` instead of `>`; classify these explicitly during review.
+The follow-up adds spectral phase/interpolation, collision, Nyquist, window,
+convolution-gain, clipping, and FFT-hop regression tests. It fixes frequency-range
+passthrough and corrects the STFT convolver's full-frame latency report, including
+Miff and Wavetable Filter host compensation. Their manuals and PDFs reflect the
+measured delays of 4096 and 2048 samples respectively.
+
+Redundant shifter buffer writes were removed. Eleven exact equivalent mutations
+are excluded individually by the documented `exclude_re` entries in
+`.cargo/mutants.toml`; meaningful contribution-tie comparisons remain tested.
+Review those explanations when changing the affected expressions. The full
+verification (`cargo mutants -p tract-dsp -j 8`) completed in about 7 minutes
+locally. Mutation coverage remains limited to `tract-dsp`.
 
 ## Documentation
 

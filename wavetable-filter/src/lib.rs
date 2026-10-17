@@ -15,7 +15,6 @@ use wavetable::Wavetable;
 /// Fixed output kernel length for convolution. Must be a multiple of 16 (for SIMD).
 /// 2048 gives 1024 frequency bins — enough resolution for any typical wavetable frame.
 const KERNEL_LEN: usize = 2048;
-const HOP: usize = KERNEL_LEN / 2; // 1024 — STFT overlap-add hop size (50% overlap)
 
 /// Pre-prepared reload data built on the GUI/loader thread so the audio thread
 /// can install a new wavetable without any heap allocations.
@@ -867,7 +866,7 @@ impl Plugin for WavetableFilter {
         let stft_latency = if filter_mode == FilterMode::Raw {
             0
         } else {
-            HOP as u32
+            self.stft[0].latency() as u32
         };
         if stft_latency != self.last_reported_latency {
             context.set_latency_samples(stft_latency);
@@ -1650,6 +1649,21 @@ mod tests {
     }
 
     #[test]
+    fn stft_reported_latency_matches_the_impulse_delay() {
+        let mut plugin = WavetableFilter::default();
+        plugin.stft_magnitudes.fill(1.0);
+        let latency = plugin.stft[0].latency();
+        assert_eq!(latency, KERNEL_LEN);
+        let mut input = vec![0.0; 2 * KERNEL_LEN + 1];
+        input[0] = 1.0;
+        let output = run_stft_mono(&mut plugin, &input);
+        for (i, &sample) in output.iter().enumerate() {
+            let expected = if i == latency { 1.0 } else { 0.0 };
+            assert!((sample - expected).abs() < 1e-6, "sample {i}");
+        }
+    }
+
+    #[test]
     fn test_stft_lowpass_attenuates_highs() {
         let mut plugin = WavetableFilter::default();
 
@@ -1683,8 +1697,7 @@ mod tests {
     #[test]
     fn test_stft_flat_preserves_amplitude() {
         // With flat magnitude spectrum, the output should preserve the input
-        // signal's amplitude. The STFT introduces a fixed latency of up to
-        // HOP samples (reported to the host for compensation).
+        // signal's amplitude after the full-frame STFT latency.
         let mut plugin = WavetableFilter::default();
         plugin.stft_magnitudes.fill(1.0);
 
@@ -1701,7 +1714,7 @@ mod tests {
         let start = KERNEL_LEN * 3;
         let len = KERNEL_LEN;
         let mut best_corr = f32::NEG_INFINITY;
-        let search = HOP as i32;
+        let search = KERNEL_LEN as i32;
         for lag in -search..=search {
             let mut corr = 0.0f32;
             for j in 0..len {

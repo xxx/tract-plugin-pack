@@ -406,5 +406,23 @@ mod tests {
             "dc-only transform produced near-zero mean output {mean}"
         );
         assert!(out.iter().all(|x| x.is_finite()));
+        assert!(tail.iter().all(|&sample| (sample - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn analysis_transform_runs_once_at_each_hop_boundary() {
+        struct CountFrames(usize);
+        impl SpectralTransform for CountFrames {
+            fn transform(&mut self, _: &mut [Complex<f32>], _: usize, _: f32) {
+                self.0 += 1;
+            }
+        }
+        let mut engine = SpectralEngine::new(48_000.0);
+        let mut transform = CountFrames(0);
+        let hop = engine.fft_size() / 2;
+        for i in 1..=2 * hop + 1 {
+            engine.process_sample(0.0, &mut transform);
+            assert_eq!(transform.0, i / hop, "after {i} samples");
+        }
     }
 }

@@ -174,6 +174,19 @@ impl PartitionedConvolver {
 mod tests {
     use super::*;
 
+    #[test]
+    fn missing_or_empty_ir_produces_silence() {
+        let mut convolver = PartitionedConvolver::new(P);
+        for clear_ir in [false, true] {
+            if clear_ir {
+                convolver.set_ir(&[], 0);
+            }
+            let mut output = vec![1.0; 3 * P + 17];
+            convolver.process(&vec![0.75; output.len()], &mut output);
+            assert!(output.iter().all(|&sample| sample == 0.0));
+        }
+    }
+
     /// Direct time-domain convolution reference: out[n] = Σ_k ir[k]·in[n-k].
     fn direct_conv(input: &[f32], ir: &[f32]) -> Vec<f32> {
         let mut out = vec![0.0f32; input.len()];

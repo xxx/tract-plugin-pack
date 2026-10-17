@@ -24,7 +24,7 @@ The plugin supports two filtering modes:
 
 - **Raw** — Direct time-domain convolution. Zero reported latency.
 - **Phaseless** — STFT magnitude-only filtering. No pre-ringing, at a constant
-  2048-sample latency.
+  4096-sample latency.
 
 ![Miff interface](screenshot.png){ width=100% }
 
@@ -195,7 +195,7 @@ multiplied by the kernel's *magnitude* spectrum, and inverse-transformed with
 
 - No pre-ringing — transient shape is preserved.
 - Slight temporal smearing from the overlap-add (inherent to the technique).
-- A constant **2048-sample latency**, reported to the host for delay
+- A constant **4096-sample latency**, reported to the host for delay
   compensation. The STFT frame is fixed at 4096 points regardless of the
   Length setting, so this latency never jumps when you adjust Length.
 

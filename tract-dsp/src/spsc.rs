@@ -135,6 +135,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn capacity_remains_the_requested_size_after_wraparound() {
+        for capacity in [1, 7, 256] {
+            let (producer, consumer) = channel(capacity);
+            assert_eq!(consumer.capacity(), capacity);
+            for i in 0..3 * capacity {
+                producer.push(i as f32, -(i as f32));
+            }
+            assert_eq!(consumer.capacity(), capacity);
+        }
+    }
+
+    #[test]
     fn oldest_first_preserves_order() {
         let (prod, cons) = channel(1024);
         for i in 0..1000 {

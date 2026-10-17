@@ -15,3 +15,5 @@ retries = 1
 [profile.mutants]
 fail-fast = true
 retries = 0
+# Cargo-mutants parallelizes scenarios; stop before starting expensive stragglers.
+test-threads = 1

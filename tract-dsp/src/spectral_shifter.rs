@@ -229,25 +229,6 @@ impl SpectralShifter {
         let lo = low_bin.max(1);
         let hi = high_bin.min(half_plus_one);
 
-        // Pass through bins outside the active range (no shift/stretch)
-        for k in 1..lo.min(half_plus_one) {
-            out_buf[k] = spectrum[k];
-            if k < n / 2 {
-                out_buf[n - k] = spectrum[n - k];
-            }
-            // Keep phase tracking consistent
-            last_input_phase[k] = spectrum[k].arg();
-            accumulated_output_phase[k] = spectrum[k].arg();
-        }
-        for k in hi..half_plus_one {
-            out_buf[k] = spectrum[k];
-            if k < n / 2 {
-                out_buf[n - k] = spectrum[n - k];
-            }
-            last_input_phase[k] = spectrum[k].arg();
-            accumulated_output_phase[k] = spectrum[k].arg();
-        }
-
         // Phase 1: Remap bins within the active range.
         // We use out_buf as temporary workspace for in-range bins:
         //   out_buf[k].re = best magnitude so far for target bin k
@@ -310,12 +291,21 @@ impl SpectralShifter {
                 if k < n / 2 {
                     out_buf[n - k] = out_buf[k].conj();
                 }
-            } else {
-                out_buf[k] = zero();
-                if k < n / 2 {
-                    out_buf[n - k] = zero();
-                }
             }
+        }
+
+        // Restore excluded bins after synthesizing the magnitude/phase workspace.
+        for k in 1..lo.min(half_plus_one) {
+            out_buf[k] = spectrum[k];
+            out_buf[n - k] = spectrum[n - k];
+            last_input_phase[k] = spectrum[k].arg();
+            accumulated_output_phase[k] = spectrum[k].arg();
+        }
+        for k in hi..half_plus_one {
+            out_buf[k] = spectrum[k];
+            out_buf[n - k] = spectrum[n - k];
+            last_input_phase[k] = spectrum[k].arg();
+            accumulated_output_phase[k] = spectrum[k].arg();
         }
 
         // DC bin: pass through
@@ -334,6 +324,201 @@ fn wrap_phase(phase: f32) -> f32 {
 mod tests {
     use super::*;
     use rustfft::FftPlanner;
+
+    #[test]
+    fn bins_outside_the_selected_range_preserve_magnitude_and_phase() {
+        let mut spectrum = [Complex::new(0.0, 0.0); 32];
+        spectrum[0] = Complex::new(0.3, 0.0);
+        spectrum[1] = Complex::new(-2.0, 0.5);
+        spectrum[2] = Complex::new(0.3, -0.8);
+        spectrum[7] = Complex::from_polar(3.0, 0.7);
+        spectrum[13] = Complex::new(-0.4, -0.6);
+        spectrum[14] = Complex::new(0.2, 0.9);
+        spectrum[16] = Complex::new(-0.7, 0.0);
+        for k in 1..16 {
+            spectrum[32 - k] = spectrum[k].conj();
+        }
+        let mut output = [Complex::new(0.0, 0.0); 32];
+        let mut previous = [0.2; 17];
+        let mut accumulated = [0.4; 17];
+        SpectralShifter::remap_bins(
+            &spectrum,
+            &mut output,
+            &mut previous,
+            &mut accumulated,
+            32,
+            4,
+            12.0,
+            1.0,
+            4,
+            12,
+        );
+        assert_eq!(output[0], spectrum[0]);
+        for k in (1..4).chain(12..17) {
+            assert_eq!(output[k], spectrum[k], "positive bin {k}");
+            if k < 16 {
+                assert_eq!(output[32 - k], spectrum[32 - k], "negative bin {k}");
+            }
+            assert_eq!(previous[k], spectrum[k].arg());
+            assert_eq!(accumulated[k], spectrum[k].arg());
+        }
+    }
+
+    #[test]
+    fn fractional_bin_remapping_preserves_phase_deviation_across_frames() {
+        let mut spectrum = [Complex::new(0.0, 0.0); 32];
+        let mut output = spectrum;
+        let mut previous = [0.0; 17];
+        let mut accumulated = [0.0; 17];
+        previous[3] = -0.2;
+        accumulated[2] = 0.4;
+        accumulated[3] = -0.3;
+        let mut expected_phases = [0.4, -0.3];
+        let mut old_phase = -0.2_f64;
+        for phase in [0.7_f32, -0.4] {
+            spectrum[3] = Complex::from_polar(2.0, phase);
+            spectrum[29] = spectrum[3].conj();
+            let source_advance = f64::from(phase) - old_phase - 3.0 * std::f64::consts::FRAC_PI_4;
+            let deviation = source_advance.sin().atan2(source_advance.cos());
+            SpectralShifter::remap_bins(
+                &spectrum,
+                &mut output,
+                &mut previous,
+                &mut accumulated,
+                32,
+                4,
+                0.0,
+                0.75,
+                1,
+                17,
+            );
+            for (i, (target, magnitude)) in [(2, 1.5), (3, 0.5)].into_iter().enumerate() {
+                expected_phases[i] += target as f64 * std::f64::consts::FRAC_PI_4 + deviation;
+                let expected = Complex::from_polar(magnitude, expected_phases[i] as f32);
+                assert!((output[target] - expected).norm() < 2e-6, "target {target}");
+                assert!((output[32 - target] - expected.conj()).norm() < 2e-6);
+            }
+            for k in (1..17).filter(|&k| k != 2 && k != 3) {
+                assert_eq!(output[k], Complex::new(0.0, 0.0), "empty target {k}");
+            }
+            assert!((previous[3] - phase).abs() < 1e-6);
+            old_phase = f64::from(phase);
+        }
+    }
+
+    #[test]
+    fn equal_magnitude_collisions_keep_the_first_contributor_phase() {
+        for (shift, stretch, sources, target, phase) in [
+            (
+                -12.0,
+                1.0,
+                [(3, 2.0), (4, 1.0)],
+                2,
+                -std::f32::consts::FRAC_PI_4,
+            ),
+            (-12.0, 0.5, [(1, 2.0), (2, 1.0)], 1, 0.0),
+        ] {
+            let mut spectrum = [Complex::new(0.0, 0.0); 32];
+            for (source, magnitude) in sources {
+                spectrum[source] = Complex::new(magnitude, 0.0);
+                spectrum[32 - source] = spectrum[source].conj();
+            }
+            let mut output = spectrum;
+            SpectralShifter::remap_bins(
+                &spectrum,
+                &mut output,
+                &mut [0.0; 17],
+                &mut [0.0; 17],
+                32,
+                4,
+                shift,
+                stretch,
+                1,
+                17,
+            );
+            let magnitude = if stretch == 1.0 { 1.0 } else { 0.5 };
+            assert!((output[target] - Complex::from_polar(magnitude, phase)).norm() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn smallest_fft_discards_remapped_contributions_above_nyquist() {
+        let spectrum = [Complex::new(0.0, 0.0), Complex::new(1.0, 0.0)];
+        for (stretch, magnitude) in [(1.5, 0.5), (2.0, 0.0)] {
+            let mut output = spectrum;
+            SpectralShifter::remap_bins(
+                &spectrum,
+                &mut output,
+                &mut [0.0; 2],
+                &mut [0.0; 2],
+                2,
+                1,
+                0.0,
+                stretch,
+                1,
+                2,
+            );
+            assert!((output[1] - Complex::new(magnitude, 0.0)).norm() < 1e-6);
+            assert_eq!(output[0], spectrum[0]);
+        }
+    }
+
+    #[test]
+    fn wrapped_phase_preserves_angles_across_positive_and_negative_turns() {
+        for angle in [-2.4, -0.2, 0.7, 2.9] {
+            for turns in [-9.0, -2.0, 0.0, 3.0, 10.0] {
+                let wrapped = wrap_phase(angle + turns * TAU);
+                assert!(
+                    (wrapped - angle).abs() < 1e-5,
+                    "angle {angle}, turns {turns}"
+                );
+                assert!((-PI..PI).contains(&wrapped));
+            }
+        }
+        assert_eq!(wrap_phase(PI), -PI);
+        assert_eq!(wrap_phase(-PI), -PI);
+    }
+
+    #[test]
+    fn synthesis_starts_only_after_a_complete_analysis_hop() {
+        let mut shifter = SpectralShifter::new(32, 8);
+        for i in 1..=17 {
+            shifter.process_sample(0.25, 0.0, 1.0, false, 1, 17);
+            assert_eq!(shifter.hop_counter, i % 8);
+            if i < 8 {
+                assert!(
+                    shifter
+                        .output_magnitudes()
+                        .iter()
+                        .all(|&value| value == 0.0)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn visualization_includes_the_nyquist_bin() {
+        let mut shifter = SpectralShifter::new(32, 8);
+        for i in 0..32 {
+            let input = if i % 2 == 0 { 0.8 } else { -0.8 };
+            shifter.process_sample(input, 0.0, 1.0, false, 1, 17);
+        }
+        let magnitudes = shifter.output_magnitudes();
+        assert_eq!(magnitudes.len(), 17);
+        assert!((magnitudes[16] - 0.8 * 10.0_f32.powf(-3.0 / 20.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn shift_at_identity_tolerance_uses_the_untrimmed_remap() {
+        for shift in [-1e-6, 1e-6] {
+            let mut shifter = SpectralShifter::new(32, 8);
+            for i in 0..32 {
+                let input = 0.8 * (TAU * 4.0 * i as f32 / 32.0).cos();
+                shifter.process_sample(input, shift, 1.0, false, 1, 17);
+            }
+            assert!((shifter.output_magnitudes()[4] - 0.4).abs() < 1e-6);
+        }
+    }
 
     #[test]
     fn reset_restarts_nonidentity_shifter_without_old_tail() {

@@ -7,3 +7,23 @@ profile = "mutants"
 additional_cargo_args = ["--locked"]
 additional_cargo_test_args = ["--profile=mutants"]
 gitignore = true
+
+exclude_re = [
+    # Equal nonnegative peaks only reassign the same value (two sites).
+    'replace > with >= in TruePeakDetector::process_sample_peak$',
+    # The maximum is unchanged on ties; hi == lo only occurs at silence,
+    # where all bins take the loud branch and never use the reciprocal.
+    'replace > with >= in SpectralClipper::process_frame$',
+    # Alternate spelling of exactly the same complex zero.
+    'replace zero -> Complex<f32> with Complex::from\(0\.0\)$',
+    # No f32 near 1 differs from 1 by exactly the f32 value 1e-6.
+    '^tract-dsp/src/spectral_shifter\.rs:\d+:71: replace < with <= in SpectralShifter::process_frame$',
+    # Low target 0 is overwritten by original DC; high target = low + 1 is positive.
+    '^tract-dsp/src/spectral_shifter\.rs:\d+:26: replace > with >= in SpectralShifter::remap_bins$',
+    # Zero-magnitude slots have zero increments; visiting them changes no audio.
+    '^tract-dsp/src/spectral_shifter\.rs:\d+:20: replace > with >= in SpectralShifter::remap_bins$',
+    # Including Nyquist in this mirror only conjugates its imaginary part;
+    # real synthesis and the magnitude display are unchanged.
+    '^tract-dsp/src/spectral_shifter\.rs:\d+:22: replace < with <= in SpectralShifter::remap_bins$',
+    '^tract-dsp/src/spectral_shifter\.rs:\d+:26: replace / with \* in SpectralShifter::remap_bins$',
+]
