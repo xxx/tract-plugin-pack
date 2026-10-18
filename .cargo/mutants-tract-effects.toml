@@ -28,6 +28,7 @@ examine_re = [
     '^tract-effects/src/effects/spectral_lofi\.rs:',
     '^tract-effects/src/effects/spectral_scatter\.rs:',
     '^tract-effects/src/effects/spectral_cascade\.rs:',
+    '^tract-effects/src/effects/spectral_reverb\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -124,4 +125,6 @@ exclude_re = [
     '^tract-effects/src/effects/spectral_scatter\.rs:21:39: replace / with \*$',
     # A larger backing stride only adds unused entries between supported bins.
     '^tract-effects/src/effects/spectral_cascade\.rs:23:39: replace / with \*$',
+    # Extra tail entries are unused by the supported FFT sizes.
+    '^tract-effects/src/effects/spectral_reverb\.rs:13:39: replace / with \*$',
 ]
