@@ -828,12 +828,12 @@ impl EffectKind {
     /// nonzero `latency_samples()` to the host. Used by the editor
     /// to draw a "this row adds PDC" badge on the track listing.
     ///
-    /// Today this is purely a function of kind (Satch and WarpZone
-    /// have fixed FFT-sized latency; everything else is zero-latency);
-    /// if a future kind grows a state-dependent latency the editor
-    /// will need a per-instance hook here instead. The
-    /// `effect_kind_reports_latency_matches_instance_latency` test
-    /// keeps this in sync with the trait impls.
+    /// All Spectral-family kinds report latency at their default settings.
+    /// Satch and WarpZone use fixed FFT sizes; other spectral effects can
+    /// change latency with their FFT-size parameter. This flag indicates
+    /// only whether latency is nonzero, not its current sample count.
+    /// `effect_kind_reports_latency_matches_instance_latency` checks
+    /// that the default instance agrees with this metadata.
     pub fn reports_latency(self) -> bool {
         matches!(
             self,
@@ -2008,6 +2008,131 @@ mod tests {
                     let expected = if labels.is_empty() { "" } else { "Only" };
                     assert_eq!(format_value(value, format), expected);
                     assert_eq!(format_value_bare(value, format), expected);
+                }
+            }
+        }
+    }
+
+    mod registry_metadata {
+        use super::*;
+
+        #[test]
+        fn short_labels_and_families_match_the_picker_catalog() {
+            use EffectKind as K;
+
+            let expected = [
+                (K::None, "None", None),
+                (K::Bitcrush, "Crush", Some("Distortion")),
+                (K::Distortion, "Distort", Some("Distortion")),
+                (K::Downsample, "Down", Some("Distortion")),
+                (K::Wavefolder, "Folder", Some("Distortion")),
+                (K::Compressor, "Comp", Some("Dynamics")),
+                (K::Gate, "Gate", Some("Dynamics")),
+                (K::Limiter, "Limiter", Some("Dynamics")),
+                (K::TransientShaper, "Shaper", Some("Dynamics")),
+                (K::Comb, "Comb", Some("Filter")),
+                (K::Diode, "Diode", Some("Filter")),
+                (K::Ladder, "Ladder", Some("Filter")),
+                (K::PhaserFilter, "Phaser", Some("Filter")),
+                (K::SallenKey, "SK", Some("Filter")),
+                (K::Svf, "SVF", Some("Filter")),
+                (K::Vocoder, "Vocoder", Some("Misc")),
+                (K::AutoPan, "AutoPan", Some("Modulation")),
+                (K::Chorus, "Chorus", Some("Modulation")),
+                (K::Flanger, "Flanger", Some("Modulation")),
+                (K::Fm, "FM", Some("Modulation")),
+                (K::Phaser, "Phaser", Some("Modulation")),
+                (K::Ring, "Ring", Some("Modulation")),
+                (K::Tremolo, "Tremolo", Some("Modulation")),
+                (K::Vibrato, "Vibrato", Some("Modulation")),
+                (K::FrequencyShift, "FreqSh", Some("Pitch")),
+                (K::PitchShift, "Shift", Some("Pitch")),
+                (K::Varispeed, "Varispd", Some("Pitch")),
+                (K::Haas, "Haas", Some("Spatial")),
+                (K::StereoWidener, "Widen", Some("Spatial")),
+                (K::Delay, "Delay", Some("Time")),
+                (K::Plate, "Plate", Some("Time")),
+                (K::Repeat, "Repeat", Some("Time")),
+                (K::Reverb, "Reverb", Some("Time")),
+                (K::Stretch, "Stretch", Some("Time")),
+                (K::SpectralBandpass, "Bpass", Some("Spectral")),
+                (K::SpectralCascade, "Cascade", Some("Spectral")),
+                (K::SpectralCompress, "Comp", Some("Spectral")),
+                (K::SpectralCorrupt, "Corrupt", Some("Spectral")),
+                (K::SpectralLofi, "Lofi", Some("Spectral")),
+                (K::SpectralMirror, "Mirror", Some("Spectral")),
+                (K::SpectralReverb, "Reverb", Some("Spectral")),
+                (K::SpectralRotate, "Rotate", Some("Spectral")),
+                (K::Satch, "Satch", Some("Spectral")),
+                (K::SpectralScatter, "Scatter", Some("Spectral")),
+                (K::SpectralShift, "Shift", Some("Spectral")),
+                (K::SpectralSmear, "Smear", Some("Spectral")),
+                (K::SpectralSpread, "Spread", Some("Spectral")),
+                (K::SpectralStretch, "Stretch", Some("Spectral")),
+                (K::SpectralTwist, "Twist", Some("Spectral")),
+                (K::WarpZone, "Warp", Some("Spectral")),
+            ];
+            assert_eq!(expected.map(|(kind, _, _)| kind), EffectKind::ALL);
+            for (kind, label, family) in expected {
+                assert_eq!(kind.track_label(), label, "{kind:?}");
+                assert_eq!(kind.family(), family, "{kind:?}");
+            }
+        }
+
+        #[test]
+        fn parameter_counts_and_defaults_match_every_live_effect() {
+            for kind in EffectKind::ALL {
+                let instance = EffectInstance::new(kind);
+                let specs = instance.parameters();
+                assert!(specs.len() <= MAX_EFFECT_PARAMS, "{kind:?}");
+                assert_eq!(param_count(kind), specs.len(), "{kind:?}");
+                let defaults = default_params_for_kind(kind);
+                for (index, spec) in specs.iter().enumerate() {
+                    assert_eq!(defaults[index], spec.default, "{kind:?} slot {index}");
+                }
+                assert!(
+                    defaults[specs.len()..].iter().all(|&value| value == 0.0),
+                    "{kind:?}: unused slots must be zero"
+                );
+            }
+        }
+
+        #[test]
+        fn static_dimming_only_disables_the_free_dial_for_synced_delay_and_repeat() {
+            for kind in [EffectKind::Delay, EffectKind::Repeat] {
+                for (selector, synced) in [
+                    (0.0, true),
+                    (8.0, true),
+                    (13.0, true),
+                    (13.49, true),
+                    (13.5, false),
+                    (14.0, false),
+                ] {
+                    let mut params = default_params_for_kind(kind);
+                    params[1] = selector;
+                    assert_eq!(
+                        parameter_dimmed(kind, 0, &params),
+                        synced,
+                        "{kind:?} selector {selector}"
+                    );
+                    for index in (1..=MAX_EFFECT_PARAMS).chain([usize::MAX]) {
+                        assert!(
+                            !parameter_dimmed(kind, index, &params),
+                            "{kind:?} selector {selector}: slot {index} should stay active"
+                        );
+                    }
+                }
+            }
+            let params = [8.0; MAX_EFFECT_PARAMS];
+            for kind in EffectKind::ALL {
+                if matches!(kind, EffectKind::Delay | EffectKind::Repeat) {
+                    continue;
+                }
+                for index in (0..=MAX_EFFECT_PARAMS).chain([usize::MAX]) {
+                    assert!(
+                        !parameter_dimmed(kind, index, &params),
+                        "{kind:?} slot {index}"
+                    );
                 }
             }
         }
