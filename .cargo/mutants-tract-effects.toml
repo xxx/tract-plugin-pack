@@ -24,6 +24,7 @@ examine_re = [
     '^tract-effects/src/effects/spectral_spread\.rs:',
     '^tract-effects/src/effects/spectral_compress\.rs:',
     '^tract-effects/src/effects/spectral_smear\.rs:',
+    '^tract-effects/src/effects/spectral_corrupt\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -110,4 +111,8 @@ exclude_re = [
     '^tract-effects/src/effects/spectral_spread\.rs:\d+:9: replace SpectralSpreadChannel::reset with \(\)$',
     # Extra backing entries are unused; supported FFTs access at most 2049 values.
     '^tract-effects/src/effects/spectral_smear\.rs:16:39: replace / with \*$',
+    # Extra backing entries are unused by the supported FFT sizes.
+    '^tract-effects/src/effects/spectral_corrupt\.rs:17:39: replace / with \*$',
+    # Zero Amount returns through the deadband before choosing quiet/loud ranks.
+    "^tract-effects/src/effects/spectral_corrupt\\.rs:\\d+:33: replace > with >= in <impl SpectralTransform for TransformCtx<'_>>::transform$",
 ]
