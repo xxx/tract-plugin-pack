@@ -205,47 +205,312 @@ mod tests {
     use super::*;
     use crate::effects::{Effect, ParamFormat, ParamScaling};
 
+    fn configured(params: [f32; 5], sample_rate: f32) -> WarpZoneEffect {
+        let mut effect = WarpZoneEffect::default();
+        for (slot, value) in params.into_iter().enumerate() {
+            effect.set_param(slot, value);
+        }
+        effect.set_sample_rate(sample_rate);
+        effect
+    }
+
+    fn input_at(sample: usize) -> (f32, f32) {
+        let t = sample as f32;
+        let nyquist = if sample.is_multiple_of(2) { 1.0 } else { -1.0 };
+        (
+            0.25 * (t * 0.071).sin() + 0.08 * (t * 0.73).cos() + 0.12 * nyquist,
+            -0.18 * (t * 0.13).cos() + 0.06 * (t * 1.17).sin() - 0.09 * nyquist,
+        )
+    }
+
+    #[test]
+    fn frequency_bounds_round_at_half_bins_and_follow_the_sample_rate() {
+        for (sr, low, high, expected) in [
+            (48_000.0, 20.0, 20_000.0, (2, 1_707)),
+            (44_100.0, 20.0, 20_000.0, (2, 1_858)),
+            (96_000.0, 20.0, 20_000.0, (1, 853)),
+            (192_000.0, 20.0, 20_000.0, (1, 427)),
+            (192_000.0, 20.0, 20.0, (1, 1)),
+            (32_000.0, 20.0, 15_000.0, (3, 1_920)),
+            (8_000.0, 20.0, 2_000.0, (10, 1_024)),
+            (8_000.0, 20.0, 4_001.0, (10, 2_049)),
+            (40_960.0, 24.999, 34.999, (2, 3)),
+            (40_960.0, 25.0, 35.0, (3, 4)),
+            (40_960.0, 25.001, 35.001, (3, 4)),
+            (40_960.0, 1_000.0, 500.0, (100, 100)),
+        ] {
+            let effect = configured([12.0, 1.3, 0.0, low, high], sr);
+            assert_eq!(
+                effect.frequency_bins(),
+                expected,
+                "SR {sr}, Low {low}, High {high}"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_feedback_matches_an_independent_delayed_echo_model() {
+        fn impulse(sample: usize) -> (f64, f64) {
+            match sample {
+                8_192 => (12.0, -10.0),
+                8_209 => (-11.0, 14.0),
+                _ => (0.0, 0.0),
+            }
+        }
+        let trim = 10.0_f64.powf(-3.0 / 20.0);
+        for (percent, feedback) in [(0.0, 0.0), (50.0, 0.5), (95.0, 0.95)] {
+            let mut effect = configured([0.0, 1.0, percent, 20.0, 20_000.0], 48_000.0);
+            let mut history: Vec<(f64, f64)> = Vec::new();
+            let mut clamp_signs = [false; 4];
+            for sample in 0..32_768 {
+                let expected = if sample < 4_096 {
+                    (0.0, 0.0)
+                } else {
+                    let dry = impulse(sample - 4_096);
+                    let previous = if sample > 4_096 {
+                        history[sample - 4_097]
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    (
+                        trim * (dry.0 + feedback * previous.0.clamp(-4.0, 4.0)),
+                        trim * (dry.1 + feedback * previous.1.clamp(-4.0, 4.0)),
+                    )
+                };
+                history.push(expected);
+                let input = impulse(sample);
+                let actual = effect.process_sample(input.0 as f32, input.1 as f32);
+                assert!(
+                    (actual.0 as f64 - expected.0).abs() < 2e-5
+                        && (actual.1 as f64 - expected.1).abs() < 2e-5,
+                    "feedback {percent}, sample {sample}: {actual:?} vs {expected:?}"
+                );
+                clamp_signs[0] |= actual.0 > 4.0;
+                clamp_signs[1] |= actual.0 < -4.0;
+                clamp_signs[2] |= actual.1 > 4.0;
+                clamp_signs[3] |= actual.1 < -4.0;
+            }
+            assert!(clamp_signs.into_iter().all(|seen| seen));
+        }
+    }
+
+    #[test]
+    fn empty_and_above_nyquist_ranges_preserve_delayed_audio_at_unity() {
+        for (sr, low, high) in [(40_960.0, 1_000.0, 500.0), (8_000.0, 10_000.0, 20_000.0)] {
+            let mut effect = configured([12.0, 1.3, 0.0, low, high], sr);
+            let mut energy = [0.0; 2];
+            for sample in 0..16_384 {
+                let input = input_at(sample);
+                let actual = effect.process_sample(input.0, input.1);
+                if sample >= 8_192 {
+                    let expected = input_at(sample - 4_096);
+                    assert!(
+                        (actual.0 - expected.0).abs() < 3e-6
+                            && (actual.1 - expected.1).abs() < 3e-6,
+                        "SR {sr}, sample {sample}: {actual:?} vs {expected:?}"
+                    );
+                    energy[0] += actual.0 * actual.0;
+                    energy[1] += actual.1 * actual.1;
+                }
+            }
+            assert!(energy.into_iter().all(|energy| energy > 0.01));
+        }
+    }
+
+    #[test]
+    fn shifted_stereo_audio_matches_separate_shifters_with_known_bin_ranges() {
+        use tract_dsp::spectral_shifter::SpectralShifter;
+        for (params, sr, low_bin, high_bin) in [
+            ([12.0, 1.0, 0.0, 200.0, 4_000.0], 40_960.0, 20, 400),
+            ([-7.0, 0.75, 0.0, 1_000.0, 12_000.0], 48_000.0, 85, 1_024),
+            ([3.0, 1.5, 0.0, 500.0, 8_000.0], 32_000.0, 64, 1_024),
+            ([-12.0, 1.0, 0.0, 20.0, 20_000.0], 8_000.0, 10, usize::MAX),
+        ] {
+            let mut effect = configured(params, sr);
+            let mut left = SpectralShifter::new(4_096, 1_024);
+            let mut right = SpectralShifter::new(4_096, 1_024);
+            let mut energy = [0.0; 2];
+            for sample in 0..16_384 {
+                let input = input_at(sample);
+                let expected = (
+                    left.process_sample(input.0, params[0], params[1], false, low_bin, high_bin),
+                    right.process_sample(input.1, params[0], params[1], false, low_bin, high_bin),
+                );
+                let actual = effect.process_sample(input.0, input.1);
+                assert_eq!(actual, expected, "SR {sr}, sample {sample}");
+                energy[0] += actual.0 * actual.0;
+                energy[1] += actual.1 * actual.1;
+            }
+            assert!(energy.into_iter().all(|energy| energy > 0.01));
+        }
+    }
+
+    #[test]
+    fn live_rate_changes_update_bin_ranges_without_resetting_feedback_or_shifter_history() {
+        use tract_dsp::spectral_shifter::SpectralShifter;
+        let mut effect = configured([-5.0, 1.2, 50.0, 1_000.0, 8_000.0], 40_960.0);
+        let mut left = SpectralShifter::new(4_096, 1_024);
+        let mut right = SpectralShifter::new(4_096, 1_024);
+        let mut previous = (0.0_f32, 0.0_f32);
+        let mut bins = (100, 800);
+        let mut energy = [0.0; 2];
+        for sample in 0..16_384 {
+            match sample {
+                3_033 => {
+                    effect.set_sample_rate(32_000.0);
+                    bins = (128, 1_024);
+                }
+                6_107 => {
+                    effect.set_sample_rate(96_000.0);
+                    bins = (43, 341);
+                }
+                8_191 => {
+                    effect.set_sample_rate(8_000.0);
+                    bins = (512, usize::MAX);
+                }
+                _ => {}
+            }
+            let input = input_at(sample);
+            let expected = (
+                left.process_sample(
+                    input.0 + previous.0.clamp(-4.0, 4.0) * 0.5,
+                    -5.0,
+                    1.2,
+                    false,
+                    bins.0,
+                    bins.1,
+                ),
+                right.process_sample(
+                    input.1 + previous.1.clamp(-4.0, 4.0) * 0.5,
+                    -5.0,
+                    1.2,
+                    false,
+                    bins.0,
+                    bins.1,
+                ),
+            );
+            previous = expected;
+            let actual = effect.process_sample(input.0, input.1);
+            assert_eq!(actual, expected, "sample {sample}");
+            assert_eq!(effect.latency_samples(), 4_096);
+            energy[0] += actual.0 * actual.0;
+            energy[1] += actual.1 * actual.1;
+        }
+        assert!(energy.into_iter().all(|energy| energy > 0.01));
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_stereo_processor_with_the_same_parameters_and_rate() {
+        for feedback in [0.0, 75.0, 95.0] {
+            let params = [7.0, 0.75, feedback, 400.0, 11_000.0];
+            let mut used = configured(params, 32_000.0);
+            let mut warm_energy = [0.0; 2];
+            for sample in 0..16_384 {
+                let input = input_at(sample);
+                let output = used.process_sample(input.0, input.1);
+                warm_energy[0] += output.0 * output.0;
+                warm_energy[1] += output.1 * output.1;
+            }
+            assert!(warm_energy.into_iter().all(|energy| energy > 0.01));
+            used.reset();
+            let mut fresh = configured(params, 32_000.0);
+            let mut energy = [0.0; 2];
+            for sample in 0..16_384 {
+                let input = input_at(sample + 137);
+                let actual = used.process_sample(input.0, input.1);
+                assert_eq!(actual, fresh.process_sample(input.0, input.1));
+                energy[0] += actual.0 * actual.0;
+                energy[1] += actual.1 * actual.1;
+            }
+            assert!(energy.into_iter().all(|energy| energy > 0.01));
+        }
+    }
+
     #[test]
     fn warpzone_lists_five_parameters_with_the_expected_specs() {
         let w = WarpZoneEffect::new();
         let specs = w.parameters();
-        assert_eq!(specs.len(), 5);
-        assert_eq!(specs[0].name, "Shift");
-        assert_eq!(specs[0].min, -24.0);
-        assert_eq!(specs[0].max, 24.0);
-        assert_eq!(specs[1].name, "Stretch");
-        assert_eq!(specs[1].min, 0.5);
-        assert_eq!(specs[1].max, 2.0);
-        assert_eq!(specs[2].name, "Feedback");
-        assert_eq!(specs[2].max, 95.0);
-        assert_eq!(specs[3].name, "Low");
-        assert!(matches!(specs[3].scaling, ParamScaling::Log));
-        assert!(matches!(specs[3].format, ParamFormat::Hertz));
-        assert_eq!(specs[4].name, "High");
-        assert!(matches!(specs[4].format, ParamFormat::Hertz));
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.name, spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [
+                ("Shift", -24.0, 24.0, 0.0),
+                ("Stretch", 0.5, 2.0, 1.0),
+                ("Feedback", 0.0, 95.0, 0.0),
+                ("Low", 20.0, 20_000.0, 20.0),
+                ("High", 20.0, 20_000.0, 20_000.0)
+            ]
+        );
+        assert_eq!(
+            (w.shift_st, w.stretch, w.feedback_pct, w.low_hz, w.high_hz),
+            (0.0, 1.0, 0.0, 20.0, 20_000.0)
+        );
+        assert!(
+            specs[..3]
+                .iter()
+                .all(|spec| matches!(spec.scaling, ParamScaling::Linear))
+        );
+        assert!(
+            specs[3..]
+                .iter()
+                .all(|spec| matches!(spec.scaling, ParamScaling::Log))
+        );
+        assert!(matches!(
+            specs[0].format,
+            ParamFormat::Number {
+                decimals: 1,
+                unit: " st"
+            }
+        ));
+        assert!(matches!(
+            specs[1].format,
+            ParamFormat::Number {
+                decimals: 2,
+                unit: "x"
+            }
+        ));
+        assert!(matches!(
+            specs[2].format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: "%"
+            }
+        ));
+        assert!(
+            specs[3..]
+                .iter()
+                .all(|spec| matches!(spec.format, ParamFormat::Hertz))
+        );
     }
 
     #[test]
     fn warpzone_set_param_clamps_to_each_spec_range() {
         let mut w = WarpZoneEffect::new();
-        // Shift past +24 → 24.0; below -24 → -24.0.
-        w.set_param(0, 100.0);
-        assert_eq!(w.shift_st, 24.0);
-        w.set_param(0, -100.0);
-        assert_eq!(w.shift_st, -24.0);
-        // Stretch clamps to [0.5, 2.0].
-        w.set_param(1, 5.0);
-        assert_eq!(w.stretch, 2.0);
-        w.set_param(1, 0.0);
-        assert_eq!(w.stretch, 0.5);
-        // Feedback caps at 95 even if a stray modulation overshoots.
-        w.set_param(2, 200.0);
-        assert_eq!(w.feedback_pct, 95.0);
-        // Hz params clamp to [20, 20000].
-        w.set_param(3, 1.0);
-        assert_eq!(w.low_hz, 20.0);
-        w.set_param(4, 999_999.0);
-        assert_eq!(w.high_hz, 20_000.0);
+        for (slot, cases) in [
+            (0, [(-999.0, -24.0), (7.25, 7.25), (99_999.0, 24.0)]),
+            (1, [(-999.0, 0.5), (1.25, 1.25), (99_999.0, 2.0)]),
+            (2, [(-999.0, 0.0), (37.5, 37.5), (99_999.0, 95.0)]),
+            (3, [(-999.0, 20.0), (750.0, 750.0), (99_999.0, 20_000.0)]),
+            (
+                4,
+                [(-999.0, 20.0), (3_750.0, 3_750.0), (99_999.0, 20_000.0)],
+            ),
+        ] {
+            for (value, expected) in cases {
+                w.set_param(slot, value);
+                assert_eq!(
+                    [w.shift_st, w.stretch, w.feedback_pct, w.low_hz, w.high_hz][slot],
+                    expected
+                );
+            }
+        }
+        w.set_param(99, f32::INFINITY);
+        assert_eq!(
+            (w.shift_st, w.stretch, w.feedback_pct, w.low_hz, w.high_hz),
+            (24.0, 2.0, 95.0, 20_000.0, 20_000.0)
+        );
     }
 
     #[test]
