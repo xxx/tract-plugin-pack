@@ -8,10 +8,10 @@ the tests catch each change. Run the commands below from the workspace root.
 | Package | Mutation scope | Configuration |
 |---|---|---|
 | `tract-dsp` | All library modules and FFT features | [mutants.toml](../../.cargo/mutants.toml) |
-| `tract-effects` | All 49 audio effects, shared compressor, modulation, randomisation, undo, parameter helpers, and static registry metadata | [mutants-tract-effects.toml](../../.cargo/mutants-tract-effects.toml) |
+| `tract-effects` | Runtime: all effects, registry and dispatch, track state, compressor, modulation, randomisation, and undo | [mutants-tract-effects.toml](../../.cargo/mutants-tract-effects.toml) |
 
-The `tract-effects` scope excludes the silent `None` placeholder, DSP dispatch, persisted track state, and the editor.
-Expand coverage one reviewed scope at a time.
+The `tract-effects` rollout is still in progress: the shared editor remains to be audited.
+Complete coverage of each crate through reviewed increments before moving to another crate.
 
 ## Run locally
 
