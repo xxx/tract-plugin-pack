@@ -18,6 +18,7 @@ examine_re = [
     '^tract-effects/src/effects/plate\.rs:',
     '^tract-effects/src/effects/vocoder\.rs:',
     '^tract-effects/src/effects/spectral_(mirror|rotate)\.rs:',
+    '^tract-effects/src/effects/spectral_shift\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -98,4 +99,6 @@ exclude_re = [
     '^tract-effects/src/effects/vocoder\.rs:\d+:23: replace > with >= in VocoderEffect::step_env$',
     # The Carrier setter stores 0..2 before this defensive upper cap.
     '^tract-effects/src/effects/vocoder\.rs:\d+:87: replace - with (\+|/) in VocoderEffect::next_carrier$',
+    # Clamped f32 scale differences lie on a 2^-24 grid; 1e-6 is off that grid.
+    '^tract-effects/src/effects/spectral_shift\.rs:\d+:44: replace < with <= in <impl SpectralTransform for TransformCtx>::transform$',
 ]
