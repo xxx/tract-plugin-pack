@@ -1,10 +1,10 @@
 //! Spectral Cascade: per-bin delay ramped linearly around a centre frequency.
 //!
-//! delay_for_bin[k] = round(Length_hops * (k - centre_bin) / (N/2)), clamped
-//! to [0, MAX_DELAY_HOPS - 1]. Bins ABOVE Centre get positive delay; bins
-//! at or below Centre read "now" (delay 0). Centre low -> low frequencies
-//! arrive on time and highs slide in later (upward slide). Centre high ->
-//! highs arrive on time and lows slide in (downward slide).
+//! Length rounds to whole hops and is capped at MAX_DELAY_HOPS - 1. The
+//! per-bin ramp Length_hops * (k - centre_bin) / (N/2) truncates to whole
+//! hops, with negative delays clamped to zero. Bins at or below Centre read
+//! "now"; higher bins are increasingly delayed. Raising Centre leaves more
+//! bins immediate and reduces the remaining high-frequency delays.
 //!
 //! Feedback recycles the delayed output back into the ring so taps come
 //! around again, building cascading echoes per bin.
@@ -250,6 +250,489 @@ impl Effect for SpectralCascadeEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
+    fn tagged_spectrum(size: usize, hop: usize) -> Vec<Complex<f32>> {
+        let mut bins = vec![Complex::default(); size];
+        bins[0] = Complex::new(-0.25 * (hop + 1) as f32, 0.0);
+        for bin in 1..=size / 2 {
+            bins[bin] = Complex::new(
+                bin as f32 * 0.0078125 + hop as f32 * 0.0625,
+                if bin == size / 2 {
+                    0.0
+                } else {
+                    -0.5 - hop as f32 * 0.015625
+                },
+            );
+            if bin < size / 2 {
+                bins[size - bin] = bins[bin].conj();
+            }
+        }
+        bins
+    }
+
+    fn transform(
+        channel: &mut SpectralCascadeChannel,
+        bins: &mut [Complex<f32>],
+        length: f32,
+        feedback: f32,
+        centre: f32,
+        sample_rate: f32,
+    ) {
+        let size = bins.len();
+        TransformCtx {
+            chan: channel,
+            params: ParamsCache {
+                length_ms: length,
+                feedback_pct: feedback,
+                centre_hz: centre,
+                ..ParamsCache::default()
+            },
+        }
+        .transform(bins, size, sample_rate);
+    }
+
+    fn configured_cascade(fft_index: f32) -> SpectralCascadeEffect {
+        let mut effect = SpectralCascadeEffect::default();
+        for (index, value) in [200.0, 37.5, 1_000.0, fft_index].into_iter().enumerate() {
+            effect.set_param(index, value);
+        }
+        effect
+    }
+
+    #[test]
+    fn impulses_arrive_at_known_ramp_length_and_centre_boundaries() {
+        type RampCase = (usize, f32, f32, f32, &'static [(usize, usize)]);
+        let cases: &[RampCase] = &[
+            (
+                512,
+                32_000.0,
+                11.99,
+                20.0,
+                &[(127, 0), (128, 0), (255, 0), (256, 1)],
+            ),
+            (
+                512,
+                32_000.0,
+                12.0,
+                20.0,
+                &[(127, 0), (128, 1), (255, 1), (256, 2)],
+            ),
+            (512, 32_000.0, 16.0, 31.249, &[(128, 1), (256, 2)]),
+            (512, 32_000.0, 16.0, 31.25, &[(128, 0), (256, 1)]),
+            (
+                512,
+                32_000.0,
+                32.0,
+                312.5,
+                &[
+                    (5, 0),
+                    (68, 0),
+                    (69, 1),
+                    (100, 1),
+                    (101, 1),
+                    (133, 2),
+                    (256, 3),
+                ],
+            ),
+            (
+                512,
+                48_000.0,
+                2_000.0,
+                20.0,
+                &[(1, 0), (2, 0), (3, 1), (128, 63), (255, 126), (256, 127)],
+            ),
+            (
+                4_096,
+                48_000.0,
+                200.0,
+                1_000.0,
+                &[(85, 0), (494, 0), (495, 1), (904, 1), (905, 2), (2_048, 4)],
+            ),
+            (
+                4_096,
+                48_000.0,
+                10.0,
+                20.0,
+                &[(1, 0), (1_024, 0), (2_048, 0)],
+            ),
+        ];
+        for &(size, sr, length, centre, probes) in cases {
+            let impulse = tagged_spectrum(size, 0);
+            let mut channel = SpectralCascadeChannel::new();
+            for hop in 0..=128 {
+                let mut bins = if hop == 0 {
+                    impulse.clone()
+                } else {
+                    vec![Complex::default(); size]
+                };
+                transform(&mut channel, &mut bins, length, 0.0, centre, sr);
+                assert_eq!(
+                    bins[0],
+                    if hop == 0 {
+                        impulse[0]
+                    } else {
+                        Complex::default()
+                    }
+                );
+                for &(bin, delay) in probes {
+                    let expected = if hop == delay {
+                        impulse[bin]
+                    } else {
+                        Complex::default()
+                    };
+                    assert_eq!(
+                        bins[bin], expected,
+                        "FFT {size}, Length {length}, Centre {centre}, bin {bin}, hop {hop}"
+                    );
+                    if bin < size / 2 {
+                        assert_eq!(bins[size - bin], expected.conj());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complex_delay_ramps_match_independent_queues_over_two_ring_wraps() {
+        for size in [512, 1_024, 2_048, 4_096] {
+            let half = size / 2;
+            for (sr, length, centre, centre_bin, depth) in [
+                (
+                    48_000.0,
+                    (size / 2) as f32 / 48.0 * 4.0,
+                    6_000.0,
+                    half / 4,
+                    4,
+                ),
+                (192_000.0, 2_000.0, 20.0, 0, 127),
+            ] {
+                // Invert the ramp: delay d starts at ceil(d * half / depth) above Centre.
+                let mut delays = vec![0; half + 1];
+                for delay in 1..=depth {
+                    let start = centre_bin + (delay * half).div_ceil(depth);
+                    for value in delays.iter_mut().take(half + 1).skip(start) {
+                        *value = delay;
+                    }
+                }
+                for (feedback_pct, feedback) in [(0.0, 0.0), (50.0, 0.5)] {
+                    let mut channel = SpectralCascadeChannel::new();
+                    let mut queues: Vec<_> = delays
+                        .iter()
+                        .map(|&delay| VecDeque::from(vec![Complex::default(); delay]))
+                        .collect();
+                    for hop in 0..259 {
+                        let input = tagged_spectrum(size, hop);
+                        let mut expected = input.clone();
+                        for bin in 1..=half {
+                            if let Some(delayed) = queues[bin].pop_front() {
+                                queues[bin].push_back(input[bin] + delayed * feedback);
+                                expected[bin] = delayed;
+                            }
+                            if bin < half {
+                                expected[size - bin] = expected[bin].conj();
+                            }
+                        }
+                        let mut actual = input;
+                        transform(&mut channel, &mut actual, length, feedback_pct, centre, sr);
+                        assert_eq!(
+                            actual, expected,
+                            "FFT {size}, depth {depth}, hop {hop}, feedback {feedback_pct}"
+                        );
+                        assert_eq!(channel.write_pos, (hop + 1) % 128);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zero_delay_ignores_stale_feedback_and_stores_unboosted_input_for_later_taps() {
+        for feedback in [0.0, 50.0, 95.0] {
+            let mut channel = SpectralCascadeChannel::new();
+            channel.ring.fill(Complex::new(99.0, -9.0));
+            let original = tagged_spectrum(512, 0);
+            let mut bins = original.clone();
+            transform(&mut channel, &mut bins, 32.0, feedback, 16_000.0, 32_000.0);
+            assert_eq!(bins, original);
+            let mut next = tagged_spectrum(512, 1);
+            transform(&mut channel, &mut next, 32.0, feedback, 20.0, 32_000.0);
+            assert_eq!(next[64], original[64]);
+            assert_eq!(next[448], original[64].conj());
+            let original = tagged_spectrum(512, 2);
+            let mut now = original.clone();
+            transform(&mut channel, &mut now, 32.0, feedback, 16_000.0, 32_000.0);
+            assert_eq!(now, original);
+        }
+    }
+
+    #[test]
+    fn feedback_echoes_follow_closed_form_decay_at_each_bin_delay() {
+        for (feedback_pct, feedback) in [(0.0, 0.0_f64), (50.0, 0.5), (95.0, 0.95)] {
+            let mut channel = SpectralCascadeChannel::new();
+            for hop in 0..32 {
+                let mut bins = vec![Complex::default(); 512];
+                if hop == 0 {
+                    bins[128] = Complex::new(1.25, -0.5);
+                    bins[384] = bins[128].conj();
+                    bins[256] = Complex::new(0.75, 0.0);
+                }
+                transform(&mut channel, &mut bins, 16.0, feedback_pct, 20.0, 32_000.0);
+                for (bin, delay, input) in [
+                    (128, 1, Complex::new(1.25, -0.5)),
+                    (256, 2, Complex::new(0.75, 0.0)),
+                ] {
+                    let gain = if hop >= delay && hop % delay == 0 {
+                        feedback.powi(hop / delay - 1)
+                    } else {
+                        0.0
+                    };
+                    assert!((bins[bin].re as f64 - input.re * gain).abs() < 2e-6);
+                    assert!((bins[bin].im as f64 - input.im * gain).abs() < 2e-6);
+                }
+                assert_eq!(bins[384], bins[128].conj());
+                assert_eq!(bins[0], Complex::default());
+            }
+        }
+    }
+
+    #[test]
+    fn channel_reset_clears_history_and_reuses_storage_across_fft_changes() {
+        let mut effect = SpectralCascadeEffect::default();
+        for channel in [&mut effect.chan_l, &mut effect.chan_r] {
+            assert!(channel.ring.len() >= 128 * 2_049);
+            let storage = channel.ring.as_ptr();
+            let length = channel.ring.len();
+            let capacity = channel.ring.capacity();
+            for size in [512, 4_096, 1_024, 2_048, 4_096] {
+                channel.ring.fill(Complex::new(0.5, -0.25));
+                channel.write_pos = 37;
+                channel.reset();
+                assert_eq!(channel.write_pos, 0);
+                let mut silence = vec![Complex::default(); size];
+                transform(channel, &mut silence, 2_000.0, 50.0, 20.0, 192_000.0);
+                assert!(silence.iter().all(|value| *value == Complex::default()));
+                let mut input = tagged_spectrum(size, 1);
+                transform(channel, &mut input, 2_000.0, 50.0, 20.0, 192_000.0);
+                assert_eq!(channel.ring.as_ptr(), storage);
+                assert_eq!(channel.ring.len(), length);
+                assert_eq!(channel.ring.capacity(), capacity);
+            }
+        }
+    }
+
+    #[test]
+    fn parameter_defaults_bounds_and_fft_selection_match_metadata() {
+        let mut effect = SpectralCascadeEffect::default();
+        assert_eq!(
+            (
+                effect.params.length_ms,
+                effect.params.feedback_pct,
+                effect.params.centre_hz,
+                effect.params.fft_param
+            ),
+            (200.0, 0.0, 1_000.0, 2.0)
+        );
+        assert_eq!(effect.sample_rate, 48_000.0);
+        assert_eq!(effect.latency_samples(), 2_048);
+        let specs = effect.parameters();
+        assert_eq!(
+            specs
+                .iter()
+                .map(|s| (s.name, s.min, s.max, s.default))
+                .collect::<Vec<_>>(),
+            [
+                ("Length", 10.0, 2_000.0, 200.0),
+                ("Feedback", 0.0, 95.0, 0.0),
+                ("Centre", 20.0, 20_000.0, 1_000.0),
+                ("FFT", 0.0, 3.0, 2.0)
+            ]
+        );
+        assert!(matches!(specs[0].scaling, ParamScaling::Log));
+        assert!(matches!(specs[1].scaling, ParamScaling::Linear));
+        assert!(matches!(specs[2].scaling, ParamScaling::Log));
+        assert!(matches!(specs[3].scaling, ParamScaling::Linear));
+        assert!(matches!(
+            specs[0].format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: " ms"
+            }
+        ));
+        assert!(matches!(
+            specs[1].format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: " %"
+            }
+        ));
+        assert!(matches!(specs[2].format, ParamFormat::Hertz));
+        assert!(
+            matches!(specs[3].format, ParamFormat::Enum { labels } if labels == ["512", "1024", "2048", "4096"])
+        );
+        for (slot, cases) in [
+            (0, [(-999.0, 10.0), (37.5, 37.5), (99_999.0, 2_000.0)]),
+            (1, [(-999.0, 0.0), (37.5, 37.5), (99_999.0, 95.0)]),
+            (
+                2,
+                [(-999.0, 20.0), (3_750.0, 3_750.0), (99_999.0, 20_000.0)],
+            ),
+        ] {
+            for (value, expected) in cases {
+                effect.set_param(slot, value);
+                assert_eq!(
+                    [
+                        effect.params.length_ms,
+                        effect.params.feedback_pct,
+                        effect.params.centre_hz
+                    ][slot],
+                    expected
+                );
+            }
+        }
+        for (value, size) in [
+            (-99.0, 512),
+            (0.49, 512),
+            (0.5, 1_024),
+            (1.5, 2_048),
+            (99.0, 4_096),
+        ] {
+            effect.set_param(3, value);
+            assert_eq!(effect.latency_samples(), size);
+            assert_eq!(effect.engine_r.latency_samples(), size);
+        }
+        effect.set_param(99, f32::INFINITY);
+        assert_eq!(
+            (
+                effect.params.length_ms,
+                effect.params.feedback_pct,
+                effect.params.centre_hz
+            ),
+            (2_000.0, 95.0, 20_000.0)
+        );
+        assert_eq!(effect.latency_samples(), 4_096);
+    }
+
+    #[test]
+    fn sub_half_hop_length_matches_an_independent_stereo_identity_reference() {
+        struct Identity;
+        impl SpectralTransform for Identity {
+            fn transform(&mut self, _: &mut [Complex<f32>], _: usize, _: f32) {}
+        }
+        let mut effect = configured_cascade(3.0);
+        effect.set_param(0, 10.0);
+        effect.set_param(1, 95.0);
+        let mut left = SpectralEngine::new(48_000.0);
+        let mut right = SpectralEngine::new(48_000.0);
+        left.set_fft_size(4_096);
+        right.set_fft_size(4_096);
+        let mut energy = [0.0; 2];
+        for sample in 0..16_384 {
+            let input = (
+                (sample as f32 * 0.17).sin() * 0.25,
+                (sample as f32 * 0.31).cos() * 0.125,
+            );
+            let expected = (
+                left.process_sample(input.0, &mut Identity),
+                right.process_sample(input.1, &mut Identity),
+            );
+            let actual = effect.process_sample(input.0, input.1);
+            assert!(
+                (actual.0 - expected.0).abs() < 1e-6 && (actual.1 - expected.1).abs() < 1e-6,
+                "sample {sample}"
+            );
+            energy[0] += actual.0 * actual.0;
+            energy[1] += actual.1 * actual.1;
+        }
+        assert!(energy.into_iter().all(|e| e > 0.01));
+    }
+
+    #[test]
+    fn left_only_input_has_a_delayed_tail_without_leaking_into_the_right_channel() {
+        let mut effect = configured_cascade(0.0);
+        for _ in 0..2_048 {
+            effect.process_sample(0.0, 0.0);
+        }
+        let mut tail = 0.0;
+        for sample in 0..24_576 {
+            let input = if sample < 2_048 {
+                (sample as f32 * 1.3).sin() * 0.25
+            } else {
+                0.0
+            };
+            let output = effect.process_sample(input, 0.0);
+            assert_eq!(output.1, 0.0);
+            if sample >= 4_096 {
+                tail += output.0 * output.0;
+            }
+        }
+        assert!(tail > 0.01);
+    }
+
+    #[test]
+    fn host_reset_clears_stereo_history_and_preserves_pending_fft() {
+        let mut used = configured_cascade(0.0);
+        for sample in 0..16_384 {
+            used.process_sample(
+                (sample as f32 * 0.23).sin() * 0.25,
+                (sample as f32 * 0.31).cos() * 0.125,
+            );
+        }
+        used.set_param(3, 1.0);
+        used.reset();
+        assert_eq!(used.latency_samples(), 1_024);
+        let mut fresh = configured_cascade(0.0);
+        for _ in 0..1_024 {
+            fresh.process_sample(0.0, 0.0);
+        }
+        fresh.set_param(3, 1.0);
+        fresh.reset();
+        let mut energy = [0.0; 2];
+        for sample in 0..16_384 {
+            let input = (
+                (sample as f32 * 0.11).cos() * 0.125,
+                (sample as f32 * 0.27).sin() * 0.25,
+            );
+            let actual = used.process_sample(input.0, input.1);
+            assert_eq!(actual, fresh.process_sample(input.0, input.1));
+            energy[0] += actual.0 * actual.0;
+            energy[1] += actual.1 * actual.1;
+        }
+        assert!(energy.into_iter().all(|e| e > 0.01));
+    }
+
+    #[test]
+    fn sample_rate_configuration_and_reset_replay_a_fresh_selected_fft() {
+        for index in 0..4 {
+            let mut used = configured_cascade(index as f32);
+            for sample in 0..16_384 {
+                used.process_sample(
+                    (sample as f32 * 0.19).sin() * 0.25,
+                    (sample as f32 * 0.27).cos() * 0.125,
+                );
+            }
+            used.set_sample_rate(32_000.0);
+            used.reset();
+            let mut fresh = configured_cascade(index as f32);
+            fresh.set_sample_rate(32_000.0);
+            fresh.reset();
+            assert_eq!(used.sample_rate, 32_000.0);
+            assert_eq!(used.latency_samples(), [512, 1_024, 2_048, 4_096][index]);
+            assert_eq!(used.engine_r.latency_samples(), used.latency_samples());
+            let mut energy = [0.0; 2];
+            for sample in 0..16_384 {
+                let input = (
+                    (sample as f32 * 0.29).cos() * 0.25,
+                    (sample as f32 * 0.13).sin() * 0.125,
+                );
+                let actual = used.process_sample(input.0, input.1);
+                assert_eq!(actual, fresh.process_sample(input.0, input.1));
+                energy[0] += actual.0 * actual.0;
+                energy[1] += actual.1 * actual.1;
+            }
+            assert!(energy.into_iter().all(|e| e > 0.01));
+        }
+    }
 
     fn drive(e: &mut SpectralCascadeEffect, n: usize, src: impl Fn(usize) -> f32) -> Vec<f32> {
         (0..n)

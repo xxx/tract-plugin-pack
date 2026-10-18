@@ -27,6 +27,7 @@ examine_re = [
     '^tract-effects/src/effects/spectral_corrupt\.rs:',
     '^tract-effects/src/effects/spectral_lofi\.rs:',
     '^tract-effects/src/effects/spectral_scatter\.rs:',
+    '^tract-effects/src/effects/spectral_cascade\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -121,4 +122,6 @@ exclude_re = [
     '^tract-effects/src/effects/spectral_lofi\.rs:14:39: replace / with \*$',
     # A larger backing stride only adds unused entries between supported bins.
     '^tract-effects/src/effects/spectral_scatter\.rs:21:39: replace / with \*$',
+    # A larger backing stride only adds unused entries between supported bins.
+    '^tract-effects/src/effects/spectral_cascade\.rs:23:39: replace / with \*$',
 ]
