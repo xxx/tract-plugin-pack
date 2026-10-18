@@ -186,6 +186,167 @@ mod tests {
     use crate::effects::{Effect, ParamFormat, ParamScaling};
 
     #[test]
+    fn carriers_match_landmarks_and_wrap_in_both_directions() {
+        let sine = [
+            0.0,
+            std::f64::consts::FRAC_1_SQRT_2,
+            1.0,
+            std::f64::consts::FRAC_1_SQRT_2,
+            0.0,
+            -std::f64::consts::FRAC_1_SQRT_2,
+            -1.0,
+            -std::f64::consts::FRAC_1_SQRT_2,
+        ];
+        let triangle = [1.0, 0.5, 0.0, -0.5, -1.0, -0.5, 0.0, 0.5];
+        for offset in [-2.0, 0.0, 3.0] {
+            for index in 0..8 {
+                let phase = offset + index as f32 / 8.0;
+                assert!((RingEffect::carrier_wave(phase, 0) as f64 - sine[index]).abs() < 5e-7);
+                assert_eq!(RingEffect::carrier_wave(phase, 1), triangle[index]);
+            }
+        }
+    }
+
+    #[test]
+    fn intermediate_bias_and_stereo_match_the_carrier_at_each_sample() {
+        for shape in [0, 1] {
+            for bias_pct in [-50.0, -25.0, 25.0, 75.0] {
+                for stereo_pct in [25.0, 50.0, 75.0] {
+                    let mut ring = RingEffect::new();
+                    ring.set_sample_rate(32_000.0);
+                    for (index, value) in [1_000.0, shape as f32, bias_pct, stereo_pct]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        ring.set_param(index, value);
+                    }
+                    let wave = |phase: f64| {
+                        let phase = phase.fract();
+                        if shape == 0 {
+                            (std::f64::consts::TAU * phase).sin()
+                        } else if phase < 0.5 {
+                            1.0 - 4.0 * phase
+                        } else {
+                            4.0 * phase - 3.0
+                        }
+                    };
+                    let bias = bias_pct as f64 / 100.0;
+                    for sample in 0..=64 {
+                        let phase = (sample % 32) as f64 / 32.0;
+                        let left_carrier = bias + (1.0 - bias.abs()) * wave(phase);
+                        let right_carrier =
+                            bias + (1.0 - bias.abs()) * wave(phase + stereo_pct as f64 / 200.0);
+                        let (left, right) = ring.process_sample(0.75, -0.25);
+                        assert!(
+                            (left as f64 - 0.75 * left_carrier).abs() < 5e-7,
+                            "shape {shape}, bias {bias_pct}, stereo {stereo_pct}, sample {sample}: {left}"
+                        );
+                        assert!(
+                            (right as f64 + 0.25 * right_carrier).abs() < 5e-7,
+                            "shape {shape}, bias {bias_pct}, stereo {stereo_pct}, sample {sample}: {right}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cycle_repeats_after_an_exact_fractional_wrap() {
+        let mut ring = RingEffect::new();
+        ring.set_sample_rate(30_000.0);
+        ring.set_param(0, 5_000.0);
+        ring.set_param(1, 1.0);
+        let cycle: Vec<_> = (0..6).map(|_| ring.process_sample(1.0, -0.5)).collect();
+        for _ in 0..8 {
+            for expected in &cycle {
+                assert_eq!(ring.process_sample(1.0, -0.5), *expected);
+            }
+        }
+    }
+
+    fn configured_ring() -> RingEffect {
+        let mut ring = RingEffect::new();
+        ring.set_sample_rate(32_000.0);
+        for (index, value) in [1_000.0, 1.0, -25.0, 75.0].into_iter().enumerate() {
+            ring.set_param(index, value);
+        }
+        ring
+    }
+
+    #[test]
+    fn frequency_and_sample_rate_changes_preserve_the_running_clock() {
+        let mut ring = configured_ring();
+        ring.set_param(2, 0.0);
+        ring.set_param(3, 50.0);
+        for _ in 0..8 {
+            ring.process_sample(0.75, -0.25);
+        }
+        ring.set_param(0, 500.0);
+        assert_eq!(ring.process_sample(0.75, -0.25), (0.0, 0.25));
+        for _ in 1..8 {
+            ring.process_sample(0.75, -0.25);
+        }
+        ring.set_sample_rate(16_000.0);
+        assert_eq!(ring.process_sample(0.75, -0.25), (-0.375, 0.125));
+        for _ in 1..4 {
+            ring.process_sample(0.75, -0.25);
+        }
+        assert_eq!(ring.process_sample(0.75, -0.25), (-0.75, 0.0));
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_ring_with_the_same_parameters() {
+        let mut used = configured_ring();
+        let mut fresh = configured_ring();
+        for _ in 0..19 {
+            used.process_sample(0.1, -0.2);
+        }
+        used.reset();
+        used.set_param(99, 123.0);
+        for sample in 0..257 {
+            let input = ((sample as f32 * 0.17).sin(), (sample as f32 * 0.31).cos());
+            assert_eq!(
+                used.process_sample(input.0, input.1),
+                fresh.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_limits_and_shape_rounding_preserve_the_running_phase() {
+        for (index, value, endpoint) in [
+            (0, -1.0, 0.1),
+            (0, 9_999.0, 5_000.0),
+            (1, -1.0, 0.0),
+            (1, 0.49, 0.0),
+            (1, 0.5, 1.0),
+            (1, 99.0, 1.0),
+            (2, -999.0, -100.0),
+            (2, 999.0, 100.0),
+            (3, -1.0, 0.0),
+            (3, 999.0, 100.0),
+        ] {
+            let mut clamped = configured_ring();
+            let mut reference = configured_ring();
+            for _ in 0..13 {
+                clamped.process_sample(0.5, -0.75);
+                reference.process_sample(0.5, -0.75);
+            }
+            clamped.set_param(index, value);
+            reference.set_param(index, endpoint);
+            clamped.set_param(99, -123.0);
+            for sample in 0..257 {
+                let input = ((sample as f32 * 0.23).cos(), (sample as f32 * 0.37).sin());
+                assert_eq!(
+                    clamped.process_sample(input.0, input.1),
+                    reference.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn ring_lists_four_parameters_with_the_expected_specs() {
         let r = RingEffect::new();
         let specs = r.parameters();
@@ -204,6 +365,31 @@ mod tests {
         assert_eq!(specs[3].name, "Stereo");
         assert_eq!(specs[3].min, 0.0);
         assert_eq!(specs[3].max, 100.0);
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [
+                (0.1, 5_000.0, 100.0),
+                (0.0, 1.0, 0.0),
+                (-100.0, 100.0, 0.0),
+                (0.0, 100.0, 0.0)
+            ]
+        );
+        assert!(matches!(
+            specs[1].format,
+            ParamFormat::Enum {
+                labels: ["Sine", "Triangle"]
+            }
+        ));
+        assert!(specs[2..].iter().all(|spec| matches!(
+            spec.format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: "%"
+            }
+        )));
     }
 
     #[test]
