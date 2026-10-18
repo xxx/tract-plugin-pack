@@ -16,11 +16,14 @@ use super::{Effect, ParamFormat, ParamScaling, ParamSpec, RepeatEffect};
 /// (100 %); the adjacent-grain sum is exactly `2 − smooth` at every
 /// position, so a matching scale (`1 / (2 − smooth)`) keeps the
 /// summed amplitude unit across the whole Smooth range.
+/// Grain durations round to even sample counts and remain fixed while a grain plays.
 ///
 /// **Trade-offs:**
 /// - Output is dry passthrough until the ring has filled with at least
 ///   one capture window of audio, so the user always hears something
 ///   when the effect first engages.
+/// - Refresh is capped at half the ring capacity to retain the active
+///   capture while recording the next one, including during automation.
 /// - Latency reported as 0: the granulation delay (= one Refresh
 ///   interval) is *the effect*, not a fixed plugin delay PDC should
 ///   compensate for. Same call as Repeat.
@@ -37,7 +40,7 @@ pub struct StretchEffect {
     ring_r: Vec<f32>,
     write_idx: usize,
     /// Capture-clock phase in `[0, 1)`. Wrap → fire a Refresh tick.
-    capture_phase: f32,
+    capture_phase: f64,
     /// Index into the ring where the active capture window starts.
     /// Updated on each Refresh tick.
     capture_origin: usize,
@@ -47,10 +50,10 @@ pub struct StretchEffect {
     /// Read pointer within the capture window, `0..capture_window`.
     /// Advances at `pace` samples per output sample so it traverses the
     /// window in exactly `capture_period` output samples.
-    read_pos: f32,
-    /// Grain-spawn phase in `[0, 1)`. Wrap → spawn a new grain in the
-    /// next available slot.
-    grain_spawn_phase: f32,
+    read_pos: f64,
+    /// Samples until the next grain. Each spawn latches an integer
+    /// half-grain interval so adjacent windows remain complementary.
+    grain_samples_until_spawn: usize,
     /// Active grain pool. 4 slots — at 50 % overlap, never more than 2
     /// are simultaneously active in steady state; the extra two cover
     /// the brief overlap during grain hand-off.
@@ -166,7 +169,7 @@ impl StretchEffect {
             capture_origin: 0,
             capture_window: 0.0,
             read_pos: 0.0,
-            grain_spawn_phase: 1.0,
+            grain_samples_until_spawn: 0,
             grains: [StretchGrain::default(); 4],
             primed: false,
             samples_since_reset: 0,
@@ -185,14 +188,17 @@ impl StretchEffect {
     fn capture_period_samples(&self) -> f32 {
         let beats = Self::refresh_beats(self.refresh_idx.round() as usize);
         let sec_per_beat = 60.0 / self.bpm.max(1.0);
-        (beats * sec_per_beat * self.sample_rate).max(1.0)
+        (beats * sec_per_beat * self.sample_rate)
+            .max(1.0)
+            .min((Self::BUF_LEN / 2) as f32)
     }
 
     /// Grain length in samples — what each individual snippet plays for
-    /// at original speed.
+    /// at original speed. Even lengths give exact half-grain hops.
     fn grain_length_samples(&self) -> f32 {
         let hz = self.grain_hz.clamp(Self::GRAIN_MIN_HZ, Self::GRAIN_MAX_HZ);
-        (self.sample_rate / hz).max(2.0)
+        let samples = (self.sample_rate / hz).max(2.0);
+        (samples * 0.5).round() * 2.0
     }
 }
 
@@ -219,7 +225,7 @@ impl Effect for StretchEffect {
         let next_capture_window = (capture_period * pace).max(Self::MIN_WINDOW_SAMPLES as f32);
 
         // Capture clock.
-        self.capture_phase += 1.0 / capture_period;
+        self.capture_phase += 1.0 / f64::from(capture_period);
         let phase_fired = if self.capture_phase >= 1.0 {
             self.capture_phase -= 1.0;
             true
@@ -255,10 +261,9 @@ impl Effect for StretchEffect {
         // Grain scheduler: spawn rate = 2 / grain_length so adjacent
         // grains hit 50 % overlap, the standard granular setting.
         let grain_length = self.grain_length_samples();
-        let spawn_period = (grain_length * 0.5).max(1.0);
-        self.grain_spawn_phase += 1.0 / spawn_period;
-        if self.grain_spawn_phase >= 1.0 {
-            self.grain_spawn_phase -= 1.0;
+        let spawn_period = (grain_length as usize) / 2;
+        if self.grain_samples_until_spawn == 0 {
+            self.grain_samples_until_spawn = spawn_period;
             // Grain start lives at (capture_origin + read_pos) — the
             // crawling read pointer determines what audio each grain
             // reads. Find the first inactive slot; if all slots are
@@ -285,13 +290,14 @@ impl Effect for StretchEffect {
                 length: grain_length,
             };
         }
+        self.grain_samples_until_spawn -= 1;
 
         // Advance the read pointer at the stretch rate. Saturate at
         // capture_window so degenerate state can't index past it; the
         // capture-clock math keeps this in sync in normal operation.
-        self.read_pos += pace;
-        if self.read_pos >= self.capture_window {
-            self.read_pos = self.capture_window;
+        self.read_pos += f64::from(pace);
+        if self.read_pos >= f64::from(self.capture_window) {
+            self.read_pos = f64::from(self.capture_window);
         }
 
         // Sum active grains with the Smooth-blended window. The window
@@ -344,7 +350,7 @@ impl Effect for StretchEffect {
         self.capture_origin = 0;
         self.capture_window = 0.0;
         self.read_pos = 0.0;
-        self.grain_spawn_phase = 1.0;
+        self.grain_samples_until_spawn = 0;
         for g in self.grains.iter_mut() {
             *g = StretchGrain::default();
         }
@@ -375,6 +381,398 @@ mod tests {
     use super::*;
     use crate::effects::{Effect, ParamFormat, ParamScaling};
 
+    fn configured_stretch(pace: f32, refresh: f32, grain_hz: f32, smooth: f32) -> StretchEffect {
+        let mut stretch = StretchEffect::new();
+        stretch.set_sample_rate(1_024.0);
+        stretch.set_bpm(240.0);
+        for (index, value) in [pace, refresh, grain_hz, smooth].into_iter().enumerate() {
+            stretch.set_param(index, value);
+        }
+        stretch
+    }
+
+    #[test]
+    fn half_overlapping_grains_preserve_constant_stereo_gain_after_startup() {
+        for smooth in [0.0, 50.0, 100.0] {
+            let mut stretch = configured_stretch(1.0, 0.0, 8.0, smooth);
+            for sample in 0..512 {
+                let actual = stretch.process_sample(1.0, -0.25);
+                if sample >= 15 + 64 {
+                    assert!(
+                        (actual.0 - 1.0).abs() < 3e-6,
+                        "smooth {smooth}, sample {sample}: {actual:?}"
+                    );
+                    assert!((actual.1 + 0.25).abs() < 3e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_grain_rates_preserve_steady_stereo_gain() {
+        for (sample_rate, count, settled) in [(1_024.0, 4_096, 511), (48_000.0, 20_000, 14_000)] {
+            for smooth in [0.0, 50.0, 100.0] {
+                let mut stretch = configured_stretch(0.5, 8.0, 31.0, smooth);
+                stretch.set_sample_rate(sample_rate);
+                stretch.set_bpm(120.0);
+                for sample in 0..count {
+                    let actual = stretch.process_sample(1.0, -0.25);
+                    if sample >= settled {
+                        assert!(
+                            (actual.0 - 1.0).abs() < 3e-6,
+                            "rate {sample_rate}, smooth {smooth}, sample {sample}: {actual:?}"
+                        );
+                        assert!((actual.1 + 0.25).abs() < 3e-6);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pace_automation_uses_the_existing_window_until_the_next_refresh() {
+        let mut stretch = configured_stretch(0.5, 8.0, 8.0, 0.0);
+        for sample in 0..320 {
+            if sample == 160 {
+                stretch.set_param(0, 0.25);
+            }
+            let input = (sample as f32 / 1_024.0, (256.0 - sample as f32) / 512.0);
+            let actual = stretch.process_sample(input.0, input.1);
+            if (160..255).contains(&sample) {
+                assert_eq!(stretch.capture_window, 128.0);
+            }
+            if sample >= 255 {
+                assert_eq!(stretch.capture_window, 64.0);
+            }
+            let expected = match sample {
+                191 => Some((0.04296875, 0.4140625)),
+                223 => Some((0.07421875, 0.3515625)),
+                255 => Some((0.13671875, 0.2265625)),
+                287 => Some((0.16796875, 0.1640625)),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                assert_eq!(actual, expected, "sample {sample}");
+            }
+        }
+    }
+
+    #[test]
+    fn long_refresh_windows_fit_while_recording_the_next_capture() {
+        let mut stretch = configured_stretch(1.0, 13.0, 200.0, 0.0);
+        stretch.set_sample_rate(192_000.0);
+        stretch.set_bpm(1.0);
+        assert_eq!(stretch.capture_period_samples(), 384_000.0);
+        for sample in 0..384_000 {
+            let actual = stretch.process_sample(0.25, -0.5);
+            assert!(actual.0.is_finite() && actual.1.is_finite());
+            assert_eq!(stretch.primed, sample == 383_999);
+        }
+        assert_eq!(stretch.capture_window, 384_000.0);
+        assert_eq!(stretch.capture_origin, 0);
+    }
+
+    #[test]
+    fn long_capture_clocks_stay_within_one_sample_of_the_host_tempo() {
+        let mut stretch = configured_stretch(0.25, 8.0, 200.0, 0.0);
+        stretch.set_sample_rate(100_000.0);
+        stretch.set_bpm(60.0);
+        let mut first_refresh = None;
+        for sample in 0..100_002 {
+            stretch.process_sample(0.25, -0.5);
+            if stretch.capture_origin != 0 {
+                first_refresh = Some(sample);
+                break;
+            }
+        }
+        assert!(
+            matches!(first_refresh, Some(99_999..=100_000)),
+            "first refresh: {first_refresh:?}"
+        );
+    }
+
+    #[test]
+    fn the_read_cursor_keeps_the_selected_pace_over_a_long_capture() {
+        let mut stretch = configured_stretch(0.3, 8.0, 200.0, 0.0);
+        stretch.set_sample_rate(100_000.0);
+        stretch.set_bpm(60.0);
+        for _ in 0..80_000 {
+            stretch.process_sample(0.25, -0.5);
+        }
+        assert_eq!(stretch.capture_origin, 0);
+        assert!(
+            (stretch.read_pos - 50_001.0 * 0.3).abs() < 0.003,
+            "read position {}",
+            stretch.read_pos
+        );
+    }
+
+    #[test]
+    fn stereo_ramp_anchors_match_analytic_hann_overlap_and_capture_timing() {
+        for (smooth, at_64, at_128) in [
+            (0.0, (0.046875, 0.40625), (0.109375, 0.28125)),
+            (
+                50.0,
+                (0.052083333333, 0.395833333333),
+                (0.104166666667, 0.291666666667),
+            ),
+            (100.0, (0.0625, 0.375), (0.09375, 0.3125)),
+        ] {
+            let mut stretch = configured_stretch(0.5, 8.0, 8.0, smooth);
+            stretch.write_idx = StretchEffect::BUF_LEN - 64;
+            for sample in 0..320 {
+                let input = (sample as f32 / 1_024.0, (256.0 - sample as f32) / 512.0);
+                let actual = stretch.process_sample(input.0, input.1);
+                if sample < 127 {
+                    assert_eq!(actual, input);
+                }
+                let expected = match sample {
+                    159 => Some((0.015625, 0.21875)),
+                    191 => Some(at_64),
+                    223 => Some((0.078125, 0.34375)),
+                    255 => Some(at_128),
+                    287 => Some((0.140625, 0.21875)),
+                    _ => None,
+                };
+                if let Some(expected) = expected {
+                    assert!(
+                        (actual.0 as f64 - expected.0).abs() < 3e-6,
+                        "smooth {smooth}, sample {sample}: {actual:?} vs {expected:?}"
+                    );
+                    assert!((actual.1 as f64 - expected.1).abs() < 3e-6);
+                }
+            }
+        }
+    }
+
+    fn seeded_grain_processor(smooth: f32) -> StretchEffect {
+        let mut stretch = configured_stretch(0.5, 8.0, 8.0, smooth);
+        stretch.primed = true;
+        stretch.capture_window = 128.0;
+        stretch.capture_phase = 0.0;
+        stretch.grain_samples_until_spawn = 64;
+        stretch.ring_l.fill(0.75);
+        stretch.ring_r.fill(-0.375);
+        stretch
+    }
+
+    #[test]
+    fn a_grain_follows_the_analytic_blended_hann_window_and_retires() {
+        for smooth in [0.0, 25.0, 50.0, 100.0] {
+            let mut stretch = seeded_grain_processor(smooth);
+            stretch.grains[0] = StretchGrain {
+                active: true,
+                start_idx: StretchEffect::BUF_LEN - 4,
+                elapsed: 0.0,
+                length: 8.0,
+            };
+            for elapsed in 0..9 {
+                let actual = stretch.process_sample(0.75, -0.375);
+                let expected = if elapsed == 8 {
+                    0.0
+                } else {
+                    let hann = (std::f64::consts::PI * elapsed as f64 / 8.0).sin().powi(2);
+                    let amount = smooth as f64 / 100.0;
+                    ((1.0 - amount) + amount * hann) / (2.0 - amount)
+                };
+                assert!((actual.0 as f64 - 0.75 * expected).abs() < 3e-7);
+                assert!((actual.1 as f64 + 0.375 * expected).abs() < 3e-7);
+            }
+            assert!(!stretch.grains[0].active);
+        }
+    }
+
+    #[test]
+    fn paired_hann_windows_sum_to_unity_at_every_smooth_setting() {
+        for smooth in [0.0, 25.0, 50.0, 100.0] {
+            let mut stretch = seeded_grain_processor(smooth);
+            for (slot, elapsed) in [(0, 0.0), (1, 4.0)] {
+                stretch.grains[slot] = StretchGrain {
+                    active: true,
+                    start_idx: slot * 16,
+                    elapsed,
+                    length: 8.0,
+                };
+            }
+            for _ in 0..4 {
+                let actual = stretch.process_sample(0.75, -0.375);
+                assert!((actual.0 - 0.75).abs() < 3e-7);
+                assert!((actual.1 + 0.375).abs() < 3e-7);
+            }
+        }
+    }
+
+    #[test]
+    fn new_grains_use_a_free_slot_before_evicting_the_oldest() {
+        for free_slot in [None, Some(0), Some(2)] {
+            let mut stretch = seeded_grain_processor(50.0);
+            stretch.capture_origin = 50;
+            stretch.read_pos = 3.5;
+            stretch.grain_samples_until_spawn = 0;
+            for (slot, elapsed) in [4.0, 40.0, 12.0, 24.0].into_iter().enumerate() {
+                stretch.grains[slot] = StretchGrain {
+                    active: true,
+                    start_idx: 100 * (slot + 1),
+                    elapsed,
+                    length: 128.0,
+                };
+            }
+            if let Some(slot) = free_slot {
+                stretch.grains[slot].active = false;
+            }
+            let previous = stretch.grains;
+            stretch.process_sample(0.75, -0.375);
+            let selected = free_slot.unwrap_or(1);
+            for (slot, old) in previous.into_iter().enumerate() {
+                let grain = &stretch.grains[slot];
+                assert!(grain.active);
+                assert_eq!(grain.length, 128.0);
+                if slot == selected {
+                    assert_eq!(grain.start_idx, 53);
+                    assert_eq!(grain.elapsed, 1.0);
+                } else {
+                    assert_eq!(grain.start_idx, old.start_idx);
+                    assert_eq!(grain.elapsed, old.elapsed + 1.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grain_clocks_preserve_long_half_grain_intervals() {
+        let mut stretch = configured_stretch(1.0, 0.0, 5.0, 0.0);
+        stretch.set_sample_rate(100_000.0);
+        stretch.set_bpm(23_437.5);
+        let mut starts = Vec::new();
+        for sample in 0..30_020 {
+            stretch.process_sample(0.25, -0.5);
+            if stretch
+                .grains
+                .iter()
+                .any(|grain| grain.active && grain.elapsed == 1.0)
+            {
+                starts.push(sample);
+            }
+        }
+        assert_eq!(starts, [15, 10_015, 20_015, 30_015]);
+    }
+
+    #[test]
+    fn grain_duration_changes_apply_at_the_next_scheduled_spawn() {
+        let mut stretch = configured_stretch(1.0, 0.0, 8.0, 0.0);
+        for _ in 0..20 {
+            stretch.process_sample(0.25, -0.5);
+        }
+        stretch.set_param(2, 31.0);
+        for sample in 20..80 {
+            stretch.process_sample(0.25, -0.5);
+            assert_eq!(stretch.grains[0].length, 128.0);
+            assert_eq!(stretch.grains[0].elapsed, (sample - 14) as f32);
+            if sample < 79 {
+                assert!(stretch.grains[1..].iter().all(|grain| !grain.active));
+            }
+        }
+        assert_eq!(stretch.grains[1].length, 34.0);
+        assert_eq!(stretch.grains[1].elapsed, 1.0);
+        assert_eq!(stretch.grain_samples_until_spawn, 16);
+    }
+
+    #[test]
+    fn refresh_and_grain_lengths_follow_tempo_sample_rate_and_enum_rounding() {
+        let beats = [
+            0.0625, 0.09375, 0.125, 0.1875, 0.25, 0.375, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+        ];
+        let mut stretch = configured_stretch(0.5, 8.0, 8.0, 0.0);
+        for (index, beats) in beats.into_iter().enumerate() {
+            assert_eq!(StretchEffect::refresh_beats(index), beats);
+            stretch.set_param(1, index as f32);
+            for (sample_rate, bpm, samples_per_beat) in
+                [(1_024.0, 240.0, 256.0), (48_000.0, 120.0, 24_000.0)]
+            {
+                stretch.set_sample_rate(sample_rate);
+                stretch.set_bpm(bpm);
+                assert_eq!(stretch.capture_period_samples(), beats * samples_per_beat);
+                assert_eq!(stretch.grain_length_samples(), sample_rate / 8.0);
+            }
+        }
+        for index in [14, usize::MAX] {
+            assert_eq!(StretchEffect::refresh_beats(index), 1.0);
+        }
+        for (sample_rate, hz, samples) in [
+            (48_000.0, 31.0, 1_548.0),
+            (44_100.0, 200.0, 220.0),
+            (1_024.0, 31.0, 34.0),
+        ] {
+            stretch.set_sample_rate(sample_rate);
+            stretch.set_param(2, hz);
+            assert_eq!(stretch.grain_length_samples(), samples);
+        }
+        stretch.set_param(1, -1.0);
+        assert_eq!(stretch.refresh_idx, 0.0);
+        stretch.set_param(1, 6.49);
+        assert_eq!(stretch.refresh_idx, 6.0);
+        stretch.set_param(1, 6.5);
+        assert_eq!(stretch.refresh_idx, 7.0);
+        stretch.set_param(3, -1.0);
+        assert_eq!(stretch.smooth_pct, 0.0);
+        stretch.set_sample_rate(0.0);
+        stretch.set_bpm(-120.0);
+        assert_eq!(stretch.sample_rate, 1.0);
+        assert_eq!(stretch.bpm, 1.0);
+        assert_eq!(stretch.grain_length_samples(), 2.0);
+        stretch.set_bpm(1_000_000.0);
+        assert_eq!(stretch.capture_period_samples(), 1.0);
+        stretch.set_sample_rate(f32::INFINITY);
+        stretch.set_bpm(f32::INFINITY);
+        assert_eq!(stretch.capture_period_samples(), 1.0);
+    }
+
+    #[test]
+    fn parameter_changes_preserve_active_grains_capture_and_clocks() {
+        let mut changed = configured_stretch(0.5, 8.0, 8.0, 50.0);
+        let mut reference = configured_stretch(0.5, 8.0, 8.0, 50.0);
+        for sample in 0..320 {
+            let input = ((sample as f32 * 0.17).sin(), (sample as f32 * 0.31).cos());
+            changed.process_sample(input.0, input.1);
+            reference.process_sample(input.0, input.1);
+        }
+        changed.set_sample_rate(48_000.0);
+        changed.set_bpm(120.0);
+        for (index, value) in [0.25, 13.0, 200.0, 100.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_sample_rate(1_024.0);
+        changed.set_bpm(240.0);
+        for (index, value) in [0.5, 8.0, 8.0, 50.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_param(99, 123.0);
+        for sample in 320..720 {
+            let input = ((sample as f32 * 0.13).cos(), (sample as f32 * 0.23).sin());
+            assert_eq!(
+                changed.process_sample(input.0, input.1),
+                reference.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_granulator_with_the_current_settings() {
+        let mut used = configured_stretch(0.25, 8.0, 16.0, 25.0);
+        let mut fresh = configured_stretch(0.25, 8.0, 16.0, 25.0);
+        for sample in 0..333 {
+            used.process_sample((sample as f32 * 0.17).sin(), 0.5);
+        }
+        used.reset();
+        for sample in 0..512 {
+            let input = ((sample as f32 * 0.13).cos(), -0.25);
+            assert_eq!(
+                used.process_sample(input.0, input.1),
+                fresh.process_sample(input.0, input.1)
+            );
+        }
+    }
+
     #[test]
     fn stretch_lists_four_parameters_with_the_expected_specs() {
         let s = StretchEffect::new();
@@ -392,6 +790,44 @@ mod tests {
         assert_eq!(specs[2].max, 200.0);
         assert_eq!(specs[3].name, "Smooth");
         assert_eq!(specs[3].max, 100.0);
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [
+                (0.05, 1.0, 0.5),
+                (0.0, 13.0, 8.0),
+                (5.0, 200.0, 30.0),
+                (0.0, 100.0, 50.0)
+            ]
+        );
+        assert!(matches!(specs[0].scaling, ParamScaling::Linear));
+        assert!(matches!(
+            specs[0].format,
+            ParamFormat::Number {
+                decimals: 2,
+                unit: "x"
+            }
+        ));
+        assert!(matches!(specs[1].scaling, ParamScaling::Linear));
+        assert!(matches!(
+            specs[1].format,
+            ParamFormat::Enum {
+                labels: [
+                    "1/64", "1/64.", "1/32", "1/32.", "1/16", "1/16.", "1/8", "1/8.", "1/4",
+                    "1/4.", "1/2", "1/2.", "1/1", "1/1."
+                ]
+            }
+        ));
+        assert!(matches!(specs[3].scaling, ParamScaling::Linear));
+        assert!(matches!(
+            specs[3].format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: "%"
+            }
+        ));
     }
 
     #[test]

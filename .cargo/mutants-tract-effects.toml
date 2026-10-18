@@ -13,6 +13,7 @@ examine_re = [
     '^tract-effects/src/effects/(phaser|vibrato)\.rs:',
     '^tract-effects/src/effects/fm\.rs:',
     '^tract-effects/src/effects/(delay|repeat)\.rs:',
+    '^tract-effects/src/effects/stretch\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -87,4 +88,6 @@ exclude_re = [
     '^tract-effects/src/effects/repeat\.rs:\d+:43: replace > with >= in <impl Effect for RepeatEffect>::process_sample$',
     # Smooth already limits the fade to half a bounded loop, so a larger cap is redundant.
     '^tract-effects/src/effects/repeat\.rs:\d+:56: replace / with \* in <impl Effect for RepeatEffect>::process_sample$',
+    # Priming always installs a window of at least 16 samples; reset clears both.
+    '^tract-effects/src/effects/stretch\.rs:\d+:25: replace \|\| with && in <impl Effect for StretchEffect>::process_sample$',
 ]
