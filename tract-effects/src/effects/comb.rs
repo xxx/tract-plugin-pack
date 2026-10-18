@@ -162,8 +162,8 @@ impl CombEffect {
             (self.pitch_hz * (-stereo_oct).exp2()).clamp(Self::PITCH_MIN_HZ, Self::PITCH_MAX_HZ);
         let pitch_r =
             (self.pitch_hz * stereo_oct.exp2()).clamp(Self::PITCH_MIN_HZ, Self::PITCH_MAX_HZ);
-        let d_l = (self.sample_rate / pitch_l).clamp(2.0, (Self::DELAY_BUF_LEN - 2) as f32);
-        let d_r = (self.sample_rate / pitch_r).clamp(2.0, (Self::DELAY_BUF_LEN - 2) as f32);
+        let d_l = (self.sample_rate / pitch_l).clamp(2.0, (Self::DELAY_BUF_LEN - 1) as f32);
+        let d_r = (self.sample_rate / pitch_r).clamp(2.0, (Self::DELAY_BUF_LEN - 1) as f32);
         (d_l, d_r)
     }
 }
@@ -274,6 +274,180 @@ mod tests {
     use crate::effects::{Effect, ParamFormat, ParamScaling};
 
     #[test]
+    fn lowest_pitch_uses_the_full_delay_capacity() {
+        for sample_rate in [192_000.0, 384_000.0] {
+            let mut comb = CombEffect::new();
+            comb.set_sample_rate(sample_rate);
+            comb.set_param(0, 20.0);
+            comb.set_param(1, 1.0);
+            comb.set_param(2, 50.0);
+            assert_eq!(comb.process_sample(1.0, -0.5), (1.0, -0.5));
+            for sample in 1..9_600 {
+                assert_eq!(
+                    comb.process_sample(0.0, 0.0),
+                    (0.0, 0.0),
+                    "early echo at sample {sample}, sample rate {sample_rate}"
+                );
+            }
+            assert_eq!(comb.process_sample(0.0, 0.0), (0.5, -0.25));
+            for _ in 0..9_600 {
+                assert_eq!(comb.process_sample(0.0, 0.0), (0.0, 0.0));
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_taps_interpolate_across_the_ring_boundary() {
+        let history = [2.0, -4.0, 6.0, 10.0, -8.0, 14.0];
+        for (write, delay, expected) in [
+            (0, 2.25, -3.5),
+            (1, 2.25, 8.5),
+            (5, 2.25, 9.0),
+            (1, 1.5, 8.0),
+            (4, 4.75, 11.0),
+            (5, 5.0, 2.0),
+        ] {
+            assert_eq!(CombEffect::read_tap(&history, write, delay), expected);
+        }
+    }
+
+    #[test]
+    fn signed_impulse_responses_match_each_comb_topology() {
+        for mode in 0..3 {
+            for (depth, alpha) in [
+                (-100.0, -0.95_f64),
+                (-60.0, -0.6),
+                (0.0, 0.0),
+                (60.0, 0.6),
+                (100.0, 0.95),
+            ] {
+                let mut comb = CombEffect::new();
+                comb.set_param(0, 4_000.0);
+                comb.set_param(1, mode as f32);
+                comb.set_param(2, depth);
+                for sample in 0..121 {
+                    let expected = if sample == 0 {
+                        if mode == 2 { -alpha } else { 1.0 }
+                    } else if sample % 12 != 0 {
+                        0.0
+                    } else {
+                        let echo = sample / 12;
+                        match mode {
+                            0 => alpha.powi(echo),
+                            1 => {
+                                if echo == 1 {
+                                    alpha
+                                } else {
+                                    0.0
+                                }
+                            }
+                            _ => (1.0 - alpha * alpha) * alpha.powi(echo - 1),
+                        }
+                    };
+                    let input = if sample == 0 { 1.0 } else { 0.0 };
+                    let (left, right) = comb.process_sample(input, -0.25 * input);
+                    assert!(
+                        (left as f64 - expected).abs() < 1e-6,
+                        "mode {mode}, depth {depth}, sample {sample}: {left} vs {expected}"
+                    );
+                    assert!(
+                        (right as f64 + 0.25 * expected).abs() < 1e-6,
+                        "mode {mode}, depth {depth}, sample {sample}: right {right}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn damping_shapes_the_delayed_impulse_on_both_channels() {
+        for (amount, coefficient) in [(63.0, 0.63_f64), (100.0, 0.99)] {
+            let mut comb = CombEffect::new();
+            comb.set_param(0, 4_000.0);
+            comb.set_param(1, 1.0);
+            comb.set_param(2, -40.0);
+            comb.set_param(3, amount);
+            for sample in 0..512 {
+                let expected = match sample {
+                    0 => 1.0,
+                    1..12 => 0.0,
+                    _ => -0.4 * (1.0 - coefficient) * coefficient.powi(sample - 12),
+                };
+                let input = if sample == 0 { 1.0 } else { 0.0 };
+                let (left, right) = comb.process_sample(input, -0.3 * input);
+                assert!(
+                    (left as f64 - expected).abs() < 2e-7,
+                    "damping {amount}, sample {sample}: {left} vs {expected}"
+                );
+                assert!((right as f64 + 0.3 * expected).abs() < 2e-7);
+            }
+        }
+    }
+
+    #[test]
+    fn stereo_tuning_uses_opposite_octave_offsets_and_pitch_limits() {
+        let mut comb = CombEffect::new();
+        comb.set_sample_rate(96_000.0);
+        comb.set_param(0, 750.0);
+        comb.set_param(4, 60.0);
+        let (left, right) = comb.channel_delays();
+        assert!((left as f64 - 128.0 * 2.0_f64.powf(0.3)).abs() < 2e-5);
+        assert!((right as f64 - 128.0 * 2.0_f64.powf(-0.3)).abs() < 2e-5);
+        comb.set_param(4, 100.0);
+        comb.set_param(0, 20.0);
+        let (left, right) = comb.channel_delays();
+        assert_eq!(left, 4_800.0);
+        assert!((right as f64 - 4_800.0 / 2.0_f64.sqrt()).abs() < 5e-4);
+        comb.set_param(0, 5_000.0);
+        let (left, right) = comb.channel_delays();
+        assert!((left as f64 - 19.2 * 2.0_f64.sqrt()).abs() < 5e-6);
+        assert!((right - 19.2).abs() < 2e-6);
+    }
+
+    #[test]
+    fn short_delays_keep_two_samples_of_history() {
+        let mut comb = CombEffect::new();
+        comb.set_sample_rate(8_000.0);
+        comb.set_param(0, 5_000.0);
+        comb.set_param(1, 1.0);
+        comb.set_param(2, 50.0);
+        assert_eq!(comb.process_sample(1.0, -0.5), (1.0, -0.5));
+        assert_eq!(comb.process_sample(0.0, 0.0), (0.0, 0.0));
+        assert_eq!(comb.process_sample(0.0, 0.0), (0.5, -0.25));
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_comb_with_the_same_settings() {
+        for mode in 0..3 {
+            let configured = || {
+                let mut comb = CombEffect::new();
+                comb.set_sample_rate(96_000.0);
+                for (index, value) in [250.0, mode as f32, -85.0, 73.0, 45.0]
+                    .into_iter()
+                    .enumerate()
+                {
+                    comb.set_param(index, value);
+                }
+                comb
+            };
+            let mut used = configured();
+            let mut fresh = configured();
+            for sample in 0..10_000 {
+                used.process_sample((sample as f32 * 0.13).sin(), (sample as f32 * 0.27).cos());
+            }
+            used.reset();
+            used.set_param(99, 123.0);
+            for sample in 0..1_500 {
+                let input = ((sample as f32 * 0.19).cos(), (sample as f32 * 0.31).sin());
+                assert_eq!(
+                    used.process_sample(input.0, input.1),
+                    fresh.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn comb_lists_five_parameters_with_the_expected_specs() {
         let c = CombEffect::new();
         let specs = c.parameters();
@@ -284,6 +458,7 @@ mod tests {
         assert_eq!(specs[0].min, 20.0);
         assert_eq!(specs[0].max, 5_000.0);
         assert_eq!(specs[1].name, "Mode");
+        assert_eq!(specs[1].max, 2.0);
         assert!(matches!(specs[1].format, ParamFormat::Enum { .. }));
         assert_eq!(specs[1].default, 0.0); // Resonant
         assert_eq!(specs[2].name, "Depth");

@@ -29,7 +29,7 @@ pub struct SvfEffect {
     sample_rate: f32,
     /// Butterworth (Q = 0.707, no peak) coefficients — used by every
     /// stage except the last. Tuple order is `(a1, a2, a3, k)` where
-    /// `k = 1/Q` (needed for the HP tap `v3 − k · v1`).
+    /// `k = 1/Q` (needed for the HP tap `x − k · v1 − v2`).
     butter: (f32, f32, f32, f32),
     /// User-resonance coefficients — used by the LAST cascade stage only.
     /// At pole count = 2 (one stage), this is also the only set in play.
@@ -124,7 +124,7 @@ impl SvfEffect {
     /// Build a `(a1, a2, a3, k)` TPT-SVF coefficient tuple for the given
     /// Q. Q < 0.5 critically damps; Q = 0.707 is Butterworth (flat,
     /// 3 dB at cutoff); higher Q peaks the response at cutoff. `k = 1/Q`
-    /// is needed for the HP output tap (`v3 − k · v1`).
+    /// is needed for the HP output tap (`x − k · v1 − v2`).
     fn svf_coefs(g: f32, q: f32) -> (f32, f32, f32, f32) {
         let k = 1.0 / q.max(0.0001);
         let a1 = 1.0 / (1.0 + g * (g + k));
@@ -149,7 +149,7 @@ impl SvfEffect {
     ///
     /// * `0` (LP): `v2` — lowpass output.
     /// * `1` (BP): `v1` — bandpass output.
-    /// * `2` (HP): `v3 − k · v1` — highpass output.
+    /// * `2` (HP): `x − k · v1 − v2` — highpass output.
     ///
     /// `coefs` is the precomputed `(a1, a2, a3, k)` tuple — picks
     /// Butterworth or resonance per stage.
@@ -173,7 +173,7 @@ impl SvfEffect {
         match type_idx {
             SVF_TYPE_LP => v2,
             SVF_TYPE_BP => v1,
-            _ => v3 - k * v1, // HP
+            _ => x - k * v1 - v2, // HP
         }
     }
 }
@@ -248,6 +248,190 @@ mod tests {
     use crate::effects::{Effect, ParamFormat, ParamScaling};
 
     #[test]
+    fn all_taps_and_pole_counts_match_the_analytical_transfer_function() {
+        for (sample_rate, requested_cutoff, frequency, resonance) in [
+            (48_000.0, 1_500.0, 375.0, 0.0),
+            (96_000.0, 3_000.0, 3_000.0, 0.35),
+            (44_100.0, 2_205.0, 4_410.0, 1.0),
+            (8_000.0, 20_000.0, 3_000.0, 0.25),
+        ] {
+            for kind in 0..3 {
+                for stages in 1..=4 {
+                    let mut svf = SvfEffect::new();
+                    svf.set_sample_rate(sample_rate);
+                    svf.set_param(0, requested_cutoff);
+                    svf.set_param(1, resonance);
+                    svf.set_param(2, kind as f32);
+                    svf.set_param(3, (stages - 1) as f32);
+
+                    // Bilinear transform of H(s) = {1, s, s²}/(s² + s/Q + 1).
+                    let cutoff = (requested_cutoff as f64).min(0.49 * sample_rate as f64);
+                    let u = (std::f64::consts::PI * frequency / sample_rate as f64).tan()
+                        / (std::f64::consts::PI * cutoff / sample_rate as f64).tan();
+                    let (numerator, numerator_phase) = match kind {
+                        0 => (1.0, 0.0),
+                        1 => (u, std::f64::consts::FRAC_PI_2),
+                        _ => (u * u, std::f64::consts::PI),
+                    };
+                    let mut gain = 1.0;
+                    let mut phase = 0.0;
+                    for stage in 1..=stages {
+                        let q = if stage == stages {
+                            0.5 + 9.5 * resonance as f64
+                        } else {
+                            std::f64::consts::FRAC_1_SQRT_2
+                        };
+                        let real = 1.0 - u * u;
+                        let imag = u / q;
+                        gain *= numerator / real.hypot(imag);
+                        phase += numerator_phase - imag.atan2(real);
+                    }
+
+                    let mut measured = [0.0_f64; 4];
+                    for sample in 0..10_240 {
+                        let angle =
+                            std::f64::consts::TAU * frequency * sample as f64 / sample_rate as f64;
+                        let (sin, cos) = angle.sin_cos();
+                        let (left, right) = svf.process_sample(sin as f32, (-0.37 * cos) as f32);
+                        if sample >= 5_120 {
+                            measured[0] += left as f64 * sin;
+                            measured[1] += left as f64 * cos;
+                            measured[2] += right as f64 * sin;
+                            measured[3] += right as f64 * cos;
+                        }
+                    }
+                    let expected = [
+                        gain * phase.cos(),
+                        gain * phase.sin(),
+                        0.37 * gain * phase.sin(),
+                        -0.37 * gain * phase.cos(),
+                    ];
+                    for (actual, expected) in measured.into_iter().zip(expected) {
+                        let actual = actual * 2.0 / 5_120.0;
+                        assert!(
+                            (actual - expected).abs() < 5e-5 * (1.0 + gain),
+                            "rate {sample_rate}, cutoff {requested_cutoff}, frequency {frequency}, resonance {resonance}, kind {kind}, stages {stages}: {actual} vs {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn configured_svf(kind: f32, poles: f32) -> SvfEffect {
+        let mut svf = SvfEffect::new();
+        svf.set_sample_rate(96_000.0);
+        for (index, value) in [2_800.0, 0.63, kind, poles].into_iter().enumerate() {
+            svf.set_param(index, value);
+        }
+        svf
+    }
+
+    #[test]
+    fn single_stage_taps_reconstruct_the_input() {
+        for resonance in [0.0, 0.3, 1.0] {
+            let mut taps = [SvfEffect::new(), SvfEffect::new(), SvfEffect::new()];
+            for (kind, tap) in taps.iter_mut().enumerate() {
+                tap.set_param(0, 7_200.0);
+                tap.set_param(1, resonance);
+                tap.set_param(2, kind as f32);
+            }
+            let k = 1.0 / (0.5 + 9.5 * resonance);
+            for sample in 0..512 {
+                let input = ((sample as f32 * 0.31).sin(), (sample as f32 * 0.57).cos());
+                let low = taps[0].process_sample(input.0, input.1);
+                let band = taps[1].process_sample(input.0, input.1);
+                let high = taps[2].process_sample(input.0, input.1);
+                assert!((low.0 + k * band.0 + high.0 - input.0).abs() < 2e-6);
+                assert!((low.1 + k * band.1 + high.1 - input.1).abs() < 2e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn reset_clears_every_cascade_and_channel_while_retaining_settings() {
+        for kind in 0..3 {
+            for poles in 0..4 {
+                let mut used = configured_svf(kind as f32, poles as f32);
+                let mut fresh = configured_svf(kind as f32, poles as f32);
+                for sample in 0..1_024 {
+                    used.process_sample((sample as f32 * 0.21).sin(), (sample as f32 * 0.43).cos());
+                }
+                used.reset();
+                for sample in 0..256 {
+                    let (left, right) =
+                        ((sample as f32 * 0.17).cos(), (sample as f32 * 0.39).sin());
+                    assert_eq!(
+                        used.process_sample(left, right),
+                        fresh.process_sample(left, right)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parameter_and_sample_rate_changes_preserve_filter_history() {
+        let mut changed = configured_svf(1.0, 3.0);
+        let mut reference = configured_svf(1.0, 3.0);
+        for sample in 0..512 {
+            let input = ((sample as f32 * 0.13).sin(), (sample as f32 * 0.19).cos());
+            changed.process_sample(input.0, input.1);
+            reference.process_sample(input.0, input.1);
+        }
+        changed.set_sample_rate(48_000.0);
+        for (index, value) in [8_000.0, 0.1, 2.0, 0.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_sample_rate(96_000.0);
+        for (index, value) in [2_800.0, 0.63, 1.0, 3.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_param(99, 1.0);
+        for sample in 0..512 {
+            let input = ((sample as f32 * 0.31).cos(), (sample as f32 * 0.23).sin());
+            assert_eq!(
+                changed.process_sample(input.0, input.1),
+                reference.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn parameters_clamp_and_select_the_nearest_enum_value() {
+        for (index, requested, expected) in [
+            (0, -100.0, 20.0),
+            (0, 30_000.0, 20_000.0),
+            (1, -1.0, 0.0),
+            (1, 2.0, 1.0),
+            (2, -1.0, 0.0),
+            (2, 0.49, 0.0),
+            (2, 0.5, 1.0),
+            (2, 1.5, 2.0),
+            (2, 99.0, 2.0),
+            (3, -1.0, 0.0),
+            (3, 0.49, 0.0),
+            (3, 0.5, 1.0),
+            (3, 1.5, 2.0),
+            (3, 2.5, 3.0),
+            (3, 99.0, 3.0),
+        ] {
+            let mut clamped = configured_svf(0.0, 0.0);
+            let mut endpoint = configured_svf(0.0, 0.0);
+            clamped.set_param(index, requested);
+            endpoint.set_param(index, expected);
+            for sample in 0..512 {
+                let input = ((sample as f32 * 0.17).sin(), (sample as f32 * 0.37).cos());
+                assert_eq!(
+                    clamped.process_sample(input.0, input.1),
+                    endpoint.process_sample(input.0, input.1),
+                    "parameter {index}, requested {requested}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn svf_effect_parameters_are_declared() {
         let svf = SvfEffect::new();
         let specs = svf.parameters();
@@ -256,7 +440,19 @@ mod tests {
         assert_eq!(specs[1].name, "Resonance");
         assert_eq!(specs[2].name, "Type");
         assert_eq!(specs[3].name, "Poles");
-        assert!(specs[0].min < specs[0].max);
+        let endpoints: Vec<_> = specs
+            .iter()
+            .map(|spec| (spec.min, spec.max, spec.default))
+            .collect();
+        assert_eq!(
+            endpoints,
+            [
+                (20.0, 20_000.0, 2_000.0),
+                (0.0, 1.0, 0.1),
+                (0.0, 2.0, 0.0),
+                (0.0, 3.0, 0.0)
+            ]
+        );
     }
 
     #[test]
