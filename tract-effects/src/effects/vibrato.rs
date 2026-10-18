@@ -198,6 +198,219 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fractional_reads_interpolate_wrap_and_clamp_to_available_history() {
+        let history = [2.0, -4.0, 6.0, 10.0, -8.0, 14.0, 3.0, -5.0];
+        for (write, delay, expected) in [
+            (0, 2.25, 5.75),
+            (1, 2.25, -3.0),
+            (7, 2.25, 8.5),
+            (2, 2.25, 0.25),
+            (0, 5.5, 8.0),
+            (7, 6.0, -4.0),
+            (0, 2.0, 3.0),
+            (2, -10.0, -4.0),
+            (2, 100.0, -8.0),
+        ] {
+            assert_eq!(VibratoEffect::read_frac(&history, write, delay), expected);
+        }
+    }
+
+    #[test]
+    fn zero_depth_impulses_have_the_exact_integer_or_fractional_delay() {
+        for (sample_rate, first, second) in [(8_000.0, 24, 24), (12_500.0, 37, 38)] {
+            let mut vibrato = VibratoEffect::new();
+            vibrato.set_sample_rate(sample_rate);
+            vibrato.set_param(1, 0.0);
+            for sample in 0..4_200 {
+                let expected = if first == second && sample == first {
+                    (1.0, -0.25)
+                } else if first != second && (sample == first || sample == second) {
+                    (0.5, -0.125)
+                } else {
+                    (0.0, 0.0)
+                };
+                let input = if sample == 0 { 1.0 } else { 0.0 };
+                assert_eq!(
+                    vibrato.process_sample(input, -0.25 * input),
+                    expected,
+                    "rate {sample_rate}, sample {sample}"
+                );
+            }
+        }
+    }
+
+    fn filled_ramp() -> VibratoEffect {
+        let mut vibrato = VibratoEffect::new();
+        vibrato.set_sample_rate(48_000.0);
+        vibrato.set_param(1, 50.0);
+        for (index, (left, right)) in vibrato
+            .delay_l
+            .iter_mut()
+            .zip(&mut vibrato.delay_r)
+            .enumerate()
+        {
+            *left = index as f32 / 1_024.0;
+            *right = -(index as f32) / 2_048.0;
+        }
+        vibrato.write_idx = 1_024;
+        vibrato
+    }
+
+    #[test]
+    fn every_lfo_shape_places_the_delay_tap_at_its_waveform_landmarks() {
+        let q = std::f64::consts::FRAC_1_SQRT_2;
+        for (shape, landmarks) in [
+            [0.0, q, 1.0, q, 0.0, -q, -1.0, -q],
+            [0.0, 0.5, 1.0, 0.5, 0.0, -0.5, -1.0, -0.5],
+            [1.0, 1.0, 1.0, 1.0, -1.0, -1.0, -1.0, -1.0],
+            [-1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (index, wave) in landmarks.into_iter().enumerate() {
+                let mut vibrato = filled_ramp();
+                vibrato.set_param(2, shape as f32);
+                vibrato.phase = index as f32 / 8.0;
+                let delay = 144.0 + 72.0 * wave;
+                let (left, right) = vibrato.process_sample(0.0, 0.0);
+                assert!(
+                    (left as f64 - (1_024.0 - delay) / 1_024.0).abs() < 2e-7,
+                    "shape {shape}, phase {index}/8: {left}"
+                );
+                assert!((right as f64 + (1_024.0 - delay) / 2_048.0).abs() < 2e-7);
+            }
+        }
+    }
+
+    #[test]
+    fn delay_limits_keep_the_output_causal_and_inside_the_buffer() {
+        for (sample_rate, phase, expected_delay) in [(48_000.0, 0.5, 1), (384_000.0, 0.0, 2_046)] {
+            let mut vibrato = VibratoEffect::new();
+            vibrato.set_sample_rate(sample_rate);
+            vibrato.set_param(0, 0.05);
+            vibrato.set_param(1, 100.0);
+            vibrato.set_param(2, 2.0);
+            vibrato.phase = phase;
+            for sample in 0..2_052 {
+                let input = if sample == 0 { 1.0 } else { 0.0 };
+                let expected = if sample == expected_delay {
+                    (1.0, -0.25)
+                } else {
+                    (0.0, 0.0)
+                };
+                assert_eq!(
+                    vibrato.process_sample(input, -0.25 * input),
+                    expected,
+                    "rate {sample_rate}, sample {sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rate_and_sample_rate_changes_preserve_the_clock_and_input_history() {
+        let mut vibrato = filled_ramp();
+        vibrato.set_param(2, 3.0);
+        let mut phase = 0.9995_f64;
+        vibrato.phase = phase as f32;
+        let mut write = 1_024.0;
+        for (sample_rate, rate) in [(32_768.0, 10.0), (48_000.0, 5.0), (96_000.0, 7.0)] {
+            vibrato.set_sample_rate(sample_rate);
+            vibrato.set_param(0, rate);
+            for _ in 0..16 {
+                let delay = (3.0 + 1.5 * (2.0 * phase - 1.0)) * sample_rate as f64 / 1_000.0;
+                let (left, right) = vibrato.process_sample(0.0, 0.0);
+                assert!((left as f64 - (write - delay) / 1_024.0).abs() < 5e-7);
+                assert!((right as f64 + (write - delay) / 2_048.0).abs() < 5e-7);
+                assert!((0.0..1.0).contains(&vibrato.phase));
+                phase = (phase + rate as f64 / sample_rate as f64).fract();
+                write += 1.0;
+            }
+        }
+    }
+
+    #[test]
+    fn zero_depth_keeps_the_clock_running_for_later_modulation() {
+        let mut vibrato = VibratoEffect::new();
+        vibrato.set_sample_rate(32_768.0);
+        vibrato.set_param(0, 16.0);
+        vibrato.set_param(1, 0.0);
+        vibrato.set_param(2, 3.0);
+        for sample in 0..1_536 {
+            vibrato.process_sample(sample as f32 / 1_024.0, -(sample as f32) / 2_048.0);
+        }
+        vibrato.set_param(1, 50.0);
+        // Phase 3/4 gives a 122.88-sample offset into the written ramp.
+        let (left, right) = vibrato.process_sample(1.5, -0.75);
+        assert!((left - 1.38).abs() < 2e-7);
+        assert!((right + 0.69).abs() < 2e-7);
+    }
+
+    fn configured_vibrato() -> VibratoEffect {
+        let mut vibrato = VibratoEffect::new();
+        vibrato.set_sample_rate(32_000.0);
+        for (index, value) in [7.0, 63.0, 1.0].into_iter().enumerate() {
+            vibrato.set_param(index, value);
+        }
+        vibrato
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_vibrato_with_the_same_parameters() {
+        let mut used = configured_vibrato();
+        let mut fresh = configured_vibrato();
+        for sample in 0..2_100 {
+            used.process_sample((sample as f32 * 0.13).sin(), (sample as f32 * 0.31).cos());
+        }
+        used.reset();
+        used.set_param(99, 123.0);
+        for sample in 0..4_200 {
+            let input = ((sample as f32 * 0.17).cos(), (sample as f32 * 0.29).sin());
+            assert_eq!(
+                used.process_sample(input.0, input.1),
+                fresh.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn parameters_clamp_and_round_shapes_without_clearing_history() {
+        for (index, value, endpoint) in [
+            (0, -1.0, 0.05),
+            (0, 99.0, 20.0),
+            (1, -1.0, 0.0),
+            (1, 999.0, 100.0),
+            (2, -1.0, 0.0),
+            (2, 0.49, 0.0),
+            (2, 0.5, 1.0),
+            (2, 1.49, 1.0),
+            (2, 1.5, 2.0),
+            (2, 2.49, 2.0),
+            (2, 2.5, 3.0),
+            (2, 99.0, 3.0),
+        ] {
+            let mut clamped = configured_vibrato();
+            let mut reference = configured_vibrato();
+            for sample in 0..257 {
+                let input = ((sample as f32 * 0.19).sin(), (sample as f32 * 0.37).cos());
+                clamped.process_sample(input.0, input.1);
+                reference.process_sample(input.0, input.1);
+            }
+            clamped.set_param(index, value);
+            reference.set_param(index, endpoint);
+            clamped.set_param(99, -123.0);
+            for sample in 0..2_100 {
+                let input = ((sample as f32 * 0.23).cos(), (sample as f32 * 0.41).sin());
+                assert_eq!(
+                    clamped.process_sample(input.0, input.1),
+                    reference.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn parameters_are_declared() {
         let e = VibratoEffect::new();
         let specs = e.parameters();
@@ -205,6 +418,28 @@ mod tests {
         assert_eq!(specs[0].name, "Rate");
         assert_eq!(specs[1].name, "Depth");
         assert_eq!(specs[2].name, "Shape");
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [(0.05, 20.0, 5.0), (0.0, 100.0, 30.0), (0.0, 3.0, 0.0)]
+        );
+        assert!(matches!(specs[0].scaling, ParamScaling::Log));
+        assert!(matches!(specs[0].format, ParamFormat::Hertz));
+        assert!(matches!(
+            specs[1].format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: "%"
+            }
+        ));
+        assert!(matches!(
+            specs[2].format,
+            ParamFormat::Enum {
+                labels: ["Sine", "Triangle", "Square", "Saw"]
+            }
+        ));
     }
 
     #[test]

@@ -170,6 +170,204 @@ impl Effect for PhaserEffect {
 mod tests {
     use super::*;
     use crate::effects::{Effect, ParamFormat, ParamScaling};
+    use rustfft::num_complex::Complex64;
+
+    #[test]
+    fn allpass_step_uses_the_previous_register_and_signed_coefficient() {
+        for (input, initial, coefficient, output, next) in [
+            (0.5, 0.25, 0.4, 0.05, 0.52),
+            (-0.75, 0.52, 0.4, 0.82, -0.422),
+            (0.6, -0.2, -0.5, 0.1, 0.55),
+        ] {
+            let mut state = initial;
+            assert!(
+                (PhaserEffect::allpass_step(input, &mut state, coefficient) - output).abs() < 2e-7
+            );
+            assert!((state - next).abs() < 2e-7);
+        }
+    }
+
+    #[test]
+    fn quarter_rate_center_exposes_the_four_stage_feedback_echo_spacing() {
+        for (feedback, gain) in [(0.0, 0.0_f64), (50.0, 0.5), (95.0, 0.95)] {
+            let mut phaser = PhaserEffect::new();
+            phaser.set_sample_rate(32_000.0);
+            phaser.set_param(0, 8_000.0);
+            phaser.set_param(1, feedback);
+            for sample in 0..256 {
+                // Each stage is a one-sample delay at the quarter-rate centre.
+                let expected = if sample == 0 {
+                    1.0
+                } else if sample >= 4 && (sample - 4) % 5 == 0 {
+                    gain.powi((sample - 4) / 5)
+                } else {
+                    0.0
+                };
+                let input = if sample == 0 { 1.0 } else { 0.0 };
+                let (left, right) = phaser.process_sample(input, -0.25 * input);
+                assert!(
+                    (left as f64 - expected).abs() < 2e-6,
+                    "feedback {feedback}, sample {sample}: {left} vs {expected}"
+                );
+                assert!((right as f64 + 0.25 * expected).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn stereo_gain_and_phase_match_the_delayed_feedback_transfer() {
+        for (sample_rate, center, feedback, stereo, period) in [
+            (48_000.0, 1_000.0, 0.0, 0.0, 64.0),
+            (96_000.0, 4_000.0, 60.0, 50.0, 32.0),
+            (44_100.0, 2_000.0, 95.0, 100.0, 16.0),
+            (8_000.0, 8_000.0, 30.0, 100.0, 8.0),
+        ] {
+            let mut phaser = PhaserEffect::new();
+            phaser.set_sample_rate(sample_rate);
+            for (index, value) in [center, feedback, stereo].into_iter().enumerate() {
+                phaser.set_param(index, value);
+            }
+            let omega = std::f64::consts::TAU / period;
+            let frequency = sample_rate as f64 / period;
+            let z_delay = Complex64::from_polar(1.0, -omega);
+            let mut expected = [Complex64::new(0.0, 0.0); 2];
+            for (channel, direction) in [-1.0, 1.0].into_iter().enumerate() {
+                let cutoff = (center as f64 * 2.0_f64.powf(direction * stereo as f64 / 200.0))
+                    .clamp(20.0, 0.45 * sample_rate as f64);
+                let u = (std::f64::consts::PI * frequency / sample_rate as f64).tan()
+                    / (std::f64::consts::PI * cutoff / sample_rate as f64).tan();
+                let s = Complex64::new(0.0, u);
+                let cascade = ((1.0 - s) / (1.0 + s)).powu(4);
+                expected[channel] =
+                    1.0 + cascade / (1.0 - feedback as f64 / 100.0 * z_delay * cascade);
+            }
+            let mut measured = [0.0_f64; 4];
+            for sample in 0..16_384 {
+                let (sin, cos) = (omega * sample as f64).sin_cos();
+                let (left, right) = phaser.process_sample(sin as f32, (-0.37 * cos) as f32);
+                if sample >= 8_192 {
+                    measured[0] += left as f64 * sin;
+                    measured[1] += left as f64 * cos;
+                    measured[2] += right as f64 * sin;
+                    measured[3] += right as f64 * cos;
+                }
+            }
+            let targets = [
+                expected[0].re,
+                expected[0].im,
+                0.37 * expected[1].im,
+                -0.37 * expected[1].re,
+            ];
+            let tolerance = 1e-4 * (1.0 + expected[0].norm().max(expected[1].norm()));
+            for (actual, expected) in measured.into_iter().zip(targets) {
+                assert!(
+                    (actual / 4_096.0 - expected).abs() < tolerance,
+                    "rate {sample_rate}, center {center}, feedback {feedback}, stereo {stereo}: {} vs {expected}",
+                    actual / 4_096.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zero_feedback_notches_cancel_dry_at_the_analytical_frequencies() {
+        // f=(sr/PI)*atan(tan(PI*500/sr)*tan(PI/8 or 3PI/8)).
+        for frequency in [207.16804765, 1_205.03306058] {
+            let mut phaser = PhaserEffect::new();
+            phaser.set_param(1, 0.0);
+            for sample in 0..8_192 {
+                let (sin, cos) =
+                    (std::f64::consts::TAU * frequency * sample as f64 / 48_000.0).sin_cos();
+                let (left, right) = phaser.process_sample(sin as f32, (-0.37 * cos) as f32);
+                if sample >= 4_096 {
+                    assert!(left.abs() < 2e-5 && right.abs() < 2e-5);
+                }
+            }
+        }
+    }
+
+    fn configured_phaser() -> PhaserEffect {
+        let mut phaser = PhaserEffect::new();
+        phaser.set_sample_rate(96_000.0);
+        for (index, value) in [1_500.0, 73.0, 65.0].into_iter().enumerate() {
+            phaser.set_param(index, value);
+        }
+        phaser
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_phaser_with_the_same_parameters() {
+        let mut used = configured_phaser();
+        let mut fresh = configured_phaser();
+        for sample in 0..1_024 {
+            used.process_sample((sample as f32 * 0.13).sin(), (sample as f32 * 0.31).cos());
+        }
+        used.reset();
+        for sample in 0..1_024 {
+            let input = ((sample as f32 * 0.17).cos(), (sample as f32 * 0.29).sin());
+            assert_eq!(
+                used.process_sample(input.0, input.1),
+                fresh.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_and_sample_rate_changes_preserve_filter_history() {
+        let mut changed = configured_phaser();
+        let mut reference = configured_phaser();
+        for sample in 0..512 {
+            let input = ((sample as f32 * 0.19).sin(), (sample as f32 * 0.37).cos());
+            changed.process_sample(input.0, input.1);
+            reference.process_sample(input.0, input.1);
+        }
+        changed.set_sample_rate(44_100.0);
+        for (index, value) in [8_000.0, 95.0, 100.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_sample_rate(96_000.0);
+        for (index, value) in [1_500.0, 73.0, 65.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_param(99, -123.0);
+        for sample in 0..512 {
+            let input = ((sample as f32 * 0.23).cos(), (sample as f32 * 0.41).sin());
+            assert_eq!(
+                changed.process_sample(input.0, input.1),
+                reference.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_limits_match_their_endpoint_responses() {
+        for (index, value, endpoint) in [
+            (0, -1.0, 50.0),
+            (0, 99_000.0, 8_000.0),
+            (1, -1.0, 0.0),
+            (1, 999.0, 95.0),
+            (2, -1.0, 0.0),
+            (2, 999.0, 100.0),
+        ] {
+            let mut clamped = configured_phaser();
+            let mut reference = configured_phaser();
+            for sample in 0..256 {
+                let input = ((sample as f32 * 0.19).sin(), (sample as f32 * 0.37).cos());
+                clamped.process_sample(input.0, input.1);
+                reference.process_sample(input.0, input.1);
+            }
+            clamped.set_param(index, value);
+            reference.set_param(index, endpoint);
+            clamped.set_param(99, -123.0);
+            for sample in 0..1_024 {
+                let input = ((sample as f32 * 0.23).cos(), (sample as f32 * 0.41).sin());
+                assert_eq!(
+                    clamped.process_sample(input.0, input.1),
+                    reference.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
 
     #[test]
     fn phaser_lists_three_parameters_with_the_expected_specs() {
@@ -187,6 +385,20 @@ mod tests {
         assert_eq!(specs[2].name, "Stereo");
         assert_eq!(specs[2].min, 0.0);
         assert_eq!(specs[2].max, 100.0);
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [(50.0, 8_000.0, 500.0), (0.0, 95.0, 30.0), (0.0, 100.0, 0.0)]
+        );
+        assert!(specs[1..].iter().all(|spec| matches!(
+            spec.format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: "%"
+            }
+        )));
     }
 
     #[test]
