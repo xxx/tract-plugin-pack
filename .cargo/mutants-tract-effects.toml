@@ -3,6 +3,8 @@ examine_re = [
     '^tract-effects/src/(compressor|modulation|randomize|undo)\.rs:',
     '^tract-effects/src/effects/',
     '^tract-effects/src/editor/view\.rs:',
+    '^tract-effects/src/editor/mod\.rs:\d+:\d+: replace (TriggerChoice::item|EffectEditor::(captures_keyboard|dropdown_open)|Session<[^>]+>::(trigger_items|trigger_index|dropdown_items)|dropdown_items|mseg_color|mseg_node_tooltip_text|ClickTracker<[^>]+>::check_and_update(_at)?) ->',
+    '^tract-effects/src/editor/mod\.rs:\d+:\d+: .* in (TriggerChoice::item|EffectEditor::(captures_keyboard|dropdown_open)|Session<[^>]+>::(trigger_items|trigger_index|dropdown_items)|dropdown_items|mseg_color|mseg_node_tooltip_text|ClickTracker<[^>]+>::check_and_update(_at)?)$',
 ]
 all_features = true
 test_tool = "nextest"

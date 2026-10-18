@@ -1379,7 +1379,10 @@ impl<A: Copy + PartialEq> ClickTracker<A> {
     /// Record this press; return `true` if it is a double-click on the same
     /// control as the previous press within the time window.
     pub fn check_and_update(&mut self, action: A) -> bool {
-        let now = std::time::Instant::now();
+        self.check_and_update_at(action, std::time::Instant::now())
+    }
+
+    fn check_and_update_at(&mut self, action: A, now: std::time::Instant) -> bool {
         let is_double = self.last_action == Some(action)
             && now.duration_since(self.last_time).as_millis() < DOUBLE_CLICK_MS;
         self.last_time = now;
@@ -1448,6 +1451,323 @@ pub fn mseg_node_tooltip_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod editor_helpers {
+        use super::*;
+
+        fn open_menu(editor: &mut EffectEditor, action: EffectAction) {
+            editor.effect_dropdown.open(
+                action,
+                (20.0, 20.0, 140.0, 30.0),
+                widgets::dropdown::DropdownList {
+                    items: &["one", "two"],
+                    sections: &[],
+                },
+                0,
+                true,
+                (800.0, 600.0),
+            );
+        }
+
+        fn with_session(
+            choices: &'static [TriggerChoice],
+            kind: EffectKind,
+            check: impl FnOnce(&mut Session<'_>),
+        ) {
+            let mut editor = EffectEditor::new(choices);
+            let mut effect = TrackEffect {
+                kind,
+                params: effects::default_params_for_kind(kind),
+                ..Default::default()
+            };
+            let mut modulation = TrackModulation::default();
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            let geometry = EditorGeometry {
+                layout: view::effect_layout((16.0, 16.0, 1_304.0, 640.0), 1.0),
+                scale: 1.0,
+                window_size: (1_336.0, 680.0),
+            };
+            let mut session = Session::new(
+                &mut editor,
+                EditorContext {
+                    pointer_position: (0.0, 0.0),
+                    effect: &mut effect,
+                    modulation: &mut modulation,
+                    text_renderer: &mut tr,
+                    geometry,
+                },
+            );
+            check(&mut session);
+        }
+
+        #[test]
+        fn keyboard_capture_tracks_popup_and_text_edit_independently() {
+            for (popup, text) in [(false, false), (true, false), (false, true), (true, true)] {
+                let mut editor = EffectEditor::default();
+                if popup {
+                    open_menu(&mut editor, EffectAction::Kind);
+                }
+                if text {
+                    editor.text_edit.begin(EffectHit::Mix, "25");
+                }
+                assert_eq!(editor.dropdown_open(), popup);
+                assert_eq!(editor.captures_keyboard(), popup || text);
+            }
+        }
+
+        #[test]
+        fn trigger_menus_preserve_host_order_and_missing_sources_fall_back_to_zero() {
+            for (choice, index) in [
+                (TriggerChoice::Free, 0),
+                (TriggerChoice::CellLight, 1),
+                (TriggerChoice::CellStep, 2),
+                (TriggerChoice::FreeHz, 3),
+                (TriggerChoice::Transient, 4),
+            ] {
+                assert_eq!(choice.item(), index);
+            }
+            let cases: [(&'static [TriggerChoice], &[&str], [usize; 5]); 4] = [
+                (
+                    TriggerChoice::ALL,
+                    &[
+                        "Free run",
+                        "Cell light",
+                        "Cell step",
+                        "Free Hz",
+                        "Transient",
+                    ],
+                    [0, 1, 2, 3, 4],
+                ),
+                (
+                    &[
+                        TriggerChoice::Transient,
+                        TriggerChoice::FreeHz,
+                        TriggerChoice::Free,
+                    ],
+                    &["Transient", "Free Hz", "Free run"],
+                    [2, 0, 0, 1, 0],
+                ),
+                (&[TriggerChoice::FreeHz], &["Free Hz"], [0; 5]),
+                (&[], &[], [0; 5]),
+            ];
+            for (choices, labels, indices) in cases {
+                with_session(choices, EffectKind::None, |session| {
+                    assert_eq!(session.trigger_items(), labels);
+                    for (source, index) in [
+                        TriggerSource::Free,
+                        TriggerSource::CellLight,
+                        TriggerSource::CellStep,
+                        TriggerSource::FreeHz { hz: 7.25 },
+                        TriggerSource::Transient {
+                            threshold: 2.5,
+                            hold_ms: 80.0,
+                        },
+                    ]
+                    .into_iter()
+                    .zip(indices)
+                    {
+                        assert_eq!(session.trigger_index(source), index, "{source:?}");
+                    }
+                });
+            }
+        }
+
+        #[test]
+        fn dropdowns_follow_active_action_and_parameter_format() {
+            with_session(
+                &[TriggerChoice::Transient, TriggerChoice::Free],
+                EffectKind::Svf,
+                |session| {
+                    let kinds = view::kind_items().items;
+                    assert_eq!(dropdown_items(session.state, session.effect), kinds);
+                    assert_eq!(session.dropdown_items(), kinds);
+                    for (action, expected) in [
+                        (EffectAction::Kind, kinds),
+                        (
+                            EffectAction::Target,
+                            vec!["(none)", "Cutoff", "Resonance", "Type", "Poles", "Mix"],
+                        ),
+                        (EffectAction::Trigger, vec!["Transient", "Free run"]),
+                        (
+                            EffectAction::ParamDropdown(2),
+                            vec!["Lowpass", "Bandpass", "Highpass"],
+                        ),
+                        (EffectAction::ParamDropdown(3), vec!["2", "4", "6", "8"]),
+                        (EffectAction::ParamDropdown(0), vec![]),
+                        (EffectAction::ParamDropdown(4), vec![]),
+                    ] {
+                        open_menu(session.state, action);
+                        assert_eq!(
+                            dropdown_items(session.state, session.effect),
+                            expected,
+                            "{action:?}"
+                        );
+                        assert_eq!(session.dropdown_items(), expected, "{action:?}");
+                    }
+                },
+            );
+            with_session(TriggerChoice::ALL, EffectKind::None, |session| {
+                open_menu(session.state, EffectAction::Target);
+                assert_eq!(session.dropdown_items(), ["(none)", "Mix"]);
+                open_menu(session.state, EffectAction::ParamDropdown(0));
+                assert!(session.dropdown_items().is_empty());
+            });
+        }
+
+        #[test]
+        fn slot_palette_is_opaque_and_extreme_indices_use_the_last_hue() {
+            for slot in [0, 1, 2, 3, 4, usize::MAX] {
+                assert_eq!(mseg_color(slot).alpha(), 1.0);
+            }
+            assert_eq!(mseg_color(usize::MAX), mseg_color(3));
+        }
+
+        #[test]
+        fn amp_tooltips_show_exact_positions_and_the_silence_threshold() {
+            let above_floor = f32::from_bits(1e-4_f32.to_bits() + 1);
+            for (value, expected) in [
+                (0.0, "X 42%  Y 0.00\n-∞ dB"),
+                (1e-4, "X 42%  Y 0.00\n-∞ dB"),
+                (above_floor, "X 42%  Y 0.00\n-80.0 dB"),
+                (0.01, "X 42%  Y 0.01\n-40.0 dB"),
+                (0.5, "X 42%  Y 0.50\n-6.0 dB"),
+                (1.0, "X 42%  Y 1.00\n0.0 dB"),
+            ] {
+                let mut data = widgets::MsegData::default();
+                let index = data.insert_node(0.42, value).unwrap();
+                assert_eq!(
+                    mseg_node_tooltip_text(0, &data, index, None, 0.0, None),
+                    expected
+                );
+            }
+        }
+
+        #[test]
+        fn routed_tooltips_require_both_metadata_inputs_and_preserve_units_and_polarity() {
+            let spec = effects::ParamSpec {
+                name: "Gain",
+                min: -10.0,
+                max: 30.0,
+                default: 0.0,
+                scaling: effects::ParamScaling::Linear,
+                format: effects::ParamFormat::Number {
+                    decimals: 1,
+                    unit: "dB",
+                },
+            };
+            for (polarity, depth, expected) in [
+                (widgets::Polarity::Unipolar, 0.5, "X 25%  Y 0.75\n15.0 dB"),
+                (widgets::Polarity::Bipolar, 0.5, "X 25%  Y +0.50\n10.0 dB"),
+                (widgets::Polarity::Bipolar, -0.5, "X 25%  Y +0.50\n-10.0 dB"),
+            ] {
+                let mut data = widgets::MsegData {
+                    polarity,
+                    ..Default::default()
+                };
+                let index = data.insert_node(0.25, 0.75).unwrap();
+                assert_eq!(
+                    mseg_node_tooltip_text(
+                        3,
+                        &data,
+                        index,
+                        Some(spec),
+                        0.0,
+                        Some((depth, polarity))
+                    ),
+                    expected
+                );
+                let position = expected.split('\n').next().unwrap();
+                for (metadata, modulation) in [
+                    (None, None),
+                    (Some(spec), None),
+                    (None, Some((depth, polarity))),
+                ] {
+                    assert_eq!(
+                        mseg_node_tooltip_text(3, &data, index, metadata, 0.0, modulation),
+                        position
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn tooltip_indices_at_or_past_the_active_node_count_are_empty() {
+            let data = widgets::MsegData::default();
+            for index in [data.node_count, data.node_count + 1, usize::MAX] {
+                assert_eq!(mseg_node_tooltip_text(0, &data, index, None, 0.0, None), "");
+            }
+        }
+
+        #[test]
+        fn public_click_tracking_records_the_first_press_with_the_current_time() {
+            let mut tracker = ClickTracker::<EffectHit>::default();
+            assert_eq!(tracker.last_action, None);
+            let before = std::time::Instant::now();
+            assert!(!tracker.check_and_update(EffectHit::Mix));
+            let after = std::time::Instant::now();
+            assert_eq!(tracker.last_action, Some(EffectHit::Mix));
+            assert!((before..=after).contains(&tracker.last_time));
+        }
+
+        #[test]
+        fn double_clicks_require_the_same_action_strictly_before_four_hundred_ms() {
+            use std::time::{Duration, Instant};
+
+            let anchor = Instant::now();
+            let a = EffectHit::Dial(0);
+            let b = EffectHit::Dial(1);
+            for (previous, next, elapsed, expected) in [
+                (None, a, Duration::ZERO, false),
+                (Some(a), a, Duration::ZERO, true),
+                (Some(a), a, Duration::from_millis(399), true),
+                (Some(a), a, Duration::from_micros(399_999), true),
+                (Some(a), a, Duration::from_millis(400), false),
+                (Some(a), a, Duration::from_micros(400_001), false),
+                (Some(a), a, Duration::from_secs(1), false),
+                (Some(a), b, Duration::from_millis(100), false),
+            ] {
+                let mut tracker = ClickTracker {
+                    last_time: anchor,
+                    last_action: previous,
+                };
+                let now = anchor + elapsed;
+                assert_eq!(
+                    tracker.check_and_update_at(next, now),
+                    expected,
+                    "{previous:?} -> {next:?} after {elapsed:?}"
+                );
+                assert_eq!(tracker.last_time, now);
+                assert_eq!(tracker.last_action, Some(next));
+            }
+        }
+
+        #[test]
+        fn click_tracking_updates_the_baseline_after_every_action_and_result() {
+            use std::time::{Duration, Instant};
+
+            let mut tracker = ClickTracker::<EffectHit>::new();
+            let anchor = Instant::now();
+            for (millis, action, expected) in [
+                (0, EffectHit::Mix, false),
+                (100, EffectHit::Mix, true),
+                (399, EffectHit::Mix, true),
+                (500, EffectHit::Depth, false),
+                (600, EffectHit::Depth, true),
+                (1_000, EffectHit::Depth, false),
+                (1_001, EffectHit::Mix, false),
+                (1_002, EffectHit::Mix, true),
+            ] {
+                let now = anchor + Duration::from_millis(millis);
+                assert_eq!(
+                    tracker.check_and_update_at(action, now),
+                    expected,
+                    "press at {millis} ms"
+                );
+                assert_eq!(tracker.last_time, now);
+                assert_eq!(tracker.last_action, Some(action));
+            }
+        }
+    }
 
     #[test]
     fn mseg_color_returns_the_four_slot_hues_and_clamps_oob() {
