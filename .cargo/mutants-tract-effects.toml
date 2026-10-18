@@ -1,10 +1,12 @@
-# Runtime and editor view coverage; the remaining editor rollout is in progress.
+# Runtime, editor view, and selected editor helpers; rollout remains in progress.
 examine_re = [
     '^tract-effects/src/(compressor|modulation|randomize|undo)\.rs:',
     '^tract-effects/src/effects/',
     '^tract-effects/src/editor/view\.rs:',
     '^tract-effects/src/editor/mod\.rs:\d+:\d+: replace (TriggerChoice::item|EffectEditor::(captures_keyboard|dropdown_open)|Session<[^>]+>::(trigger_items|trigger_index|dropdown_items)|dropdown_items|mseg_color|mseg_node_tooltip_text|ClickTracker<[^>]+>::check_and_update(_at)?) ->',
     '^tract-effects/src/editor/mod\.rs:\d+:\d+: .* in (TriggerChoice::item|EffectEditor::(captures_keyboard|dropdown_open)|Session<[^>]+>::(trigger_items|trigger_index|dropdown_items)|dropdown_items|mseg_color|mseg_node_tooltip_text|ClickTracker<[^>]+>::check_and_update(_at)?)$',
+    '^tract-effects/src/editor/mod\.rs:\d+:\d+: replace Session<[^>]+>::(effect_config|modulation_config|apply_(selection|effect_dial|kind_switch|depth_drag|param_dropdown_selection|target_selection|mix)|effect_param_(count|format)|param_(spec|enum_labels)|reset_(effect_dial|depth|mix)_to_default)( ->| with \(\))',
+    '^tract-effects/src/editor/mod\.rs:\d+:\d+: .* in Session<[^>]+>::(effect_config|modulation_config|apply_(selection|effect_dial|kind_switch|depth_drag|param_dropdown_selection|target_selection|mix)|effect_param_(count|format)|param_(spec|enum_labels)|reset_(effect_dial|depth|mix)_to_default)$',
 ]
 all_features = true
 test_tool = "nextest"

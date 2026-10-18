@@ -1452,6 +1452,37 @@ pub fn mseg_node_tooltip_text(
 mod tests {
     use super::*;
 
+    fn with_session(
+        choices: &'static [TriggerChoice],
+        kind: EffectKind,
+        check: impl FnOnce(&mut Session<'_>),
+    ) {
+        let mut editor = EffectEditor::new(choices);
+        let mut effect = TrackEffect {
+            kind,
+            params: effects::default_params_for_kind(kind),
+            ..Default::default()
+        };
+        let mut modulation = TrackModulation::default();
+        let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+        let geometry = EditorGeometry {
+            layout: view::effect_layout((16.0, 16.0, 1_304.0, 640.0), 1.0),
+            scale: 1.0,
+            window_size: (1_336.0, 680.0),
+        };
+        let mut session = Session::new(
+            &mut editor,
+            EditorContext {
+                pointer_position: (0.0, 0.0),
+                effect: &mut effect,
+                modulation: &mut modulation,
+                text_renderer: &mut tr,
+                geometry,
+            },
+        );
+        check(&mut session);
+    }
+
     mod editor_helpers {
         use super::*;
 
@@ -1467,37 +1498,6 @@ mod tests {
                 true,
                 (800.0, 600.0),
             );
-        }
-
-        fn with_session(
-            choices: &'static [TriggerChoice],
-            kind: EffectKind,
-            check: impl FnOnce(&mut Session<'_>),
-        ) {
-            let mut editor = EffectEditor::new(choices);
-            let mut effect = TrackEffect {
-                kind,
-                params: effects::default_params_for_kind(kind),
-                ..Default::default()
-            };
-            let mut modulation = TrackModulation::default();
-            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
-            let geometry = EditorGeometry {
-                layout: view::effect_layout((16.0, 16.0, 1_304.0, 640.0), 1.0),
-                scale: 1.0,
-                window_size: (1_336.0, 680.0),
-            };
-            let mut session = Session::new(
-                &mut editor,
-                EditorContext {
-                    pointer_position: (0.0, 0.0),
-                    effect: &mut effect,
-                    modulation: &mut modulation,
-                    text_renderer: &mut tr,
-                    geometry,
-                },
-            );
-            check(&mut session);
         }
 
         #[test]
@@ -1766,6 +1766,429 @@ mod tests {
                 assert_eq!(tracker.last_time, now);
                 assert_eq!(tracker.last_action, Some(action));
             }
+        }
+    }
+
+    mod editor_edits {
+        use super::*;
+
+        #[test]
+        fn configuration_accessors_return_the_current_host_state() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.effect.params[0] = 731.0;
+                session.effect.mix = 0.37;
+                session.effect.muted = true;
+                session.effect.soloed = true;
+                session.modulation.depths = [-0.2, 0.5, 0.9];
+                session.modulation.targets[2] = Some(ModulationTarget::Mix);
+                session.modulation.trigger = TriggerSource::Transient {
+                    threshold: 2.5,
+                    hold_ms: 80.0,
+                };
+                session.modulation.msegs[2].nodes[0].value = 0.3;
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+
+                assert_eq!(session.effect_config(), effect);
+                assert_eq!(session.modulation_config(), &modulation);
+                assert!(!session.response.changed);
+            });
+        }
+
+        #[test]
+        fn parameter_count_and_specs_follow_the_selected_effect() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                assert_eq!(session.effect_param_count(), 4);
+                let cutoff = session.param_spec(0).unwrap();
+                assert_eq!(cutoff.name, "Cutoff");
+                assert_eq!(
+                    (cutoff.min, cutoff.max, cutoff.default),
+                    (20.0, 20_000.0, 2_000.0)
+                );
+                assert_eq!(cutoff.scaling, effects::ParamScaling::Log);
+                assert_eq!(cutoff.format, effects::ParamFormat::Hertz);
+                let poles = session.param_spec(3).unwrap();
+                assert_eq!(poles.name, "Poles");
+                assert_eq!((poles.min, poles.max, poles.default), (0.0, 3.0, 0.0));
+                for index in [4, MAX_EFFECT_PARAMS, usize::MAX] {
+                    assert!(session.param_spec(index).is_none());
+                }
+                session.effect.kind = EffectKind::None;
+                assert_eq!(session.effect_param_count(), 0);
+                assert!(session.param_spec(0).is_none());
+            });
+        }
+
+        #[test]
+        fn parameter_formats_distinguish_continuous_enum_and_missing_slots() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                use effects::ParamFormat;
+
+                let types = &["Lowpass", "Bandpass", "Highpass"][..];
+                let poles = &["2", "4", "6", "8"][..];
+                assert_eq!(session.param_enum_labels(2), Some(types));
+                assert_eq!(session.param_enum_labels(3), Some(poles));
+                assert_eq!(
+                    session.effect_param_format(2),
+                    ParamFormat::Enum { labels: types }
+                );
+                assert_eq!(
+                    session.effect_param_format(3),
+                    ParamFormat::Enum { labels: poles }
+                );
+                assert_eq!(session.effect_param_format(0), ParamFormat::Hertz);
+                assert_eq!(
+                    session.effect_param_format(1),
+                    ParamFormat::Number {
+                        decimals: 2,
+                        unit: ""
+                    }
+                );
+                for index in [0, 1, 4, MAX_EFFECT_PARAMS, usize::MAX] {
+                    assert_eq!(session.param_enum_labels(index), None);
+                }
+                let fallback = ParamFormat::Number {
+                    decimals: 0,
+                    unit: "",
+                };
+                for index in [4, MAX_EFFECT_PARAMS, usize::MAX] {
+                    assert_eq!(session.effect_param_format(index), fallback);
+                }
+                session.effect.kind = EffectKind::None;
+                assert_eq!(session.param_enum_labels(0), None);
+                assert_eq!(session.effect_param_format(0), fallback);
+            });
+        }
+
+        #[test]
+        fn dial_edits_apply_linear_and_log_ranges_without_touching_other_state() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let original = *session.effect;
+                let modulation = session.modulation.clone();
+                for (index, norm, value) in [
+                    (0, 0.0, 20.0),
+                    (0, 1.0 / 3.0, 200.0),
+                    (0, 1.0, 20_000.0),
+                    (1, -0.5, 0.0),
+                    (1, 0.25, 0.25),
+                    (1, 1.5, 1.0),
+                ] {
+                    *session.effect = original;
+                    session.response = EditorResponse::default();
+                    session.apply_effect_dial(index, norm);
+                    assert!((session.effect.params[index] - value).abs() < 0.01);
+                    let mut expected = original;
+                    expected.params[index] = session.effect.params[index];
+                    assert_eq!(*session.effect, expected);
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(session.response.changed);
+                }
+                for index in [4, MAX_EFFECT_PARAMS, usize::MAX] {
+                    *session.effect = original;
+                    session.response = EditorResponse::default();
+                    session.apply_effect_dial(index, 0.75);
+                    assert_eq!(*session.effect, original);
+                    assert!(!session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn dial_resets_restore_the_parameter_default_and_ignore_missing_specs() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.effect.params = [7.0; MAX_EFFECT_PARAMS];
+                let original = *session.effect;
+                let modulation = session.modulation.clone();
+                for (index, value) in [(0, 2_000.0), (1, 0.1), (2, 0.0), (3, 0.0)] {
+                    *session.effect = original;
+                    session.response = EditorResponse::default();
+                    session.reset_effect_dial_to_default(index);
+                    let mut expected = original;
+                    expected.params[index] = value;
+                    assert_eq!(*session.effect, expected);
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(session.response.changed);
+                }
+                for index in [4, MAX_EFFECT_PARAMS, usize::MAX] {
+                    *session.effect = original;
+                    session.response = EditorResponse::default();
+                    session.reset_effect_dial_to_default(index);
+                    assert_eq!(*session.effect, original);
+                    assert!(!session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn parameter_selection_accepts_the_last_storage_slot_and_rejects_larger_indices() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let original = *session.effect;
+                let modulation = session.modulation.clone();
+                for (index, item) in [(2, 1), (3, 3), (MAX_EFFECT_PARAMS - 1, 2)] {
+                    *session.effect = original;
+                    session.response = EditorResponse::default();
+                    session.apply_param_dropdown_selection(index, item);
+                    let mut expected = original;
+                    expected.params[index] = item as f32;
+                    assert_eq!(*session.effect, expected);
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(session.response.changed);
+                }
+                for index in [MAX_EFFECT_PARAMS, usize::MAX] {
+                    *session.effect = original;
+                    session.response = EditorResponse::default();
+                    session.apply_param_dropdown_selection(index, 1);
+                    assert_eq!(*session.effect, original);
+                    assert!(!session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn depth_drag_maps_both_polarities_to_only_the_selected_assignable_slot() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.modulation.depths = [0.1, 0.2, 0.3];
+                let original = session.modulation.clone();
+                let effect = *session.effect;
+                for slot in 0..4 {
+                    session.state.selected_mseg = slot;
+                    for (norm, depth) in [
+                        (-0.25, -1.0),
+                        (0.0, -1.0),
+                        (0.25, -0.5),
+                        (0.5, 0.0),
+                        (0.75, 0.5),
+                        (1.0, 1.0),
+                        (1.25, 1.0),
+                    ] {
+                        *session.modulation = original.clone();
+                        session.response = EditorResponse::default();
+                        session.apply_depth_drag(norm);
+                        let mut expected = original.clone();
+                        if slot != 0 {
+                            expected.depths[slot - 1] = depth;
+                        }
+                        assert_eq!(*session.modulation, expected, "slot {slot}, norm {norm}");
+                        assert_eq!(*session.effect, effect);
+                        assert_eq!(session.response.changed, slot != 0);
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn depth_reset_neutralizes_each_assignable_slot_and_leaves_amp_unchanged() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.modulation.depths = [-0.5, 0.25, 0.75];
+                let original = session.modulation.clone();
+                let effect = *session.effect;
+                for slot in 0..4 {
+                    session.state.selected_mseg = slot;
+                    *session.modulation = original.clone();
+                    session.response = EditorResponse::default();
+                    session.reset_depth_to_default();
+                    let mut expected = original.clone();
+                    if slot != 0 {
+                        expected.depths[slot - 1] = 0.0;
+                    }
+                    assert_eq!(*session.modulation, expected);
+                    assert_eq!(*session.effect, effect);
+                    assert_eq!(session.response.changed, slot != 0);
+                }
+            });
+        }
+
+        #[test]
+        fn target_selection_changes_only_the_selected_route_including_mix_and_none() {
+            for kind in [EffectKind::Svf, EffectKind::None] {
+                with_session(TriggerChoice::ALL, kind, |session| {
+                    session.modulation.targets = [Some(ModulationTarget::Mix); 3];
+                    let original = session.modulation.clone();
+                    let effect = *session.effect;
+                    let cases = if kind == EffectKind::Svf {
+                        vec![
+                            (0, None),
+                            (1, Some(ModulationTarget::EffectParameter(0))),
+                            (4, Some(ModulationTarget::EffectParameter(3))),
+                            (5, Some(ModulationTarget::Mix)),
+                            (6, None),
+                            (usize::MAX, None),
+                        ]
+                    } else {
+                        vec![(0, None), (1, Some(ModulationTarget::Mix)), (2, None)]
+                    };
+                    for slot in 0..4 {
+                        session.state.selected_mseg = slot;
+                        for &(item, target) in &cases {
+                            *session.modulation = original.clone();
+                            session.response = EditorResponse::default();
+                            session.apply_target_selection(item);
+                            let mut expected = original.clone();
+                            if slot != 0 {
+                                expected.targets[slot - 1] = target;
+                            }
+                            assert_eq!(*session.modulation, expected, "slot {slot}, item {item}");
+                            assert_eq!(*session.effect, effect);
+                            assert_eq!(session.response.changed, slot != 0);
+                        }
+                    }
+                });
+            }
+        }
+
+        #[test]
+        fn mix_edits_clamp_to_the_blend_range_without_changing_routing() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let original = *session.effect;
+                let modulation = session.modulation.clone();
+                for (norm, mix) in [
+                    (-1.0, 0.0),
+                    (0.0, 0.0),
+                    (0.25, 0.25),
+                    (1.0, 1.0),
+                    (2.0, 1.0),
+                ] {
+                    session.response = EditorResponse::default();
+                    session.apply_mix(norm);
+                    assert_eq!(*session.effect, TrackEffect { mix, ..original });
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn mix_reset_restores_full_wet_and_reports_the_edit() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.effect.mix = 0.2;
+                let original = *session.effect;
+                let modulation = session.modulation.clone();
+                session.reset_mix_to_default();
+                assert_eq!(
+                    *session.effect,
+                    TrackEffect {
+                        mix: 1.0,
+                        ..original
+                    }
+                );
+                assert_eq!(*session.modulation, modulation);
+                assert!(session.response.changed);
+            });
+        }
+
+        #[test]
+        fn kind_switch_resets_parameters_and_prunes_only_unavailable_routes() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.effect.params = [0.7; MAX_EFFECT_PARAMS];
+                session.effect.mix = 0.4;
+                session.effect.muted = true;
+                session.effect.soloed = true;
+                session.state.selected_mseg = 3;
+                session.modulation.targets = [
+                    Some(ModulationTarget::EffectParameter(0)),
+                    Some(ModulationTarget::EffectParameter(4)),
+                    Some(ModulationTarget::Mix),
+                ];
+                session.modulation.depths = [-0.25, 0.5, 0.75];
+                session.modulation.trigger = TriggerSource::FreeHz { hz: 3.5 };
+                let original = *session.effect;
+                let modulation = session.modulation.clone();
+                for (kind, targets) in [
+                    (
+                        EffectKind::Svf,
+                        [
+                            Some(ModulationTarget::EffectParameter(0)),
+                            None,
+                            Some(ModulationTarget::Mix),
+                        ],
+                    ),
+                    (EffectKind::None, [None, None, Some(ModulationTarget::Mix)]),
+                ] {
+                    *session.effect = original;
+                    *session.modulation = modulation.clone();
+                    session.response = EditorResponse::default();
+                    session.apply_kind_switch(kind);
+                    assert_eq!(
+                        *session.effect,
+                        TrackEffect {
+                            kind,
+                            params: effects::default_params_for_kind(kind),
+                            ..original
+                        }
+                    );
+                    let mut expected = modulation.clone();
+                    expected.targets = targets;
+                    assert_eq!(*session.modulation, expected);
+                    assert_eq!(session.state.selected_mseg, 3);
+                    assert_eq!(
+                        (
+                            session.response.changed,
+                            session.response.captured,
+                            session.response.back,
+                            session.response.randomize
+                        ),
+                        (true, false, false, false)
+                    );
+                }
+            });
+        }
+
+        #[test]
+        fn kind_menu_selection_clamps_indices_to_the_last_registered_effect() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let last = *EffectKind::ALL.last().unwrap();
+                for (index, kind) in [
+                    (0, EffectKind::None),
+                    (1, EffectKind::ALL[1]),
+                    (EffectKind::ALL.len() - 1, last),
+                    (EffectKind::ALL.len(), last),
+                    (usize::MAX, last),
+                ] {
+                    session.effect.params = [0.7; MAX_EFFECT_PARAMS];
+                    session.response = EditorResponse::default();
+                    session.apply_selection(EffectAction::Kind, index);
+                    assert_eq!(session.effect.kind, kind);
+                    assert_eq!(
+                        session.effect.params,
+                        effects::default_params_for_kind(kind)
+                    );
+                    assert!(session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn selection_dispatch_routes_target_trigger_and_parameter_actions() {
+            with_session(
+                &[
+                    TriggerChoice::Transient,
+                    TriggerChoice::FreeHz,
+                    TriggerChoice::Free,
+                ],
+                EffectKind::Svf,
+                |session| {
+                    session.state.selected_mseg = 3;
+                    session.apply_selection(EffectAction::Target, 5);
+                    assert_eq!(session.modulation.targets[2], Some(ModulationTarget::Mix));
+                    assert!(session.response.changed);
+
+                    session.response = EditorResponse::default();
+                    session.apply_selection(EffectAction::ParamDropdown(2), 2);
+                    assert_eq!(session.effect.params[2], 2.0);
+                    assert!(session.response.changed);
+
+                    session.response = EditorResponse::default();
+                    session.apply_selection(EffectAction::Trigger, 0);
+                    assert_eq!(
+                        session.modulation.trigger,
+                        TriggerSource::Transient {
+                            threshold: crate::modulation::TRANSIENT_THRESHOLD_DEFAULT,
+                            hold_ms: crate::modulation::TRANSIENT_HOLD_MS_DEFAULT
+                        }
+                    );
+                    assert!(session.response.changed);
+                },
+            );
         }
     }
 
