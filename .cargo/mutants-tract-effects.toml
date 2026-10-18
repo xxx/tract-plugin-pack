@@ -12,6 +12,7 @@ examine_re = [
     '^tract-effects/src/effects/(chorus|flanger)\.rs:',
     '^tract-effects/src/effects/(phaser|vibrato)\.rs:',
     '^tract-effects/src/effects/fm\.rs:',
+    '^tract-effects/src/effects/(delay|repeat)\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -76,4 +77,14 @@ exclude_re = [
     '^tract-effects/src/effects/fm\.rs:\d+:(22|46|51): replace < with <= in <impl Effect for FmEffect>::process_sample$',
     # Equal target/envelope values make either smoothing coefficient multiply zero.
     '^tract-effects/src/effects/fm\.rs:\d+:42: replace > with >= in <impl Effect for FmEffect>::process_sample$',
+    # Equal target/envelope values make either duck coefficient multiply zero.
+    '^tract-effects/src/effects/delay\.rs:\d+:34: replace > with >= in <impl Effect for DelayEffect>::process_sample$',
+    # Higher Time indices still select Free and leave its dial active.
+    '^tract-effects/src/effects/delay\.rs:\d+:56: replace - with (\+|/) in <impl Effect for DelayEffect>::set_param$',
+    # Construction/reset pair unprimed with zero length; priming captures at least 16 samples.
+    '^tract-effects/src/effects/repeat\.rs:\d+:25: replace \|\| with && in <impl Effect for RepeatEffect>::process_sample$',
+    # With zero crossfade, the playhead cannot reach the loop end in this branch.
+    '^tract-effects/src/effects/repeat\.rs:\d+:43: replace > with >= in <impl Effect for RepeatEffect>::process_sample$',
+    # Smooth already limits the fade to half a bounded loop, so a larger cap is redundant.
+    '^tract-effects/src/effects/repeat\.rs:\d+:56: replace / with \* in <impl Effect for RepeatEffect>::process_sample$',
 ]
