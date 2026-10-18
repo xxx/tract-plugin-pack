@@ -138,8 +138,9 @@ impl SallenKeyEffect {
     fn recompute(&mut self) {
         let sr = self.sample_rate.max(1.0);
         let fc = self.cutoff.clamp(20.0, sr * 0.49);
-        // TPT prewarp: g = tan(pi * fc / sr), G = g / (1 + g).
-        let g = (std::f32::consts::PI * fc / sr).tan();
+        // TPT prewarp at the double-ticked rate: G = g / (1 + g).
+        let inner_sample_rate = 2.0 * sr;
+        let g = (std::f32::consts::PI * fc / inner_sample_rate).tan();
         let gp1 = 1.0 + g;
         self.coef_g = g / gp1;
 
@@ -299,6 +300,252 @@ impl Effect for SallenKeyEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustfft::num_complex::Complex64;
+
+    #[test]
+    fn clean_response_matches_the_held_input_transfer_at_the_inner_rate() {
+        for (sample_rate, requested_cutoff, frequency, resonance) in [
+            (48_000.0, 6_000.0, 1_500.0, 0.0),
+            (96_000.0, 12_000.0, 12_000.0, 0.375),
+            (44_100.0, 11_025.0, 11_025.0, 0.8),
+            (8_000.0, 20_000.0, 1_000.0, 0.2),
+        ] {
+            for kind in 0..2 {
+                let mut filter = SallenKeyEffect::new();
+                filter.set_sample_rate(sample_rate);
+                filter.set_param(0, requested_cutoff);
+                filter.set_param(1, resonance);
+                filter.set_param(3, kind as f32);
+                let cutoff = (requested_cutoff as f64).min(0.49 * sample_rate as f64);
+                let g = (std::f64::consts::PI * cutoff / (2.0 * sample_rate as f64)).tan();
+                let k = (1.96 * resonance as f64).max(0.01);
+                let omega = std::f64::consts::PI * frequency / sample_rate as f64;
+                let inner_response = |angle: f64| {
+                    let s = Complex64::new(0.0, (angle / 2.0).tan() / g);
+                    let denominator = s * s + (2.0 - k) * s + 1.0;
+                    if kind == 0 {
+                        1.0 / denominator
+                    } else {
+                        s * (s + 1.0) / denominator
+                    }
+                };
+                // Zero-order hold at 2x, then take the second tick of each pair.
+                let rotation = Complex64::from_polar(1.0, omega);
+                let expected = 0.5
+                    * ((1.0 + rotation) * inner_response(omega)
+                        + (1.0 - rotation) * inner_response(omega + std::f64::consts::PI));
+                let mut measured = [0.0_f64; 4];
+                for sample in 0..8_192 {
+                    let angle =
+                        std::f64::consts::TAU * frequency * sample as f64 / sample_rate as f64;
+                    let (sin, cos) = angle.sin_cos();
+                    let (left, right) = filter.process_sample(sin as f32, (-0.37 * cos) as f32);
+                    if sample >= 4_096 {
+                        measured[0] += left as f64 * sin;
+                        measured[1] += left as f64 * cos;
+                        measured[2] += right as f64 * sin;
+                        measured[3] += right as f64 * cos;
+                    }
+                }
+                for (actual, expected) in measured.into_iter().zip([
+                    expected.re,
+                    expected.im,
+                    0.37 * expected.im,
+                    -0.37 * expected.re,
+                ]) {
+                    let actual = actual / 2_048.0;
+                    assert!(
+                        (actual - expected).abs() < 2e-5,
+                        "rate {sample_rate}, cutoff {requested_cutoff}, frequency {frequency}, resonance {resonance}, kind {kind}: {actual} vs {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lowpass_step_emits_the_midpoint_before_advancing_the_full_state() {
+        let mut state = -0.4;
+        assert!((SallenKeyEffect::do_lpf(0.25, 0.8, &mut state) + 0.1).abs() < 1e-7);
+        assert!((state - 0.2).abs() < 1e-7);
+        assert!(SallenKeyEffect::do_lpf(0.25, -0.6, &mut state).abs() < 1e-7);
+        assert!((state + 0.2).abs() < 1e-7);
+    }
+
+    #[test]
+    fn nonlinear_inner_ticks_match_partial_drive_reference_states() {
+        for (kind, input, expected_output, expected_states) in [
+            (
+                0,
+                0.6,
+                0.43375317913917283,
+                [0.3327285448322804, -0.09466609190482561, 0.4675063582783455],
+            ),
+            (
+                0,
+                -0.9,
+                0.3994934542280541,
+                [-0.1650034982887712, -0.103021651714446, 0.3989869084561082],
+            ),
+            (
+                1,
+                0.6,
+                0.7227052676945869,
+                [
+                    0.16994455664382524,
+                    -0.0013607741273690688,
+                    0.4435311042050665,
+                ],
+            ),
+            (
+                1,
+                -0.9,
+                -0.3276678063545153,
+                [
+                    -0.0437275445881736,
+                    -0.49909281724842064,
+                    0.18735697947402485,
+                ],
+            ),
+        ] {
+            let mut filter = SallenKeyEffect::new();
+            filter.set_sample_rate(96_000.0);
+            for (index, value) in [12_000.0, 0.375, 3.0, kind as f32].into_iter().enumerate() {
+                filter.set_param(index, value);
+            }
+            filter.lz[1] = 0.2;
+            filter.hz[1] = -0.3;
+            filter.z2[1] = 0.4;
+            // f64 K35 one-tick reference using libm tanh at partial Drive.
+            let actual = if kind == 0 {
+                filter.process_channel_lp(1, input)
+            } else {
+                filter.process_channel_hp(1, input)
+            };
+            assert!((actual as f64 - expected_output).abs() < 2e-6);
+            for (actual, expected) in [filter.lz[1], filter.hz[1], filter.z2[1]]
+                .into_iter()
+                .zip(expected_states)
+            {
+                assert!((actual as f64 - expected).abs() < 2e-6);
+            }
+            assert_eq!([filter.lz[0], filter.hz[0], filter.z2[0]], [0.0; 3]);
+        }
+    }
+
+    #[test]
+    fn clean_path_does_not_evaluate_the_disabled_saturator_on_overflow() {
+        for (kind, cutoff, input) in [(0.0, 10_000.0, f32::MAX), (1.0, 1_000.0, 0.49 * f32::MAX)] {
+            let mut filter = SallenKeyEffect::new();
+            for (index, value) in [cutoff, 1.0, 0.0, kind].into_iter().enumerate() {
+                filter.set_param(index, value);
+            }
+            let (left, right) = filter.process_sample(input, 0.0);
+            assert_eq!(left, f32::INFINITY);
+            assert_eq!(right, 0.0);
+        }
+    }
+
+    fn configured_sallen_key(kind: f32) -> SallenKeyEffect {
+        let mut filter = SallenKeyEffect::new();
+        filter.set_sample_rate(96_000.0);
+        for (index, value) in [2_800.0, 0.63, 3.0, kind].into_iter().enumerate() {
+            filter.set_param(index, value);
+        }
+        filter
+    }
+
+    #[test]
+    fn stereo_channels_match_independent_mono_histories() {
+        for kind in [0.0, 1.0] {
+            let mut stereo = configured_sallen_key(kind);
+            let mut left_only = configured_sallen_key(kind);
+            let mut right_only = configured_sallen_key(kind);
+            for sample in 0..1_024 {
+                let left = (sample as f32 * 0.17).sin() * 0.3;
+                let right = (sample as f32 * 0.41).cos() * 0.7;
+                let actual = stereo.process_sample(left, right);
+                assert_eq!(actual.0, left_only.process_sample(left, 0.0).0);
+                assert_eq!(actual.1, right_only.process_sample(0.0, right).1);
+            }
+        }
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_sallen_key_with_the_same_settings() {
+        for kind in [0.0, 1.0] {
+            let mut used = configured_sallen_key(kind);
+            let mut fresh = configured_sallen_key(kind);
+            for sample in 0..1_024 {
+                used.process_sample((sample as f32 * 0.19).sin(), (sample as f32 * 0.37).cos());
+            }
+            used.reset();
+            for sample in 0..512 {
+                let input = ((sample as f32 * 0.27).cos(), (sample as f32 * 0.31).sin());
+                assert_eq!(
+                    used.process_sample(input.0, input.1),
+                    fresh.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parameter_type_and_rate_changes_preserve_sallen_key_history() {
+        for kind in [0.0, 1.0] {
+            let mut changed = configured_sallen_key(kind);
+            let mut reference = configured_sallen_key(kind);
+            for sample in 0..512 {
+                let input = ((sample as f32 * 0.23).sin(), (sample as f32 * 0.47).cos());
+                changed.process_sample(input.0, input.1);
+                reference.process_sample(input.0, input.1);
+            }
+            changed.set_sample_rate(44_100.0);
+            for (index, value) in [300.0, 0.1, 24.0, 1.0 - kind].into_iter().enumerate() {
+                changed.set_param(index, value);
+            }
+            changed.set_sample_rate(96_000.0);
+            for (index, value) in [2_800.0, 0.63, 3.0, kind].into_iter().enumerate() {
+                changed.set_param(index, value);
+            }
+            changed.set_param(99, -1.0);
+            for sample in 0..256 {
+                let input = ((sample as f32 * 0.29).cos(), (sample as f32 * 0.31).sin());
+                assert_eq!(
+                    changed.process_sample(input.0, input.1),
+                    reference.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parameters_clamp_and_select_the_nearest_filter_type() {
+        for (index, value, endpoint) in [
+            (0, -1.0, 20.0),
+            (0, 90_000.0, 20_000.0),
+            (1, -1.0, 0.0),
+            (1, 2.0, 1.0),
+            (2, -6.0, 0.0),
+            (2, 48.0, 24.0),
+            (3, -1.0, 0.0),
+            (3, 0.49, 0.0),
+            (3, 0.5, 1.0),
+            (3, 99.0, 1.0),
+        ] {
+            let mut clamped = configured_sallen_key(0.0);
+            let mut reference = configured_sallen_key(0.0);
+            clamped.set_param(index, value);
+            reference.set_param(index, endpoint);
+            for sample in 0..256 {
+                let input = ((sample as f32 * 0.31).sin(), (sample as f32 * 0.47).cos());
+                assert_eq!(
+                    clamped.process_sample(input.0, input.1),
+                    reference.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
 
     #[test]
     fn parameters_are_declared() {
@@ -309,6 +556,40 @@ mod tests {
         assert_eq!(specs[1].name, "Resonance");
         assert_eq!(specs[2].name, "Drive");
         assert_eq!(specs[3].name, "Type");
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [
+                (20.0, 20_000.0, 800.0),
+                (0.0, 1.0, 0.5),
+                (0.0, 24.0, 0.0),
+                (0.0, 1.0, 0.0)
+            ]
+        );
+        assert!(matches!(specs[0].scaling, ParamScaling::Log));
+        assert!(matches!(specs[0].format, ParamFormat::Hertz));
+        assert!(matches!(
+            specs[1].format,
+            ParamFormat::Number {
+                decimals: 2,
+                unit: ""
+            }
+        ));
+        assert!(matches!(
+            specs[2].format,
+            ParamFormat::Number {
+                decimals: 1,
+                unit: "dB"
+            }
+        ));
+        assert!(matches!(
+            specs[3].format,
+            ParamFormat::Enum {
+                labels: ["Lowpass", "Highpass"]
+            }
+        ));
     }
 
     #[test]
