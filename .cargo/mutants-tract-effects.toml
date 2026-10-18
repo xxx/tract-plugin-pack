@@ -23,6 +23,7 @@ examine_re = [
     '^tract-effects/src/effects/spectral_bandpass\.rs:',
     '^tract-effects/src/effects/spectral_spread\.rs:',
     '^tract-effects/src/effects/spectral_compress\.rs:',
+    '^tract-effects/src/effects/spectral_smear\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -107,4 +108,6 @@ exclude_re = [
     '^tract-effects/src/effects/spectral_shift\.rs:\d+:44: replace < with <= in <impl SpectralTransform for TransformCtx>::transform$',
     # Active transforms overwrite all used magnitudes; bypass never reads scratch.
     '^tract-effects/src/effects/spectral_spread\.rs:\d+:9: replace SpectralSpreadChannel::reset with \(\)$',
+    # Extra backing entries are unused; supported FFTs access at most 2049 values.
+    '^tract-effects/src/effects/spectral_smear\.rs:16:39: replace / with \*$',
 ]
