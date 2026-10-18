@@ -191,6 +191,329 @@ impl Effect for SpectralSpreadEffect {
 mod tests {
     use super::*;
 
+    fn varied_spectrum(size: usize) -> Vec<Complex<f32>> {
+        let half = size / 2;
+        let mut spectrum = vec![Complex::default(); size];
+        spectrum[0] = Complex::new(-10.0, 0.0);
+        spectrum[half] = Complex::new(15.0, 0.0);
+        for bin in 1..half {
+            let magnitude_unit = (bin % 17 + 1) as f32;
+            let real_sign = if bin % 2 == 0 { 1.0 } else { -1.0 };
+            let imag_sign = if bin % 4 < 2 { 1.0 } else { -1.0 };
+            spectrum[bin] = Complex::new(
+                real_sign * 3.0 * magnitude_unit,
+                imag_sign * 4.0 * magnitude_unit,
+            );
+            spectrum[size - bin] = spectrum[bin].conj();
+        }
+        spectrum
+    }
+
+    fn blur_reference(source: &[Complex<f32>], radius: usize) -> Vec<Complex<f32>> {
+        if radius == 0 {
+            return source.to_vec();
+        }
+        let size = source.len();
+        let half = size / 2;
+        let magnitudes: Vec<f64> = source[..=half]
+            .iter()
+            .map(|value| (value.re as f64).hypot(value.im as f64))
+            .collect();
+        let mut prefix = vec![0.0; half + 2];
+        for (bin, &magnitude) in magnitudes.iter().enumerate() {
+            prefix[bin + 1] = prefix[bin] + magnitude;
+        }
+        let mut expected = vec![Complex::default(); size];
+        for bin in 0..=half {
+            let start = bin.saturating_sub(radius);
+            let end = (bin + radius + 1).min(half + 1);
+            let mean = (prefix[end] - prefix[start]) / (end - start) as f64;
+            let magnitude = magnitudes[bin];
+            if magnitude > 0.0 {
+                let amplitude = mean * (magnitude / 1e-20).min(1.0);
+                let angle = (source[bin].im as f64).atan2(source[bin].re as f64);
+                expected[bin] = Complex::new(
+                    (amplitude * angle.cos()) as f32,
+                    (amplitude * angle.sin()) as f32,
+                );
+            }
+            if bin > 0 && bin < half {
+                expected[size - bin] = expected[bin].conj();
+            }
+        }
+        expected
+    }
+
+    fn assert_spectrum_close(actual: &[Complex<f32>], expected: &[Complex<f32>], tolerance: f32) {
+        for (bin, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual.re - expected.re).abs() < tolerance
+                    && (actual.im - expected.im).abs() < tolerance,
+                "bin {bin}: {actual:?} vs {expected:?}"
+            );
+        }
+    }
+
+    fn transform_with(
+        channel: &mut SpectralSpreadChannel,
+        spectrum: &mut [Complex<f32>],
+        amount: f32,
+    ) {
+        let size = spectrum.len();
+        TransformCtx {
+            chan: channel,
+            params: ParamsCache {
+                fft_param: 2.0,
+                amount_pct: amount,
+            },
+        }
+        .transform(spectrum, size, 48_000.0);
+    }
+
+    fn configured_spread(fft_index: f32, amount: f32) -> SpectralSpreadEffect {
+        let mut effect = SpectralSpreadEffect::default();
+        effect.set_param(0, amount);
+        effect.set_param(1, fft_index);
+        effect
+    }
+
+    #[test]
+    fn box_means_preserve_phase_with_clipped_edge_windows_and_rounded_radii() {
+        for size in [512, 1_024, 2_048, 4_096] {
+            let original = varied_spectrum(size);
+            let mut channel = SpectralSpreadChannel::new();
+            for (amount, radius) in [
+                (0.0, 0),
+                (3.124, 0),
+                (3.125, 1),
+                (9.374, 1),
+                (9.375, 2),
+                (50.0, 8),
+                (96.875, 16),
+                (100.0, 16),
+            ] {
+                let mut actual = original.clone();
+                transform_with(&mut channel, &mut actual, amount);
+                assert_spectrum_close(&actual, &blur_reference(&original, radius), 2e-5);
+                if radius == 0 {
+                    assert_eq!(actual, original);
+                }
+                assert_eq!(actual[0].im, 0.0);
+                assert_eq!(actual[size / 2].im, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn zero_and_tiny_bins_are_finite_and_obey_the_magnitude_floor() {
+        let size = 512;
+        let mut channel = SpectralSpreadChannel::new();
+        let mut sparse = vec![Complex::default(); size];
+        sparse[0] = Complex::new(2.0, 0.0);
+        sparse[2] = Complex::new(3.0, 4.0);
+        sparse[size - 2] = sparse[2].conj();
+        transform_with(&mut channel, &mut sparse, 6.25);
+        let mut expected = vec![Complex::default(); size];
+        expected[0] = Complex::new(1.0, 0.0);
+        expected[2] = Complex::new(1.0, 4.0 / 3.0);
+        expected[size - 2] = expected[2].conj();
+        assert_spectrum_close(&sparse, &expected, 2e-7);
+        for bin in [1, 3, 4, size / 2] {
+            assert_eq!(sparse[bin], Complex::default());
+        }
+
+        let mut tiny = vec![Complex::default(); size];
+        for (bin, value) in [(1, 1.0), (2, 1e-21), (3, 1.0)] {
+            tiny[bin] = Complex::new(value, 0.0);
+            tiny[size - bin] = tiny[bin];
+        }
+        transform_with(&mut channel, &mut tiny, 6.25);
+        assert!((tiny[2].re - 1.0 / 15.0).abs() < 1e-7);
+        assert_eq!(tiny[2].im, 0.0);
+        assert!(
+            tiny.iter()
+                .all(|value| value.re.is_finite() && value.im.is_finite())
+        );
+        let mut silence = vec![Complex::default(); size];
+        transform_with(&mut channel, &mut silence, 100.0);
+        assert!(silence.iter().all(|value| *value == Complex::default()));
+    }
+
+    #[test]
+    fn scratch_is_bounded_reused_and_overwritten_after_bypass_and_fft_changes() {
+        let mut effect = SpectralSpreadEffect::default();
+        for channel in [&mut effect.chan_l, &mut effect.chan_r] {
+            // The documented allocation is exactly the largest supported half-spectrum.
+            assert_eq!(channel.mags.len(), 2_049);
+            let storage = channel.mags.as_ptr();
+            let capacity = channel.mags.capacity();
+            for size in [512, 4_096, 1_024, 2_048, 512] {
+                channel.mags.fill(f32::NAN);
+                let original = varied_spectrum(size);
+                let mut actual = original.clone();
+                transform_with(channel, &mut actual, 0.0);
+                assert_eq!(actual, original);
+                transform_with(channel, &mut actual, 100.0);
+                assert_spectrum_close(&actual, &blur_reference(&original, 16), 2e-5);
+                assert_eq!(channel.mags.len(), 2_049);
+                assert_eq!(channel.mags.capacity(), capacity);
+                assert_eq!(channel.mags.as_ptr(), storage);
+            }
+        }
+    }
+
+    #[test]
+    fn parameter_defaults_bounds_and_fft_selection_match_metadata() {
+        let mut effect = SpectralSpreadEffect::default();
+        assert_eq!(
+            [effect.params.amount_pct, effect.params.fft_param],
+            [0.0, 2.0]
+        );
+        assert_eq!(effect.latency_samples(), 2_048);
+        let specs = effect.parameters();
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.name, spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [("Amount", 0.0, 100.0, 0.0), ("FFT", 0.0, 3.0, 2.0),]
+        );
+        assert!(
+            specs
+                .iter()
+                .all(|spec| matches!(spec.scaling, ParamScaling::Linear))
+        );
+        assert!(matches!(
+            specs[0].format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: " %"
+            }
+        ));
+        assert!(
+            matches!(specs[1].format, ParamFormat::Enum { labels } if labels == ["512", "1024", "2048", "4096"])
+        );
+        for (value, expected) in [(-99.0, 0.0), (37.5, 37.5), (999.0, 100.0)] {
+            effect.set_param(0, value);
+            assert_eq!(effect.params.amount_pct, expected);
+        }
+        for (value, size) in [
+            (-99.0, 512),
+            (0.49, 512),
+            (0.5, 1_024),
+            (1.5, 2_048),
+            (99.0, 4_096),
+        ] {
+            effect.set_param(1, value);
+            assert_eq!(effect.latency_samples(), size);
+            assert_eq!(effect.engine_r.latency_samples(), size);
+        }
+        effect.set_param(99, f32::INFINITY);
+        assert_eq!(effect.params.amount_pct, 100.0);
+        assert_eq!(effect.latency_samples(), 4_096);
+    }
+
+    #[test]
+    fn stereo_audio_matches_independent_prefix_means_and_phase_reconstruction() {
+        struct Reference;
+        impl SpectralTransform for Reference {
+            fn transform(&mut self, spectrum: &mut [Complex<f32>], _: usize, _: f32) {
+                spectrum.copy_from_slice(&blur_reference(spectrum, 8));
+            }
+        }
+        let mut effect = configured_spread(0.0, 50.0);
+        let mut reference_l = SpectralEngine::new(48_000.0);
+        let mut reference_r = SpectralEngine::new(48_000.0);
+        reference_l.set_fft_size(512);
+        reference_r.set_fft_size(512);
+        let mut energy = [0.0; 2];
+        for sample in 0..8_192 {
+            let input = (
+                (sample as f32 * 0.17).sin() * 0.25,
+                (sample as f32 * 0.31).cos() * 0.125,
+            );
+            let expected = (
+                reference_l.process_sample(input.0, &mut Reference),
+                reference_r.process_sample(input.1, &mut Reference),
+            );
+            let actual = effect.process_sample(input.0, input.1);
+            assert!(
+                (actual.0 - expected.0).abs() < 5e-6 && (actual.1 - expected.1).abs() < 5e-6,
+                "sample {sample}: {actual:?} vs {expected:?}"
+            );
+            energy[0] += actual.0 * actual.0;
+            energy[1] += actual.1 * actual.1;
+        }
+        assert!(energy.into_iter().all(|energy| energy > 0.01));
+    }
+
+    #[test]
+    fn reset_clears_active_stereo_history_and_preserves_pending_fft_selection() {
+        let mut used = configured_spread(0.0, 75.0);
+        let mut energy = [0.0; 2];
+        for sample in 0..4_096 {
+            let output = used.process_sample(
+                (sample as f32 * 0.23).sin() * 0.25,
+                (sample as f32 * 0.31).cos() * 0.125,
+            );
+            energy[0] += output.0 * output.0;
+            energy[1] += output.1 * output.1;
+        }
+        assert!(energy.into_iter().all(|energy| energy > 0.01));
+        used.set_param(1, 1.0);
+        used.reset();
+        assert_eq!(used.latency_samples(), 1_024);
+        let mut fresh = configured_spread(0.0, 75.0);
+        for _ in 0..1_024 {
+            fresh.process_sample(0.0, 0.0);
+        }
+        fresh.set_param(1, 1.0);
+        fresh.reset();
+        for sample in 0..8_192 {
+            let input = (
+                (sample as f32 * 0.11).cos() * 0.125,
+                (sample as f32 * 0.27).sin() * 0.25,
+            );
+            assert_eq!(
+                used.process_sample(input.0, input.1),
+                fresh.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn sample_rate_rebuilds_both_engines_with_the_selected_fft_and_amount() {
+        for index in 0..4 {
+            let mut used = configured_spread(index as f32, 37.5);
+            let mut energy = [0.0; 2];
+            for sample in 0..12_288 {
+                let output = used.process_sample(
+                    (sample as f32 * 0.19).sin() * 0.25,
+                    (sample as f32 * 0.27).cos() * 0.125,
+                );
+                energy[0] += output.0 * output.0;
+                energy[1] += output.1 * output.1;
+            }
+            assert!(energy.into_iter().all(|energy| energy > 0.01));
+            used.set_sample_rate(32_000.0);
+            let mut fresh = configured_spread(index as f32, 37.5);
+            fresh.set_sample_rate(32_000.0);
+            assert_eq!(used.sample_rate, 32_000.0);
+            assert_eq!(used.latency_samples(), [512, 1_024, 2_048, 4_096][index]);
+            assert_eq!(used.engine_r.latency_samples(), used.latency_samples());
+            for sample in 0..12_288 {
+                let input = (
+                    (sample as f32 * 0.29).cos() * 0.25,
+                    (sample as f32 * 0.41).sin() * 0.125,
+                );
+                assert_eq!(
+                    used.process_sample(input.0, input.1),
+                    fresh.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
+
     fn drive(e: &mut SpectralSpreadEffect, n: usize, src: impl Fn(usize) -> f32) -> Vec<f32> {
         (0..n)
             .map(|i| {
