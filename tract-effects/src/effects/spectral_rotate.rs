@@ -34,7 +34,7 @@ impl SpectralTransform for TransformCtx {
         }
         // Rotate write.
         for k in 1..half as i32 {
-            let src = (((k - shift_bins).rem_euclid(half as i32 - 1)) + 1) as usize;
+            let src = (((k - 1 - shift_bins).rem_euclid(half as i32 - 1)) + 1) as usize;
             // Read from the stashed mirror: stashed[m] is at spectrum[n - m].
             spectrum[k as usize] = spectrum[n - src];
         }
@@ -156,6 +156,203 @@ impl Effect for SpectralRotateEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn indexed_spectrum(size: usize) -> Vec<Complex<f32>> {
+        let mut spectrum = vec![Complex::default(); size];
+        spectrum[0] = Complex::new(0.25, 0.0);
+        spectrum[size / 2] = Complex::new(-0.75, 0.0);
+        for bin in 1..size / 2 {
+            spectrum[bin] = Complex::new(bin as f32, bin as f32 * -0.25);
+            spectrum[size - bin] = spectrum[bin].conj();
+        }
+        spectrum
+    }
+
+    fn rotate_reference(spectrum: &mut [Complex<f32>], shift: i32) {
+        let size = spectrum.len();
+        let half = size / 2;
+        if shift >= 0 {
+            spectrum[1..half].rotate_right(shift as usize);
+        } else {
+            spectrum[1..half].rotate_left((-shift) as usize);
+        }
+        for bin in 1..half {
+            spectrum[size - bin] = spectrum[bin].conj();
+        }
+    }
+
+    fn configured_rotate(fft_index: f32, shift: f32) -> SpectralRotateEffect {
+        let mut effect = SpectralRotateEffect::default();
+        effect.set_param(0, shift);
+        effect.set_param(1, fft_index);
+        effect
+    }
+
+    #[test]
+    fn one_bin_rotation_moves_each_positive_bin_and_preserves_its_phase() {
+        let size = 512;
+        let half = size / 2;
+        let mut spectrum = indexed_spectrum(size);
+        let mut expected = spectrum.clone();
+        rotate_reference(&mut expected, 1);
+        TransformCtx {
+            shift_pct: 100.0 / half as f32,
+        }
+        .transform(&mut spectrum, size, 48_000.0);
+        assert_eq!(spectrum, expected);
+    }
+
+    #[test]
+    fn rotations_match_slice_permutations_at_rounding_wrap_and_fft_boundaries() {
+        for (size, maximum_shift) in [(512, 38), (1_024, 77), (2_048, 154), (4_096, 307)] {
+            let half = size / 2;
+            for (percent, shift) in [
+                (0.0, 0),
+                (49.0 / half as f32, 0),
+                (-49.0 / half as f32, 0),
+                (50.0 / half as f32, 1),
+                (-50.0 / half as f32, -1),
+                (15.0, maximum_shift),
+                (-15.0, -maximum_shift),
+            ] {
+                let mut spectrum = indexed_spectrum(size);
+                let mut expected = spectrum.clone();
+                rotate_reference(&mut expected, shift);
+                TransformCtx { shift_pct: percent }.transform(&mut spectrum, size, 96_000.0);
+                assert_eq!(spectrum, expected, "FFT {size}, shift {percent}");
+                TransformCtx {
+                    shift_pct: -percent,
+                }
+                .transform(&mut spectrum, size, 96_000.0);
+                assert_eq!(spectrum, indexed_spectrum(size));
+            }
+        }
+    }
+
+    #[test]
+    fn parameter_defaults_bounds_and_fft_selection_match_metadata() {
+        let mut effect = SpectralRotateEffect::default();
+        assert_eq!(effect.params.fft_param, 2.0);
+        assert_eq!(effect.params.shift_pct, 0.0);
+        assert_eq!(effect.latency_samples(), 2_048);
+        let specs = effect.parameters();
+        assert_eq!(
+            (specs[0].min, specs[0].max, specs[0].default),
+            (-15.0, 15.0, 0.0)
+        );
+        assert!(matches!(specs[0].scaling, ParamScaling::Linear));
+        assert!(matches!(
+            specs[0].format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: " %"
+            }
+        ));
+        assert_eq!(
+            (specs[1].min, specs[1].max, specs[1].default),
+            (0.0, 3.0, 2.0)
+        );
+        assert!(
+            matches!(specs[1].format, ParamFormat::Enum { labels } if labels == ["512", "1024", "2048", "4096"])
+        );
+        for (value, expected) in [(-99.0, -15.0), (-7.5, -7.5), (99.0, 15.0)] {
+            effect.set_param(0, value);
+            assert_eq!(effect.params.shift_pct, expected);
+        }
+        for (value, size) in [
+            (-99.0, 512),
+            (0.49, 512),
+            (0.5, 1_024),
+            (1.5, 2_048),
+            (99.0, 4_096),
+        ] {
+            effect.set_param(1, value);
+            assert_eq!(effect.latency_samples(), size);
+            assert_eq!(effect.engine_r.latency_samples(), size);
+        }
+        effect.set_param(99, f32::INFINITY);
+        assert_eq!(effect.params.shift_pct, 15.0);
+        assert_eq!(effect.latency_samples(), 4_096);
+    }
+
+    #[test]
+    fn stereo_audio_matches_independent_slice_rotations() {
+        struct Reference;
+        impl SpectralTransform for Reference {
+            fn transform(&mut self, spectrum: &mut [Complex<f32>], size: usize, _: f32) {
+                // 12.5% of Nyquist is exactly N/16 bins at every supported size.
+                rotate_reference(spectrum, (size / 16) as i32);
+            }
+        }
+        let mut effect = configured_rotate(0.0, 12.5);
+        let mut reference_l = SpectralEngine::new(48_000.0);
+        let mut reference_r = SpectralEngine::new(48_000.0);
+        reference_l.set_fft_size(512);
+        reference_r.set_fft_size(512);
+        let mut energy = [0.0; 2];
+        for sample in 0..8_192 {
+            let input = (
+                (sample as f32 * 0.17).sin() * 0.25,
+                (sample as f32 * 0.31).cos() * 0.125,
+            );
+            let expected = (
+                reference_l.process_sample(input.0, &mut Reference),
+                reference_r.process_sample(input.1, &mut Reference),
+            );
+            let actual = effect.process_sample(input.0, input.1);
+            assert_eq!(actual, expected, "sample {sample}");
+            energy[0] += actual.0 * actual.0;
+            energy[1] += actual.1 * actual.1;
+        }
+        assert!(energy.into_iter().all(|energy| energy > 0.01));
+    }
+
+    #[test]
+    fn reset_clears_both_channels_and_preserves_pending_fft_selection() {
+        let mut used = configured_rotate(0.0, -12.5);
+        for sample in 0..4_096 {
+            used.process_sample((sample as f32 * 0.23).sin() * 0.25, 0.125);
+        }
+        used.set_param(1, 1.0);
+        used.reset();
+        assert_eq!(used.latency_samples(), 1_024);
+        // Reproduce the same pending switch from the previously active 512 slot.
+        let mut fresh = configured_rotate(0.0, -12.5);
+        for _ in 0..1_024 {
+            fresh.process_sample(0.0, 0.0);
+        }
+        fresh.set_param(1, 1.0);
+        fresh.reset();
+        for sample in 0..8_192 {
+            let input = ((sample as f32 * 0.11).cos() * 0.125, -0.25);
+            assert_eq!(
+                used.process_sample(input.0, input.1),
+                fresh.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn sample_rate_rebuilds_both_engines_with_the_selected_fft_and_shift() {
+        for index in 0..4 {
+            let mut used = configured_rotate(index as f32, 12.5);
+            for sample in 0..5_000 {
+                used.process_sample((sample as f32 * 0.19).sin() * 0.25, 0.125);
+            }
+            used.set_sample_rate(32_000.0);
+            let mut fresh = configured_rotate(index as f32, 12.5);
+            fresh.set_sample_rate(32_000.0);
+            assert_eq!(used.sample_rate, 32_000.0);
+            assert_eq!(used.latency_samples(), [512, 1_024, 2_048, 4_096][index]);
+            for sample in 0..8_192 {
+                let input = ((sample as f32 * 0.13).cos() * 0.25, -0.125);
+                assert_eq!(
+                    used.process_sample(input.0, input.1),
+                    fresh.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
 
     fn drive(e: &mut SpectralRotateEffect, n: usize, src: impl Fn(usize) -> f32) -> Vec<f32> {
         (0..n)
