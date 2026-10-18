@@ -1003,6 +1003,363 @@ mod tests {
         a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
     }
 
+    mod layout_and_hits {
+        use super::super::{effect_hit as hit, effect_layout as layout};
+        use super::*;
+
+        type Rect = (f32, f32, f32, f32);
+
+        fn rectangles(lay: EffectLayout) -> [(&'static str, Rect); 20] {
+            [
+                ("back", lay.back),
+                ("effect header", lay.effect_header),
+                ("kind", lay.kind),
+                ("randomize", lay.randomize),
+                ("dial 0", lay.dials[0]),
+                ("dial 1", lay.dials[1]),
+                ("dial 2", lay.dials[2]),
+                ("dial 3", lay.dials[3]),
+                ("dial 4", lay.dials[4]),
+                ("mix", lay.mix),
+                ("modulation header", lay.modulation_header),
+                ("trigger", lay.trigger),
+                ("trigger rate", lay.trigger_rate),
+                ("trigger aux", lay.trigger_aux),
+                ("MSEG selector", lay.mseg_selector),
+                ("target", lay.target),
+                ("depth", lay.depth),
+                ("MSEG sync", lay.mseg_sync),
+                ("MSEG length", lay.mseg_length),
+                ("MSEG pane", lay.mseg_pane),
+            ]
+        }
+
+        fn center((x, y, w, h): Rect) -> (f32, f32) {
+            (x + w * 0.5, y + h * 0.5)
+        }
+
+        #[test]
+        fn every_layout_rectangle_scales_and_translates_from_the_design_geometry() {
+            let expected = [
+                (14.0, 4.0, 90.0, 30.0),
+                (14.0, 36.0, 1_186.0, 16.0),
+                (14.0, 66.0, 200.0, 34.0),
+                (14.0, 108.0, 200.0, 30.0),
+                (244.0, 60.0, 88.0, 88.0),
+                (340.0, 60.0, 88.0, 88.0),
+                (436.0, 60.0, 88.0, 88.0),
+                (532.0, 60.0, 88.0, 88.0),
+                (644.0, 60.0, 88.0, 88.0),
+                (748.0, 60.0, 88.0, 88.0),
+                (14.0, 152.0, 1_186.0, 16.0),
+                (14.0, 200.0, 130.0, 34.0),
+                (160.0, 172.0, 64.0, 64.0),
+                (230.0, 172.0, 64.0, 64.0),
+                (310.0, 200.0, 240.0, 34.0),
+                (566.0, 200.0, 170.0, 34.0),
+                (752.0, 172.0, 64.0, 64.0),
+                (828.0, 200.0, 110.0, 34.0),
+                (948.0, 200.0, 140.0, 34.0),
+                (14.0, 240.0, 1_186.0, 390.0),
+            ];
+            for (ox, oy, scale) in [(0.0, 0.0, 1.0), (37.0, 19.0, 1.5), (-31.0, 23.0, 0.75)] {
+                let actual = layout((ox, oy, 1_200.0, 640.0), scale);
+                for ((name, rect), (x, y, w, h)) in rectangles(actual).into_iter().zip(expected) {
+                    assert_eq!(
+                        rect,
+                        ((x + ox) * scale, (y + oy) * scale, w * scale, h * scale),
+                        "{name}, origin ({ox}, {oy}), scale {scale}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn width_changes_resize_only_headers_and_the_mseg_pane() {
+            let narrow = rectangles(layout((37.0, 19.0, 1_200.0, 640.0), 1.5));
+            let wide = rectangles(layout((37.0, 19.0, 1_600.0, 640.0), 1.5));
+            for ((name, before), (_, after)) in narrow.into_iter().zip(wide) {
+                let expected_width =
+                    if matches!(name, "effect header" | "modulation header" | "MSEG pane") {
+                        before.2 + 600.0
+                    } else {
+                        before.2
+                    };
+                assert_eq!(
+                    after,
+                    (before.0, before.1, expected_width, before.3),
+                    "{name}"
+                );
+            }
+        }
+
+        #[test]
+        fn rectangles_include_left_top_and_exclude_right_bottom_and_empty_areas() {
+            let rect = (-5.0, 7.0, 12.0, 9.0);
+            for (x, y, inside) in [
+                (-5.0, 7.0, true),
+                (0.0, 10.0, true),
+                (6.999, 15.999, true),
+                (7.0, 10.0, false),
+                (0.0, 16.0, false),
+                (-5.001, 10.0, false),
+                (0.0, 6.999, false),
+                (7.0, 16.0, false),
+                (100.0, 10.0, false),
+                (0.0, -20.0, false),
+            ] {
+                assert_eq!(in_rect(rect, x, y), inside, "point ({x}, {y})");
+            }
+            for rect in [
+                (0.0, 0.0, 0.0, 20.0),
+                (0.0, 0.0, 20.0, 0.0),
+                (0.0, 0.0, 0.0, 0.0),
+            ] {
+                for (x, y) in [(0.0, 0.0), (1.0, 1.0), (-1.0, -1.0)] {
+                    assert!(!in_rect(rect, x, y), "empty {rect:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn hit_routing_uses_every_supplied_physical_control_and_ignores_headers() {
+            for scale in [0.75, 1.5] {
+                let lay = layout((123.0, 47.0, 1_250.0, 640.0), scale);
+                let cases = [
+                    (lay.back, EffectHit::Back),
+                    (lay.kind, EffectHit::Kind),
+                    (lay.randomize, EffectHit::Randomize),
+                    (lay.mix, EffectHit::Mix),
+                    (lay.trigger, EffectHit::Trigger),
+                    (lay.trigger_rate, EffectHit::TriggerRate),
+                    (lay.trigger_aux, EffectHit::TriggerAux),
+                    (lay.mseg_selector, EffectHit::MsegSelector(3)),
+                    (lay.target, EffectHit::Target),
+                    (lay.depth, EffectHit::Depth),
+                    (lay.mseg_sync, EffectHit::MsegSync(1)),
+                    (lay.mseg_length, EffectHit::MsegLength),
+                    (lay.mseg_pane, EffectHit::MsegPane),
+                ];
+                let dials = lay
+                    .dials
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, rect)| (rect, EffectHit::Dial(i)));
+                let trigger = TriggerSource::Transient {
+                    threshold: 2.0,
+                    hold_ms: 75.0,
+                };
+                for (rect, expected) in cases.into_iter().chain(dials) {
+                    let (x, y) = center(rect);
+                    for supplied_scale in [0.5, 4.0] {
+                        assert_eq!(
+                            hit(x, y, supplied_scale, &lay, 5, 1, trigger),
+                            Some(expected)
+                        );
+                    }
+                }
+                for rect in [lay.effect_header, lay.modulation_header] {
+                    let (x, y) = center(rect);
+                    assert_eq!(hit(x, y, scale, &lay, 5, 1, trigger), None);
+                }
+            }
+        }
+
+        #[test]
+        fn mseg_selectors_use_half_open_edges_and_exact_segment_boundaries() {
+            let mut lay = layout((1_000.0, 1_000.0, 1_200.0, 640.0), 1.0);
+            lay.mseg_selector = (-12.0, 20.0, 80.0, 24.0);
+            lay.mseg_sync = (-12.0, 80.0, 80.0, 24.0);
+            for (offset, slot) in [
+                (0.0, 1),
+                (19.75, 1),
+                (20.0, 2),
+                (39.75, 2),
+                (40.0, 3),
+                (59.75, 3),
+                (60.0, 0),
+                (79.75, 0),
+            ] {
+                assert_eq!(
+                    hit(-12.0 + offset, 20.0, 1.0, &lay, 0, 1, TriggerSource::Free),
+                    Some(EffectHit::MsegSelector(slot)),
+                    "offset {offset}"
+                );
+            }
+            for (offset, segment) in [(0.0, 0), (39.75, 0), (40.0, 1), (79.75, 1)] {
+                assert_eq!(
+                    hit(-12.0 + offset, 80.0, 1.0, &lay, 0, 1, TriggerSource::Free),
+                    Some(EffectHit::MsegSync(segment)),
+                    "offset {offset}"
+                );
+            }
+            for (x, y) in [
+                (-12.25, 20.0),
+                (68.0, 20.0),
+                (0.0, 19.75),
+                (0.0, 44.0),
+                (-12.25, 80.0),
+                (68.0, 80.0),
+                (0.0, 79.75),
+                (0.0, 104.0),
+            ] {
+                assert_eq!(
+                    hit(x, y, 1.0, &lay, 0, 1, TriggerSource::Free),
+                    None,
+                    "point ({x}, {y})"
+                );
+            }
+        }
+
+        #[test]
+        fn parameter_hit_slots_follow_arity_and_cap_oversized_counts() {
+            let lay = layout((0.0, 0.0, 1_200.0, 640.0), 1.0);
+            for count in [0, 1, 2, 3, 4, 5, usize::MAX] {
+                for (index, rect) in lay.dials.into_iter().enumerate() {
+                    let (x, y) = center(rect);
+                    let expected = if index < count.min(DIAL_SLOTS) {
+                        Some(EffectHit::Dial(index))
+                    } else {
+                        None
+                    };
+                    assert_eq!(
+                        hit(x, y, 1.0, &lay, count, 1, TriggerSource::Free),
+                        expected,
+                        "count {count}, slot {index}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn trigger_dials_are_hot_only_for_their_visible_sources() {
+            let lay = layout((0.0, 0.0, 1_200.0, 640.0), 1.0);
+            for (trigger, rate, aux) in [
+                (TriggerSource::Free, false, false),
+                (TriggerSource::CellLight, false, false),
+                (TriggerSource::CellStep, false, false),
+                (TriggerSource::FreeHz { hz: 3.0 }, true, false),
+                (
+                    TriggerSource::Transient {
+                        threshold: 2.0,
+                        hold_ms: 75.0,
+                    },
+                    true,
+                    true,
+                ),
+            ] {
+                for (rect, expected) in [
+                    (lay.trigger_rate, rate.then_some(EffectHit::TriggerRate)),
+                    (lay.trigger_aux, aux.then_some(EffectHit::TriggerAux)),
+                ] {
+                    let (x, y) = center(rect);
+                    assert_eq!(hit(x, y, 1.0, &lay, 5, 1, trigger), expected, "{trigger:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn amp_hides_target_and_depth_while_mix_and_the_pane_remain_hot() {
+            let lay = layout((0.0, 0.0, 1_200.0, 640.0), 1.0);
+            for slot in 0..4 {
+                for (rect, control) in [
+                    (lay.target, EffectHit::Target),
+                    (lay.depth, EffectHit::Depth),
+                ] {
+                    let (x, y) = center(rect);
+                    assert_eq!(
+                        hit(x, y, 1.0, &lay, 5, slot, TriggerSource::Free),
+                        (slot != 0).then_some(control)
+                    );
+                }
+                for (rect, control) in [
+                    (lay.mix, EffectHit::Mix),
+                    (lay.mseg_pane, EffectHit::MsegPane),
+                ] {
+                    let (x, y) = center(rect);
+                    assert_eq!(
+                        hit(x, y, 1.0, &lay, 5, slot, TriggerSource::Free),
+                        Some(control)
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn zero_sized_back_rectangles_disable_host_navigation() {
+            let mut lay = layout((1_000.0, 1_000.0, 1_200.0, 640.0), 1.0);
+            for rect in [
+                (0.0, 0.0, 0.0, 30.0),
+                (0.0, 0.0, 90.0, 0.0),
+                (0.0, 0.0, 0.0, 0.0),
+            ] {
+                lay.back = rect;
+                assert_eq!(hit(0.0, 0.0, 1.0, &lay, 0, 0, TriggerSource::Free), None);
+            }
+        }
+
+        #[test]
+        fn short_enum_labels_and_non_enum_formats_keep_the_slot_width() {
+            use crate::effects::ParamFormat;
+
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            for scale in [0.5, 1.0, 2.0] {
+                let width = 88.0 * scale;
+                for format in [
+                    ParamFormat::Hertz,
+                    ParamFormat::Number {
+                        decimals: 2,
+                        unit: "dB",
+                    },
+                    ParamFormat::Enum { labels: &[] },
+                    ParamFormat::Enum {
+                        labels: &["2", "4", "6", "8"],
+                    },
+                ] {
+                    assert_eq!(
+                        enum_trigger_width_for(&mut tr, format, 34.0 * scale, width, scale),
+                        width
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn intermediate_enum_labels_fit_the_widest_text_and_padding() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            let format = crate::effects::ParamFormat::Enum {
+                labels: &["i", "Medium", "W"],
+            };
+            for (scale, height, text_size, padding) in [
+                (1.0, 40.0, 20.0, 38.0),
+                (0.5, 12.0, 10.0, 20.2),
+                (2.0, 36.0, 18.0, 37.6),
+            ] {
+                let expected = tr.text_width("Medium", text_size) + padding;
+                let slot_width = expected - 6.0 * scale;
+                let actual = enum_trigger_width_for(&mut tr, format, height, slot_width, scale);
+                assert!(
+                    (actual - expected).abs() < 1e-4,
+                    "scale {scale}, height {height}: {actual} vs {expected}"
+                );
+            }
+        }
+
+        #[test]
+        fn long_enum_labels_cap_overflow_at_twelve_scaled_pixels() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            let format = crate::effects::ParamFormat::Enum {
+                labels: &["An intentionally long enum label that cannot fit"],
+            };
+            for scale in [0.5, 1.0, 2.0] {
+                assert_eq!(
+                    enum_trigger_width_for(&mut tr, format, 34.0 * scale, 88.0 * scale, scale),
+                    100.0 * scale
+                );
+            }
+        }
+    }
+
     mod control_mappings {
         use super::*;
 
