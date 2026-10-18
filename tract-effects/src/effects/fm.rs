@@ -1,43 +1,16 @@
 use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
 
-/// Frequency-modulation effect. The input plays one of two roles, chosen by
-/// the `Mode` param:
+/// Phase/frequency modulation with two selectable carrier roles.
 ///
-/// * **Carrier** — the input is treated as the audio being FMed. An internal
-///   sine at the `Freq` rate modulates a delay line's length around a fixed
-///   5 ms centre; the output is the input read out at that varying delay
-///   (vibrato at slow `Freq`, sideband-rich FM at audio-rate `Freq`). The
-///   delay-line approach is the only practical way to "FM" an arbitrary
-///   input without an analytic-signal Hilbert transform, since instantaneous
-///   frequency is the derivative of phase.
+/// **Carrier** rotates the input's Hilbert analytic signal using an internal
+/// sine at `Freq`. The Hilbert FIR introduces a 32-sample group delay.
+/// **Modulator** lets the input modulate an internal sine carrier, with an
+/// input envelope controlling its amplitude (1 ms attack, 100 ms release).
+/// Each channel has its own carrier phase and feedback memory.
 ///
-/// * **Modulator** — the input modulates an internal sine carrier. The
-///   carrier phase advances at `Freq + depth · input_sample` per sample
-///   (through-zero phase modulation). Each channel runs its own carrier so
-///   stereo input produces stereo output.
-///
-/// `Feedback` is DX7-style operator self-modulation in both modes: the
-/// previous output sample mixes back into the rotation phase, enriching
-/// the timbre (sine → sawtooth-ish at high settings).
-///
-/// **Modulator-mode input gating**: the internal carrier sine plays only
-/// when there's input to modulate. An envelope follower tracks the input
-/// level (fast attack, slow release) and scales the carrier's amplitude,
-/// so a silent input — including the host having stopped the transport —
-/// yields a silent output instead of a continuously-ringing bare carrier.
-/// Carrier mode is intrinsically input-driven (the analytic signal of
-/// silence is silent), so no gate is needed there.
-///
-/// **Unified architecture**: both modes go through the same PM/FM rotation
-/// math; only the role assignment differs:
-///
-/// * **Modulator**: the carrier is an internal sine whose phase is rotated
-///   by the input (modulator) plus self-feedback.
-/// * **Carrier**: the carrier is the **input audio**, converted to an
-///   analytic signal via a Hilbert FIR (so its phase is well-defined),
-///   then rotated by the internal sine modulator plus self-feedback. The
-///   Hilbert filter adds ≈ 32 samples (~0.7 ms at 48 kHz) of latency only
-///   while this mode is selected.
+/// PM applies an instantaneous phase offset; FM accumulates modulation into
+/// phase. Feedback adds the previous output as a phase offset, except in
+/// Modulator/FM where it contributes to the phase increment.
 pub struct FmEffect {
     // Stored parameters.
     mode: f32, // 0 = Carrier, 1 = Modulator (rounded on set_param).
@@ -345,6 +318,454 @@ mod tests {
     use super::*;
     use crate::effects::{Effect, ParamFormat, ParamScaling};
 
+    fn configured_fm(sample_rate: f32, mode: f32, topology: f32) -> FmEffect {
+        let mut fm = FmEffect::new();
+        fm.set_sample_rate(sample_rate);
+        for (index, value) in [sample_rate / 16.0, 50.0, 0.0, mode, topology]
+            .into_iter()
+            .enumerate()
+        {
+            fm.set_param(index, value);
+        }
+        fm
+    }
+
+    #[test]
+    fn carrier_zero_depth_has_an_exact_32_sample_stereo_delay() {
+        for sample_rate in [44_100.0, 96_000.0] {
+            for topology in [0.0, 1.0] {
+                let mut fm = configured_fm(sample_rate, 0.0, topology);
+                fm.set_param(1, 0.0);
+                for sample in 0..160 {
+                    let input = (
+                        if sample == 0 {
+                            1.0
+                        } else if sample == 73 {
+                            -0.25
+                        } else {
+                            0.0
+                        },
+                        if sample == 7 {
+                            -0.5
+                        } else if sample == 49 {
+                            0.75
+                        } else {
+                            0.0
+                        },
+                    );
+                    let expected = (
+                        if sample == 32 {
+                            1.0
+                        } else if sample == 105 {
+                            -0.25
+                        } else {
+                            0.0
+                        },
+                        if sample == 39 {
+                            -0.5
+                        } else if sample == 81 {
+                            0.75
+                        } else {
+                            0.0
+                        },
+                    );
+                    assert_eq!(
+                        fm.process_sample(input.0, input.1),
+                        expected,
+                        "rate {sample_rate}, topology {topology}, sample {sample}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn sparse_input(sample: usize, pulses: &[(usize, f64)]) -> f32 {
+        pulses
+            .iter()
+            .filter(|(at, _)| *at == sample)
+            .map(|(_, amplitude)| *amplitude as f32)
+            .sum()
+    }
+
+    fn analytic_impulse_reference(sample: usize, pulses: &[(usize, f64)]) -> (f64, f64) {
+        let real = pulses
+            .iter()
+            .filter(|(at, _)| sample == at + 32)
+            .map(|(_, amplitude)| amplitude)
+            .sum();
+        let mut imaginary = 0.0;
+        for &(at, amplitude) in pulses {
+            if sample >= at {
+                let lag = sample - at;
+                if lag < 65 && lag % 2 == 1 {
+                    // Hann-windowed ideal Hilbert impulse, evaluated independently in f64.
+                    let window = (std::f64::consts::PI * lag as f64 / 64.0).sin().powi(2);
+                    imaginary +=
+                        amplitude * 2.0 * window / (std::f64::consts::PI * (lag as f64 - 32.0));
+                }
+            }
+        }
+        (real, imaginary)
+    }
+
+    #[test]
+    fn carrier_pm_and_fm_match_the_analytic_rotation_of_sparse_impulses() {
+        let pulses_l = [(0, 0.75), (17, -0.3), (49, 0.2)];
+        let pulses_r = [(5, -0.4), (27, 0.6), (73, -0.2)];
+        for topology in [0.0, 1.0] {
+            let mut fm = configured_fm(48_000.0, 0.0, topology);
+            fm.set_param(1, 12.5);
+            for sample in 0..160 {
+                let n = sample as f64;
+                let theta = if topology == 0.0 {
+                    0.125 * (std::f64::consts::PI * n / 8.0).sin()
+                } else {
+                    0.125
+                        * (std::f64::consts::PI * n / 16.0).sin()
+                        * (std::f64::consts::PI * (n + 1.0) / 16.0).sin()
+                        / (std::f64::consts::PI / 16.0).sin()
+                };
+                let (sin, cos) = (std::f64::consts::TAU * theta).sin_cos();
+                let left = analytic_impulse_reference(sample, &pulses_l);
+                let right = analytic_impulse_reference(sample, &pulses_r);
+                let expected = (left.0 * cos - left.1 * sin, right.0 * cos - right.1 * sin);
+                let actual = fm.process_sample(
+                    sparse_input(sample, &pulses_l),
+                    sparse_input(sample, &pulses_r),
+                );
+                assert!(
+                    (actual.0 as f64 - expected.0).abs() < 3e-6,
+                    "topology {topology}, sample {sample}: L {} vs {}",
+                    actual.0,
+                    expected.0
+                );
+                assert!(
+                    (actual.1 as f64 - expected.1).abs() < 3e-6,
+                    "topology {topology}, sample {sample}: R {} vs {}",
+                    actual.1,
+                    expected.1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn carrier_feedback_matches_independent_stereo_rotation_anchors() {
+        // f64 sparse-Hilbert reference with 0.25 cycles of previous-output feedback.
+        let pulses_l = [(0, 0.75), (11, -0.25)];
+        let pulses_r = [(3, -0.5), (19, 0.375)];
+        for (topology, expected) in [
+            (
+                0.0,
+                [
+                    (0.734901922266, 0.0),
+                    (-0.473122131617, 0.0),
+                    (-0.103833308969, -0.446265797455),
+                    (-0.011748972075, 0.027507239754),
+                    (-0.006027074605, 0.223434124691),
+                ],
+            ),
+            (
+                1.0,
+                [
+                    (0.750038970298, 0.0),
+                    (-0.474297464060, 0.0),
+                    (-0.155723097564, -0.175401703720),
+                    (-0.017167359210, 0.283053533052),
+                    (-0.008912162888, -0.113348139193),
+                ],
+            ),
+        ] {
+            let mut fm = configured_fm(48_000.0, 0.0, topology);
+            fm.set_param(1, 12.5);
+            fm.set_param(2, 50.0);
+            for sample in 0..80 {
+                let actual = fm.process_sample(
+                    sparse_input(sample, &pulses_l),
+                    sparse_input(sample, &pulses_r),
+                );
+                if let Some(index) = [32, 33, 35, 36, 51].iter().position(|&at| at == sample) {
+                    assert!(
+                        (actual.0 as f64 - expected[index].0).abs() < 3e-6,
+                        "topology {topology}, sample {sample}: L {} vs {}",
+                        actual.0,
+                        expected[index].0
+                    );
+                    assert!(
+                        (actual.1 as f64 - expected[index].1).abs() < 3e-6,
+                        "topology {topology}, sample {sample}: R {} vs {}",
+                        actual.1,
+                        expected[index].1
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn modulator_pm_and_fm_match_closed_form_attack_and_release() {
+        for sample_rate in [32_000.0, 48_000.0] {
+            for topology in [0.0, 1.0] {
+                let mut fm = configured_fm(sample_rate, 1.0, topology);
+                for n in 1..=256 {
+                    let envelope = 0.5 * (1.0 - (-(n as f64) / (sample_rate as f64 * 0.001)).exp());
+                    let phase = (n % 16) as f64 / 16.0;
+                    let phases = if topology == 0.0 {
+                        (phase + 0.125, phase - 0.375)
+                    } else {
+                        (
+                            (3 * n % 16) as f64 / 16.0,
+                            ((-5_i32 * n).rem_euclid(16)) as f64 / 16.0,
+                        )
+                    };
+                    let actual = fm.process_sample(0.25, -0.75);
+                    let expected = (
+                        envelope * (std::f64::consts::TAU * phases.0).sin(),
+                        envelope * (std::f64::consts::TAU * phases.1).sin(),
+                    );
+                    assert!((actual.0 as f64 - expected.0).abs() < 2e-6);
+                    assert!((actual.1 as f64 - expected.1).abs() < 2e-6);
+                }
+                let attack_end = 0.5 * (1.0 - (-256.0 / (sample_rate as f64 * 0.001)).exp());
+                for n in 1..=256 {
+                    let envelope = attack_end * (-(n as f64) / (sample_rate as f64 * 0.1)).exp();
+                    let expected =
+                        envelope * (std::f64::consts::TAU * (n % 16) as f64 / 16.0).sin();
+                    let actual = fm.process_sample(0.0, 0.0);
+                    assert!((actual.0 as f64 - expected).abs() < 2e-6);
+                    assert!((actual.1 as f64 - expected).abs() < 2e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn modulator_gate_caps_the_amplitude_without_shortening_attack() {
+        for topology in [0.0, 1.0] {
+            let mut fm = configured_fm(48_000.0, 1.0, topology);
+            fm.set_param(0, 6_000.0);
+            fm.set_param(1, 0.0);
+            for n in 1..=128 {
+                let gate = (3.0 * (1.0 - (-(n as f64) / 48.0).exp())).min(1.0);
+                let expected = gate * (std::f64::consts::TAU * (n % 8) as f64 / 8.0).sin();
+                let actual = fm.process_sample(4.0, -2.0);
+                assert!((actual.0 as f64 - expected).abs() < 2e-6);
+                assert!((actual.1 as f64 - expected).abs() < 2e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn modulator_feedback_matches_pm_and_fm_reference_traces() {
+        // f64 PM/FM reference with 0.4 cycles of previous-output feedback.
+        let inputs = [
+            (0.25, -0.75),
+            (0.8, -0.2),
+            (-0.9, 0.7),
+            (0.0, 0.0),
+            (0.1, 0.1),
+            (-0.05, 0.3),
+            (2.0, -2.0),
+            (-0.4, 0.2),
+        ];
+        let envelopes = [
+            0.4020617819,
+            0.4040810543,
+            0.4122440393,
+            0.4121581641,
+            0.4120931379,
+            0.4120437487,
+            0.4447839427,
+            0.4447537825,
+        ];
+        for (topology, expected) in [
+            (
+                0.0,
+                [
+                    (0.1060932687, 0.1881366949),
+                    (-0.3822435813, -0.2950046665),
+                    (0.0825895509, -0.2878179939),
+                    (-0.3452446957, -0.4113654159),
+                    (-0.3286127502, -0.2995973429),
+                    (-0.4073890988, 0.2629677267),
+                    (-0.1025941510, -0.3681657925),
+                    (-0.1533800326, 0.4249000862),
+                ],
+            ),
+            (
+                1.0,
+                [
+                    (0.1060932687, 0.1881366949),
+                    (-0.2272588736, 0.3899295014),
+                    (-0.2897254721, -0.4100909165),
+                    (-0.3059641612, -0.3875191160),
+                    (-0.3620612698, -0.3916690171),
+                    (-0.3063814634, -0.4077431119),
+                    (0.3815853356, 0.0968019019),
+                    (0.0736705796, 0.4417075078),
+                ],
+            ),
+        ] {
+            let mut fm = configured_fm(48_000.0, 1.0, topology);
+            fm.set_param(0, 6_000.0);
+            fm.set_param(1, 35.0);
+            fm.set_param(2, 80.0);
+            fm.carrier_phase_l = 0.125;
+            fm.carrier_phase_r = 0.375;
+            fm.prev_out_l = 0.3;
+            fm.prev_out_r = -0.4;
+            fm.input_env = 0.4;
+            for (index, input) in inputs.into_iter().enumerate() {
+                let actual = fm.process_sample(input.0, input.1);
+                assert!(
+                    (actual.0 as f64 - expected[index].0).abs() < 3e-6,
+                    "topology {topology}, sample {index}: L {} vs {}",
+                    actual.0,
+                    expected[index].0
+                );
+                assert!(
+                    (actual.1 as f64 - expected[index].1).abs() < 3e-6,
+                    "topology {topology}, sample {index}: R {} vs {}",
+                    actual.1,
+                    expected[index].1
+                );
+                assert!((fm.input_env as f64 - envelopes[index]).abs() < 2e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn sample_rate_changes_preserve_the_envelope_and_carrier_phase() {
+        let mut fm = configured_fm(48_000.0, 1.0, 0.0);
+        fm.set_param(0, 6_000.0);
+        fm.set_param(1, 0.0);
+        for _ in 0..95 {
+            fm.process_sample(0.5, 0.5);
+        }
+        let initial = 0.5 * (1.0 - (-95.0_f64 / 48.0).exp());
+        fm.set_sample_rate(96_000.0);
+        for n in 1..=96 {
+            let envelope = 1.0 - (1.0 - initial) * (-(n as f64) / 96.0).exp();
+            let expected = envelope * (std::f64::consts::TAU * ((14 + n) % 16) as f64 / 16.0).sin();
+            let actual = fm.process_sample(1.0, 1.0);
+            assert!((actual.0 as f64 - expected).abs() < 2e-6);
+            assert!((actual.1 as f64 - expected).abs() < 2e-6);
+        }
+    }
+
+    fn nondefault_fm(mode: f32, topology: f32) -> FmEffect {
+        let mut fm = configured_fm(96_000.0, mode, topology);
+        for (index, value) in [4_000.0, 37.5, 62.5].into_iter().enumerate() {
+            fm.set_param(index, value);
+        }
+        fm
+    }
+
+    fn prime_all_modes(fm: &mut FmEffect) {
+        for (mode, topology) in [(0.0, 0.0), (0.0, 1.0), (1.0, 0.0), (1.0, 1.0)] {
+            fm.set_param(3, mode);
+            fm.set_param(4, topology);
+            for sample in 0..73 {
+                fm.process_sample((sample as f32 * 0.17).sin(), (sample as f32 * 0.31).cos());
+            }
+        }
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_processor_after_exercising_every_mode() {
+        for (mode, topology) in [(0.0, 0.0), (0.0, 1.0), (1.0, 0.0), (1.0, 1.0)] {
+            let mut used = nondefault_fm(mode, topology);
+            let mut fresh = nondefault_fm(mode, topology);
+            prime_all_modes(&mut used);
+            used.set_param(3, mode);
+            used.set_param(4, topology);
+            used.reset();
+            for sample in 0..160 {
+                let input = ((sample as f32 * 0.19).sin(), (sample as f32 * 0.37).cos());
+                assert_eq!(
+                    used.process_sample(input.0, input.1),
+                    fresh.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parameter_and_mode_changes_preserve_existing_dsp_history() {
+        for (mode, topology) in [(0.0, 0.0), (0.0, 1.0), (1.0, 0.0), (1.0, 1.0)] {
+            let mut changed = nondefault_fm(mode, topology);
+            let mut reference = nondefault_fm(mode, topology);
+            prime_all_modes(&mut changed);
+            prime_all_modes(&mut reference);
+            for fm in [&mut changed, &mut reference] {
+                fm.set_param(3, mode);
+                fm.set_param(4, topology);
+            }
+            for sample in 0..97 {
+                let input = ((sample as f32 * 0.13).sin(), (sample as f32 * 0.31).cos());
+                changed.process_sample(input.0, input.1);
+                reference.process_sample(input.0, input.1);
+            }
+            changed.set_sample_rate(44_100.0);
+            for (index, value) in [8_000.0, 10.0, 100.0, 1.0 - mode, 1.0 - topology]
+                .into_iter()
+                .enumerate()
+            {
+                changed.set_param(index, value);
+            }
+            changed.set_sample_rate(96_000.0);
+            for (index, value) in [4_000.0, 37.5, 62.5, mode, topology]
+                .into_iter()
+                .enumerate()
+            {
+                changed.set_param(index, value);
+            }
+            changed.set_param(99, -123.0);
+            for sample in 0..160 {
+                let input = ((sample as f32 * 0.23).cos(), (sample as f32 * 0.41).sin());
+                assert_eq!(
+                    changed.process_sample(input.0, input.1),
+                    reference.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parameters_clamp_and_round_enums_without_retriggering() {
+        for (index, value, endpoint) in [
+            (0, -1.0, 20.0),
+            (0, 99_999.0, 20_000.0),
+            (1, -1.0, 0.0),
+            (1, 999.0, 100.0),
+            (2, -1.0, 0.0),
+            (2, 999.0, 100.0),
+            (3, -1.0, 0.0),
+            (3, 0.49, 0.0),
+            (3, 0.5, 1.0),
+            (3, 99.0, 1.0),
+            (4, -1.0, 0.0),
+            (4, 0.49, 0.0),
+            (4, 0.5, 1.0),
+            (4, 99.0, 1.0),
+        ] {
+            let mut clamped = nondefault_fm(0.0, 1.0);
+            let mut reference = nondefault_fm(0.0, 1.0);
+            prime_all_modes(&mut clamped);
+            prime_all_modes(&mut reference);
+            clamped.set_param(index, value);
+            reference.set_param(index, endpoint);
+            clamped.set_param(99, 123.0);
+            for sample in 0..256 {
+                let input = ((sample as f32 * 0.29).sin(), (sample as f32 * 0.43).cos());
+                assert_eq!(
+                    clamped.process_sample(input.0, input.1),
+                    reference.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
+
     #[test]
     fn fm_effect_lists_five_parameters_with_the_expected_specs() {
         let fm = FmEffect::new();
@@ -363,6 +784,38 @@ mod tests {
         assert!(matches!(specs[3].format, ParamFormat::Enum { .. }));
         assert_eq!(specs[4].name, "Topology");
         assert!(matches!(specs[4].format, ParamFormat::Enum { .. }));
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [
+                (20.0, 20_000.0, 100.0),
+                (0.0, 100.0, 25.0),
+                (0.0, 100.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 1.0, 0.0)
+            ]
+        );
+        assert!(specs[1..3].iter().all(|spec| matches!(
+            spec.format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: "%"
+            }
+        )));
+        assert!(matches!(
+            specs[3].format,
+            ParamFormat::Enum {
+                labels: ["Carrier", "Modulator"]
+            }
+        ));
+        assert!(matches!(
+            specs[4].format,
+            ParamFormat::Enum {
+                labels: ["PM", "FM"]
+            }
+        ));
     }
 
     #[test]
