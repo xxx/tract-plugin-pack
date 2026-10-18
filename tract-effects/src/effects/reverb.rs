@@ -12,7 +12,7 @@ use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
 /// - **Per-comb LFO modulation.** Each of the 8 comb tap reads has
 ///   its own sub-Hz LFO at a mutually-prime rate; the LFOs add up
 ///   to ±MOD_DEPTH samples of fractional offset on the read tap.
-///   At Mod = 0 this collapses to plain Freeverb (LFOs idle); at
+///   At Mod = 0 the offset is zero while the LFOs keep running; at
 ///   Mod = 100 the tail picks up the gentle pitch shimmer that
 ///   gives plates and the better hall algorithms their liveliness.
 /// - **Pre-delay** before the reverb input, useful for separating
@@ -234,23 +234,18 @@ impl ReverbEffect {
 
     /// Read a ring buffer at fractional `delay_samples` back from
     /// `write_idx`, linearly interpolating between adjacent slots.
-    /// `delay_samples` must satisfy `2 ≤ delay_samples < buf.len()`
-    /// — the per-channel `delay_samples + mod_offset` math
-    /// guarantees this in practice (min delay ≈ 1116 samples at
-    /// 44.1 kHz, modulation ≤ 10 samples).
-    ///
     /// `buf.len()` must be a power of two; the wrap is a bitmask
     /// (`MAX_COMB_LEN`, `MAX_AP_LEN`, `MAX_PRE_DELAY` are all pow2).
     #[inline]
     fn read_frac(buf: &[f32], write_idx: usize, delay_samples: f32) -> f32 {
         let n = buf.len();
         let mask = n - 1;
-        let pos = write_idx as f32 + n as f32 - delay_samples;
-        let i_floor = pos.floor();
-        let frac = pos - i_floor;
-        let i0 = (i_floor as usize) & mask;
-        let i1 = (i0 + 1) & mask;
-        buf[i0] * (1.0 - frac) + buf[i1] * frac
+        let whole = delay_samples.floor();
+        let frac = delay_samples - whole;
+        // Keep wrapping in integer space so the fractional offset retains its precision.
+        let newer = (write_idx + n - ((whole as usize) & mask)) & mask;
+        let older = (newer + n - 1) & mask;
+        buf[newer] * (1.0 - frac) + buf[older] * frac
     }
 }
 
@@ -294,7 +289,7 @@ impl Effect for ReverbEffect {
         let two_pi = 2.0 * std::f32::consts::PI;
         for i in 0..Self::N_COMBS {
             self.lfo_phase[i] += self.lfo_inc[i];
-            if self.lfo_phase[i] > two_pi {
+            if self.lfo_phase[i] >= two_pi {
                 self.lfo_phase[i] -= two_pi;
             }
         }
@@ -437,6 +432,403 @@ mod tests {
     use super::*;
     use crate::effects::{Effect, ParamFormat};
 
+    fn configured_reverb(sample_rate: f32, params: [f32; 5]) -> ReverbEffect {
+        let mut reverb = ReverbEffect::new();
+        reverb.set_sample_rate(sample_rate);
+        for (index, value) in params.into_iter().enumerate() {
+            reverb.set_param(index, value);
+        }
+        reverb
+    }
+
+    #[test]
+    fn fractional_reads_preserve_subsample_precision_at_every_ring_position() {
+        for length in [8, 4_096, 8_192, 32_768] {
+            for write in [0, length / 2, length - 1] {
+                for delay in [1.25, 2.0 + 1.0 / 65_536.0, length as f32 - 1.5] {
+                    let mut buffer = vec![0.0; length];
+                    let whole = delay.floor() as usize;
+                    buffer[(write + length - whole) % length] = 0.75;
+                    buffer[(write + length - whole - 1) % length] = -0.25;
+                    let expected = 0.75 - (delay - whole as f32);
+                    assert_eq!(
+                        ReverbEffect::read_frac(&buffer, write, delay),
+                        expected,
+                        "length {length}, write {write}, delay {delay}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lfos_wrap_at_the_exact_cycle_boundary_even_when_modulation_is_muted() {
+        let mut reverb = configured_reverb(96_000.0, [50.0, 30.0, 0.0, 0.0, 100.0]);
+        for i in 0..8 {
+            reverb.lfo_phase[i] = std::f32::consts::TAU - reverb.lfo_inc[i];
+            assert_eq!(
+                reverb.lfo_phase[i] + reverb.lfo_inc[i],
+                std::f32::consts::TAU
+            );
+        }
+        reverb.process_sample(0.0, 0.0);
+        assert_eq!(reverb.lfo_phase, [0.0; 8]);
+        reverb.process_sample(0.0, 0.0);
+        assert_eq!(reverb.lfo_phase, reverb.lfo_inc);
+        let expected: [f64; 8] = std::array::from_fn(|i| {
+            reverb.lfo_phase[i] = std::f32::consts::TAU - reverb.lfo_inc[i] / 2.0;
+            reverb.lfo_phase[i] as f64 + reverb.lfo_inc[i] as f64 - std::f32::consts::TAU as f64
+        });
+        reverb.process_sample(0.0, 0.0);
+        for (phase, expected) in reverb.lfo_phase.into_iter().zip(expected) {
+            assert!(phase > 0.0 && phase < std::f32::consts::TAU);
+            assert!((phase as f64 - expected).abs() < 5e-7);
+        }
+    }
+
+    #[test]
+    fn long_pre_delays_respect_the_existing_storage_limit() {
+        for (sample_rate, delay) in [(192_000.0, 19_200), (384_000.0, 32_766)] {
+            let mut reverb = configured_reverb(sample_rate, [0.0, 0.0, 0.0, 100.0, 100.0]);
+            let source = ReverbEffect::MAX_PRE_DELAY - delay - 1;
+            reverb.pre_buf_l[source] = 0.75;
+            reverb.pre_buf_r[source] = -0.25;
+            reverb.process_sample(0.0, 0.0);
+            for comb in reverb.comb_l.iter().chain(reverb.comb_r.iter()) {
+                assert_eq!(comb.buf[0], 0.25, "sample rate {sample_rate}");
+            }
+        }
+    }
+
+    fn analytic_channel_impulse(length: usize, spread: usize, feedback: f64) -> Vec<f64> {
+        let mut response = vec![0.0; length];
+        for delay in [1_116, 1_188, 1_277, 1_356, 1_422, 1_491, 1_557, 1_617] {
+            let delay = delay + spread;
+            for echo in 1..length.div_ceil(delay) {
+                response[echo * delay] += feedback.powi(echo as i32 - 1) / 8.0;
+            }
+        }
+        for delay in [556, 441, 341, 225] {
+            let delay = delay + spread;
+            let mut diffused = vec![0.0; length];
+            for (sample, &amplitude) in response.iter().enumerate() {
+                // (z^-D - g)/(1 - g*z^-D): h[0]=-g, h[kD]=(1-g²)*g^(k-1).
+                diffused[sample] -= 0.5 * amplitude;
+                if amplitude == 0.0 {
+                    continue;
+                }
+                for echo in 1..(length - sample).div_ceil(delay) {
+                    diffused[sample + echo * delay] +=
+                        amplitude * 0.75 * 0.5_f64.powi(echo as i32 - 1);
+                }
+            }
+            response = diffused;
+        }
+        response
+    }
+
+    #[test]
+    fn impulse_responses_match_independent_comb_and_allpass_transfer_functions() {
+        for (decay, pre_delay, pre_samples, width) in
+            [(0.0, 0.0, 0, 100.0), (100.0, 20.0, 882, 37.5)]
+        {
+            let mut reverb = configured_reverb(44_100.0, [decay, 0.0, 0.0, pre_delay, width]);
+            let feedback = 0.65 + decay as f64 * 0.0033;
+            let left = analytic_channel_impulse(9_000, 0, feedback);
+            let right = analytic_channel_impulse(9_000, 23, feedback);
+            for sample in 0..9_000 {
+                let input = if sample == 0 {
+                    (1.0, -0.25)
+                } else {
+                    (0.0, 0.0)
+                };
+                let (wet_l, wet_r) = if sample > pre_samples {
+                    (
+                        0.375 * left[sample - pre_samples - 1],
+                        0.375 * right[sample - pre_samples - 1],
+                    )
+                } else {
+                    (0.0, 0.0)
+                };
+                let side_gain = width as f64 / 100.0;
+                let expected = (
+                    ((1.0 + side_gain) * wet_l + (1.0 - side_gain) * wet_r) / 2.0,
+                    ((1.0 - side_gain) * wet_l + (1.0 + side_gain) * wet_r) / 2.0,
+                );
+                let actual = reverb.process_sample(input.0, input.1);
+                assert!(
+                    (actual.0 as f64 - expected.0).abs() < 2e-6,
+                    "decay {decay}, sample {sample}: {actual:?} vs {expected:?}"
+                );
+                assert!((actual.1 as f64 - expected.1).abs() < 2e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn seeded_comb_and_diffuser_states_follow_the_analytic_one_step_update() {
+        for decay in [0.0, 50.0, 100.0] {
+            for damping in [0.0, 50.0, 100.0] {
+                for width in [0.0, 37.5, 100.0] {
+                    let mut reverb = configured_reverb(44_100.0, [decay, damping, 0.0, 0.0, width]);
+                    reverb.pre_write = ReverbEffect::MAX_PRE_DELAY - 1;
+                    reverb.pre_buf_l[ReverbEffect::MAX_PRE_DELAY - 2] = 0.5;
+                    reverb.pre_buf_r[ReverbEffect::MAX_PRE_DELAY - 2] = -0.25;
+                    for i in 0..8 {
+                        for (comb, delay, tap, state) in [
+                            (&mut reverb.comb_l[i], i + 2, (i + 1) as f32 / 8.0, 0.25),
+                            (
+                                &mut reverb.comb_r[i],
+                                i + 3,
+                                -(i as f32 + 1.0) / 16.0,
+                                -0.375,
+                            ),
+                        ] {
+                            comb.delay_samples = delay as f32;
+                            comb.write_idx = if i % 2 == 0 { 0 } else { comb.buf.len() - 1 };
+                            let tap_index =
+                                (comb.write_idx + comb.buf.len() - delay) % comb.buf.len();
+                            comb.buf[tap_index] = tap;
+                            comb.lp_state = state;
+                        }
+                    }
+                    for allpass in reverb.ap_l.iter_mut().chain(reverb.ap_r.iter_mut()) {
+                        allpass.write_idx = allpass.buf.len() - 1;
+                    }
+                    let actual = reverb.process_sample(0.75, -0.125);
+                    let wet_l = 4.5 / 128.0;
+                    let wet_r = -2.25 / 128.0;
+                    let w = width as f64 / 100.0;
+                    let expected = (
+                        ((1.0 + w) * wet_l + (1.0 - w) * wet_r) / 2.0,
+                        ((1.0 - w) * wet_l + (1.0 + w) * wet_r) / 2.0,
+                    );
+                    assert!((actual.0 as f64 - expected.0).abs() < 2e-7);
+                    assert!((actual.1 as f64 - expected.1).abs() < 2e-7);
+                    for i in 0..8 {
+                        for (comb, tap, state) in [
+                            (&reverb.comb_l[i], (i + 1) as f64 / 8.0, 0.25),
+                            (&reverb.comb_r[i], -(i as f64 + 1.0) / 16.0, -0.375),
+                        ] {
+                            let d = damping as f64 / 200.0;
+                            let lp = (1.0 - d) * tap + d * state;
+                            let written = 0.125 + lp * (0.65 + decay as f64 * 0.0033);
+                            let previous = if i % 2 == 0 { 0 } else { comb.buf.len() - 1 };
+                            assert!((comb.lp_state as f64 - lp).abs() < 2e-7);
+                            assert!((comb.buf[previous] as f64 - written).abs() < 2e-7);
+                            assert_eq!(comb.write_idx, if i % 2 == 0 { 1 } else { 0 });
+                        }
+                    }
+                    for i in 0..4 {
+                        let factor = 0.75 * (-0.5_f64).powi(i as i32);
+                        assert_eq!(
+                            reverb.ap_l[i].buf[ReverbEffect::MAX_AP_LEN - 1] as f64,
+                            4.5 * factor
+                        );
+                        assert_eq!(
+                            reverb.ap_r[i].buf[ReverbEffect::MAX_AP_LEN - 1] as f64,
+                            -2.25 * factor
+                        );
+                        assert_eq!(reverb.ap_l[i].write_idx, 0);
+                        assert_eq!(reverb.ap_r[i].write_idx, 0);
+                    }
+                    assert_eq!(reverb.pre_write, 0);
+                    assert_eq!(reverb.pre_buf_l[ReverbEffect::MAX_PRE_DELAY - 1], 0.75);
+                    assert_eq!(reverb.pre_buf_r[ReverbEffect::MAX_PRE_DELAY - 1], -0.125);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn modulation_moves_each_stereo_comb_to_the_expected_fractional_taps() {
+        for (phase, offset, sum_l, sum_r) in [
+            (std::f32::consts::FRAC_PI_2, 2.5, 1.125, 0.6875),
+            (3.0 * std::f32::consts::FRAC_PI_2, -2.5, 1.125, 0.6875),
+            (std::f32::consts::PI / 6.0, 1.25, 2.8125, -0.34375),
+        ] {
+            let mut reverb = configured_reverb(44_100.0, [50.0, 50.0, 25.0, 0.0, 100.0]);
+            for i in 0..8 {
+                reverb.lfo_phase[i] = phase - reverb.lfo_inc[i];
+                for (comb, newer, older) in [
+                    (
+                        &mut reverb.comb_l[i],
+                        (i + 1) as f32 / 8.0,
+                        -(i as f32 + 1.0) / 16.0,
+                    ),
+                    (
+                        &mut reverb.comb_r[i],
+                        -(i as f32 + 2.0) / 32.0,
+                        (i + 2) as f32 / 16.0,
+                    ),
+                ] {
+                    let whole = (comb.delay_samples + offset).floor() as usize;
+                    let newer_index = comb.buf.len() - whole;
+                    comb.buf[newer_index] = newer;
+                    comb.buf[newer_index - 1] = older;
+                }
+            }
+            let actual = reverb.process_sample(0.0, 0.0);
+            assert!((actual.0 - sum_l / 128.0).abs() < 2e-7);
+            assert!((actual.1 - sum_r / 128.0).abs() < 2e-7);
+            for &actual_phase in &reverb.lfo_phase {
+                assert_eq!(actual_phase, phase);
+            }
+        }
+    }
+
+    #[test]
+    fn fractional_pre_delay_matches_fractional_input_delay_through_the_whole_engine() {
+        let mut delayed = configured_reverb(48_000.0, [75.0, 60.0, 0.0, 1.5 / 48.0, 62.5]);
+        let mut reference = configured_reverb(48_000.0, [75.0, 60.0, 0.0, 0.0, 62.5]);
+        let mut previous = [(0.0, 0.0); 2];
+        for sample in 0..12_000 {
+            let input = if sample < 3_000 {
+                (
+                    (sample as f32 * 0.17).sin() * 0.25,
+                    (sample as f32 * 0.31).cos() * 0.375,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            let shifted = (
+                0.5 * (previous[0].0 + previous[1].0),
+                0.5 * (previous[0].1 + previous[1].1),
+            );
+            let actual = delayed.process_sample(input.0, input.1);
+            let expected = reference.process_sample(shifted.0, shifted.1);
+            assert!(
+                (actual.0 - expected.0).abs() < 5e-7,
+                "sample {sample}: {actual:?} vs {expected:?}"
+            );
+            assert!((actual.1 - expected.1).abs() < 5e-7);
+            previous = [input, previous[0]];
+        }
+    }
+
+    #[test]
+    fn sample_rates_scale_all_delay_lengths_and_lfo_rates_without_resetting_phases() {
+        let mut reverb = ReverbEffect::new();
+        for sample_rate in [44_100.0, 48_000.0, 96_000.0, 192_000.0] {
+            for (index, phase) in reverb.lfo_phase.iter_mut().enumerate() {
+                *phase = index as f32 * 0.25;
+            }
+            reverb.set_sample_rate(sample_rate);
+            for (i, delay) in [1_116, 1_188, 1_277, 1_356, 1_422, 1_491, 1_557, 1_617]
+                .into_iter()
+                .enumerate()
+            {
+                let left = delay as f64 * sample_rate as f64 / 44_100.0;
+                let right = (delay + 23) as f64 * sample_rate as f64 / 44_100.0;
+                assert!((reverb.comb_l[i].delay_samples as f64 - left).abs() < 0.002);
+                assert!((reverb.comb_r[i].delay_samples as f64 - right).abs() < 0.002);
+                let frequency = [0.317, 0.421, 0.547, 0.671, 0.797, 0.911, 1.063, 1.237][i];
+                let increment = std::f64::consts::TAU * frequency / sample_rate as f64;
+                assert!((reverb.lfo_inc[i] as f64 - increment).abs() < 2e-10);
+                assert_eq!(reverb.lfo_phase[i], i as f32 * 0.25);
+            }
+            for (i, delay) in [556, 441, 341, 225].into_iter().enumerate() {
+                assert!(
+                    (reverb.ap_l[i].delay_samples as f64
+                        - delay as f64 * sample_rate as f64 / 44_100.0)
+                        .abs()
+                        < 0.002
+                );
+                assert!(
+                    (reverb.ap_r[i].delay_samples as f64
+                        - (delay + 23) as f64 * sample_rate as f64 / 44_100.0)
+                        .abs()
+                        < 0.002
+                );
+            }
+        }
+        reverb.set_sample_rate(0.0);
+        assert_eq!(reverb.sample_rate, 1.0);
+    }
+
+    #[test]
+    fn parameter_and_sample_rate_changes_preserve_the_existing_reverb_tail() {
+        let params = [73.0, 64.0, 45.0, 7.0, 62.5];
+        let mut changed = configured_reverb(48_000.0, params);
+        let mut reference = configured_reverb(48_000.0, params);
+        for sample in 0..10_000 {
+            let input = (
+                (sample as f32 * 0.17).sin() * 0.25,
+                (sample as f32 * 0.31).cos() * 0.375,
+            );
+            changed.process_sample(input.0, input.1);
+            reference.process_sample(input.0, input.1);
+        }
+        changed.set_sample_rate(96_000.0);
+        for (index, value) in [0.0, 0.0, 0.0, 100.0, 0.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_sample_rate(48_000.0);
+        for (index, value) in params.into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_param(99, 123.0);
+        for _ in 0..10_000 {
+            assert_eq!(
+                changed.process_sample(0.0, 0.0),
+                reference.process_sample(0.0, 0.0)
+            );
+        }
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_processor_with_the_current_parameters_and_rate() {
+        let params = [73.0, 64.0, 45.0, 7.0, 62.5];
+        let mut used = configured_reverb(96_000.0, params);
+        let mut fresh = configured_reverb(96_000.0, params);
+        for sample in 0..10_000 {
+            used.process_sample((sample as f32 * 0.17).sin() * 0.25, -0.375);
+        }
+        used.reset();
+        for sample in 0..10_000 {
+            let input = if sample < 1_000 {
+                (0.25, (sample as f32 * 0.31).cos() * 0.375)
+            } else {
+                (0.0, 0.0)
+            };
+            assert_eq!(
+                used.process_sample(input.0, input.1),
+                fresh.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn every_parameter_clamps_to_its_endpoints_without_retriggering_the_tail() {
+        for slot in 0..5 {
+            for (value, endpoint) in [(-1.0, 0.0), (999.0, 100.0)] {
+                let mut clamped = configured_reverb(48_000.0, [73.0, 64.0, 45.0, 7.0, 62.5]);
+                let mut reference = configured_reverb(48_000.0, [73.0, 64.0, 45.0, 7.0, 62.5]);
+                for sample in 0..2_000 {
+                    let input = ((sample as f32 * 0.17).sin() * 0.25, -0.375);
+                    clamped.process_sample(input.0, input.1);
+                    reference.process_sample(input.0, input.1);
+                }
+                clamped.set_param(slot, value);
+                reference.set_param(slot, endpoint);
+                let stored = [
+                    clamped.decay_pct,
+                    clamped.damping_pct,
+                    clamped.mod_pct,
+                    clamped.pre_delay_ms,
+                    clamped.width_pct,
+                ];
+                assert_eq!(stored[slot], endpoint);
+                for _ in 0..6_000 {
+                    assert_eq!(
+                        clamped.process_sample(0.0, 0.0),
+                        reference.process_sample(0.0, 0.0)
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn reverb_lists_five_parameters_with_the_expected_specs() {
         let r = ReverbEffect::new();
@@ -454,6 +846,39 @@ mod tests {
         ));
         assert_eq!(specs[4].name, "Width");
         assert_eq!(specs[4].default, 100.0);
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [
+                (0.0, 100.0, 50.0),
+                (0.0, 100.0, 30.0),
+                (0.0, 100.0, 20.0),
+                (0.0, 100.0, 0.0),
+                (0.0, 100.0, 100.0)
+            ]
+        );
+        for (index, spec) in specs.iter().enumerate() {
+            assert!(matches!(spec.scaling, ParamScaling::Linear));
+            if index == 3 {
+                assert!(matches!(
+                    spec.format,
+                    ParamFormat::Number {
+                        decimals: 1,
+                        unit: "ms"
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    spec.format,
+                    ParamFormat::Number {
+                        decimals: 0,
+                        unit: "%"
+                    }
+                ));
+            }
+        }
     }
 
     #[test]

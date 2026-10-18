@@ -14,6 +14,7 @@ examine_re = [
     '^tract-effects/src/effects/fm\.rs:',
     '^tract-effects/src/effects/(delay|repeat)\.rs:',
     '^tract-effects/src/effects/stretch\.rs:',
+    '^tract-effects/src/effects/reverb\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
