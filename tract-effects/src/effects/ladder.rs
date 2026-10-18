@@ -227,6 +227,197 @@ mod tests {
     use super::*;
 
     #[test]
+    fn coefficient_calibration_matches_reference_across_sample_rates() {
+        for (sample_rate, cutoff, tune, acr) in [
+            (48_000.0, 800.0, 2_016.9082420830707, 1.0263882222222223),
+            (44_100.0, 20_000.0, 30_114.54329804474, 1.0220537780040209),
+            (96_000.0, 12_000.0, 12_227.886620701085, 1.16540625),
+            (8_000.0, 20_000.0, 31_681.077974284875, 0.95371136),
+        ] {
+            let mut ladder = LadderEffect::new();
+            ladder.set_param(0, cutoff);
+            ladder.set_param(1, 0.375);
+            ladder.set_param(2, 13.7);
+            ladder.set_sample_rate(sample_rate);
+            // f64 Huovilainen coefficient anchors, including the host Nyquist cap.
+            assert!(
+                (ladder.tune as f64 - tune).abs() < 3e-6 * tune,
+                "rate {sample_rate}, cutoff {cutoff}: tune {} vs {tune}",
+                ladder.tune
+            );
+            assert!((ladder.acr as f64 - acr).abs() < 3e-7);
+            assert!((ladder.res_quad as f64 - 1.5 * acr).abs() < 1e-6);
+            assert!((ladder.drive_lin as f64 - 4.841723675840993).abs() < 2e-6);
+        }
+    }
+
+    #[test]
+    fn small_signal_impulse_matches_the_four_pole_closed_form() {
+        let a = 0.3056971655175271_f64;
+        // Four identical one-poles, followed by a half-tick average and 2x hold.
+        let inner_impulse = |tick: i32| {
+            if tick < 0 {
+                return 0.0;
+            }
+            let binomial = ((tick + 1) * (tick + 2) * (tick + 3)) as f64 / 6.0;
+            a.powi(4) * binomial * (1.0 - a).powi(tick)
+        };
+        for (drive, gain) in [
+            (0.0, 1.0),
+            (13.7, 4.841723675840993),
+            (24.0, 15.848931924611133),
+        ] {
+            let mut ladder = LadderEffect::new();
+            ladder.set_sample_rate(96_000.0);
+            ladder.set_param(0, 12_000.0);
+            ladder.set_param(1, 0.0);
+            ladder.set_param(2, drive);
+            for sample in 0..64 {
+                let expected = 0.5
+                    * gain
+                    * (inner_impulse(2 * sample + 1)
+                        + 2.0 * inner_impulse(2 * sample)
+                        + inner_impulse(2 * sample - 1));
+                let input = if sample == 0 { 0.01 } else { 0.0 };
+                let (left, right) = ladder.process_sample(input, -0.3 * input);
+                assert!(
+                    (left as f64 - 0.01 * expected).abs() < 3e-9 * gain,
+                    "drive {drive}, sample {sample}: {left} vs {}",
+                    0.01 * expected
+                );
+                assert!((right as f64 + 0.003 * expected).abs() < 1e-9 * gain);
+            }
+        }
+    }
+
+    #[test]
+    fn first_inner_tick_follows_the_nonlinear_transistor_cascade() {
+        for input in [-100_000.0, 80_000.0] {
+            let mut ladder = LadderEffect::new();
+            ladder.set_sample_rate(96_000.0);
+            ladder.set_param(0, 12_000.0);
+            ladder.set_param(1, 0.0);
+            let mut expected = input as f64;
+            for _ in 0..4 {
+                expected = 12_227.886620701085 * (expected * 0.000025).tanh();
+            }
+            let actual = ladder.ladder_tick(1, input);
+            assert!((actual as f64 - 0.5 * expected).abs() < 0.01);
+            assert_eq!(ladder.stage[0], [0.0; 4]);
+        }
+    }
+
+    #[test]
+    fn resonant_dc_gain_includes_negative_feedback() {
+        let mut ladder = LadderEffect::new();
+        ladder.set_sample_rate(96_000.0);
+        ladder.set_param(0, 12_000.0);
+        ladder.set_param(1, 0.375);
+        ladder.set_param(2, 13.7);
+        // At DC all four stages agree: y = drive*x - R*y.
+        let gain = 4.841723675840993 / (1.0 + 1.5 * 1.16540625);
+        for sample in 0..4_096 {
+            let (left, right) = ladder.process_sample(0.1, -0.3);
+            if sample >= 3_840 {
+                assert!((left as f64 - 0.1 * gain).abs() < 5e-7);
+                assert!((right as f64 + 0.3 * gain).abs() < 1e-6);
+            }
+        }
+    }
+
+    fn configured_ladder() -> LadderEffect {
+        let mut ladder = LadderEffect::new();
+        ladder.set_sample_rate(96_000.0);
+        for (index, value) in [4_200.0, 0.63, 13.7].into_iter().enumerate() {
+            ladder.set_param(index, value);
+        }
+        ladder
+    }
+
+    #[test]
+    fn stereo_channels_match_independent_mono_histories() {
+        let mut stereo = configured_ladder();
+        let mut left_only = configured_ladder();
+        let mut right_only = configured_ladder();
+        for sample in 0..1_024 {
+            let left = (sample as f32 * 0.17).sin() * 0.3;
+            let right = (sample as f32 * 0.41).cos() * 0.7;
+            let actual = stereo.process_sample(left, right);
+            assert_eq!(actual.0, left_only.process_sample(left, 0.0).0);
+            assert_eq!(actual.1, right_only.process_sample(0.0, right).1);
+        }
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_ladder_with_the_same_settings() {
+        let mut used = configured_ladder();
+        let mut fresh = configured_ladder();
+        for sample in 0..1_024 {
+            used.process_sample((sample as f32 * 0.19).sin(), (sample as f32 * 0.37).cos());
+        }
+        used.reset();
+        used.set_param(99, 999.0);
+        for sample in 0..512 {
+            let input = ((sample as f32 * 0.27).cos(), (sample as f32 * 0.31).sin());
+            assert_eq!(
+                used.process_sample(input.0, input.1),
+                fresh.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_and_rate_changes_retain_ladder_history() {
+        let mut changed = configured_ladder();
+        let mut reference = configured_ladder();
+        for sample in 0..512 {
+            let input = ((sample as f32 * 0.23).sin(), (sample as f32 * 0.47).cos());
+            changed.process_sample(input.0, input.1);
+            reference.process_sample(input.0, input.1);
+        }
+        changed.set_sample_rate(44_100.0);
+        for (index, value) in [300.0, 0.1, 24.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_sample_rate(96_000.0);
+        for (index, value) in [4_200.0, 0.63, 13.7].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_param(99, -1.0);
+        for sample in 0..256 {
+            let input = ((sample as f32 * 0.29).cos(), (sample as f32 * 0.31).sin());
+            assert_eq!(
+                changed.process_sample(input.0, input.1),
+                reference.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_limits_match_their_endpoint_responses() {
+        for (index, value, endpoint) in [
+            (0, -1.0, 20.0),
+            (0, 90_000.0, 20_000.0),
+            (1, -1.0, 0.0),
+            (1, 2.0, 1.0),
+            (2, -6.0, 0.0),
+            (2, 48.0, 24.0),
+        ] {
+            let mut clamped = configured_ladder();
+            let mut reference = configured_ladder();
+            clamped.set_param(index, value);
+            reference.set_param(index, endpoint);
+            for sample in 0..256 {
+                let input = ((sample as f32 * 0.31).sin(), (sample as f32 * 0.47).cos());
+                assert_eq!(
+                    clamped.process_sample(input.0, input.1),
+                    reference.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn parameters_are_declared() {
         let e = LadderEffect::new();
         let specs = e.parameters();
@@ -234,6 +425,29 @@ mod tests {
         assert_eq!(specs[0].name, "Cutoff");
         assert_eq!(specs[1].name, "Resonance");
         assert_eq!(specs[2].name, "Drive");
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [(20.0, 20_000.0, 800.0), (0.0, 1.0, 0.5), (0.0, 24.0, 0.0)]
+        );
+        assert!(matches!(specs[0].scaling, ParamScaling::Log));
+        assert!(matches!(specs[0].format, ParamFormat::Hertz));
+        assert!(matches!(
+            specs[1].format,
+            ParamFormat::Number {
+                decimals: 2,
+                unit: ""
+            }
+        ));
+        assert!(matches!(
+            specs[2].format,
+            ParamFormat::Number {
+                decimals: 1,
+                unit: "dB"
+            }
+        ));
     }
 
     #[test]

@@ -6,6 +6,7 @@ examine_re = [
     '^tract-effects/src/effects/(haas|stereo_widener)\.rs:',
     '^tract-effects/src/effects/(frequency_shift|pitch_shift|varispeed)\.rs:',
     '^tract-effects/src/effects/(comb|svf)\.rs:',
+    '^tract-effects/src/effects/(diode|ladder)\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
