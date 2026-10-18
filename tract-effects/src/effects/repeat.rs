@@ -15,7 +15,8 @@ use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
 ///
 /// **Length-vs-Refresh clamp**: if the configured loop length exceeds
 /// the Refresh interval, it's silently clamped — the loop never spans
-/// more than one capture window.
+/// more than one capture window. Refresh is capped at half the ring
+/// capacity to retain the active slice while recording the next one.
 ///
 /// **Smooth**: linear crossfade at the loop seam, duration =
 /// `(smooth_pct / 100) · (loop_length / 2)`. The last samples of each
@@ -37,7 +38,7 @@ pub struct RepeatEffect {
     /// Capture-clock phase in `[0, 1)`. Each sample advances by
     /// `1 / capture_period_samples`. When the phase crosses 1.0 the
     /// capture trigger fires (after priming).
-    capture_phase: f32,
+    capture_phase: f64,
     /// Index of the first sample of the active loop in the ring buffer.
     /// Updated on each capture trigger to `write_idx − loop_length`.
     capture_origin: usize,
@@ -55,10 +56,7 @@ pub struct RepeatEffect {
 }
 
 impl RepeatEffect {
-    /// Worst-case buffer length: 4 s × 192 kHz. Covers the longest sync
-    /// subdivision the Refresh enum can ask for at the slowest practical
-    /// host tempo. Buffer is allocated once in `new`; per-sample work
-    /// only reads/writes existing slots.
+    /// Two capture windows of at most 2 s × 192 kHz each.
     const BUF_LEN: usize = (4.0 * 192_000.0) as usize;
     /// Floor on the active loop length. Anything shorter degenerates to
     /// noise; `Rate` already maxes at 1 kHz (≈ 48 samples at 48 kHz) so
@@ -198,7 +196,9 @@ impl RepeatEffect {
     fn capture_period_samples(&self) -> f32 {
         let beats = Self::refresh_beats(self.refresh_idx.round() as usize);
         let sec_per_beat = 60.0 / self.bpm.max(1.0);
-        (beats * sec_per_beat * self.sample_rate).max(1.0)
+        (beats * sec_per_beat * self.sample_rate)
+            .max(1.0)
+            .min((Self::BUF_LEN / 2) as f32)
     }
 }
 
@@ -226,7 +226,7 @@ impl Effect for RepeatEffect {
 
         // Advance the capture-clock phase. A wrap past 1.0 means it's
         // time to grab a fresh slice.
-        self.capture_phase += 1.0 / capture_period;
+        self.capture_phase += 1.0 / f64::from(capture_period);
         let phase_fired = if self.capture_phase >= 1.0 {
             self.capture_phase -= 1.0;
             true
@@ -362,6 +362,333 @@ mod tests {
     use super::*;
     use crate::effects::{Effect, ParamFormat, ParamScaling};
 
+    fn free_repeat(rate: f32, smooth: f32) -> RepeatEffect {
+        let mut repeat = RepeatEffect::new();
+        repeat.set_sample_rate(8_192.0);
+        repeat.set_bpm(240.0);
+        for (index, value) in [rate, 14.0, 0.0, smooth].into_iter().enumerate() {
+            repeat.set_param(index, value);
+        }
+        repeat
+    }
+
+    fn counter_input(sample: usize) -> (f32, f32) {
+        (sample as f32 + 1.0, -(2.0 * sample as f32 + 3.0))
+    }
+
+    #[test]
+    fn captured_stereo_loops_prime_refresh_and_wrap_at_exact_frames() {
+        for start in [0, RepeatEffect::BUF_LEN - 16] {
+            let mut repeat = free_repeat(256.0, 0.0);
+            repeat.write_idx = start;
+            for sample in 0..400 {
+                let source = if sample < 31 {
+                    sample
+                } else if sample < 127 {
+                    (sample - 31) % 32
+                } else {
+                    let capture = (sample + 1) / 128 * 128 - 1;
+                    capture - 31 + (sample - capture) % 32
+                };
+                let input = counter_input(sample);
+                assert_eq!(
+                    repeat.process_sample(input.0, input.1),
+                    counter_input(source),
+                    "start {start}, sample {sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn seam_crossfades_match_exact_stereo_weights() {
+        for (smooth, tail) in [
+            (0.0, &[][..]),
+            (25.0, &[(15.0, -225.0), (9.0, -130.0)][..]),
+            (
+                50.0,
+                &[(13.0, -169.0), (11.0, -148.0), (9.0, -117.0), (7.0, -76.0)][..],
+            ),
+            (
+                100.0,
+                &[
+                    (9.0, -81.0),
+                    (9.0, -88.0),
+                    (9.0, -93.0),
+                    (9.0, -96.0),
+                    (9.0, -97.0),
+                    (9.0, -96.0),
+                    (9.0, -93.0),
+                    (9.0, -88.0),
+                ][..],
+            ),
+        ] {
+            let mut repeat = free_repeat(512.0, smooth);
+            for sample in 0..80 {
+                let left = sample as f32 + 1.0;
+                let input = (left, -left * left);
+                let expected = if sample < 15 {
+                    input
+                } else {
+                    let offset = (sample - 15) % 16;
+                    if offset >= 16 - tail.len() {
+                        tail[offset - (16 - tail.len())]
+                    } else {
+                        let left = offset as f32 + 1.0;
+                        (left, -left * left)
+                    }
+                };
+                assert_eq!(
+                    repeat.process_sample(input.0, input.1),
+                    expected,
+                    "smooth {smooth}, sample {sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sync_subdivisions_and_free_rate_control_the_requested_loop_length() {
+        let beats = [
+            0.0625, 0.09375, 0.125, 0.1875, 0.25, 0.375, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+        ];
+        let mut repeat = RepeatEffect::new();
+        for (index, beats) in beats.into_iter().enumerate() {
+            assert_eq!(RepeatEffect::snap_beats(index), Some(beats));
+            assert_eq!(RepeatEffect::refresh_beats(index), beats);
+            repeat.set_param(1, index as f32);
+            repeat.set_param(2, index as f32);
+            for (sample_rate, bpm, samples_per_beat) in
+                [(8_000.0, 120.0, 4_000.0), (16_000.0, 60.0, 16_000.0)]
+            {
+                repeat.set_sample_rate(sample_rate);
+                repeat.set_bpm(bpm);
+                assert_eq!(repeat.loop_length_samples_raw(), beats * samples_per_beat);
+                assert_eq!(repeat.capture_period_samples(), beats * samples_per_beat);
+                assert!(repeat.param_dimmed(0));
+                for slot in [1, 2, 3, 99] {
+                    assert!(!repeat.param_dimmed(slot));
+                }
+            }
+        }
+        for index in [14, 15, usize::MAX] {
+            assert_eq!(RepeatEffect::snap_beats(index), None);
+            assert_eq!(RepeatEffect::refresh_beats(index), 1.0);
+        }
+        repeat.set_param(1, 14.0);
+        repeat.set_param(0, 400.0);
+        assert!(!repeat.param_dimmed(0));
+        assert_eq!(repeat.loop_length_samples_raw(), 40.0);
+        assert!(RepeatEffect::snap_is_synced(13.49));
+        assert!(!RepeatEffect::snap_is_synced(13.5));
+    }
+
+    #[test]
+    fn priming_uses_the_minimum_loop_and_the_refresh_clamp() {
+        for (rate, snap, refresh, bpm, length) in [
+            (1_000.0, 14.0, 0.0, 240.0, 16),
+            (4.0, 13.0, 0.0, 960.0, 32),
+            (300.0, 14.0, 0.0, 240.0, 27),
+        ] {
+            let mut repeat = free_repeat(rate, 0.0);
+            repeat.set_param(1, snap);
+            repeat.set_param(2, refresh);
+            repeat.set_bpm(bpm);
+            for sample in 0..length {
+                let input = counter_input(sample);
+                let expected = if sample + 1 == length {
+                    counter_input(0)
+                } else {
+                    input
+                };
+                assert_eq!(repeat.process_sample(input.0, input.1), expected);
+            }
+            assert_eq!(repeat.loop_length, length);
+        }
+    }
+
+    #[test]
+    fn rate_changes_take_effect_at_the_next_capture_without_restarting_playback() {
+        let mut repeat = free_repeat(256.0, 0.0);
+        for sample in 0..200 {
+            if sample == 64 {
+                repeat.set_param(0, 512.0);
+            }
+            let source = if sample < 31 {
+                sample
+            } else if sample < 127 {
+                (sample - 31) % 32
+            } else {
+                112 + (sample - 127) % 16
+            };
+            let input = counter_input(sample);
+            assert_eq!(
+                repeat.process_sample(input.0, input.1),
+                counter_input(source),
+                "sample {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_refresh_retains_the_capture_until_the_next_bounded_tick() {
+        let mut repeat = RepeatEffect::new();
+        repeat.set_sample_rate(192_000.0);
+        repeat.set_bpm(30.0);
+        for (index, value) in [1_000.0, 14.0, 13.0, 0.0].into_iter().enumerate() {
+            repeat.set_param(index, value);
+        }
+        assert_eq!(repeat.capture_period_samples(), 384_000.0);
+        for sample in 0..384_003 {
+            let input = if sample < 192 {
+                counter_input(sample)
+            } else {
+                (1_000.0, -2_000.0)
+            };
+            let actual = repeat.process_sample(input.0, input.1);
+            if sample < 191 {
+                assert_eq!(actual, input);
+            } else if sample < 383_999 {
+                assert_eq!(
+                    actual,
+                    counter_input((sample - 191) % 192),
+                    "sample {sample}"
+                );
+            } else if sample > 384_000 {
+                assert_eq!(actual, (1_000.0, -2_000.0));
+            }
+        }
+    }
+
+    #[test]
+    fn longest_requested_loop_primes_within_the_ring_capacity() {
+        let mut repeat = RepeatEffect::new();
+        repeat.set_sample_rate(192_000.0);
+        repeat.set_bpm(30.0);
+        repeat.set_param(1, 13.0);
+        repeat.set_param(2, 13.0);
+        repeat.set_param(3, 0.0);
+        assert_eq!(repeat.capture_period_samples(), 384_000.0);
+        for sample in 0..384_000 {
+            let input = if sample == 0 { (1.0, -0.5) } else { (0.0, 0.0) };
+            let expected = if sample == 383_999 {
+                (1.0, -0.5)
+            } else {
+                input
+            };
+            assert_eq!(repeat.process_sample(input.0, input.1), expected);
+        }
+        assert!(repeat.primed);
+        assert_eq!(repeat.loop_length, 384_000);
+    }
+
+    #[test]
+    fn long_capture_periods_do_not_accumulate_audible_clock_drift() {
+        let mut repeat = free_repeat(1_000.0, 0.0);
+        repeat.set_sample_rate(100_000.0);
+        repeat.set_bpm(60.0);
+        repeat.set_param(2, 8.0);
+        let mut first_refresh = None;
+        for sample in 0..100_002 {
+            repeat.process_sample(0.25, -0.5);
+            if repeat.capture_origin != 0 {
+                first_refresh = Some(sample);
+                break;
+            }
+        }
+        assert!(
+            matches!(first_refresh, Some(99_999..=100_000)),
+            "first refresh: {first_refresh:?}"
+        );
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_repeat_with_the_current_settings() {
+        let mut used = free_repeat(256.0, 75.0);
+        let mut fresh = free_repeat(256.0, 75.0);
+        for sample in 0..170 {
+            let input = counter_input(sample);
+            used.process_sample(input.0, input.1);
+        }
+        used.reset();
+        for sample in 0..400 {
+            let input = counter_input(sample);
+            assert_eq!(
+                used.process_sample(input.0, input.1),
+                fresh.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn setters_preserve_the_active_capture_and_playback_phase() {
+        let mut changed = free_repeat(256.0, 75.0);
+        let mut reference = free_repeat(256.0, 75.0);
+        for sample in 0..73 {
+            let input = counter_input(sample);
+            changed.process_sample(input.0, input.1);
+            reference.process_sample(input.0, input.1);
+        }
+        changed.set_sample_rate(16_000.0);
+        changed.set_bpm(60.0);
+        for (index, value) in [500.0, 8.0, 13.0, 0.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_sample_rate(8_192.0);
+        changed.set_bpm(240.0);
+        for (index, value) in [256.0, 14.0, 0.0, 75.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_param(99, 123.0);
+        for sample in 73..400 {
+            let input = counter_input(sample);
+            assert_eq!(
+                changed.process_sample(input.0, input.1),
+                reference.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn enum_rounding_lower_bounds_and_invalid_slots_are_stable() {
+        let mut repeat = free_repeat(256.0, 75.0);
+        for (index, value, expected) in [
+            (0, -1.0, 0.5),
+            (1, -1.0, 0.0),
+            (1, 6.49, 6.0),
+            (1, 6.5, 7.0),
+            (2, -1.0, 0.0),
+            (2, 6.49, 6.0),
+            (2, 6.5, 7.0),
+            (3, -1.0, 0.0),
+        ] {
+            repeat.set_param(index, value);
+            let actual = match index {
+                0 => repeat.rate_hz,
+                1 => repeat.snap_idx,
+                2 => repeat.refresh_idx,
+                _ => repeat.smooth_pct,
+            };
+            assert_eq!(actual, expected);
+        }
+        repeat.set_sample_rate(0.0);
+        repeat.set_bpm(-120.0);
+        assert_eq!(repeat.sample_rate, 1.0);
+        assert_eq!(repeat.bpm, 1.0);
+        repeat.set_bpm(1_000_000.0);
+        assert_eq!(repeat.capture_period_samples(), 1.0);
+        repeat.set_param(1, 99.0);
+        assert!(!repeat.param_dimmed(0));
+        repeat.set_param(2, 99.0);
+        assert_eq!(repeat.refresh_idx, 13.0);
+        repeat.set_sample_rate(f32::INFINITY);
+        repeat.set_bpm(f32::INFINITY);
+        assert_eq!(repeat.capture_period_samples(), 1.0);
+        for _ in 0..17 {
+            assert_eq!(repeat.process_sample(0.25, -0.5), (0.25, -0.5));
+        }
+    }
+
     #[test]
     fn repeat_lists_four_parameters_with_the_expected_specs() {
         let r = RepeatEffect::new();
@@ -382,6 +709,48 @@ mod tests {
         assert_eq!(specs[2].default, 8.0);
         assert_eq!(specs[3].name, "Smooth");
         assert_eq!(specs[3].max, 100.0);
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [
+                (0.5, 1_000.0, 30.0),
+                (0.0, 14.0, 6.0),
+                (0.0, 13.0, 8.0),
+                (0.0, 100.0, 10.0)
+            ]
+        );
+        assert!(
+            specs[1..]
+                .iter()
+                .all(|spec| matches!(spec.scaling, ParamScaling::Linear))
+        );
+        assert!(matches!(
+            specs[3].format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: "%"
+            }
+        ));
+        assert!(matches!(
+            specs[1].format,
+            ParamFormat::Enum {
+                labels: [
+                    "1/64", "1/64.", "1/32", "1/32.", "1/16", "1/16.", "1/8", "1/8.", "1/4",
+                    "1/4.", "1/2", "1/2.", "1/1", "1/1.", "Free"
+                ]
+            }
+        ));
+        assert!(matches!(
+            specs[2].format,
+            ParamFormat::Enum {
+                labels: [
+                    "1/64", "1/64.", "1/32", "1/32.", "1/16", "1/16.", "1/8", "1/8.", "1/4",
+                    "1/4.", "1/2", "1/2.", "1/1", "1/1."
+                ]
+            }
+        ));
     }
 
     #[test]

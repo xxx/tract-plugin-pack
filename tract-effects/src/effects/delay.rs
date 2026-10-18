@@ -189,11 +189,12 @@ impl DelayEffect {
     /// behind the current write head from `buf`.
     fn read_delay(buf: &[f32], write_idx: usize, delay_samples: f32) -> f32 {
         let n = buf.len();
-        let read = (write_idx as f32 + n as f32 - delay_samples).rem_euclid(n as f32);
-        let i0 = (read.floor() as usize) % n;
-        let i1 = (i0 + 1) % n;
-        let frac = read - read.floor();
-        buf[i0] * (1.0 - frac) + buf[i1] * frac
+        let whole = delay_samples.floor() as usize;
+        let frac = delay_samples - whole as f32;
+        // Wrap integer indices without rounding away the fractional delay.
+        let newer = (write_idx + n - whole) % n;
+        let older = (newer + n - 1) % n;
+        buf[newer] * (1.0 - frac) + buf[older] * frac
     }
 }
 
@@ -294,6 +295,230 @@ mod tests {
     use super::*;
     use crate::effects::{Effect, ParamFormat, ParamScaling};
 
+    fn free_delay(sample_rate: f32, milliseconds: f32, feedback: f32, duck: f32) -> DelayEffect {
+        let mut delay = DelayEffect::new();
+        delay.set_sample_rate(sample_rate);
+        for (index, value) in [milliseconds, 14.0, feedback, duck].into_iter().enumerate() {
+            delay.set_param(index, value);
+        }
+        delay
+    }
+
+    #[test]
+    fn fractional_stereo_echoes_keep_their_timing_near_the_ring_boundary() {
+        for start in [0, DelayEffect::BUF_LEN - 50] {
+            let mut delay = free_delay(48_000.0, 48.03125 / 48.0, 0.0, 0.0);
+            assert_eq!(delay.delay_samples(), 48.03125);
+            delay.write_idx = start;
+            for sample in 0..96 {
+                let input = if sample == 0 { (1.0, -0.5) } else { (0.0, 0.0) };
+                let expected = match sample {
+                    0 => (1.0, -0.5),
+                    48 => (31.0 / 32.0, -31.0 / 64.0),
+                    49 => (1.0 / 32.0, -1.0 / 64.0),
+                    _ => (0.0, 0.0),
+                };
+                assert_eq!(
+                    delay.process_sample(input.0, input.1),
+                    expected,
+                    "start {start}, sample {sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_sync_subdivision_tracks_tempo_and_sample_rate() {
+        let beats = [
+            0.0625, 0.09375, 0.125, 0.1875, 0.25, 0.375, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+        ];
+        let mut delay = free_delay(8_000.0, 123.0, 0.0, 0.0);
+        for (index, beats) in beats.into_iter().enumerate() {
+            assert_eq!(delay_time_beats(index), Some(beats));
+            delay.set_param(1, index as f32);
+            for (sample_rate, bpm, samples_per_beat) in
+                [(8_000.0, 120.0, 4_000.0), (16_000.0, 60.0, 16_000.0)]
+            {
+                delay.set_sample_rate(sample_rate);
+                delay.set_bpm(bpm);
+                assert_eq!(delay.delay_samples(), beats * samples_per_beat);
+                assert!(delay.param_dimmed(0));
+                for slot in [1, 2, 3, 99] {
+                    assert!(!delay.param_dimmed(slot));
+                }
+            }
+        }
+        for index in [14, 15, usize::MAX] {
+            assert_eq!(delay_time_beats(index), None);
+        }
+        assert!(DelayEffect::time_is_synced(13.49));
+        assert!(!DelayEffect::time_is_synced(13.5));
+        delay.set_param(1, 14.0);
+        delay.set_sample_rate(8_000.0);
+        delay.set_bpm(240.0);
+        assert_eq!(delay.delay_samples(), 984.0);
+        assert!(!delay.param_dimmed(0));
+    }
+
+    #[test]
+    fn stereo_feedback_echoes_follow_geometric_decay_and_the_safety_cap() {
+        for (feedback, gain) in [(25.0, 0.25_f64), (50.0, 0.5), (100.0, 0.95)] {
+            let mut delay = free_delay(8_000.0, 1.0, feedback, 0.0);
+            for sample in 0..49 {
+                let input = if sample == 0 { (1.0, -0.5) } else { (0.0, 0.0) };
+                let expected = if sample == 0 {
+                    1.0
+                } else if sample % 8 == 0 {
+                    gain.powi(sample / 8 - 1)
+                } else {
+                    0.0
+                };
+                let actual = delay.process_sample(input.0, input.1);
+                assert!(
+                    (actual.0 as f64 - expected).abs() < 3e-7,
+                    "feedback {feedback}, sample {sample}"
+                );
+                assert!((actual.1 as f64 + 0.5 * expected).abs() < 3e-7);
+            }
+        }
+    }
+
+    #[test]
+    fn ducking_matches_the_closed_form_stereo_attack_and_release() {
+        for sample_rate in [8_000.0, 16_000.0] {
+            for duck in [25.0, 100.0] {
+                let mut delay = free_delay(sample_rate, 1.0, 0.0, duck);
+                let lag = (sample_rate / 1_000.0) as usize;
+                let attack_end = 0.5 * (1.0 - (-64.0 / (sample_rate as f64 * 0.005)).exp());
+                for sample in 0..192 {
+                    let envelope = if sample < 64 {
+                        0.5 * (1.0 - (-((sample + 1) as f64) / (sample_rate as f64 * 0.005)).exp())
+                    } else {
+                        attack_end * (-((sample - 63) as f64) / (sample_rate as f64 * 0.150)).exp()
+                    };
+                    let input = if sample < 64 {
+                        (0.25, -0.75)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let tap = if (lag..64 + lag).contains(&sample) {
+                        (0.25, -0.75)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let factor = 1.0 - duck as f64 / 100.0 * envelope;
+                    let actual = delay.process_sample(input.0, input.1);
+                    assert!((delay.duck_env as f64 - envelope).abs() < 3e-6);
+                    assert!((actual.0 as f64 - (input.0 as f64 + factor * tap.0)).abs() < 3e-6);
+                    assert!((actual.1 as f64 - (input.1 as f64 + factor * tap.1)).abs() < 3e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hot_input_fully_ducks_output_without_ducking_feedback_memory() {
+        let mut ducked = free_delay(8_000.0, 1.0, 60.0, 100.0);
+        let mut reference = free_delay(8_000.0, 1.0, 60.0, 0.0);
+        for sample in 0..128 {
+            let actual = ducked.process_sample(4.0, -2.0);
+            reference.process_sample(4.0, -2.0);
+            if sample >= 32 {
+                assert_eq!(actual, (4.0, -2.0));
+            }
+        }
+        ducked.set_param(3, 0.0);
+        for _ in 0..128 {
+            assert_eq!(
+                ducked.process_sample(0.0, 0.0),
+                reference.process_sample(0.0, 0.0)
+            );
+        }
+    }
+
+    #[test]
+    fn delay_times_and_parameter_bounds_are_safe_at_extreme_settings() {
+        let mut delay = free_delay(1.0, 1.0, 0.0, 0.0);
+        assert_eq!(delay.delay_samples(), 1.0);
+        for (slot, below, above) in [(0, 1.0, 2_000.0), (2, 0.0, 100.0), (3, 0.0, 100.0)] {
+            delay.set_param(slot, -1.0);
+            let value = match slot {
+                0 => delay.free_ms,
+                2 => delay.feedback_pct,
+                _ => delay.duck_pct,
+            };
+            assert_eq!(value, below);
+            delay.set_param(slot, 99_999.0);
+            let value = match slot {
+                0 => delay.free_ms,
+                2 => delay.feedback_pct,
+                _ => delay.duck_pct,
+            };
+            assert_eq!(value, above);
+        }
+        delay.set_sample_rate(192_000.0);
+        assert_eq!(delay.delay_samples(), 383_998.0);
+        delay.set_param(1, -1.0);
+        delay.set_bpm(-120.0);
+        assert_eq!(delay.delay_samples(), 383_998.0);
+        delay.set_sample_rate(8_000.0);
+        delay.set_bpm(120.0);
+        delay.set_param(1, 7.49);
+        assert_eq!(delay.delay_samples(), 3_000.0);
+        delay.set_param(1, 7.5);
+        assert_eq!(delay.delay_samples(), 4_000.0);
+        delay.set_param(1, f32::INFINITY);
+        assert!(!delay.param_dimmed(0));
+    }
+
+    #[test]
+    fn parameter_and_sample_rate_changes_preserve_pending_echoes() {
+        let mut changed = free_delay(8_000.0, 3.0, 60.0, 35.0);
+        let mut reference = free_delay(8_000.0, 3.0, 60.0, 35.0);
+        for sample in 0..160 {
+            let input = ((sample as f32 * 0.17).sin(), (sample as f32 * 0.31).cos());
+            changed.process_sample(input.0, input.1);
+            reference.process_sample(input.0, input.1);
+        }
+        changed.set_sample_rate(16_000.0);
+        changed.set_bpm(60.0);
+        for (index, value) in [1.0, 8.0, 100.0, 100.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_sample_rate(8_000.0);
+        changed.set_bpm(120.0);
+        for (index, value) in [3.0, 14.0, 60.0, 35.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_param(99, 123.0);
+        for sample in 0..160 {
+            let input = ((sample as f32 * 0.13).cos(), (sample as f32 * 0.23).sin());
+            assert_eq!(
+                changed.process_sample(input.0, input.1),
+                reference.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_delay_with_the_current_parameters() {
+        let mut used = free_delay(8_000.0, 1.0, 70.0, 80.0);
+        let mut fresh = free_delay(8_000.0, 1.0, 70.0, 80.0);
+        used.set_bpm(90.0);
+        fresh.set_bpm(90.0);
+        for sample in 0..96 {
+            used.process_sample((sample as f32 * 0.17).sin(), 0.5);
+        }
+        used.reset();
+        for sample in 0..96 {
+            let input = ((sample as f32 * 0.13).cos(), -0.25);
+            assert_eq!(
+                used.process_sample(input.0, input.1),
+                fresh.process_sample(input.0, input.1)
+            );
+        }
+    }
+
     #[test]
     fn delay_effect_lists_four_parameters_with_the_expected_specs() {
         let d = DelayEffect::new();
@@ -313,6 +538,46 @@ mod tests {
         assert_eq!(specs[1].default, max_time_idx);
         assert_eq!(specs[2].name, "Feedback");
         assert_eq!(specs[3].name, "Duck");
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [
+                (1.0, 2_000.0, 250.0),
+                (0.0, 14.0, 14.0),
+                (0.0, 100.0, 30.0),
+                (0.0, 100.0, 0.0)
+            ]
+        );
+        assert!(matches!(
+            specs[0].format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: "ms"
+            }
+        ));
+        assert!(
+            specs[1..]
+                .iter()
+                .all(|spec| matches!(spec.scaling, ParamScaling::Linear))
+        );
+        assert!(specs[2..].iter().all(|spec| matches!(
+            spec.format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: "%"
+            }
+        )));
+        assert!(matches!(
+            specs[1].format,
+            ParamFormat::Enum {
+                labels: [
+                    "1/64", "1/64.", "1/32", "1/32.", "1/16", "1/16.", "1/8", "1/8.", "1/4",
+                    "1/4.", "1/2", "1/2.", "1/1", "1/1.", "Free"
+                ]
+            }
+        ));
     }
 
     #[test]
