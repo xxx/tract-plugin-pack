@@ -5,6 +5,7 @@ examine_re = [
     '^tract-effects/src/effects/(bitcrush|distortion|downsample|wavefolder)\.rs:',
     '^tract-effects/src/effects/(haas|stereo_widener)\.rs:',
     '^tract-effects/src/effects/(frequency_shift|pitch_shift|varispeed)\.rs:',
+    '^tract-effects/src/effects/(comb|svf)\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -46,4 +47,8 @@ exclude_re = [
     '^tract-effects/src/effects/wavefolder\.rs:\d+:33: replace \* with / in FolderCell::func$',
     # At a triangle window's midpoint, both branches return exactly 1.
     '^tract-effects/src/effects/(pitch_shift|varispeed)\.rs:\d+:18: replace < with <= in (PitchShiftEffect|VarispeedEffect)::triangle_window$',
+    # The Comb setter already bounds modes to 0..2 before this defensive cap.
+    '^tract-effects/src/effects/comb\.rs:\d+:81: replace - with (\+|/) in <impl Effect for CombEffect>::process_sample$',
+    # Higher Type selectors still choose HP; higher Poles selectors still use four stages.
+    '^tract-effects/src/effects/svf\.rs:\d+:(54|55): replace - with (\+|/) in <impl Effect for SvfEffect>::set_param$',
 ]
