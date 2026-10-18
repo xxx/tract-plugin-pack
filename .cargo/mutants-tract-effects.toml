@@ -1,4 +1,4 @@
-# Shared runtime and all audio effects; registry and editor remain separate.
+# Shared runtime, parameter helpers, and all audio effects; dispatch and editor remain separate.
 examine_re = [
     '^tract-effects/src/(compressor|modulation|randomize|undo)\.rs:',
     '^tract-effects/src/effects/(compressor|limiter|gate|transient_shaper)\.rs:',
@@ -32,6 +32,9 @@ examine_re = [
     '^tract-effects/src/effects/satch\.rs:',
     '^tract-effects/src/effects/warp_zone\.rs:',
     '^tract-effects/src/effects/spectral_stretch\.rs:',
+    # Register helper functions without including effect dispatch or persisted state.
+    '^tract-effects/src/effects/mod\.rs:\d+:\d+: replace (value_to_norm|norm_to_value|format_value(_bare)?|enum_index|parse_value) ->',
+    '^tract-effects/src/effects/mod\.rs:\d+:\d+: .* in (value_to_norm|norm_to_value|format_value(_bare)?|enum_index|parse_value)$',
 ]
 all_features = true
 test_tool = "nextest"
@@ -41,6 +44,8 @@ additional_cargo_test_args = ["--profile=mutants"]
 gitignore = true
 
 exclude_re = [
+    # Negative float-to-index casts saturate to zero; zero also selects index zero.
+    '^tract-effects/src/effects/mod\.rs:\d+:16: replace < with (==|<=) in enum_index$',
     # At equal peak/envelope, the attack/release choice multiplies a zero delta.
     'replace > with >= in Compressor::process_sample$',
     '^tract-effects/src/modulation\.rs:\d+:35: replace > with >= in TransientDetector::process_sample$',
