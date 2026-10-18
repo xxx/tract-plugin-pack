@@ -10,6 +10,7 @@ examine_re = [
     '^tract-effects/src/effects/(phaser_filter|sallen_key)\.rs:',
     '^tract-effects/src/effects/(auto_pan|ring|tremolo)\.rs:',
     '^tract-effects/src/effects/(chorus|flanger)\.rs:',
+    '^tract-effects/src/effects/(phaser|vibrato)\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -66,4 +67,8 @@ exclude_re = [
     '^tract-effects/src/effects/ring\.rs:\d+:84: replace - with (\+|/) in <impl Effect for RingEffect>::process_sample$',
     # Triangle arms agree exactly at 1/4 and 3/4 of a cycle.
     '^tract-effects/src/effects/flanger\.rs:\d+:(14|21): replace < with <= in FlangerEffect::triangle_lfo$',
+    # Triangle arms agree at 1/4 and 3/4; keep Square's half-cycle boundary active.
+    '^tract-effects/src/effects/vibrato\.rs:(97:22|99:29): replace < with <= in VibratoEffect::eval_lfo$',
+    # Higher Shape selectors still choose the Saw fallback.
+    '^tract-effects/src/effects/vibrato\.rs:\d+:59: replace - with (\+|/) in <impl Effect for VibratoEffect>::set_param$',
 ]
