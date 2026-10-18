@@ -19,6 +19,7 @@ examine_re = [
     '^tract-effects/src/effects/vocoder\.rs:',
     '^tract-effects/src/effects/spectral_(mirror|rotate)\.rs:',
     '^tract-effects/src/effects/spectral_shift\.rs:',
+    '^tract-effects/src/effects/spectral_twist\.rs:',
 ]
 all_features = true
 test_tool = "nextest"

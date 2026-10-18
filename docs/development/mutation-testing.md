@@ -8,7 +8,7 @@ the tests catch each change. Run the commands below from the workspace root.
 | Package | Mutation scope | Configuration |
 |---|---|---|
 | `tract-dsp` | All library modules and FFT features | [mutants.toml](../../.cargo/mutants.toml) |
-| `tract-effects` | Shared compressor, modulation, randomisation, undo, all Distortion, Dynamics, Filter, Misc, Modulation, Pitch, Spatial, and Time effects, plus Spectral Mirror, Spectral Rotate, and Spectral Shift | [mutants-tract-effects.toml](../../.cargo/mutants-tract-effects.toml) |
+| `tract-effects` | Shared compressor, modulation, randomisation, undo, all Distortion, Dynamics, Filter, Misc, Modulation, Pitch, Spatial, and Time effects, plus Spectral Mirror, Spectral Rotate, Spectral Shift, and Spectral Twist | [mutants-tract-effects.toml](../../.cargo/mutants-tract-effects.toml) |
 
 The `tract-effects` scope excludes the remaining effect DSP, the registry, and the editor.
 Expand coverage one reviewed scope at a time.
