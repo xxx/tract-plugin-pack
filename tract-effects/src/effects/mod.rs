@@ -2138,6 +2138,187 @@ mod tests {
         }
     }
 
+    mod runtime_dispatch {
+        use super::*;
+
+        #[test]
+        fn constructors_report_every_requested_kind() {
+            for kind in EffectKind::ALL {
+                assert_eq!(EffectInstance::new(kind).kind(), kind);
+            }
+        }
+
+        #[test]
+        fn free_delay_dispatches_parameters_and_sample_rate_in_stereo() {
+            for (sample_rate, echo) in [(8_000.0, 8), (16_000.0, 16)] {
+                let mut delay = EffectInstance::new(EffectKind::Delay);
+                delay.set_sample_rate(sample_rate);
+                for (index, value) in [1.0, 14.0, 0.0, 0.0].into_iter().enumerate() {
+                    delay.set_param(index, value);
+                }
+                for sample in 0..=2 * echo {
+                    let input = if sample == 0 {
+                        (0.75, -0.25)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let expected = if sample == 0 || sample == echo {
+                        (0.75, -0.25)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    assert_eq!(
+                        delay.process_sample(input.0, input.1),
+                        expected,
+                        "rate {sample_rate}, sample {sample}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn synced_delay_dispatches_tempo_changes_and_reset_retains_them() {
+            let mut delay = EffectInstance::new(EffectKind::Delay);
+            delay.set_sample_rate(8_000.0);
+            for (index, value) in [7.0, 0.0, 0.0, 0.0].into_iter().enumerate() {
+                delay.set_param(index, value);
+            }
+            for (bpm, echo) in [(240.0, 125), (120.0, 250), (60.0, 500)] {
+                delay.set_bpm(bpm);
+                delay.reset();
+                for sample in 0..=2 * echo {
+                    let input = if sample == 0 {
+                        (-0.5, 0.125)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let expected = if sample == 0 || sample == echo {
+                        (-0.5, 0.125)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    assert_eq!(
+                        delay.process_sample(input.0, input.1),
+                        expected,
+                        "bpm {bpm}, sample {sample}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn reset_dispatch_clears_delay_history_while_retaining_settings() {
+            let mut used = EffectInstance::new(EffectKind::Delay);
+            let mut fresh = DelayEffect::new();
+            for effect in [&mut used as &mut dyn Effect, &mut fresh] {
+                effect.set_sample_rate(8_000.0);
+                effect.set_bpm(240.0);
+                for (index, value) in [7.0, 0.0, 60.0, 70.0].into_iter().enumerate() {
+                    effect.set_param(index, value);
+                }
+            }
+            for sample in 0..1_024 {
+                let input = (sample as f32 * 0.031).sin() * 0.3;
+                used.process_sample(input, -input * 0.25);
+            }
+            used.reset();
+            for sample in 0..1_024 {
+                let input = if sample == 0 {
+                    (0.5, -0.125)
+                } else {
+                    (0.0, 0.0)
+                };
+                assert_eq!(
+                    used.process_sample(input.0, input.1),
+                    fresh.process_sample(input.0, input.1),
+                    "sample {sample}"
+                );
+            }
+        }
+
+        #[test]
+        fn repeat_dispatch_matches_tempo_synced_capture_and_playback() {
+            let mut wrapped = EffectInstance::new(EffectKind::Repeat);
+            let mut direct = RepeatEffect::new();
+            for effect in [&mut wrapped as &mut dyn Effect, &mut direct] {
+                effect.set_sample_rate(8_000.0);
+                effect.set_bpm(240.0);
+                for (index, value) in [7.0, 0.0, 2.0, 0.0].into_iter().enumerate() {
+                    effect.set_param(index, value);
+                }
+            }
+            for sample in 0..1_024 {
+                let input = ((sample as f32 * 0.037).sin() * 0.4, sample as f32 / 4_096.0);
+                assert_eq!(
+                    wrapped.process_sample(input.0, input.1),
+                    direct.process_sample(input.0, input.1),
+                    "sample {sample}"
+                );
+            }
+        }
+
+        #[test]
+        fn none_stays_silent_with_empty_metadata_after_lifecycle_calls() {
+            let mut direct = NoneEffect::new();
+            let mut default: NoneEffect = Default::default();
+            let mut wrapped = EffectInstance::new(EffectKind::None);
+            for effect in [&mut direct as &mut dyn Effect, &mut default, &mut wrapped] {
+                for sample_rate in [8_000.0, 96_000.0] {
+                    effect.set_sample_rate(sample_rate);
+                    effect.set_bpm(93.0);
+                    for index in (0..=MAX_EFFECT_PARAMS).chain([usize::MAX]) {
+                        effect.set_param(index, 0.75);
+                        assert!(!effect.param_dimmed(index));
+                    }
+                    effect.reset();
+                    assert!(effect.parameters().is_empty());
+                    assert_eq!(effect.latency_samples(), 0);
+                    for (left, right) in [(0.75, -0.25), (0.0, 0.0), (-1.0, 0.5)] {
+                        assert_eq!(effect.process_sample(left, right), (0.0, 0.0));
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn track_defaults_are_fully_wet_unassigned_and_unflagged_for_any_row() {
+            let expected = TrackEffect {
+                kind: EffectKind::None,
+                params: [0.0; MAX_EFFECT_PARAMS],
+                mix: 1.0,
+                muted: false,
+                soloed: false,
+            };
+            assert_eq!(TrackEffect::default(), expected);
+            for row in (0..16).chain([usize::MAX]) {
+                assert_eq!(TrackEffect::default_for_row(row), expected, "row {row}");
+            }
+        }
+
+        #[test]
+        fn legacy_track_fields_default_independently_without_replacing_saved_values() {
+            for missing in ["mix", "muted", "soloed"] {
+                let mut saved = serde_json::json!({
+                    "kind": "Delay", "params": [7.0, 0.0, 60.0, 70.0, 0.0],
+                    "mix": 0.25, "muted": true, "soloed": true
+                });
+                saved.as_object_mut().unwrap().remove(missing);
+                let expected = TrackEffect {
+                    kind: EffectKind::Delay,
+                    params: [7.0, 0.0, 60.0, 70.0, 0.0],
+                    mix: if missing == "mix" { 1.0 } else { 0.25 },
+                    muted: missing != "muted",
+                    soloed: missing != "soloed",
+                };
+                assert_eq!(
+                    serde_json::from_value::<TrackEffect>(saved).unwrap(),
+                    expected,
+                    "missing {missing}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn effect_kind_registry() {
         assert_eq!(EffectKind::ALL.len(), 50);

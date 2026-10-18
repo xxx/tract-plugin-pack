@@ -1,43 +1,7 @@
-# Shared runtime, parameter helpers, registry metadata, and all audio effects.
+# Runtime coverage; the shared editor rollout is still in progress.
 examine_re = [
     '^tract-effects/src/(compressor|modulation|randomize|undo)\.rs:',
-    '^tract-effects/src/effects/(compressor|limiter|gate|transient_shaper)\.rs:',
-    '^tract-effects/src/effects/(bitcrush|distortion|downsample|wavefolder)\.rs:',
-    '^tract-effects/src/effects/(haas|stereo_widener)\.rs:',
-    '^tract-effects/src/effects/(frequency_shift|pitch_shift|varispeed)\.rs:',
-    '^tract-effects/src/effects/(comb|svf)\.rs:',
-    '^tract-effects/src/effects/(diode|ladder)\.rs:',
-    '^tract-effects/src/effects/(phaser_filter|sallen_key)\.rs:',
-    '^tract-effects/src/effects/(auto_pan|ring|tremolo)\.rs:',
-    '^tract-effects/src/effects/(chorus|flanger)\.rs:',
-    '^tract-effects/src/effects/(phaser|vibrato)\.rs:',
-    '^tract-effects/src/effects/fm\.rs:',
-    '^tract-effects/src/effects/(delay|repeat)\.rs:',
-    '^tract-effects/src/effects/stretch\.rs:',
-    '^tract-effects/src/effects/reverb\.rs:',
-    '^tract-effects/src/effects/plate\.rs:',
-    '^tract-effects/src/effects/vocoder\.rs:',
-    '^tract-effects/src/effects/spectral_(mirror|rotate)\.rs:',
-    '^tract-effects/src/effects/spectral_shift\.rs:',
-    '^tract-effects/src/effects/spectral_twist\.rs:',
-    '^tract-effects/src/effects/spectral_bandpass\.rs:',
-    '^tract-effects/src/effects/spectral_spread\.rs:',
-    '^tract-effects/src/effects/spectral_compress\.rs:',
-    '^tract-effects/src/effects/spectral_smear\.rs:',
-    '^tract-effects/src/effects/spectral_corrupt\.rs:',
-    '^tract-effects/src/effects/spectral_lofi\.rs:',
-    '^tract-effects/src/effects/spectral_scatter\.rs:',
-    '^tract-effects/src/effects/spectral_cascade\.rs:',
-    '^tract-effects/src/effects/spectral_reverb\.rs:',
-    '^tract-effects/src/effects/satch\.rs:',
-    '^tract-effects/src/effects/warp_zone\.rs:',
-    '^tract-effects/src/effects/spectral_stretch\.rs:',
-    # Register helper functions without including effect dispatch or persisted state.
-    '^tract-effects/src/effects/mod\.rs:\d+:\d+: replace (value_to_norm|norm_to_value|format_value(_bare)?|enum_index|parse_value) ->',
-    '^tract-effects/src/effects/mod\.rs:\d+:\d+: .* in (value_to_norm|norm_to_value|format_value(_bare)?|enum_index|parse_value)$',
-    # Static registry metadata; DSP dispatch and persisted state remain separate.
-    '^tract-effects/src/effects/mod\.rs:\d+:\d+: replace (EffectKind::(name|track_label|family|reports_latency)|parameter_specs|parameter_dimmed|param_count|default_params_for_kind) ->',
-    '^tract-effects/src/effects/mod\.rs:\d+:\d+: .* in (EffectKind::(name|track_label|family|reports_latency)|parameter_specs|parameter_dimmed|param_count|default_params_for_kind)$',
+    '^tract-effects/src/effects/',
 ]
 all_features = true
 test_tool = "nextest"
@@ -47,6 +11,8 @@ additional_cargo_test_args = ["--profile=mutants"]
 gitignore = true
 
 exclude_re = [
+    # An empty Vec allocates nothing and leaks the same empty-slice value.
+    "^tract-effects/src/effects/none\\.rs:\\d+:9: replace <impl Effect for NoneEffect>::parameters -> &'static\\[ParamSpec\\] with Vec::leak\\(Vec::new\\(\\)\\)$",
     # Negative float-to-index casts saturate to zero; zero also selects index zero.
     '^tract-effects/src/effects/mod\.rs:\d+:16: replace < with (==|<=) in enum_index$',
     # At equal peak/envelope, the attack/release choice multiplies a zero delta.
