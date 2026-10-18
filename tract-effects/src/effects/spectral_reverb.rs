@@ -3,8 +3,8 @@
 //! Each bin maintains a running tail: tail_k = tail_k * g_k + input_k.
 //! The per-bin gain g_k is derived from a target T60 (time to drop 60 dB),
 //! which is shaped by Tone: at Tone=0 ("dark") HF bins decay fast (T60 = 0.1
-//! \* Time); at Tone=1 ("bright") LF bins decay fast. Tone=0.5 is roughly
-//! uniform decay at Time across the spectrum.
+//! \* Time); at Tone=1 ("bright") LF bins decay fast. Tone=0.5 gives
+//! uniform decay with T60 = 0.55 * Time across the spectrum.
 
 use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
 use rustfft::num_complex::Complex;
@@ -197,6 +197,412 @@ impl Effect for SpectralReverbEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn impulse_spectrum(size: usize) -> Vec<Complex<f32>> {
+        let mut bins = vec![Complex::default(); size];
+        bins[0] = Complex::new(-0.25, 0.0);
+        bins[size / 2] = Complex::new(0.5, 0.0);
+        for bin in 1..size / 2 {
+            bins[bin] = Complex::new(0.75, -0.25);
+            bins[size - bin] = bins[bin].conj();
+        }
+        bins
+    }
+
+    fn transform(
+        channel: &mut SpectralReverbChannel,
+        bins: &mut [Complex<f32>],
+        time: f32,
+        tone: f32,
+        sample_rate: f32,
+    ) {
+        let size = bins.len();
+        TransformCtx {
+            chan: channel,
+            params: ParamsCache {
+                time_s: time,
+                tone_pct: tone,
+                ..ParamsCache::default()
+            },
+        }
+        .transform(bins, size, sample_rate);
+    }
+
+    fn assert_complex_near(actual: Complex<f32>, expected: Complex<f64>) {
+        for (actual, expected) in [(actual.re, expected.re), (actual.im, expected.im)] {
+            assert!(
+                (actual as f64 - expected).abs() < 2e-7 + expected.abs() * 4e-5,
+                "{actual} vs {expected}"
+            );
+        }
+    }
+
+    fn configured_reverb(fft_index: f32) -> SpectralReverbEffect {
+        let mut effect = SpectralReverbEffect::default();
+        for (index, value) in [0.4, 25.0, fft_index].into_iter().enumerate() {
+            effect.set_param(index, value);
+        }
+        effect
+    }
+
+    #[test]
+    fn impulse_decay_matches_tabulated_tone_curves_and_sixty_db_times() {
+        // 10 Hz/bin and 50 ms/hop: probes span both frequency clamps and three decades.
+        let probes = [1, 2, 20, 200, 2_000, 2_048];
+        let original = impulse_spectrum(4_096);
+        for (tone, damping) in [
+            (0.0, [1.0, 1.0, 0.7, 0.4, 0.1, 0.1]),
+            (25.0, [0.775, 0.775, 0.625, 0.475, 0.325, 0.325]),
+            (50.0, [0.55; 6]),
+            (75.0, [0.325, 0.325, 0.475, 0.625, 0.775, 0.775]),
+            (100.0, [0.1, 0.1, 0.4, 0.7, 1.0, 1.0]),
+        ] {
+            let mut channel = SpectralReverbChannel::new();
+            for hop in 0..=80 {
+                let mut bins = if hop == 0 {
+                    original.clone()
+                } else {
+                    vec![Complex::default(); 4_096]
+                };
+                transform(&mut channel, &mut bins, 2.0, tone, 40_960.0);
+                assert_eq!(
+                    bins[0],
+                    if hop == 0 {
+                        original[0]
+                    } else {
+                        Complex::default()
+                    }
+                );
+                for (&bin, ratio) in probes.iter().zip(damping) {
+                    let gain = 10.0_f64.powf(-3.0 * hop as f64 * 0.05 / (2.0 * ratio));
+                    let expected = Complex::new(
+                        original[bin].re as f64 * gain,
+                        original[bin].im as f64 * gain,
+                    );
+                    assert_complex_near(bins[bin], expected);
+                    assert_complex_near(channel.tail[bin], expected);
+                    if bin < 2_048 {
+                        assert_eq!(bins[4_096 - bin], bins[bin].conj());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn midpoint_decay_is_frequency_independent_at_all_fft_sizes_rates_and_time_bounds() {
+        for size in [512, 1_024, 2_048, 4_096] {
+            for sr in [32_000.0, 96_000.0] {
+                for time in [0.1, 2.0, 20.0] {
+                    let original = impulse_spectrum(size);
+                    let mut channel = SpectralReverbChannel::new();
+                    for hop in 0..=32 {
+                        let mut bins = if hop == 0 {
+                            original.clone()
+                        } else {
+                            vec![Complex::default(); size]
+                        };
+                        transform(&mut channel, &mut bins, time, 50.0, sr);
+                        let elapsed = hop as f64 * (size / 2) as f64 / sr as f64;
+                        let gain = 10.0_f64.powf(-3.0 * elapsed / (0.55 * time as f64));
+                        for bin in 1..=size / 2 {
+                            assert_complex_near(
+                                bins[bin],
+                                Complex::new(
+                                    original[bin].re as f64 * gain,
+                                    original[bin].im as f64 * gain,
+                                ),
+                            );
+                            if bin < size / 2 {
+                                assert_eq!(bins[size - bin], bins[bin].conj());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn new_inputs_and_time_tone_changes_accumulate_without_erasing_the_tail() {
+        let mut channel = SpectralReverbChannel::new();
+        let first = impulse_spectrum(4_096);
+        let mut bins = first.clone();
+        transform(&mut channel, &mut bins, 1.0, 0.0, 40_960.0);
+        let mut second = vec![Complex::new(-0.125, 0.375); 4_096];
+        second[0] = Complex::new(0.25, 0.0);
+        second[2_048] = Complex::new(-0.25, 0.0);
+        for bin in 1..2_048 {
+            second[4_096 - bin] = second[bin].conj();
+        }
+        let mut bins = second.clone();
+        transform(&mut channel, &mut bins, 1.0, 0.0, 40_960.0);
+        assert_eq!(bins[0], second[0]);
+        for hop in 0..=8 {
+            if hop > 0 {
+                bins.fill(Complex::default());
+                bins[0] = Complex::new(hop as f32 * 0.125, 0.0);
+                transform(&mut channel, &mut bins, 2.0, 100.0, 40_960.0);
+                assert_eq!(bins[0].re, hop as f32 * 0.125);
+            }
+            for (bin, dark, bright) in [
+                (2, 1.0, 0.1),
+                (20, 0.7, 0.4),
+                (200, 0.4, 0.7),
+                (2_000, 0.1, 1.0),
+                (2_048, 0.1, 1.0),
+            ] {
+                let first_gain = 10.0_f64.powf(-3.0 * 0.05 / dark);
+                let later_gain = 10.0_f64.powf(-3.0 * hop as f64 * 0.05 / (2.0 * bright));
+                let expected = Complex::new(
+                    (first[bin].re as f64 * first_gain + second[bin].re as f64) * later_gain,
+                    (first[bin].im as f64 * first_gain + second[bin].im as f64) * later_gain,
+                );
+                assert_complex_near(bins[bin], expected);
+                if bin < 2_048 {
+                    assert_eq!(bins[4_096 - bin], bins[bin].conj());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fft_changes_preserve_dormant_tails_and_reset_reuses_preallocated_storage() {
+        let mut effect = SpectralReverbEffect::default();
+        for channel in [&mut effect.chan_l, &mut effect.chan_r] {
+            assert!(channel.tail.len() >= 2_049);
+            let storage = channel.tail.as_ptr();
+            let length = channel.tail.len();
+            let capacity = channel.tail.capacity();
+            channel.tail[1] = Complex::new(0.75, -0.25);
+            channel.tail[2_048] = Complex::new(0.5, 0.0);
+            let mut large_visits = 0;
+            for (index, size) in [512, 4_096, 1_024, 2_048, 4_096].into_iter().enumerate() {
+                let mut silence = vec![Complex::default(); size];
+                transform(channel, &mut silence, 2.0, 50.0, size as f32 * 20.0);
+                let low_gain = 10.0_f64.powf(-3.0 * (index + 1) as f64 * 0.025 / 1.1);
+                assert_complex_near(silence[1], Complex::new(0.75 * low_gain, -0.25 * low_gain));
+                if size == 4_096 {
+                    large_visits += 1;
+                }
+                let high_gain = 10.0_f64.powf(-3.0 * large_visits as f64 * 0.025 / 1.1);
+                assert_complex_near(channel.tail[2_048], Complex::new(0.5 * high_gain, 0.0));
+                assert_eq!(channel.tail.as_ptr(), storage);
+                assert_eq!(channel.tail.len(), length);
+                assert_eq!(channel.tail.capacity(), capacity);
+            }
+            channel.reset();
+            let mut silence = vec![Complex::default(); 4_096];
+            transform(channel, &mut silence, 2.0, 50.0, 81_920.0);
+            assert!(silence.iter().all(|value| *value == Complex::default()));
+            assert_eq!(channel.tail.as_ptr(), storage);
+            assert_eq!(channel.tail.len(), length);
+            assert_eq!(channel.tail.capacity(), capacity);
+        }
+    }
+
+    #[test]
+    fn parameter_defaults_bounds_and_fft_selection_match_metadata() {
+        let mut effect = SpectralReverbEffect::default();
+        assert_eq!(
+            (
+                effect.params.time_s,
+                effect.params.tone_pct,
+                effect.params.fft_param
+            ),
+            (2.0, 50.0, 2.0)
+        );
+        assert_eq!(effect.sample_rate, 48_000.0);
+        assert_eq!(effect.latency_samples(), 2_048);
+        let specs = effect.parameters();
+        assert_eq!(
+            specs
+                .iter()
+                .map(|s| (s.name, s.min, s.max, s.default))
+                .collect::<Vec<_>>(),
+            [
+                ("Time", 0.1, 20.0, 2.0),
+                ("Tone", 0.0, 100.0, 50.0),
+                ("FFT", 0.0, 3.0, 2.0)
+            ]
+        );
+        assert!(matches!(specs[0].scaling, ParamScaling::Log));
+        assert!(matches!(specs[1].scaling, ParamScaling::Linear));
+        assert!(matches!(specs[2].scaling, ParamScaling::Linear));
+        assert!(matches!(
+            specs[0].format,
+            ParamFormat::Number {
+                decimals: 2,
+                unit: " s"
+            }
+        ));
+        assert!(matches!(
+            specs[1].format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: " %"
+            }
+        ));
+        assert!(
+            matches!(specs[2].format, ParamFormat::Enum { labels } if labels == ["512", "1024", "2048", "4096"])
+        );
+        for (slot, cases) in [
+            (0, [(-999.0, 0.1), (3.75, 3.75), (999.0, 20.0)]),
+            (1, [(-999.0, 0.0), (37.5, 37.5), (999.0, 100.0)]),
+        ] {
+            for (value, expected) in cases {
+                effect.set_param(slot, value);
+                assert_eq!(
+                    [effect.params.time_s, effect.params.tone_pct][slot],
+                    expected
+                );
+            }
+        }
+        for (value, size) in [
+            (-99.0, 512),
+            (0.49, 512),
+            (0.5, 1_024),
+            (1.5, 2_048),
+            (99.0, 4_096),
+        ] {
+            effect.set_param(2, value);
+            assert_eq!(effect.latency_samples(), size);
+            assert_eq!(effect.engine_r.latency_samples(), size);
+        }
+        effect.set_param(99, f32::INFINITY);
+        assert_eq!(
+            (effect.params.time_s, effect.params.tone_pct),
+            (20.0, 100.0)
+        );
+        assert_eq!(effect.latency_samples(), 4_096);
+    }
+
+    #[test]
+    fn stereo_audio_matches_an_independent_convolution_of_past_spectra() {
+        struct Reference {
+            frames: Vec<Vec<Complex<f32>>>,
+        }
+        impl SpectralTransform for Reference {
+            fn transform(&mut self, bins: &mut [Complex<f32>], size: usize, sr: f32) {
+                assert_eq!((size, sr), (2_048, 40_960.0));
+                self.frames.push(bins.to_vec());
+                let mut sum = vec![Complex::<f64>::default(); size / 2 + 1];
+                // Direct convolution with the flat 0.55-second decay, without tail recurrence.
+                for (lag, frame) in self.frames.iter().rev().enumerate() {
+                    let gain = 10.0_f64.powf(-3.0 * lag as f64 * 0.025 / 0.55);
+                    for bin in 1..=size / 2 {
+                        sum[bin].re += frame[bin].re as f64 * gain;
+                        sum[bin].im += frame[bin].im as f64 * gain;
+                    }
+                }
+                for bin in 1..=size / 2 {
+                    bins[bin] = Complex::new(sum[bin].re as f32, sum[bin].im as f32);
+                    bins[size - bin] = bins[bin].conj();
+                }
+            }
+        }
+        let mut effect = configured_reverb(2.0);
+        effect.set_param(0, 1.0);
+        effect.set_param(1, 50.0);
+        effect.set_sample_rate(40_960.0);
+        let mut left = SpectralEngine::new(40_960.0);
+        let mut right = SpectralEngine::new(40_960.0);
+        let mut left_ref = Reference { frames: Vec::new() };
+        let mut right_ref = Reference { frames: Vec::new() };
+        let mut energy = [0.0; 2];
+        for sample in 0..16_384 {
+            let input = match sample / 4_096 {
+                0 => ((sample as f32 * 0.17).sin() * 0.125 + 0.025, 0.0),
+                1 => (0.0, (sample as f32 * 0.31).cos() * 0.0625 - 0.0125),
+                2 => (0.0, 0.0),
+                _ => (
+                    (sample as f32 * 0.11).cos() * 0.125,
+                    (sample as f32 * 0.27).sin() * 0.25,
+                ),
+            };
+            let expected = (
+                left.process_sample(input.0, &mut left_ref),
+                right.process_sample(input.1, &mut right_ref),
+            );
+            let actual = effect.process_sample(input.0, input.1);
+            assert!(
+                (actual.0 - expected.0).abs() < 2e-6 && (actual.1 - expected.1).abs() < 2e-6,
+                "sample {sample}: {actual:?} vs {expected:?}"
+            );
+            energy[0] += actual.0 * actual.0;
+            energy[1] += actual.1 * actual.1;
+        }
+        assert!(energy.into_iter().all(|e| e > 0.01));
+    }
+
+    #[test]
+    fn host_reset_clears_stereo_tails_and_preserves_pending_fft() {
+        let mut used = configured_reverb(0.0);
+        let mut warm_energy = [0.0; 2];
+        for sample in 0..16_384 {
+            let output = used.process_sample(
+                (sample as f32 * 0.23).sin() * 0.25,
+                (sample as f32 * 0.31).cos() * 0.125,
+            );
+            warm_energy[0] += output.0 * output.0;
+            warm_energy[1] += output.1 * output.1;
+        }
+        assert!(warm_energy.into_iter().all(|e| e > 0.01));
+        used.set_param(2, 1.0);
+        used.reset();
+        assert_eq!(used.latency_samples(), 1_024);
+        let mut fresh = configured_reverb(0.0);
+        for _ in 0..1_024 {
+            fresh.process_sample(0.0, 0.0);
+        }
+        fresh.set_param(2, 1.0);
+        fresh.reset();
+        let mut energy = [0.0; 2];
+        for sample in 0..16_384 {
+            let input = (
+                (sample as f32 * 0.11).cos() * 0.125,
+                (sample as f32 * 0.27).sin() * 0.25,
+            );
+            let actual = used.process_sample(input.0, input.1);
+            assert_eq!(actual, fresh.process_sample(input.0, input.1));
+            energy[0] += actual.0 * actual.0;
+            energy[1] += actual.1 * actual.1;
+        }
+        assert!(energy.into_iter().all(|e| e > 0.01));
+    }
+
+    #[test]
+    fn sample_rate_configuration_and_host_reset_replay_a_fresh_selected_fft() {
+        for index in 0..4 {
+            let mut used = configured_reverb(index as f32);
+            for sample in 0..16_384 {
+                used.process_sample(
+                    (sample as f32 * 0.19).sin() * 0.25,
+                    (sample as f32 * 0.27).cos() * 0.125,
+                );
+            }
+            used.set_sample_rate(32_000.0);
+            used.reset();
+            let mut fresh = configured_reverb(index as f32);
+            fresh.set_sample_rate(32_000.0);
+            fresh.reset();
+            assert_eq!(used.sample_rate, 32_000.0);
+            assert_eq!(used.latency_samples(), [512, 1_024, 2_048, 4_096][index]);
+            assert_eq!(used.engine_r.latency_samples(), used.latency_samples());
+            let mut energy = [0.0; 2];
+            for sample in 0..16_384 {
+                let input = (
+                    (sample as f32 * 0.29).cos() * 0.25,
+                    (sample as f32 * 0.13).sin() * 0.125,
+                );
+                let actual = used.process_sample(input.0, input.1);
+                assert_eq!(actual, fresh.process_sample(input.0, input.1));
+                energy[0] += actual.0 * actual.0;
+                energy[1] += actual.1 * actual.1;
+            }
+            assert!(energy.into_iter().all(|e| e > 0.01));
+        }
+    }
 
     fn drive(e: &mut SpectralReverbEffect, n: usize, src: impl Fn(usize) -> f32) -> Vec<f32> {
         (0..n)
