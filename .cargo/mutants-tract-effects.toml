@@ -8,6 +8,7 @@ examine_re = [
     '^tract-effects/src/effects/(comb|svf)\.rs:',
     '^tract-effects/src/effects/(diode|ladder)\.rs:',
     '^tract-effects/src/effects/(phaser_filter|sallen_key)\.rs:',
+    '^tract-effects/src/effects/(auto_pan|ring|tremolo)\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -55,4 +56,11 @@ exclude_re = [
     '^tract-effects/src/effects/svf\.rs:\d+:(54|55): replace - with (\+|/) in <impl Effect for SvfEffect>::set_param$',
     # Type selectors above 1 still choose the HP coefficient and processing branches.
     '^tract-effects/src/effects/sallen_key\.rs:\d+:\d+: replace - with (\+|/) in <impl Effect for SallenKeyEffect>::set_param$',
+    # Triangle arms agree exactly at 1/4 and 3/4; keep Square's boundary active.
+    '^tract-effects/src/effects/auto_pan\.rs:(79:22|81:29): replace < with <= in AutoPanEffect::eval_lfo$',
+    '^tract-effects/src/effects/tremolo\.rs:(82:22|84:29): replace < with <= in TremoloEffect::eval_lfo$',
+    # Higher Shape selectors still choose Saw in both LFOs.
+    '^tract-effects/src/effects/(auto_pan|tremolo)\.rs:\d+:59: replace - with (\+|/) in <impl Effect for (AutoPanEffect|TremoloEffect)>::set_param$',
+    # The Ring setter bounds stored shapes to 0..1 before this defensive cap.
+    '^tract-effects/src/effects/ring\.rs:\d+:84: replace - with (\+|/) in <impl Effect for RingEffect>::process_sample$',
 ]

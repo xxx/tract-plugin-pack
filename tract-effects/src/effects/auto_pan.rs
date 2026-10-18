@@ -153,6 +153,179 @@ impl Effect for AutoPanEffect {
 mod tests {
     use super::*;
 
+    fn configured_effect() -> AutoPanEffect {
+        let mut effect = AutoPanEffect::new();
+        effect.set_sample_rate(32_768.0);
+        for (index, value) in [16.0, 40.0, 3.0].into_iter().enumerate() {
+            effect.set_param(index, value);
+        }
+        effect
+    }
+
+    fn assert_stereo_close(actual: (f32, f32), expected: (f32, f32)) {
+        assert!(
+            (actual.0 - expected.0).abs() < 2e-7,
+            "{} vs {}",
+            actual.0,
+            expected.0
+        );
+        assert!(
+            (actual.1 - expected.1).abs() < 2e-7,
+            "{} vs {}",
+            actual.1,
+            expected.1
+        );
+    }
+
+    #[test]
+    fn all_shapes_follow_the_documented_gain_law_over_two_cycles() {
+        // Eight independent waveform landmarks at 40% Depth.
+        for (shape, gains) in [
+            [
+                (1.0, 1.0),
+                (0.717157287525381, 1.0),
+                (0.6, 1.0),
+                (0.717157287525381, 1.0),
+                (1.0, 1.0),
+                (1.0, 0.717157287525381),
+                (1.0, 0.6),
+                (1.0, 0.717157287525381),
+            ],
+            [
+                (1.0, 1.0),
+                (0.8, 1.0),
+                (0.6, 1.0),
+                (0.8, 1.0),
+                (1.0, 1.0),
+                (1.0, 0.8),
+                (1.0, 0.6),
+                (1.0, 0.8),
+            ],
+            [
+                (0.6, 1.0),
+                (0.6, 1.0),
+                (0.6, 1.0),
+                (0.6, 1.0),
+                (1.0, 0.6),
+                (1.0, 0.6),
+                (1.0, 0.6),
+                (1.0, 0.6),
+            ],
+            [
+                (1.0, 0.6),
+                (1.0, 0.7),
+                (1.0, 0.8),
+                (1.0, 0.9),
+                (1.0, 1.0),
+                (0.9, 1.0),
+                (0.8, 1.0),
+                (0.7, 1.0),
+            ],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut effect = configured_effect();
+            effect.set_param(2, shape as f32);
+            for sample in 0..=4_096 {
+                let (left, right) = effect.process_sample(0.75, -0.5);
+                if sample % 256 == 0 {
+                    let (gain_l, gain_r) = gains[(sample / 256) % 8];
+                    assert!(
+                        (left as f64 - 0.75 * gain_l).abs() < 1e-6,
+                        "shape {shape}, sample {sample}: {left}"
+                    );
+                    assert!(
+                        (right as f64 + 0.5 * gain_r).abs() < 1e-6,
+                        "shape {shape}, sample {sample}: {right}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rate_and_sample_rate_changes_preserve_the_running_clock() {
+        let mut effect = configured_effect();
+        for _ in 0..1_024 {
+            effect.process_sample(0.75, -0.5);
+        }
+        effect.set_param(0, 8.0);
+        assert_stereo_close(effect.process_sample(0.75, -0.5), (0.75, -0.5));
+        for _ in 1..512 {
+            effect.process_sample(0.75, -0.5);
+        }
+        effect.set_sample_rate(16_384.0);
+        assert_stereo_close(effect.process_sample(0.75, -0.5), (0.675, -0.5));
+        for _ in 1..256 {
+            effect.process_sample(0.75, -0.5);
+        }
+        assert_stereo_close(effect.process_sample(0.75, -0.5), (0.6, -0.5));
+    }
+
+    #[test]
+    fn zero_depth_keeps_the_clock_running_for_later_modulation() {
+        let mut effect = configured_effect();
+        effect.set_param(1, 0.0);
+        for _ in 0..1_536 {
+            assert_eq!(effect.process_sample(0.75, -0.5), (0.75, -0.5));
+        }
+        effect.set_param(1, 40.0);
+        assert_stereo_close(effect.process_sample(0.75, -0.5), (0.6, -0.5));
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_clock_with_the_same_parameters() {
+        let mut used = configured_effect();
+        let mut fresh = configured_effect();
+        for _ in 0..1_703 {
+            used.process_sample(0.1, -0.2);
+        }
+        used.reset();
+        for sample in 0..4_097 {
+            let input = ((sample as f32 * 0.13).sin(), (sample as f32 * 0.29).cos());
+            assert_eq!(
+                used.process_sample(input.0, input.1),
+                fresh.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn parameters_clamp_and_round_shape_without_retriggering() {
+        for (index, value, endpoint) in [
+            (0, -1.0, 0.05),
+            (0, 99.0, 20.0),
+            (1, -1.0, 0.0),
+            (1, 999.0, 100.0),
+            (2, -1.0, 0.0),
+            (2, 0.49, 0.0),
+            (2, 0.5, 1.0),
+            (2, 1.49, 1.0),
+            (2, 1.5, 2.0),
+            (2, 2.49, 2.0),
+            (2, 2.5, 3.0),
+            (2, 99.0, 3.0),
+        ] {
+            let mut clamped = configured_effect();
+            let mut reference = configured_effect();
+            for _ in 0..257 {
+                clamped.process_sample(1.0, -0.5);
+                reference.process_sample(1.0, -0.5);
+            }
+            clamped.set_param(index, value);
+            reference.set_param(index, endpoint);
+            clamped.set_param(99, -999.0);
+            for sample in 0..4_097 {
+                let input = ((sample as f32 * 0.17).sin(), (sample as f32 * 0.31).cos());
+                assert_eq!(
+                    clamped.process_sample(input.0, input.1),
+                    reference.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
+
     #[test]
     fn parameters_are_declared() {
         let e = AutoPanEffect::new();
@@ -161,6 +334,28 @@ mod tests {
         assert_eq!(specs[0].name, "Rate");
         assert_eq!(specs[1].name, "Depth");
         assert_eq!(specs[2].name, "Shape");
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [(0.05, 20.0, 1.0), (0.0, 100.0, 50.0), (0.0, 3.0, 0.0)]
+        );
+        assert!(matches!(specs[0].scaling, ParamScaling::Log));
+        assert!(matches!(specs[0].format, ParamFormat::Hertz));
+        assert!(matches!(
+            specs[1].format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: "%"
+            }
+        ));
+        assert!(matches!(
+            specs[2].format,
+            ParamFormat::Enum {
+                labels: ["Sine", "Triangle", "Square", "Saw"]
+            }
+        ));
     }
 
     #[test]
