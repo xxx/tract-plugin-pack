@@ -1006,13 +1006,13 @@ mod tests {
     mod control_drawing {
         use super::*;
 
-        fn canvas() -> Pixmap {
+        pub(super) fn canvas() -> Pixmap {
             let mut pixmap = Pixmap::new(900, 320).unwrap();
             pixmap.fill(tiny_skia::Color::from_rgba8(12, 24, 36, 255));
             pixmap
         }
 
-        fn assert_pixels(actual: &Pixmap, expected: &Pixmap, case: &str) {
+        pub(super) fn assert_pixels(actual: &Pixmap, expected: &Pixmap, case: &str) {
             assert_eq!(
                 (actual.width(), actual.height()),
                 (expected.width(), expected.height())
@@ -1335,6 +1335,643 @@ mod tests {
                             &format!("threshold {threshold}, hold {hold_ms}, scale {scale}"),
                         );
                     }
+                }
+            }
+        }
+    }
+
+    mod section_drawing {
+        use super::control_drawing::{assert_pixels, canvas};
+        use super::*;
+        use crate::editor::mseg_color;
+
+        #[derive(Clone, Copy, Default)]
+        struct DialOverlay<'a> {
+            edit: Option<&'a str>,
+            caret: bool,
+            arc: Option<(f32, usize)>,
+        }
+
+        fn effect_layout(scale: f32, short: bool) -> EffectLayout {
+            let mut lay = super::super::effect_layout((0.0, 0.0, 1_200.0, 640.0), scale);
+            lay.kind = (10.0 * scale, 12.0 * scale, 130.0 * scale, 30.0 * scale);
+            lay.randomize = (10.0 * scale, 52.0 * scale, 130.0 * scale, 28.0 * scale);
+            let height = if short { 50.0 } else { 100.0 };
+            lay.dials = std::array::from_fn(|i| {
+                (
+                    (160.0 + i as f32 * 85.0) * scale,
+                    12.0 * scale,
+                    70.0 * scale,
+                    height * scale,
+                )
+            });
+            lay.mix = (585.0 * scale, 12.0 * scale, 70.0 * scale, height * scale);
+            lay
+        }
+
+        fn chrome(
+            pixmap: &mut Pixmap,
+            tr: &mut widgets::TextRenderer,
+            lay: &EffectLayout,
+            name: &str,
+            open: bool,
+        ) {
+            widgets::dropdown::draw_dropdown_trigger(pixmap, tr, lay.kind, name, open);
+            let (x, y, w, h) = lay.randomize;
+            widgets::controls::draw_button(pixmap, tr, x, y, w, h, "Randomize", false, false);
+        }
+
+        fn mix_reference(
+            pixmap: &mut Pixmap,
+            tr: &mut widgets::TextRenderer,
+            scale: f32,
+            short: bool,
+            overlay: DialOverlay<'_>,
+        ) {
+            let (cy, radius) = if short { (37.0, 17.0) } else { (62.0, 27.0) };
+            widgets::param_dial::draw_dial_ex(
+                pixmap,
+                tr,
+                620.0 * scale,
+                cy * scale,
+                radius * scale,
+                "Mix",
+                "38%",
+                0.375,
+                overlay.arc.map(|(norm, _)| norm),
+                overlay.edit,
+                overlay.caret,
+                mseg_color(overlay.arc.map_or(1, |(_, slot)| slot)),
+            );
+        }
+
+        fn svf_reference(
+            pixmap: &mut Pixmap,
+            tr: &mut widgets::TextRenderer,
+            scale: f32,
+            short: bool,
+            overlays: [DialOverlay<'_>; 2],
+            enums_open: [bool; 2],
+            kind_open: bool,
+        ) {
+            let lay = effect_layout(scale, short);
+            chrome(pixmap, tr, &lay, "SVF", kind_open);
+            let (cy, radius, label_size, label_y, trigger_h, trigger_y) = if short {
+                (37.0, 17.0, 11.0, 23.0, 22.0, 35.0)
+            } else {
+                (62.0, 27.0, 18.0, 34.0, 32.0, 58.0)
+            };
+            for ((cx, name, text, norm), overlay) in [
+                (195.0, "Cutoff", "20 Hz", 0.0),
+                (280.0, "Resonance", "0.50", 0.5),
+            ]
+            .into_iter()
+            .zip(overlays)
+            {
+                widgets::param_dial::draw_dial_ex(
+                    pixmap,
+                    tr,
+                    cx * scale,
+                    cy * scale,
+                    radius * scale,
+                    name,
+                    text,
+                    norm,
+                    overlay.arc.map(|(n, _)| n),
+                    overlay.edit,
+                    overlay.caret,
+                    mseg_color(overlay.arc.map_or(1, |(_, slot)| slot)),
+                );
+            }
+            for (index, cx, name, value, open) in [
+                (2, 365.0, "Type", "Bandpass", enums_open[0]),
+                (3, 450.0, "Poles", "6", enums_open[1]),
+            ] {
+                tr.draw_text_centered(
+                    pixmap,
+                    cx * scale,
+                    label_y * scale,
+                    name,
+                    label_size * scale,
+                    widgets::color_text(),
+                );
+                let format = crate::effects::parameter_specs(EffectKind::Svf)[index].format;
+                let width =
+                    enum_trigger_width_for(tr, format, trigger_h * scale, 70.0 * scale, scale);
+                widgets::dropdown::draw_dropdown_trigger(
+                    pixmap,
+                    tr,
+                    (
+                        cx * scale - width * 0.5,
+                        trigger_y * scale,
+                        width,
+                        trigger_h * scale,
+                    ),
+                    value,
+                    open,
+                );
+            }
+            mix_reference(pixmap, tr, scale, short, DialOverlay::default());
+        }
+
+        fn svf_track() -> TrackEffect {
+            TrackEffect {
+                kind: EffectKind::Svf,
+                params: [20.0, 0.5, 1.0, 2.0, 0.0],
+                mix: 0.375,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn none_keeps_kind_randomize_and_mix_with_edit_and_modulation_overlays() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            for scale in [0.5, 1.0] {
+                let lay = effect_layout(scale, false);
+                for (editing, caret, arc) in [
+                    (None, false, None),
+                    (Some("12.5"), true, Some((0.85, 2))),
+                    (Some(""), false, Some((0.1, 3))),
+                ] {
+                    let track = TrackEffect {
+                        mix: 0.375,
+                        ..Default::default()
+                    };
+                    let display = ModulationDisplay {
+                        mix: arc,
+                        ..Default::default()
+                    };
+                    let mut actual = canvas();
+                    draw_effect_section(
+                        &mut actual,
+                        &mut tr,
+                        &track,
+                        true,
+                        None,
+                        editing.map(|text| (text, caret)),
+                        None,
+                        &display,
+                        scale,
+                        &lay,
+                    );
+                    let mut expected = canvas();
+                    chrome(&mut expected, &mut tr, &lay, "None", true);
+                    mix_reference(
+                        &mut expected,
+                        &mut tr,
+                        scale,
+                        false,
+                        DialOverlay {
+                            edit: editing,
+                            caret,
+                            arc: arc.map(|(norm, slot)| (norm, slot as usize)),
+                        },
+                    );
+                    assert_pixels(&actual, &expected, "None effect chrome and Mix");
+                }
+            }
+        }
+
+        #[test]
+        fn svf_draws_continuous_dials_and_centered_enum_triggers_at_both_sizes() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            for (scale, short) in [(0.5, false), (1.0, false), (1.0, true)] {
+                let lay = effect_layout(scale, short);
+                for (open, expected_open) in [
+                    (None, [false, false]),
+                    (Some(2), [true, false]),
+                    (Some(3), [false, true]),
+                ] {
+                    let mut actual = canvas();
+                    draw_effect_section(
+                        &mut actual,
+                        &mut tr,
+                        &svf_track(),
+                        false,
+                        None,
+                        None,
+                        open,
+                        &ModulationDisplay::default(),
+                        scale,
+                        &lay,
+                    );
+                    let mut expected = canvas();
+                    svf_reference(
+                        &mut expected,
+                        &mut tr,
+                        scale,
+                        short,
+                        [DialOverlay::default(); 2],
+                        expected_open,
+                        false,
+                    );
+                    assert_pixels(&actual, &expected, "SVF normal and enum geometry");
+                }
+            }
+        }
+
+        #[test]
+        fn continuous_text_edits_apply_only_to_the_matching_parameter() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            for scale in [0.5, 1.0] {
+                let lay = effect_layout(scale, false);
+                for (editing, overlays) in [
+                    (
+                        (0, "123.4", true),
+                        [
+                            DialOverlay {
+                                edit: Some("123.4"),
+                                caret: true,
+                                ..Default::default()
+                            },
+                            DialOverlay::default(),
+                        ],
+                    ),
+                    (
+                        (1, "0.75", false),
+                        [
+                            DialOverlay::default(),
+                            DialOverlay {
+                                edit: Some("0.75"),
+                                ..Default::default()
+                            },
+                        ],
+                    ),
+                    ((2, "ignored enum", true), [DialOverlay::default(); 2]),
+                    (
+                        (usize::MAX, "ignored index", true),
+                        [DialOverlay::default(); 2],
+                    ),
+                ] {
+                    let mut actual = canvas();
+                    draw_effect_section(
+                        &mut actual,
+                        &mut tr,
+                        &svf_track(),
+                        false,
+                        Some(editing),
+                        None,
+                        None,
+                        &ModulationDisplay::default(),
+                        scale,
+                        &lay,
+                    );
+                    let mut expected = canvas();
+                    svf_reference(
+                        &mut expected,
+                        &mut tr,
+                        scale,
+                        false,
+                        overlays,
+                        [false, false],
+                        false,
+                    );
+                    assert_pixels(&actual, &expected, "targeted dial text editing");
+                }
+            }
+        }
+
+        #[test]
+        fn parameter_modulation_uses_each_slot_color_and_ignores_enum_arc_data() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            let display = ModulationDisplay {
+                parameters: [Some((0.75, 3)), Some((0.1, 2)), Some((0.5, 1)), None, None],
+                mix: None,
+            };
+            for scale in [0.5, 1.0] {
+                let lay = effect_layout(scale, false);
+                let mut actual = canvas();
+                draw_effect_section(
+                    &mut actual,
+                    &mut tr,
+                    &svf_track(),
+                    false,
+                    Some((0, "20", true)),
+                    None,
+                    None,
+                    &display,
+                    scale,
+                    &lay,
+                );
+                let mut expected = canvas();
+                svf_reference(
+                    &mut expected,
+                    &mut tr,
+                    scale,
+                    false,
+                    [
+                        DialOverlay {
+                            edit: Some("20"),
+                            caret: true,
+                            arc: Some((0.75, 3)),
+                        },
+                        DialOverlay {
+                            arc: Some((0.1, 2)),
+                            ..Default::default()
+                        },
+                    ],
+                    [false, false],
+                    false,
+                );
+                assert_pixels(&actual, &expected, "per-parameter modulation and editing");
+            }
+        }
+
+        #[test]
+        fn delay_dimming_keeps_text_editing_and_modulation_visible() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            let display = ModulationDisplay {
+                parameters: [Some((0.65, 3)), None, None, None, None],
+                mix: None,
+            };
+            for scale in [0.5, 1.0] {
+                let lay = effect_layout(scale, false);
+                for (time, label, dimmed) in [(0.0, "1/64", true), (14.0, "Free", false)] {
+                    let track = TrackEffect {
+                        kind: EffectKind::Delay,
+                        params: [1.0, time, 25.0, 75.0, 0.0],
+                        mix: 0.375,
+                        ..Default::default()
+                    };
+                    let mut actual = canvas();
+                    draw_effect_section(
+                        &mut actual,
+                        &mut tr,
+                        &track,
+                        false,
+                        Some((0, "free edit", true)),
+                        None,
+                        Some(1),
+                        &display,
+                        scale,
+                        &lay,
+                    );
+                    let mut expected = canvas();
+                    chrome(&mut expected, &mut tr, &lay, "Delay", false);
+                    let draw_free = if dimmed {
+                        widgets::param_dial::draw_dial_dimmed_ex
+                    } else {
+                        widgets::param_dial::draw_dial_ex
+                    };
+                    draw_free(
+                        &mut expected,
+                        &mut tr,
+                        195.0 * scale,
+                        62.0 * scale,
+                        27.0 * scale,
+                        "Free",
+                        "1 ms",
+                        0.0,
+                        Some(0.65),
+                        Some("free edit"),
+                        true,
+                        mseg_color(3),
+                    );
+                    tr.draw_text_centered(
+                        &mut expected,
+                        280.0 * scale,
+                        34.0 * scale,
+                        "Time",
+                        18.0 * scale,
+                        widgets::color_text(),
+                    );
+                    let format = crate::effects::parameter_specs(EffectKind::Delay)[1].format;
+                    let width =
+                        enum_trigger_width_for(&mut tr, format, 32.0 * scale, 70.0 * scale, scale);
+                    widgets::dropdown::draw_dropdown_trigger(
+                        &mut expected,
+                        &mut tr,
+                        (
+                            280.0 * scale - width * 0.5,
+                            58.0 * scale,
+                            width,
+                            32.0 * scale,
+                        ),
+                        label,
+                        true,
+                    );
+                    for (cx, name, text, norm) in [
+                        (365.0, "Feedback", "25 %", 0.25),
+                        (450.0, "Duck", "75 %", 0.75),
+                    ] {
+                        widgets::param_dial::draw_dial_ex(
+                            &mut expected,
+                            &mut tr,
+                            cx * scale,
+                            62.0 * scale,
+                            27.0 * scale,
+                            name,
+                            text,
+                            norm,
+                            None,
+                            None,
+                            false,
+                            mseg_color(1),
+                        );
+                    }
+                    mix_reference(&mut expected, &mut tr, scale, false, DialOverlay::default());
+                    assert_pixels(&actual, &expected, "Delay dimming with overlays");
+                }
+            }
+        }
+
+        fn modulation_layout(scale: f32) -> EffectLayout {
+            let mut lay = super::super::effect_layout((0.0, 0.0, 1_200.0, 640.0), scale);
+            lay.mseg_selector = (20.0 * scale, 62.0 * scale, 240.0 * scale, 32.0 * scale);
+            lay.target = (300.0 * scale, 62.0 * scale, 130.0 * scale, 32.0 * scale);
+            lay.depth = (470.0 * scale, 52.0 * scale, 70.0 * scale, 100.0 * scale);
+            lay.modulation_header = (20.0 * scale, 12.0 * scale, 800.0 * scale, 20.0 * scale);
+            lay
+        }
+
+        fn selector_reference(
+            pixmap: &mut Pixmap,
+            tr: &mut widgets::TextRenderer,
+            lay: &EffectLayout,
+            active: usize,
+        ) {
+            let colors = [mseg_color(1), mseg_color(2), mseg_color(3), mseg_color(0)];
+            let (x, y, w, h) = lay.mseg_selector;
+            widgets::controls::draw_stepped_selector(
+                pixmap,
+                tr,
+                x,
+                y,
+                w,
+                h,
+                &["1", "2", "3", "Amp"],
+                active,
+                Some(&colors),
+            );
+        }
+
+        #[test]
+        fn amp_draws_only_its_colored_selector_despite_supplied_target_and_depth() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            for scale in [0.5, 1.0] {
+                let lay = modulation_layout(scale);
+                for (target, depth) in [
+                    (Some(ModulationTarget::EffectParameter(0)), 0.0),
+                    (Some(ModulationTarget::Mix), 1.0),
+                ] {
+                    let mut actual = canvas();
+                    draw_modulation_controls(
+                        &mut actual,
+                        &mut tr,
+                        0,
+                        EffectKind::Svf,
+                        target,
+                        depth,
+                        true,
+                        scale,
+                        &lay,
+                    );
+                    let mut expected = canvas();
+                    selector_reference(&mut expected, &mut tr, &lay, 3);
+                    assert_pixels(&actual, &expected, "Amp has no assignable controls or hint");
+                }
+            }
+        }
+
+        #[test]
+        fn assignable_slots_draw_targets_and_signed_bipolar_depth_without_spurious_hints() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            for scale in [0.5, 1.0] {
+                let lay = modulation_layout(scale);
+                for (slot, active, target, label, depth, norm, text) in [
+                    (
+                        1,
+                        0,
+                        Some(ModulationTarget::EffectParameter(0)),
+                        "Cutoff",
+                        -1.0,
+                        0.0,
+                        "-100%",
+                    ),
+                    (2, 1, Some(ModulationTarget::Mix), "Mix", 0.5, 0.75, "+50%"),
+                    (3, 2, None, "(none)", 0.0, 0.5, "+0%"),
+                    (
+                        1,
+                        0,
+                        Some(ModulationTarget::EffectParameter(99)),
+                        "(none)",
+                        0.0,
+                        0.5,
+                        "+0%",
+                    ),
+                    (
+                        2,
+                        1,
+                        Some(ModulationTarget::EffectParameter(1)),
+                        "Resonance",
+                        1.0,
+                        1.0,
+                        "+100%",
+                    ),
+                ] {
+                    for open in [false, true] {
+                        let mut actual = canvas();
+                        draw_modulation_controls(
+                            &mut actual,
+                            &mut tr,
+                            slot,
+                            EffectKind::Svf,
+                            target,
+                            depth,
+                            open,
+                            scale,
+                            &lay,
+                        );
+                        let mut expected = canvas();
+                        selector_reference(&mut expected, &mut tr, &lay, active);
+                        widgets::dropdown::draw_dropdown_trigger(
+                            &mut expected,
+                            &mut tr,
+                            lay.target,
+                            label,
+                            open,
+                        );
+                        widgets::param_dial::draw_dial(
+                            &mut expected,
+                            &mut tr,
+                            505.0 * scale,
+                            102.0 * scale,
+                            27.0 * scale,
+                            "Depth",
+                            text,
+                            norm,
+                        );
+                        assert_pixels(&actual, &expected, "assignable modulation controls");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn assigned_zero_depth_draws_the_colored_hint_and_erases_its_background() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            let hint = "Depth is 0% — change it to apply modulation";
+            for (scale, baseline) in [(0.5, 12.0), (1.0, 26.0)] {
+                let lay = modulation_layout(scale);
+                for (slot, active, kind, target, label) in [
+                    (
+                        1,
+                        0,
+                        EffectKind::Svf,
+                        ModulationTarget::EffectParameter(0),
+                        "Cutoff",
+                    ),
+                    (3, 2, EffectKind::None, ModulationTarget::Mix, "Mix"),
+                ] {
+                    let mut actual = canvas();
+                    draw_modulation_controls(
+                        &mut actual,
+                        &mut tr,
+                        slot,
+                        kind,
+                        Some(target),
+                        0.0,
+                        false,
+                        scale,
+                        &lay,
+                    );
+                    let mut expected = canvas();
+                    selector_reference(&mut expected, &mut tr, &lay, active);
+                    widgets::dropdown::draw_dropdown_trigger(
+                        &mut expected,
+                        &mut tr,
+                        lay.target,
+                        label,
+                        false,
+                    );
+                    widgets::param_dial::draw_dial(
+                        &mut expected,
+                        &mut tr,
+                        505.0 * scale,
+                        102.0 * scale,
+                        27.0 * scale,
+                        "Depth",
+                        "+0%",
+                        0.5,
+                    );
+                    let width = tr.text_width(hint, 12.0 * scale);
+                    widgets::draw_rect(
+                        &mut expected,
+                        14.0 * scale,
+                        12.0 * scale,
+                        width + 12.0 * scale,
+                        20.0 * scale,
+                        widgets::color_control_bg(),
+                    );
+                    tr.draw_text(
+                        &mut expected,
+                        20.0 * scale,
+                        baseline,
+                        hint,
+                        12.0 * scale,
+                        mseg_color(slot),
+                    );
+                    assert_pixels(&actual, &expected, "assigned zero-depth hint");
                 }
             }
         }
