@@ -121,8 +121,8 @@ const TANK_DELAY1_TAPS: [f32; 2] = [4453.0, 4217.0];
 const TANK_DELAY2_TAPS: [f32; 2] = [3720.0, 3163.0];
 
 /// Output tap offsets for the left channel sum (from Dattorro Table 2,
-/// `DAT_SR` reference). Indices into [delay1L, delay1L, apf2L, delay2L,
-/// delay1R, apf2R, delay2R]; the cross-channel taps are what create
+/// `DAT_SR` reference). Indices into [delay1R, delay1R, apf2R, delay2R,
+/// delay1L, apf2L, delay2L]; the cross-channel taps are what create
 /// the stereo image.
 const LEFT_TAP_OFFSETS: [f32; 7] = [266.0, 2974.0, 1913.0, 1996.0, 1990.0, 187.0, 1066.0];
 /// Output tap offsets for the right channel sum.
@@ -281,8 +281,8 @@ impl PlateEffect {
         self.decay_diff_2 = (self.decay + 0.15).clamp(0.25, 0.50);
 
         // One-pole LP coefficient `c = 1 - exp(-2*pi*fc/sr)`. At low
-        // damping the cutoff stays near Nyquist (no HF loss); at high
-        // damping it drops into the 1-2 kHz range for a dark tail.
+        // damping the cutoff is 20 kHz; at high damping it drops to
+        // 200 Hz for a dark tail.
         let damp_norm = (self.damping_pct * 0.01).clamp(0.0, 1.0);
         let damp_fc = 20_000.0 * (1.0 - damp_norm).powi(2) + 200.0 * damp_norm;
         self.damp_coef = 1.0 - (-std::f32::consts::TAU * damp_fc / sr).exp();
@@ -366,15 +366,22 @@ impl Default for PlateEffect {
 
 impl Effect for PlateEffect {
     fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
+        // These heads reference the current sample before ring writes advance them.
+        let delay1_head = self.tank_delay1_pos;
+        let delay2_head = self.tank_delay2_pos;
+        let apf2_head = self.tank_apf2_pos;
         // 1. Sum input channels into the diffuser input and apply the
         //    pre-delay ring.
         let in_sum = (left + right) * 0.5;
-        Self::write_ring(&mut self.pre_delay, &mut self.pre_delay_pos, in_sum);
-        let pre_delayed = if self.pre_delay_samples < 1.0 {
+        let pre_delayed = if self.pre_delay_samples == 0.0 {
             in_sum
+        } else if self.pre_delay_samples < 1.0 {
+            let previous = Self::read_frac(&self.pre_delay, self.pre_delay_pos, 1.0);
+            in_sum * (1.0 - self.pre_delay_samples) + previous * self.pre_delay_samples
         } else {
             Self::read_frac(&self.pre_delay, self.pre_delay_pos, self.pre_delay_samples)
         };
+        Self::write_ring(&mut self.pre_delay, &mut self.pre_delay_pos, in_sum);
 
         // 2. Bandwidth filter (1-pole LP).
         let bandwidth_out = Self::one_pole_lp(&mut self.input_lp_s, pre_delayed, self.bw_coef);
@@ -417,7 +424,7 @@ impl Effect for PlateEffect {
         );
         let l = Self::read_frac(
             &self.tank_delay1_bufs[0],
-            self.tank_delay1_pos[0],
+            delay1_head[0],
             self.tank_delay1_len[0],
         );
         let l = Self::one_pole_lp(&mut self.damp_lp_s[0], l, self.damp_coef);
@@ -436,7 +443,7 @@ impl Effect for PlateEffect {
         );
         let l_branch = Self::read_frac(
             &self.tank_delay2_bufs[0],
-            self.tank_delay2_pos[0],
+            delay2_head[0],
             self.tank_delay2_len[0],
         );
 
@@ -458,7 +465,7 @@ impl Effect for PlateEffect {
         );
         let r = Self::read_frac(
             &self.tank_delay1_bufs[1],
-            self.tank_delay1_pos[1],
+            delay1_head[1],
             self.tank_delay1_len[1],
         );
         let r = Self::one_pole_lp(&mut self.damp_lp_s[1], r, self.damp_coef);
@@ -477,77 +484,77 @@ impl Effect for PlateEffect {
         );
         let r_branch = Self::read_frac(
             &self.tank_delay2_bufs[1],
-            self.tank_delay2_pos[1],
+            delay2_head[1],
             self.tank_delay2_len[1],
         );
 
         // 7. Cross-couple for next sample.
-        self.left_sum = r_branch * self.decay;
-        self.right_sum = l_branch * self.decay;
+        self.left_sum = l_branch * self.decay;
+        self.right_sum = r_branch * self.decay;
 
         // 8. Output taps -- 7 weighted reads per channel, alternating
         //    in-branch and cross-branch to synthesize the stereo image.
         //    Indices match Dattorro Table 2:
-        //      L = +d1L[0] + d1L[1] - apf2L[2] + d2L[3]
-        //          - d1R[4] - apf2R[5] - d2R[6]
-        //      R = +d1R[0] + d1R[1] - apf2R[2] + d2R[3]
+        //      L = +d1R[0] + d1R[1] - apf2R[2] + d2R[3]
         //          - d1L[4] - apf2L[5] - d2L[6]
+        //      R = +d1L[0] + d1L[1] - apf2L[2] + d2L[3]
+        //          - d1R[4] - apf2R[5] - d2R[6]
         let yl = Self::read_int(
-            &self.tank_delay1_bufs[0],
-            self.tank_delay1_pos[0],
+            &self.tank_delay1_bufs[1],
+            delay1_head[1],
             self.left_tap_offsets[0] as usize,
         ) + Self::read_int(
-            &self.tank_delay1_bufs[0],
-            self.tank_delay1_pos[0],
+            &self.tank_delay1_bufs[1],
+            delay1_head[1],
             self.left_tap_offsets[1] as usize,
         ) - Self::read_int(
-            &self.tank_apf2_bufs[0],
-            self.tank_apf2_pos[0],
+            &self.tank_apf2_bufs[1],
+            apf2_head[1],
             self.left_tap_offsets[2] as usize,
         ) + Self::read_int(
-            &self.tank_delay2_bufs[0],
-            self.tank_delay2_pos[0],
+            &self.tank_delay2_bufs[1],
+            delay2_head[1],
             self.left_tap_offsets[3] as usize,
         ) - Self::read_int(
-            &self.tank_delay1_bufs[1],
-            self.tank_delay1_pos[1],
+            &self.tank_delay1_bufs[0],
+            delay1_head[0],
             self.left_tap_offsets[4] as usize,
         ) - Self::read_int(
-            &self.tank_apf2_bufs[1],
-            self.tank_apf2_pos[1],
+            &self.tank_apf2_bufs[0],
+            apf2_head[0],
             self.left_tap_offsets[5] as usize,
         ) - Self::read_int(
-            &self.tank_delay2_bufs[1],
-            self.tank_delay2_pos[1],
+            &self.tank_delay2_bufs[0],
+            delay2_head[0],
             self.left_tap_offsets[6] as usize,
         );
         let yr = Self::read_int(
-            &self.tank_delay1_bufs[1],
-            self.tank_delay1_pos[1],
+            &self.tank_delay1_bufs[0],
+            delay1_head[0],
             self.right_tap_offsets[0] as usize,
         ) + Self::read_int(
-            &self.tank_delay1_bufs[1],
-            self.tank_delay1_pos[1],
+            &self.tank_delay1_bufs[0],
+            delay1_head[0],
             self.right_tap_offsets[1] as usize,
         ) - Self::read_int(
-            &self.tank_apf2_bufs[1],
-            self.tank_apf2_pos[1],
+            &self.tank_apf2_bufs[0],
+            apf2_head[0],
             self.right_tap_offsets[2] as usize,
         ) + Self::read_int(
-            &self.tank_delay2_bufs[1],
-            self.tank_delay2_pos[1],
+            &self.tank_delay2_bufs[0],
+            delay2_head[0],
             self.right_tap_offsets[3] as usize,
         ) - Self::read_int(
-            &self.tank_delay1_bufs[0],
-            self.tank_delay1_pos[0],
+            &self.tank_delay1_bufs[1],
+            delay1_head[1],
             self.right_tap_offsets[4] as usize,
         ) - Self::read_int(
-            &self.tank_apf2_bufs[0],
-            self.tank_apf2_pos[0],
+            &self.tank_apf2_bufs[1],
+            apf2_head[1],
             self.right_tap_offsets[5] as usize,
         ) - Self::read_int(
-            &self.tank_delay2_bufs[0],
-            self.tank_delay2_pos[0],
+            &self.tank_delay2_bufs[1],
+            delay2_head[1],
             self.right_tap_offsets[6] as usize,
         );
 
@@ -638,6 +645,435 @@ impl Effect for PlateEffect {
 mod tests {
     use super::*;
 
+    fn configured_plate(sample_rate: f32, params: [f32; 5]) -> PlateEffect {
+        let mut plate = PlateEffect::new();
+        plate.set_sample_rate(sample_rate);
+        for (index, value) in params.into_iter().enumerate() {
+            plate.set_param(index, value);
+        }
+        plate
+    }
+
+    #[test]
+    fn predelay_holds_the_input_for_the_full_requested_sample_count() {
+        let coefficient = 1.0 - (-std::f64::consts::TAU * 10_000.0 / 48_000.0).exp();
+        for delay in [1_usize, 3, 48] {
+            let mut plate =
+                configured_plate(48_000.0, [delay as f32 / 48.0, 60.0, 40.0, 10_000.0, 100.0]);
+            for sample in 0..delay + 8 {
+                let input = if sample == 0 {
+                    (1.0, -0.25)
+                } else {
+                    (0.0, 0.0)
+                };
+                plate.process_sample(input.0, input.1);
+                let expected = if sample < delay {
+                    0.0
+                } else {
+                    0.375 * coefficient * (1.0 - coefficient).powi((sample - delay) as i32)
+                };
+                assert!(
+                    (plate.input_lp_s as f64 - expected).abs() < 2e-6,
+                    "delay {delay}, sample {sample}: {} vs {expected}",
+                    plate.input_lp_s
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn subsample_predelay_blends_the_current_and_previous_samples() {
+        let mut plate = configured_plate(48_000.0, [0.5 / 48.0, 60.0, 40.0, 10_000.0, 100.0]);
+        let coefficient = 1.0 - (-std::f64::consts::TAU * 10_000.0 / 48_000.0).exp();
+        for sample in 0..12 {
+            let input = if sample == 0 {
+                (1.0, -0.25)
+            } else {
+                (0.0, 0.0)
+            };
+            plate.process_sample(input.0, input.1);
+            let first = (1.0 - coefficient).powi(sample);
+            let second = if sample == 0 {
+                0.0
+            } else {
+                (1.0 - coefficient).powi(sample - 1)
+            };
+            let expected = 0.1875 * coefficient * (first + second);
+            assert!(
+                (plate.input_lp_s as f64 - expected).abs() < 2e-6,
+                "sample {sample}: {} vs {expected}",
+                plate.input_lp_s
+            );
+        }
+    }
+
+    #[test]
+    fn each_tank_branch_feeds_the_opposite_branch_on_the_next_sample() {
+        let mut plate = configured_plate(DAT_SR, [0.0, 60.0, 40.0, 10_000.0, 100.0]);
+        for (bank, delay, value) in [(0, 3_720, 0.5), (1, 3_163, -0.25)] {
+            plate.tank_delay2_bufs[bank][RING_CAP - delay] = value;
+            plate.tank_delay2_bufs[bank][RING_CAP + 1 - delay] = value;
+        }
+        plate.process_sample(0.0, 0.0);
+        assert!((plate.left_sum as f64 - 0.305).abs() < 2e-7);
+        assert!((plate.right_sum as f64 + 0.1525).abs() < 2e-7);
+        plate.process_sample(0.0, 0.0);
+        assert!((plate.tank_delay1_bufs[0][1] as f64 + 0.10675).abs() < 2e-7);
+        assert!((plate.tank_delay1_bufs[1][1] as f64 - 0.2135).abs() < 2e-7);
+    }
+
+    #[test]
+    fn fixed_tank_delays_preserve_the_canonical_impulse_onset_times() {
+        let mut plate = configured_plate(DAT_SR, [0.0, 60.0, 40.0, 10_000.0, 100.0]);
+        let bandwidth = 1.0 - (-std::f64::consts::TAU * 10_000.0 / 29_761.0).exp();
+        let damping = 1.0 - (-std::f64::consts::TAU * 7_280.0 / 29_761.0).exp();
+        let first = 0.375 * bandwidth * 0.75_f64.powi(2) * 0.625_f64.powi(2) * 0.7 * damping;
+        let second = -0.5 * first * 0.61_f64.powi(2);
+        for sample in 0..8_174 {
+            let input = if sample == 0 {
+                (1.0, -0.25)
+            } else {
+                (0.0, 0.0)
+            };
+            plate.process_sample(input.0, input.1);
+            for (bank, onset) in [(0, 4_453), (1, 4_217)] {
+                if sample < onset {
+                    assert_eq!(plate.damp_lp_s[bank], 0.0, "bank {bank}, sample {sample}");
+                }
+                if sample == onset {
+                    assert!((plate.damp_lp_s[bank] as f64 - first).abs() < 2e-6);
+                }
+            }
+            for (sum, onset) in [(plate.left_sum, 8_173), (plate.right_sum, 7_380)] {
+                if sample < onset {
+                    assert_eq!(sum, 0.0, "sample {sample}, expected onset {onset}");
+                }
+                if sample == onset {
+                    assert!((sum as f64 - second).abs() < 2e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn output_taps_follow_the_reference_banks_signs_offsets_width_and_dc_filter() {
+        // Dattorro Table 2, followed by this engine's trim and DC filter.
+        let taps = [
+            (0, 0, 1, 266, 1.0),
+            (0, 0, 1, 2_974, 1.0),
+            (0, 1, 1, 1_913, -1.0),
+            (0, 2, 1, 1_996, 1.0),
+            (0, 0, 0, 1_990, -1.0),
+            (0, 1, 0, 187, -1.0),
+            (0, 2, 0, 1_066, -1.0),
+            (1, 0, 0, 353, 1.0),
+            (1, 0, 0, 3_627, 1.0),
+            (1, 1, 0, 1_228, -1.0),
+            (1, 2, 0, 2_673, 1.0),
+            (1, 0, 1, 2_111, -1.0),
+            (1, 1, 1, 335, -1.0),
+            (1, 2, 1, 121, -1.0),
+        ];
+        for (output, kind, bank, offset, sign) in taps {
+            for width in [0.0, 37.5, 100.0] {
+                let mut plate = configured_plate(DAT_SR, [0.0, 60.0, 40.0, 10_000.0, width]);
+                let buffer = match kind {
+                    0 => &mut plate.tank_delay1_bufs[bank],
+                    1 => &mut plate.tank_apf2_bufs[bank],
+                    _ => &mut plate.tank_delay2_bufs[bank],
+                };
+                buffer[RING_CAP - offset] = 0.125;
+                plate.dc_in = [0.125, -0.25];
+                plate.dc_out = [0.5, -0.75];
+                let tap = sign * 0.125_f64;
+                let raw = if output == 0 { (tap, 0.0) } else { (0.0, tap) };
+                let w = width as f64 / 100.0;
+                let mixed = (
+                    ((1.0 + w) * raw.0 + (1.0 - w) * raw.1) / 4.0,
+                    ((1.0 - w) * raw.0 + (1.0 + w) * raw.1) / 4.0,
+                );
+                let pole = 1.0 - std::f64::consts::TAU * 10.0 / 29_761.0;
+                let expected = (mixed.0 - 0.125 + pole * 0.5, mixed.1 + 0.25 - pole * 0.75);
+                let actual = plate.process_sample(0.0, 0.0);
+                assert!(
+                    (actual.0 as f64 - expected.0).abs() < 3e-7,
+                    "output {output}, bank {bank}, kind {kind}, offset {offset}, width {width}: {actual:?} vs {expected:?}"
+                );
+                assert!((actual.1 as f64 - expected.1).abs() < 3e-7);
+            }
+        }
+    }
+
+    #[test]
+    fn ring_reads_preserve_integer_fractional_and_clamped_offsets_at_wrap() {
+        for head in [0, 1, RING_CAP - 1] {
+            let mut buffer = vec![0.0; RING_CAP];
+            for offset in [1.0, 1.25, 2.0 + 1.0 / 65_536.0, RING_CAP as f32 - 1.5] {
+                buffer.fill(0.0);
+                let whole = offset.floor() as usize;
+                buffer[(head + RING_CAP - whole) % RING_CAP] = 0.75;
+                buffer[(head + RING_CAP - whole - 1) % RING_CAP] = -0.25;
+                let expected = 0.75 - (offset - whole as f32);
+                assert_eq!(PlateEffect::read_frac(&buffer, head, offset), expected);
+            }
+            buffer.fill(0.0);
+            buffer[(head + RING_CAP - 1) % RING_CAP] = 0.625;
+            for offset in [-1.0, 0.0, 0.5, 1.0] {
+                assert_eq!(PlateEffect::read_frac(&buffer, head, offset), 0.625);
+            }
+            for offset in [0, 1, 107, RING_CAP - 1] {
+                buffer.fill(0.0);
+                buffer[(head + RING_CAP - offset) % RING_CAP] = 0.375;
+                assert_eq!(PlateEffect::read_int(&buffer, head, offset), 0.375);
+            }
+        }
+    }
+
+    #[test]
+    fn ring_writes_advance_once_and_preserve_the_other_slots() {
+        for start in [0, RING_CAP - 1] {
+            let mut buffer = vec![-0.25; RING_CAP];
+            let mut head = start;
+            PlateEffect::write_ring(&mut buffer, &mut head, 0.625);
+            assert_eq!(head, (start + 1) % RING_CAP);
+            for (index, &sample) in buffer.iter().enumerate() {
+                assert_eq!(sample, if index == start { 0.625 } else { -0.25 });
+            }
+        }
+    }
+
+    #[test]
+    fn allpass_impulses_match_the_closed_form_transfer_function() {
+        for delay in [1, 3, 7] {
+            for gain in [0.75, 0.625, -0.7, 0.335, 0.5] {
+                for start in [0, RING_CAP - 2] {
+                    let mut buffer = vec![0.0; RING_CAP];
+                    let mut head = start;
+                    for sample in 0..32 {
+                        let input = if sample == 0 { 1.0 } else { 0.0 };
+                        let actual = PlateEffect::allpass_step(
+                            &mut buffer,
+                            &mut head,
+                            input,
+                            delay as f32,
+                            gain,
+                        );
+                        let g = gain as f64;
+                        let expected = if sample == 0 {
+                            -g
+                        } else if sample % delay == 0 {
+                            (1.0 - g * g) * g.powi(sample / delay - 1)
+                        } else {
+                            0.0
+                        };
+                        assert!(
+                            (actual as f64 - expected).abs() < 5e-7,
+                            "delay {delay}, gain {gain}, sample {sample}: {actual} vs {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn one_pole_states_match_closed_form_attack_release_and_endpoints() {
+        for coefficient in [0.125, 0.5, 0.875] {
+            let mut state = 0.0;
+            let pole = 1.0 - coefficient as f64;
+            for sample in 1..=16 {
+                let actual = PlateEffect::one_pole_lp(&mut state, 0.75, coefficient);
+                let expected = 0.75 * (1.0 - pole.powi(sample));
+                assert!((actual as f64 - expected).abs() < 1e-7);
+            }
+            let attack_end = 0.75 * (1.0 - pole.powi(16));
+            for sample in 1..=16 {
+                let actual = PlateEffect::one_pole_lp(&mut state, -0.25, coefficient);
+                let expected = -0.25 + (attack_end + 0.25) * pole.powi(sample);
+                assert!((actual as f64 - expected).abs() < 1e-7);
+            }
+        }
+        let mut state = -0.125;
+        assert_eq!(PlateEffect::one_pole_lp(&mut state, 0.75, 0.0), -0.125);
+        assert_eq!(PlateEffect::one_pole_lp(&mut state, 0.75, 1.0), 0.75);
+    }
+
+    #[test]
+    fn coefficient_caches_follow_the_parameter_curves_and_reference_tap_times() {
+        for sample_rate in [8_000.0, 29_761.0, 48_000.0, 192_000.0] {
+            for (pre, decay, damping, bandwidth, expected_decay, expected_diffusion) in [
+                (25.0, 10.0, 0.0, 200.0, 0.185, 0.335),
+                (200.0, 50.0, 50.0, 20_000.0, 0.525, 0.5),
+                (0.0, 95.0, 100.0, 10_000.0, 0.9075, 0.5),
+            ] {
+                let plate = configured_plate(sample_rate, [pre, decay, damping, bandwidth, 100.0]);
+                let sr = sample_rate as f64;
+                assert!((plate.pre_delay_samples as f64 - pre as f64 * sr / 1_000.0).abs() < 0.005);
+                assert!((plate.decay as f64 - expected_decay).abs() < 1e-7);
+                assert!((plate.decay_diff_2 as f64 - expected_diffusion).abs() < 1e-7);
+                let damp_fc = match damping as i32 {
+                    0 => 20_000.0,
+                    50 => 5_100.0,
+                    _ => 200.0,
+                };
+                let bw_fc = (bandwidth as f64).min(sr * 0.49);
+                assert!(
+                    (plate.damp_coef as f64
+                        - (1.0 - (-std::f64::consts::TAU * damp_fc / sr).exp()))
+                    .abs()
+                        < 2e-7
+                );
+                assert!(
+                    (plate.bw_coef as f64 - (1.0 - (-std::f64::consts::TAU * bw_fc / sr).exp()))
+                        .abs()
+                        < 2e-7
+                );
+                assert!(
+                    (plate.dc_r as f64 - (1.0 - std::f64::consts::TAU * 10.0 / sr)).abs() < 1e-7
+                );
+                assert!((plate.lfo_inc as f64 - 1.0 / sr).abs() < 2e-11);
+                assert!((plate.lfo_excursion as f64 - 16.0 * sr / 29_761.0).abs() < 2e-5);
+                for (actual, reference) in [
+                    (&plate.input_apf_len[..], &[142.0, 107.0, 379.0, 277.0][..]),
+                    (&plate.tank_apf1_len[..], &[672.0, 908.0][..]),
+                    (&plate.tank_apf2_len[..], &[1_800.0, 2_656.0][..]),
+                    (&plate.tank_delay1_len[..], &[4_453.0, 4_217.0][..]),
+                    (&plate.tank_delay2_len[..], &[3_720.0, 3_163.0][..]),
+                    (
+                        &plate.left_tap_offsets[..],
+                        &[266.0, 2_974.0, 1_913.0, 1_996.0, 1_990.0, 187.0, 1_066.0][..],
+                    ),
+                    (
+                        &plate.right_tap_offsets[..],
+                        &[353.0, 3_627.0, 1_228.0, 2_673.0, 2_111.0, 335.0, 121.0][..],
+                    ),
+                ] {
+                    for (&actual, &reference) in actual.iter().zip(reference) {
+                        assert!((actual as f64 - reference * sr / 29_761.0).abs() < 0.005);
+                    }
+                }
+            }
+        }
+        let mut plate = configured_plate(960_000.0, [200.0, 60.0, 40.0, 10_000.0, 100.0]);
+        assert_eq!(plate.pre_delay_samples, 65_532.0);
+        plate.set_sample_rate(0.0);
+        assert_eq!(plate.lfo_inc, 1.0);
+        assert_eq!(plate.dc_r, 0.0);
+        let expected_bw = 1.0 - (-std::f64::consts::TAU * 0.49).exp();
+        assert!((plate.bw_coef as f64 - expected_bw).abs() < 2e-7);
+    }
+
+    #[test]
+    fn quadrature_modulation_uses_the_current_phase_and_wraps_afterward() {
+        for phase in [0.0, 0.125, 0.375, 0.75, 1.0 - 0.5 / 29_761.0] {
+            let mut plate = configured_plate(DAT_SR, [0.0, 60.0, 40.0, 10_000.0, 100.0]);
+            plate.lfo_phase = phase;
+            for distance in 0..RING_CAP {
+                let index = (RING_CAP - distance) % RING_CAP;
+                plate.tank_apf1_bufs[0][index] = distance as f32 / 65_536.0;
+                plate.tank_apf1_bufs[1][index] = -(distance as f32) / 65_536.0;
+            }
+            plate.process_sample(0.0, 0.0);
+            let angle = std::f64::consts::TAU * phase as f64;
+            let expected_l = (672.0 + 16.0 * angle.sin()) / 65_536.0;
+            let expected_r = -(908.0 + 16.0 * angle.cos()) / 65_536.0;
+            assert!((plate.tank_delay1_bufs[0][0] as f64 - expected_l).abs() < 1e-7);
+            assert!((plate.tank_delay1_bufs[1][0] as f64 - expected_r).abs() < 1e-7);
+            let expected_phase = (phase as f64 + 1.0 / 29_761.0).fract();
+            assert!((plate.lfo_phase as f64 - expected_phase).abs() < 1e-7);
+        }
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_plate_after_exercising_both_tank_branches() {
+        let params = [7.0, 73.0, 64.0, 7_231.0, 37.5];
+        let mut used = configured_plate(DAT_SR, params);
+        let mut fresh = configured_plate(DAT_SR, params);
+        for sample in 0..20_000 {
+            used.process_sample(
+                (sample as f32 * 0.17).sin() * 0.3,
+                (sample as f32 * 0.31).cos() * 0.125,
+            );
+        }
+        for buffer in &used.tank_delay2_bufs {
+            assert!(buffer.iter().any(|sample| sample.abs() > 1e-6));
+        }
+        used.reset();
+        for sample in 0..20_000 {
+            let input = if sample < 5_000 {
+                ((sample as f32 * 0.13).cos() * 0.25, -0.125)
+            } else {
+                (0.0, 0.0)
+            };
+            assert_eq!(
+                used.process_sample(input.0, input.1),
+                fresh.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn setters_preserve_the_live_tank_filter_and_modulation_history() {
+        let params = [7.0, 73.0, 64.0, 7_231.0, 37.5];
+        let mut changed = configured_plate(DAT_SR, params);
+        let mut reference = configured_plate(DAT_SR, params);
+        for sample in 0..20_000 {
+            let input = (
+                (sample as f32 * 0.17).sin() * 0.3,
+                (sample as f32 * 0.31).cos() * 0.125,
+            );
+            changed.process_sample(input.0, input.1);
+            reference.process_sample(input.0, input.1);
+        }
+        changed.set_sample_rate(96_000.0);
+        for (index, value) in [200.0, 10.0, 100.0, 200.0, 0.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_sample_rate(DAT_SR);
+        for (index, value) in params.into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_param(99, f32::INFINITY);
+        for _ in 0..10_000 {
+            assert_eq!(
+                changed.process_sample(0.0, 0.0),
+                reference.process_sample(0.0, 0.0)
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_bounds_and_sample_accurate_predelay_endpoints_are_stable() {
+        let mut plate = PlateEffect::new();
+        for (slot, minimum, maximum) in [
+            (0, 0.0, 200.0),
+            (1, 10.0, 95.0),
+            (2, 0.0, 100.0),
+            (3, 200.0, 20_000.0),
+            (4, 0.0, 100.0),
+        ] {
+            for (value, expected) in [(-1.0, minimum), (999_999.0, maximum)] {
+                plate.set_param(slot, value);
+                let stored = [
+                    plate.pre_delay_ms,
+                    plate.decay_pct,
+                    plate.damping_pct,
+                    plate.bandwidth_hz,
+                    plate.width_pct,
+                ];
+                assert_eq!(stored[slot], expected);
+            }
+        }
+        let mut delayed = configured_plate(1_000.0, [1.0, 60.0, 40.0, 10_000.0, 100.0]);
+        assert_eq!(delayed.pre_delay_samples, 1.0);
+        delayed.process_sample(f32::MAX, f32::MAX);
+        assert_eq!(delayed.input_lp_s, 0.0);
+        let mut immediate = configured_plate(48_000.0, [0.0, 60.0, 40.0, 10_000.0, 100.0]);
+        immediate.pre_delay[RING_CAP - 1] = f32::INFINITY;
+        immediate.process_sample(0.0, 0.0);
+        assert_eq!(immediate.input_lp_s, 0.0);
+    }
+
     #[test]
     fn parameters_are_declared() {
         let e = PlateEffect::new();
@@ -648,6 +1084,31 @@ mod tests {
         assert_eq!(specs[2].name, "Damping");
         assert_eq!(specs[3].name, "Bandwidth");
         assert_eq!(specs[4].name, "Width");
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [
+                (0.0, 200.0, 0.0),
+                (10.0, 95.0, 60.0),
+                (0.0, 100.0, 40.0),
+                (200.0, 20_000.0, 10_000.0),
+                (0.0, 100.0, 100.0)
+            ]
+        );
+        for (index, spec) in specs.iter().enumerate() {
+            if index == 3 {
+                assert!(matches!(spec.scaling, ParamScaling::Log));
+                assert!(matches!(spec.format, ParamFormat::Hertz));
+            } else {
+                assert!(matches!(spec.scaling, ParamScaling::Linear));
+                let expected_unit = if index == 0 { "ms" } else { "%" };
+                assert!(
+                    matches!(spec.format, ParamFormat::Number { decimals: 0, unit } if unit == expected_unit)
+                );
+            }
+        }
     }
 
     #[test]
@@ -775,17 +1236,20 @@ mod tests {
         // Drive with very different L/R to highlight stereo, then check
         // outputs match (mono collapse).
         for _ in 0..4096 {
-            e.process_sample(1.0, -1.0);
+            e.process_sample(1.0, -0.25);
         }
         let mut max_diff = 0.0_f32;
+        let mut energy = 0.0;
         for _ in 0..4096 {
-            let (l, r) = e.process_sample(0.5, -0.5);
+            let (l, r) = e.process_sample(0.5, -0.125);
             max_diff = max_diff.max((l - r).abs());
+            energy += l * l + r * r;
         }
         assert!(
             max_diff < 1e-6,
             "Width=0 should collapse to mono, got max diff={max_diff}"
         );
+        assert!(energy > 1e-6);
     }
 
     #[test]
@@ -793,7 +1257,7 @@ mod tests {
         let mut e = PlateEffect::new();
         e.set_sample_rate(48_000.0);
         for _ in 0..1024 {
-            e.process_sample(0.5, -0.5);
+            e.process_sample(0.5, -0.125);
         }
         e.reset();
         // After reset, silent input must produce silent output for at
