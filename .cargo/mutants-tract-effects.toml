@@ -16,6 +16,7 @@ examine_re = [
     '^tract-effects/src/effects/stretch\.rs:',
     '^tract-effects/src/effects/reverb\.rs:',
     '^tract-effects/src/effects/plate\.rs:',
+    '^tract-effects/src/effects/vocoder\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -92,4 +93,8 @@ exclude_re = [
     '^tract-effects/src/effects/repeat\.rs:\d+:56: replace / with \* in <impl Effect for RepeatEffect>::process_sample$',
     # Priming always installs a window of at least 16 samples; reset clears both.
     '^tract-effects/src/effects/stretch\.rs:\d+:25: replace \|\| with && in <impl Effect for StretchEffect>::process_sample$',
+    # Equal signal/envelope values make either coefficient multiply a zero delta.
+    '^tract-effects/src/effects/vocoder\.rs:\d+:23: replace > with >= in VocoderEffect::step_env$',
+    # The Carrier setter stores 0..2 before this defensive upper cap.
+    '^tract-effects/src/effects/vocoder\.rs:\d+:87: replace - with (\+|/) in VocoderEffect::next_carrier$',
 ]

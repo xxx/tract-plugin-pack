@@ -111,7 +111,7 @@ impl SvfBp {
     fn set_freq(&mut self, freq_hz: f32, sr: f32) {
         // Clamp to a safe range below Nyquist; `tan` blows up
         // near pi/2, so don't let `fc/sr` approach 0.5.
-        let fc = freq_hz.clamp(1.0, sr * 0.45);
+        let fc = freq_hz.max(1.0).min(sr * 0.45);
         self.g = (std::f32::consts::PI * fc / sr).tan();
     }
 
@@ -420,6 +420,307 @@ mod tests {
     use super::*;
     use crate::effects::{Effect, ParamFormat, ParamScaling};
 
+    fn configured_vocoder(sample_rate: f32, params: [f32; 4]) -> VocoderEffect {
+        let mut vocoder = VocoderEffect::new();
+        vocoder.set_sample_rate(sample_rate);
+        for (index, value) in params.into_iter().enumerate() {
+            vocoder.set_param(index, value);
+        }
+        vocoder
+    }
+
+    #[test]
+    fn sample_rates_below_one_use_the_minimum_rate_without_panicking() {
+        for requested in [-48_000.0, 0.0, 0.5, 1.0, 2.0, 8_000.0] {
+            let mut vocoder = VocoderEffect::new();
+            vocoder.set_sample_rate(requested);
+            let rate = (requested as f64).max(1.0);
+            assert_eq!(vocoder.sample_rate as f64, rate);
+            for filter in vocoder
+                .mod_bp_l
+                .iter()
+                .chain(&vocoder.mod_bp_r)
+                .chain(&vocoder.carrier_bp)
+            {
+                assert!(filter.g.is_finite());
+                assert!(filter.g > 0.0 && filter.g < 6.314);
+            }
+            for _ in 0..64 {
+                let (left, right) = vocoder.process_sample(0.125, -0.25);
+                assert!(left.is_finite() && right.is_finite());
+            }
+        }
+    }
+
+    #[test]
+    fn bandpass_coefficients_bound_frequency_and_q_without_clearing_history() {
+        for (rate, frequency, bounded_frequency) in [
+            (48_000.0, -100.0, 1.0),
+            (48_000.0, 731.0, 731.0),
+            (8_000.0, 8_014.1, 3_600.0),
+            (1.0, 100.0, 0.45),
+        ] {
+            let mut filter = SvfBp::new();
+            filter.ic1eq = 0.25;
+            filter.ic2eq = -0.125;
+            filter.set_freq(frequency, rate);
+            let expected = (std::f64::consts::PI * bounded_frequency / rate as f64).tan();
+            assert!((filter.g as f64 - expected).abs() < 4e-6);
+            for (q, expected) in [(-1.0, 2.0), (0.5, 2.0), (4.0, 0.25), (16.0, 0.0625)] {
+                filter.set_q(q);
+                assert_eq!(filter.k, expected);
+                assert_eq!(filter.ic1eq, 0.25);
+                assert_eq!(filter.ic2eq, -0.125);
+            }
+        }
+    }
+
+    #[test]
+    fn bandpass_impulse_matches_an_independent_biquad_transfer_function() {
+        for (rate, frequency, q) in [
+            (48_000.0, 100.0, 1.0),
+            (48_000.0, 1_388.1, 4.0),
+            (8_000.0, 3_600.0, 16.0),
+        ] {
+            let mut filter = SvfBp::new();
+            filter.set_freq(frequency, rate);
+            filter.set_q(q);
+            // H(z) = b0 * (1 - z^-2) / (1 + a1*z^-1 + a2*z^-2).
+            let g = (std::f64::consts::PI * frequency as f64 / rate as f64).tan();
+            let damping = g / q as f64;
+            let denominator = 1.0 + damping + g * g;
+            let b0 = g / denominator;
+            let a1 = 2.0 * (g * g - 1.0) / denominator;
+            let a2 = (1.0 - damping + g * g) / denominator;
+            let mut previous = [0.0; 2];
+            for sample in 0..256 {
+                let numerator = match sample {
+                    0 => b0,
+                    2 => -b0,
+                    _ => 0.0,
+                };
+                let expected = numerator - a1 * previous[0] - a2 * previous[1];
+                previous = [expected, previous[0]];
+                let actual = filter.step_bp(if sample == 0 { 1.0 } else { 0.0 });
+                assert!(
+                    (actual as f64 - expected).abs() < 5e-6,
+                    "rate {rate}, frequency {frequency}, Q {q}, sample {sample}: {actual} vs {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn coefficient_caches_follow_band_centers_q_and_envelope_time_constants() {
+        let frequencies: [f64; 16] = [
+            100.0, 133.9, 179.4, 240.3, 321.9, 431.3, 577.7, 773.8, 1_036.4, 1_388.1, 1_859.1,
+            2_490.0, 3_335.2, 4_467.4, 5_983.6, 8_014.1,
+        ];
+        for rate in [8_000.0, 44_100.0, 96_000.0] {
+            let mut vocoder = VocoderEffect::new();
+            for (q, smooth) in [(4.0, 20.0), (1.0, 1.0), (16.0, 200.0)] {
+                vocoder.set_param(2, q);
+                vocoder.set_param(3, smooth);
+                vocoder.set_sample_rate(rate);
+                for (band, frequency) in frequencies.into_iter().enumerate() {
+                    let bounded = frequency.min(rate as f64 * 0.45);
+                    let expected = (std::f64::consts::PI * bounded / rate as f64).tan();
+                    for filter in [
+                        &vocoder.mod_bp_l[band],
+                        &vocoder.mod_bp_r[band],
+                        &vocoder.carrier_bp[band],
+                    ] {
+                        assert!((filter.g as f64 - expected).abs() < 4e-6);
+                        assert_eq!(filter.k, 1.0 / q);
+                    }
+                }
+                let attack = 1.0 - (-1_000.0 / (5.0 * rate as f64)).exp();
+                let release = 1.0 - (-1_000.0 / (smooth as f64 * rate as f64)).exp();
+                assert!((vocoder.env_attack_coef as f64 - attack).abs() < 4e-8);
+                assert!((vocoder.env_release_coef as f64 - release).abs() < 4e-8);
+            }
+        }
+    }
+
+    #[test]
+    fn pitched_carriers_advance_before_output_and_wrap_at_exact_and_multiple_cycles() {
+        for (mode, expected) in [(0.0, [-0.5, 0.0, 0.5, -1.0]), (1.0, [1.0, -1.0, -1.0, 1.0])] {
+            let mut vocoder = configured_vocoder(400.0, [mode, 100.0, 4.0, 20.0]);
+            for _ in 0..3 {
+                for (index, output) in expected.into_iter().enumerate() {
+                    assert_eq!(vocoder.next_carrier(), output);
+                    assert_eq!(vocoder.carrier_phase, ((index + 1) % 4) as f32 * 0.25);
+                }
+            }
+            vocoder.set_sample_rate(800.0);
+            vocoder.set_param(1, 1_800.0);
+            assert_eq!(vocoder.next_carrier(), expected[0]);
+            assert_eq!(vocoder.carrier_phase, 0.25);
+        }
+    }
+
+    #[test]
+    fn noise_carrier_matches_fixed_rng_words_and_the_bipolar_sample_mapping() {
+        let words = [
+            0x510c_4619,
+            0xe02e_553e,
+            0x7bb9_8f3a,
+            0x0183_a8b5,
+            0xe633_6d1f,
+            0xf989_d237,
+            0xba25_29d0,
+            0xfcfb_edbf,
+        ];
+        let mut vocoder = configured_vocoder(48_000.0, [2.0, 110.0, 4.0, 20.0]);
+        for word in words {
+            let expected = ((word / 256) as f64 / 8_388_608.0 - 1.0) as f32;
+            assert_eq!(vocoder.next_carrier(), expected);
+            assert_eq!(vocoder.rng_state, word);
+        }
+    }
+
+    #[test]
+    fn noise_ignores_pitch_and_holds_the_pitched_carrier_phase() {
+        let mut low = configured_vocoder(400.0, [0.0, 100.0, 4.0, 20.0]);
+        assert_eq!(low.next_carrier(), -0.5);
+        low.set_param(0, 2.0);
+        low.set_param(1, 50.0);
+        let mut high = configured_vocoder(400.0, [2.0, 2_000.0, 4.0, 20.0]);
+        for _ in 0..32 {
+            assert_eq!(low.next_carrier(), high.next_carrier());
+            assert_eq!(low.carrier_phase, 0.25);
+            assert_eq!(high.carrier_phase, 0.0);
+        }
+        low.set_param(1, 100.0);
+        low.set_param(0, 1.0);
+        assert_eq!(low.next_carrier(), -1.0);
+        assert_eq!(low.carrier_phase, 0.5);
+    }
+
+    #[test]
+    fn envelope_attack_and_release_match_closed_form_step_responses() {
+        for smooth in [1.0, 37.5, 200.0] {
+            let vocoder = configured_vocoder(8_000.0, [0.0, 110.0, 4.0, smooth]);
+            let mut envelope = 0.125;
+            for sample in 1..=80 {
+                envelope = vocoder.step_env(envelope, 0.75);
+                let expected = 0.75 - 0.625 * (-(sample as f64) / 40.0).exp();
+                assert!((envelope as f64 - expected).abs() < 3e-6);
+            }
+            let attack_end = 0.75 - 0.625 * (-2.0_f64).exp();
+            for sample in 1..=80 {
+                envelope = vocoder.step_env(envelope, 0.0625);
+                let expected = 0.0625
+                    + (attack_end - 0.0625) * (-(sample as f64) / (smooth as f64 * 8.0)).exp();
+                assert!((envelope as f64 - expected).abs() < 3e-6);
+            }
+            assert_eq!(vocoder.step_env(0.25, 0.25), 0.25);
+        }
+    }
+
+    #[test]
+    fn first_sample_combines_all_carrier_bands_with_rectified_stereo_envelopes() {
+        for rate in [8_000.0, 48_000.0] {
+            for (mode, carrier) in [
+                (0.0, 2.0 * 250.0 / rate as f64 - 1.0),
+                (1.0, 1.0),
+                (2.0, -0.36681294441223145),
+            ] {
+                let mut vocoder = configured_vocoder(rate, [mode, 250.0, 7.0, 37.5]);
+                let weight: f64 = VocoderEffect::BAND_FREQS
+                    .iter()
+                    .map(|&frequency| {
+                        let g = (std::f64::consts::PI * (frequency as f64).min(rate as f64 * 0.45)
+                            / rate as f64)
+                            .tan();
+                        (g / (1.0 + g / 7.0 + g * g)).powi(2)
+                    })
+                    .sum();
+                let attack = 1.0 - (-1_000.0 / (5.0 * rate as f64)).exp();
+                let actual = vocoder.process_sample(0.25, -0.625);
+                let expected = (
+                    carrier * 0.25 * attack * weight,
+                    carrier * 0.625 * attack * weight,
+                );
+                assert!((actual.0 as f64 - expected.0).abs() < 2e-7);
+                assert!((actual.1 as f64 - expected.1).abs() < 2e-7);
+            }
+        }
+    }
+
+    #[test]
+    fn stereo_channels_are_independent_and_rectification_preserves_polarity_symmetry() {
+        for mode in [0.0, 1.0, 2.0] {
+            let params = [mode, 250.0, 4.0, 37.5];
+            let mut left_only = configured_vocoder(8_000.0, params);
+            let mut right_only = configured_vocoder(8_000.0, params);
+            let mut inverted = configured_vocoder(8_000.0, params);
+            let mut energy = 0.0;
+            for sample in 0..1_024 {
+                let input = (sample as f32 * 0.37).sin() * 0.5;
+                let left = left_only.process_sample(input, 0.0);
+                let right = right_only.process_sample(0.0, input);
+                let opposite = inverted.process_sample(-input, 0.0);
+                assert_eq!(left.1, 0.0);
+                assert_eq!(right.0, 0.0);
+                assert_eq!(left.0, right.1);
+                assert_eq!(left, opposite);
+                energy += left.0 * left.0;
+            }
+            assert!(energy > 1e-4);
+        }
+    }
+
+    #[test]
+    fn reset_replays_fresh_audio_while_preserving_noise_progression_and_configuration() {
+        for mode in [0.0, 1.0, 2.0] {
+            let params = [mode, 173.0, 7.0, 37.5];
+            let mut used = configured_vocoder(8_000.0, params);
+            let mut fresh = configured_vocoder(8_000.0, params);
+            for sample in 0..1_024 {
+                used.process_sample((sample as f32 * 0.37).sin() * 0.5, 0.125);
+            }
+            let rng = used.rng_state;
+            used.reset();
+            assert_eq!(used.rng_state, rng);
+            fresh.rng_state = rng;
+            for sample in 0..1_024 {
+                let input = ((sample as f32 * 0.23).cos() * 0.25, -0.125);
+                assert_eq!(
+                    used.process_sample(input.0, input.1),
+                    fresh.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parameter_and_sample_rate_changes_preserve_active_filter_and_envelope_history() {
+        let params = [2.0, 173.0, 7.0, 37.5];
+        let mut changed = configured_vocoder(8_000.0, params);
+        let mut reference = configured_vocoder(8_000.0, params);
+        for sample in 0..1_024 {
+            let input = ((sample as f32 * 0.37).sin() * 0.5, -0.125);
+            changed.process_sample(input.0, input.1);
+            reference.process_sample(input.0, input.1);
+        }
+        changed.set_sample_rate(96_000.0);
+        for (index, value) in [0.0, 2_000.0, 1.0, 200.0].into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_sample_rate(8_000.0);
+        for (index, value) in params.into_iter().enumerate() {
+            changed.set_param(index, value);
+        }
+        changed.set_param(99, f32::INFINITY);
+        for _ in 0..1_024 {
+            assert_eq!(
+                changed.process_sample(0.0, 0.0),
+                reference.process_sample(0.0, 0.0)
+            );
+        }
+    }
+
     #[test]
     fn vocoder_lists_four_parameters_with_the_expected_specs() {
         let v = VocoderEffect::new();
@@ -441,6 +742,25 @@ mod tests {
             specs[3].format,
             ParamFormat::Number { unit: "ms", .. }
         ));
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [
+                (0.0, 2.0, 0.0),
+                (50.0, 2_000.0, 110.0),
+                (1.0, 16.0, 4.0),
+                (1.0, 200.0, 20.0)
+            ]
+        );
+        assert!(
+            matches!(specs[0].format, ParamFormat::Enum { labels } if labels == ["Saw", "Square", "Noise"])
+        );
+        assert_eq!(
+            [v.carrier_idx, v.pitch_hz, v.q, v.smooth_ms],
+            [0.0, 110.0, 4.0, 20.0]
+        );
     }
 
     #[test]
