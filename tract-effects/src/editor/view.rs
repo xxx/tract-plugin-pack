@@ -1003,6 +1003,159 @@ mod tests {
         a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
     }
 
+    mod control_mappings {
+        use super::*;
+
+        #[test]
+        fn kind_dropdown_keeps_registry_order_and_each_family_header() {
+            let menu = kind_items();
+            assert_eq!(menu.items.len(), EffectKind::ALL.len());
+            for (index, kind) in EffectKind::ALL.into_iter().enumerate() {
+                assert_eq!(menu.items[index], kind.name(), "{kind:?}");
+            }
+            assert_eq!(
+                menu.sections,
+                [
+                    (1, "Distortion"),
+                    (5, "Dynamics"),
+                    (9, "Filter"),
+                    (15, "Misc"),
+                    (16, "Modulation"),
+                    (24, "Pitch"),
+                    (27, "Spatial"),
+                    (29, "Time"),
+                    (34, "Spectral"),
+                ]
+            );
+        }
+
+        #[test]
+        fn every_target_menu_lists_none_parameters_and_mix_in_order() {
+            assert_eq!(target_items(EffectKind::None), ["(none)", "Mix"]);
+            for kind in EffectKind::ALL {
+                let items = target_items(kind);
+                let specs = crate::effects::parameter_specs(kind);
+                assert_eq!(items.len(), specs.len() + 2, "{kind:?}");
+                assert_eq!(items[0], "(none)");
+                for (index, spec) in specs.iter().enumerate() {
+                    assert_eq!(items[index + 1], spec.name, "{kind:?} slot {index}");
+                }
+                assert_eq!(items.last(), Some(&"Mix"));
+            }
+        }
+
+        #[test]
+        fn missing_and_invalid_parameter_targets_remain_unassigned() {
+            for kind in EffectKind::ALL {
+                let count = crate::effects::param_count(kind);
+                assert_eq!(target_to_item(kind, None), 0, "{kind:?}");
+                for index in [count, count + 1, MAX_EFFECT_PARAMS, usize::MAX] {
+                    assert_eq!(
+                        target_to_item(kind, Some(ModulationTarget::EffectParameter(index))),
+                        0,
+                        "{kind:?} invalid slot {index}"
+                    );
+                }
+                for item in [count + 2, usize::MAX] {
+                    assert_eq!(target_from_item(kind, item), None, "{kind:?} item {item}");
+                }
+            }
+        }
+
+        #[test]
+        fn out_of_range_mseg_tabs_and_slots_clamp_to_their_declared_ends() {
+            for index in [4, 5, 99, usize::MAX] {
+                assert_eq!(segment_to_slot(index), 0, "segment {index}");
+                assert_eq!(slot_to_segment(index), 2, "slot {index}");
+            }
+        }
+
+        #[test]
+        fn trigger_selection_preserves_carried_dials_and_uses_transient_fallback() {
+            for (hz, threshold, hold_ms) in [(0.05, 1.5, 5.0), (7.25, 3.75, 173.0)] {
+                assert_eq!(
+                    trigger_from_item(3, hz, threshold, hold_ms),
+                    TriggerSource::FreeHz { hz }
+                );
+                assert_eq!(trigger_to_item(TriggerSource::FreeHz { hz }), 3);
+                let transient = TriggerSource::Transient { threshold, hold_ms };
+                for item in [4, 5, usize::MAX] {
+                    assert_eq!(trigger_from_item(item, hz, threshold, hold_ms), transient);
+                }
+                assert_eq!(trigger_to_item(transient), 4);
+            }
+        }
+
+        #[test]
+        fn beat_slider_clamps_and_rounds_at_step_boundaries() {
+            for (norm, beats) in [
+                (-4.0, 0.25),
+                (0.0, 0.25),
+                (0.049, 0.25),
+                (0.05, 0.5),
+                (0.051, 0.5),
+                (0.149, 0.5),
+                (0.15, 1.0),
+                (0.549, 8.0),
+                (0.55, 16.0),
+                (0.949, 128.0),
+                (0.95, 256.0),
+                (1.0, 256.0),
+                (4.0, 256.0),
+            ] {
+                assert_eq!(beats_norm_to_value(norm), beats, "norm {norm}");
+            }
+        }
+
+        #[test]
+        fn beat_values_and_labels_choose_log_nearest_steps_and_finite_endpoints() {
+            for (value, norm, label) in [
+                (-8.0, 0.0, "1/16"),
+                (0.0, 0.0, "1/16"),
+                (f32::MIN_POSITIVE, 0.0, "1/16"),
+                (0.1, 0.0, "1/16"),
+                (0.35, 0.0, "1/16"),
+                (0.36, 0.1, "1/8"),
+                (0.7, 0.1, "1/8"),
+                (0.72, 0.2, "1/4"),
+                (1.4, 0.2, "1/4"),
+                (1.5, 0.3, "1/2"),
+                (3.0, 0.4, "1 bar"),
+                (6.0, 0.5, "2 bars"),
+                (90.0, 0.8, "16 bars"),
+                (91.0, 0.9, "32 bars"),
+                (256.0, 1.0, "64 bars"),
+                (f32::MAX, 1.0, "64 bars"),
+            ] {
+                assert_eq!(beats_value_to_norm(value), norm, "value {value}");
+                assert_eq!(format_beats_label(value), label, "value {value}");
+            }
+        }
+
+        #[test]
+        fn equal_log_distances_keep_the_lower_beat_step() {
+            let mut checked = 0;
+            for (lower, upper, norm, label) in [
+                (0.25_f32, 0.5_f32, 0.0, "1/16"),
+                (2.0, 4.0, 0.3, "1/2"),
+                (4.0, 8.0, 0.4, "1 bar"),
+            ] {
+                let midpoint = (lower * upper).sqrt().to_bits();
+                for bits in midpoint - 8..=midpoint + 8 {
+                    let value = f32::from_bits(bits);
+                    let log_value = value.ln();
+                    if (lower.ln() - log_value).abs() != (upper.ln() - log_value).abs() {
+                        continue;
+                    }
+                    assert_eq!(beats_value_to_norm(value), norm, "value {value}");
+                    assert_eq!(format_beats_label(value), label, "value {value}");
+                    checked += 1;
+                }
+            }
+            assert!(checked > 0, "the fixture must exercise a computed tie");
+        }
+    }
+
     #[test]
     fn format_beats_label_names_every_ladder_entry() {
         // Each ladder entry maps to exactly its registered label.
