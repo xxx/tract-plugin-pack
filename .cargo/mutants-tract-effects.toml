@@ -21,6 +21,7 @@ examine_re = [
     '^tract-effects/src/effects/spectral_shift\.rs:',
     '^tract-effects/src/effects/spectral_twist\.rs:',
     '^tract-effects/src/effects/spectral_bandpass\.rs:',
+    '^tract-effects/src/effects/spectral_spread\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -103,4 +104,6 @@ exclude_re = [
     '^tract-effects/src/effects/vocoder\.rs:\d+:87: replace - with (\+|/) in VocoderEffect::next_carrier$',
     # Clamped f32 scale differences lie on a 2^-24 grid; 1e-6 is off that grid.
     '^tract-effects/src/effects/spectral_shift\.rs:\d+:44: replace < with <= in <impl SpectralTransform for TransformCtx>::transform$',
+    # Active transforms overwrite all used magnitudes; bypass never reads scratch.
+    '^tract-effects/src/effects/spectral_spread\.rs:\d+:9: replace SpectralSpreadChannel::reset with \(\)$',
 ]
