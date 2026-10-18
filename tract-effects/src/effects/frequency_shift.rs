@@ -460,6 +460,192 @@ mod tests {
     use crate::effects::{Effect, ParamFormat};
 
     #[test]
+    fn hilbert_impulse_matches_independent_complex_response_anchors() {
+        for (sample_rate, anchors) in [
+            (
+                48_000.0,
+                &[
+                    (0, 0.0003427693825783169, 0.00011989521101652897),
+                    (1, -0.0002992826875790472, 0.0075645043989200425),
+                    (7, -0.35999412649462564, -0.36366940726969194),
+                    (31, -0.06880890333841688, 0.02983591080549788),
+                ][..],
+            ),
+            (
+                22_050.0,
+                &[
+                    (0, 0.00037841739836642896, 0.0001323643129623412),
+                    (7, 0.06693131999488343, -0.2814390848833631),
+                ][..],
+            ),
+            (
+                96_000.0,
+                &[
+                    (0, 0.00017138469128915844, 0.00005994760550826449),
+                    (7, 0.05618418036865971, -0.10148798139905574),
+                ][..],
+            ),
+        ] {
+            let mut hilbert = HilbertIir::new(sample_rate);
+            for sample in 0..32 {
+                let output = hilbert.process(if sample == 0 { 1.0 } else { 0.0 });
+                if let Some(&(_, re, im)) = anchors.iter().find(|&&(index, _, _)| index == sample) {
+                    assert!(
+                        (f64::from(output.0) - re).abs() < 2e-6,
+                        "{sample_rate} Hz, sample {sample}: {output:?}"
+                    );
+                    assert!((f64::from(output.1) - im).abs() < 2e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn carrier_phase_wraps_in_both_directions_and_stays_zero_at_zero_shift() {
+        let two_pi = 2.0 * std::f32::consts::PI;
+        let increment = two_pi / 8.0;
+        let mut effect = FrequencyShiftEffect::new();
+        effect.set_sample_rate(8_000.0);
+        effect.set_param(0, 1_000.0);
+        effect.carrier_phase_l = two_pi - increment;
+        effect.carrier_phase_r = two_pi - increment;
+        effect.process_sample(0.0, 0.0);
+        assert!(effect.carrier_phase_l.abs() < 1e-6);
+        assert!(effect.carrier_phase_r.abs() < 1e-6);
+        effect.set_param(0, -1_000.0);
+        effect.process_sample(0.0, 0.0);
+        assert!((effect.carrier_phase_l - (two_pi - increment)).abs() < 1e-6);
+        assert!((effect.carrier_phase_r - (two_pi - increment)).abs() < 1e-6);
+        for shift in [1_000.0, -1_000.0, 0.0] {
+            for width in [0.0, 50.0, 100.0] {
+                effect.reset();
+                effect.set_param(0, shift);
+                effect.set_param(2, width);
+                for _ in 0..64 {
+                    effect.process_sample(0.0, 0.0);
+                    assert!((0.0..two_pi).contains(&effect.carrier_phase_l));
+                    assert!((0.0..two_pi).contains(&effect.carrier_phase_r));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn half_width_keeps_the_right_channel_identical_to_a_zero_shift_reference() {
+        let mut shifted = FrequencyShiftEffect::new();
+        let mut reference = FrequencyShiftEffect::new();
+        shifted.set_param(0, -123.0);
+        shifted.set_param(2, 50.0);
+        for effect in [&mut shifted, &mut reference] {
+            effect.set_param(1, 60.0);
+            effect.set_param(3, 6.0);
+        }
+        for sample in 0..512 {
+            let left = ((sample * 7) % 31) as f32 / 64.0 - 0.2;
+            let right = (sample as f32 * 0.13).sin() * 0.125;
+            assert_eq!(
+                shifted.process_sample(left, right).1,
+                reference.process_sample(0.0, right).1
+            );
+        }
+    }
+
+    #[test]
+    fn changing_drive_does_not_amplify_an_existing_feedback_tail() {
+        let mut unchanged = FrequencyShiftEffect::new();
+        let mut driven = FrequencyShiftEffect::new();
+        for effect in [&mut unchanged, &mut driven] {
+            effect.set_param(0, 50.0);
+            effect.set_param(1, 75.0);
+            effect.set_param(2, 100.0);
+        }
+        for sample in 0..128 {
+            let left = (sample as f32 * 0.17).sin() * 0.25;
+            let right = (sample as f32 * 0.11).cos() * -0.125;
+            unchanged.process_sample(left, right);
+            driven.process_sample(left, right);
+        }
+        driven.set_param(3, 12.0);
+        let mut energy = 0.0;
+        for _ in 0..128 {
+            let expected = unchanged.process_sample(0.0, 0.0);
+            assert_eq!(driven.process_sample(0.0, 0.0), expected);
+            energy += expected.0.abs() + expected.1.abs();
+        }
+        assert!(energy > 1e-4);
+    }
+
+    #[test]
+    fn feedback_response_preserves_polarity_and_caps_both_channels() {
+        for (percent, gain) in [
+            (50.0, 0.5),
+            (-50.0, -0.5),
+            (95.0, 0.95),
+            (-95.0, -0.95),
+            (100.0, 0.95),
+            (-100.0, -0.95),
+        ] {
+            let mut effect = FrequencyShiftEffect::new();
+            effect.set_param(1, percent);
+            effect.fb_l = 0.25;
+            effect.fb_r = -0.5;
+            let output = effect.process_sample(0.0, 0.0);
+            let impulse_gain = 0.0003427693825783169;
+            assert!((f64::from(output.0) - impulse_gain * gain * 0.25).abs() < 2e-8);
+            assert!((f64::from(output.1) + impulse_gain * gain * 0.5).abs() < 2e-8);
+        }
+    }
+
+    #[test]
+    fn drive_scales_the_nonzero_dry_signal_before_both_hilbert_channels() {
+        let mut effect = FrequencyShiftEffect::new();
+        effect.set_param(3, 12.0);
+        let output = effect.process_sample(1.0, -0.5);
+        let expected = 0.0003427693825783169 * 10.0_f64.powf(12.0 / 20.0);
+        assert!(
+            (f64::from(output.0) - expected).abs() < 2e-6,
+            "{output:?}, expected ({expected}, {})",
+            -expected * 0.5
+        );
+        assert!((f64::from(output.1) + expected * 0.5).abs() < 2e-6);
+    }
+
+    #[test]
+    fn sample_rate_changes_preserve_live_hilbert_carrier_and_feedback_state() {
+        let mut effect = FrequencyShiftEffect::new();
+        effect.set_param(0, -300.0);
+        effect.set_param(1, 60.0);
+        effect.set_param(2, 100.0);
+        for sample in 0..64 {
+            effect.process_sample((sample as f32 * 0.17).sin() * 0.25, -0.125);
+        }
+        let left = effect.hilbert_l.clone();
+        let right = effect.hilbert_r.clone();
+        let phase_and_feedback = (
+            effect.carrier_phase_l,
+            effect.carrier_phase_r,
+            effect.fb_l,
+            effect.fb_r,
+        );
+        effect.set_sample_rate(96_000.0);
+        assert_eq!(effect.hilbert_l.state_r, left.state_r);
+        assert_eq!(effect.hilbert_l.state_i, left.state_i);
+        assert_eq!(effect.hilbert_r.state_r, right.state_r);
+        assert_eq!(effect.hilbert_r.state_i, right.state_i);
+        assert_eq!(
+            (
+                effect.carrier_phase_l,
+                effect.carrier_phase_r,
+                effect.fb_l,
+                effect.fb_r
+            ),
+            phase_and_feedback
+        );
+        assert_eq!(effect.hilbert_l.direct, left.direct * 0.5);
+        assert_eq!(effect.hilbert_r.direct, right.direct * 0.5);
+    }
+
+    #[test]
     fn frequency_shift_lists_four_parameters_with_the_expected_specs() {
         let f = FrequencyShiftEffect::new();
         let specs = f.parameters();
