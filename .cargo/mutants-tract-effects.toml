@@ -7,6 +7,7 @@ examine_re = [
     '^tract-effects/src/effects/(frequency_shift|pitch_shift|varispeed)\.rs:',
     '^tract-effects/src/effects/(comb|svf)\.rs:',
     '^tract-effects/src/effects/(diode|ladder)\.rs:',
+    '^tract-effects/src/effects/(phaser_filter|sallen_key)\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -52,4 +53,6 @@ exclude_re = [
     '^tract-effects/src/effects/comb\.rs:\d+:81: replace - with (\+|/) in <impl Effect for CombEffect>::process_sample$',
     # Higher Type selectors still choose HP; higher Poles selectors still use four stages.
     '^tract-effects/src/effects/svf\.rs:\d+:(54|55): replace - with (\+|/) in <impl Effect for SvfEffect>::set_param$',
+    # Type selectors above 1 still choose the HP coefficient and processing branches.
+    '^tract-effects/src/effects/sallen_key\.rs:\d+:\d+: replace - with (\+|/) in <impl Effect for SallenKeyEffect>::set_param$',
 ]
