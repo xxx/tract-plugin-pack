@@ -8,9 +8,9 @@ the tests catch each change. Run the commands below from the workspace root.
 | Package | Mutation scope | Configuration |
 |---|---|---|
 | `tract-dsp` | All library modules and FFT features | [mutants.toml](../../.cargo/mutants.toml) |
-| `tract-effects` | Runtime: all effects, registry and dispatch, track state, compressor, modulation, randomisation, and undo | [mutants-tract-effects.toml](../../.cargo/mutants-tract-effects.toml) |
+| `tract-effects` | Runtime and editor control mappings | [mutants-tract-effects.toml](../../.cargo/mutants-tract-effects.toml) |
 
-The `tract-effects` rollout is still in progress: the shared editor remains to be audited.
+The `tract-effects` rollout is still in progress: editor layout, hit testing, drawing, and interaction handling remain to be audited.
 Complete coverage of each crate through reviewed increments before moving to another crate.
 
 ## Run locally
