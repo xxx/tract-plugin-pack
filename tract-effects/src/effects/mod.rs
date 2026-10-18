@@ -112,8 +112,8 @@ pub fn format_value(value: f32, format: ParamFormat) -> String {
     }
 }
 
-/// Round a continuous parameter value to its enum-bucket index, clamped to
-/// `0..labels_len`. Out-of-range or empty `labels_len` yields 0.
+/// Round a continuous parameter value to the nearest label index.
+/// Clamp to the first/last label; an empty list yields zero.
 fn enum_index(value: f32, labels_len: usize) -> usize {
     if labels_len == 0 {
         return 0;
@@ -121,7 +121,7 @@ fn enum_index(value: f32, labels_len: usize) -> usize {
     let rounded = value.round();
     if rounded < 0.0 {
         0
-    } else if rounded as usize >= labels_len {
+    } else if (rounded as usize) >= labels_len {
         labels_len - 1
     } else {
         rounded as usize
@@ -1739,6 +1739,279 @@ impl Default for TrackEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod parameter_helpers {
+        use super::*;
+
+        #[test]
+        fn typed_numbers_trim_unicode_whitespace_and_strip_only_matching_units() {
+            let format = ParamFormat::Number {
+                decimals: 2,
+                unit: "dB",
+            };
+            for (text, expected) in [
+                ("　-12.5 dB　", Some(-12.5)),
+                ("1.25e2DB", Some(125.0)),
+                ("+0.125db", Some(0.125)),
+                ("12.5", Some(12.5)),
+                ("dB", None),
+                (" +dB", None),
+                ("1.2.3 dB", None),
+                ("1 dB trailing", None),
+                ("1e100 dB", None),
+                ("NaN DB", None),
+                ("inf db", None),
+                ("🦀DB", None),
+                ("", None),
+                ("　", None),
+            ] {
+                assert_eq!(parse_value(text, format), expected, "{text:?}");
+            }
+            let spaced = ParamFormat::Number {
+                decimals: 1,
+                unit: " dB",
+            };
+            assert_eq!(parse_value("-12.5 dB", spaced), Some(-12.5));
+            assert_eq!(parse_value("-12.5dB", spaced), None);
+            assert_eq!(parse_value("-12.5", spaced), Some(-12.5));
+            let unicode = ParamFormat::Number {
+                decimals: 1,
+                unit: "Ω",
+            };
+            for (text, expected) in [
+                ("125.5Ω", Some(125.5)),
+                ("125.5 Ω", Some(125.5)),
+                ("Ω", None),
+                ("1.2ΩΩ", None),
+                ("🦀Ω", None),
+            ] {
+                assert_eq!(parse_value(text, unicode), expected);
+            }
+            let bare = ParamFormat::Number {
+                decimals: 1,
+                unit: "",
+            };
+            assert_eq!(parse_value("　-0.125　", bare), Some(-0.125));
+            assert_eq!(parse_value("1 dB", bare), None);
+        }
+
+        #[test]
+        fn typed_hertz_accept_signed_scaled_values_and_reject_post_scale_overflow() {
+            for (text, expected) in [
+                ("　-2.5 kHz　", Some(-2_500.0)),
+                ("1.25K", Some(1_250.0)),
+                ("1250 HZ", Some(1_250.0)),
+                ("+2.5e-1kHz", Some(250.0)),
+                ("　1.25e2Hz\n", Some(125.0)),
+                ("0.25", Some(0.25)),
+                ("kHz", None),
+                ("Hz", None),
+                ("k", None),
+                ("2 kHz Hz", None),
+                ("1khz?", None),
+                ("NaN khz", None),
+                ("inf Hz", None),
+                ("-inf k", None),
+                ("1e100", None),
+                ("1e36 kHz", None),
+                ("🦀kHz", None),
+                ("", None),
+                ("　", None),
+            ] {
+                assert_eq!(parse_value(text, ParamFormat::Hertz), expected, "{text:?}");
+            }
+        }
+
+        #[test]
+        fn typed_enum_labels_precede_unclamped_finite_numeric_fallback() {
+            let fft = ParamFormat::Enum {
+                labels: &["512", "1024", "4096"],
+            };
+            for (text, expected) in [
+                ("512", Some(0.0)),
+                ("　1024　", Some(1.0)),
+                ("4096", Some(2.0)),
+                ("1.5", Some(1.5)),
+                ("-2.5", Some(-2.5)),
+                ("999", Some(999.0)),
+                ("0", Some(0.0)),
+                ("NaN", None),
+                ("inf", None),
+                ("-inf", None),
+                ("1e100", None),
+                ("", None),
+            ] {
+                assert_eq!(parse_value(text, fft), expected, "{text:?}");
+            }
+            let routing = ParamFormat::Enum {
+                labels: &["Carrier", "Modulator", "Side"],
+            };
+            assert_eq!(parse_value("　sIdE　", routing), Some(2.0));
+            assert_eq!(parse_value("CARRIER", routing), Some(0.0));
+            assert_eq!(parse_value("Side other", routing), None);
+            let labels = ParamFormat::Enum {
+                labels: &["inf", "NaN", ""],
+            };
+            assert_eq!(parse_value("inf", labels), Some(0.0));
+            assert_eq!(parse_value("NaN", labels), Some(1.0));
+            assert_eq!(parse_value("", labels), None);
+            let empty = ParamFormat::Enum { labels: &[] };
+            assert_eq!(parse_value("3.5", empty), Some(3.5));
+            assert_eq!(parse_value("unknown", empty), None);
+        }
+
+        #[test]
+        fn registered_parameter_formats_have_stable_finite_display_parse_round_trips() {
+            for kind in EffectKind::ALL {
+                for spec in parameter_specs(kind) {
+                    for value in [spec.min, spec.default, spec.max] {
+                        let display = format_value(value, spec.format);
+                        let parsed = parse_value(&display, spec.format)
+                            .unwrap_or_else(|| panic!("{kind:?} {}: {display:?}", spec.name));
+                        assert!(parsed.is_finite());
+                        assert_eq!(format_value(parsed, spec.format), display);
+                        let bare = format_value_bare(value, spec.format);
+                        let parsed_bare = parse_value(&bare, spec.format)
+                            .unwrap_or_else(|| panic!("{kind:?} {}: {bare:?}", spec.name));
+                        assert!(parsed_bare.is_finite());
+                        assert_eq!(format_value_bare(parsed_bare, spec.format), bare);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn linear_mapping_matches_nonunit_ranges_and_clamps_both_directions() {
+            for (min, max, values) in [
+                (-12.0, 36.0, [-12.0, 0.0, 12.0, 24.0, 36.0]),
+                (7.0, 11.0, [7.0, 8.0, 9.0, 10.0, 11.0]),
+            ] {
+                for (value, norm) in values.into_iter().zip([0.0, 0.25, 0.5, 0.75, 1.0]) {
+                    assert!(
+                        (value_to_norm(value, min, max, ParamScaling::Linear) - norm).abs() < 1e-6
+                    );
+                    assert!(
+                        (norm_to_value(norm, min, max, ParamScaling::Linear) - value).abs() < 1e-6
+                    );
+                }
+                assert_eq!(
+                    value_to_norm(min - 100.0, min, max, ParamScaling::Linear),
+                    0.0
+                );
+                assert_eq!(
+                    value_to_norm(max + 100.0, min, max, ParamScaling::Linear),
+                    1.0
+                );
+                assert_eq!(norm_to_value(-2.0, min, max, ParamScaling::Linear), min);
+                assert_eq!(norm_to_value(3.0, min, max, ParamScaling::Linear), max);
+            }
+        }
+
+        #[test]
+        fn logarithmic_mapping_matches_known_powers_and_clamps_positive_values() {
+            for (value, norm) in [
+                (4.0, 0.0),
+                (16.0, 0.25),
+                (64.0, 0.5),
+                (256.0, 0.75),
+                (1_024.0, 1.0),
+            ] {
+                assert!(
+                    (value_to_norm(value, 4.0, 1_024.0, ParamScaling::Log) - norm).abs() < 1e-6
+                );
+                assert!(
+                    (norm_to_value(norm, 4.0, 1_024.0, ParamScaling::Log) - value).abs()
+                        < value * 1e-5
+                );
+            }
+            for value in [0.0, 0.5, 1.0] {
+                assert_eq!(value_to_norm(value, 4.0, 1_024.0, ParamScaling::Log), 0.0);
+            }
+            assert_eq!(value_to_norm(4_096.0, 4.0, 1_024.0, ParamScaling::Log), 1.0);
+            assert_eq!(norm_to_value(-1.0, 4.0, 1_024.0, ParamScaling::Log), 4.0);
+            assert_eq!(norm_to_value(2.0, 4.0, 1_024.0, ParamScaling::Log), 1_024.0);
+        }
+
+        #[test]
+        fn degenerate_ranges_and_invalid_log_minima_use_the_documented_fallbacks() {
+            for (min, max) in [(5.0, 5.0), (9.0, 3.0), (-3.0, -3.0), (-3.0, -9.0)] {
+                for scaling in [ParamScaling::Linear, ParamScaling::Log] {
+                    for value in [-100.0, 0.0, 7.0, 100.0] {
+                        assert_eq!(value_to_norm(value, min, max, scaling), 0.0);
+                    }
+                    for norm in [-3.0, 0.0, 0.25, 1.0, 4.0] {
+                        assert_eq!(norm_to_value(norm, min, max, scaling), min);
+                    }
+                }
+            }
+            for (min, max) in [(0.0, 100.0), (-4.0, 100.0), (-10.0, -1.0)] {
+                assert_eq!(value_to_norm(5.0, min, max, ParamScaling::Log), 0.0);
+                for norm in [-1.0, 0.0, 0.5, 1.0, 2.0] {
+                    assert_eq!(norm_to_value(norm, min, max, ParamScaling::Log), min);
+                }
+            }
+        }
+
+        #[test]
+        fn hertz_display_and_bare_text_observe_exact_signed_unit_boundaries() {
+            for (value, display, bare) in [
+                (-1_001.0, "-1.0 kHz", "-1001"),
+                (-1_000.0, "-1.0 kHz", "-1000"),
+                (-999.0, "-999 Hz", "-999"),
+                (-1.0, "-1 Hz", "-1"),
+                (-0.999, "-1.00 Hz", "-1.00"),
+                (-0.5, "-0.50 Hz", "-0.50"),
+                (0.0, "0.00 Hz", "0.00"),
+                (0.5, "0.50 Hz", "0.50"),
+                (0.999, "1.00 Hz", "1.00"),
+                (1.0, "1 Hz", "1"),
+                (999.0, "999 Hz", "999"),
+                (1_000.0, "1.0 kHz", "1000"),
+                (1_001.0, "1.0 kHz", "1001"),
+            ] {
+                assert_eq!(format_value(value, ParamFormat::Hertz), display);
+                assert_eq!(format_value_bare(value, ParamFormat::Hertz), bare);
+            }
+        }
+
+        #[test]
+        fn numbers_preserve_precision_and_enum_labels_round_and_clamp() {
+            for (value, decimals, unit, display, bare) in [
+                (0.125, 3, "", "0.125", "0.125"),
+                (-12.5, 2, "dB", "-12.50 dB", "-12.50"),
+                (7.75, 0, "bits", "8 bits", "8"),
+                (125.5, 1, "Ω", "125.5 Ω", "125.5"),
+            ] {
+                let format = ParamFormat::Number { decimals, unit };
+                assert_eq!(format_value(value, format), display);
+                assert_eq!(format_value_bare(value, format), bare);
+            }
+            let format = ParamFormat::Enum {
+                labels: &["Zero", "One", "Two"],
+            };
+            for (value, label) in [
+                (-999.0, "Zero"),
+                (-0.5, "Zero"),
+                (0.0, "Zero"),
+                (0.49, "Zero"),
+                (0.5, "One"),
+                (1.49, "One"),
+                (1.5, "Two"),
+                (999.0, "Two"),
+            ] {
+                assert_eq!(format_value(value, format), label);
+                assert_eq!(format_value_bare(value, format), label);
+            }
+            for value in [-999.0, 0.0, 0.5, 999.0] {
+                for labels in [&[][..], &["Only"][..]] {
+                    let format = ParamFormat::Enum { labels };
+                    let expected = if labels.is_empty() { "" } else { "Only" };
+                    assert_eq!(format_value(value, format), expected);
+                    assert_eq!(format_value_bare(value, format), expected);
+                }
+            }
+        }
+    }
 
     #[test]
     fn effect_kind_registry() {
