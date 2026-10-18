@@ -282,7 +282,6 @@ impl Effect for PitchShiftEffect {
         self.delay_r[self.write_idx] = right + feedback * self.fb_r;
 
         // ----- Stage 2: maybe spawn a new grain -----
-        self.spawn_countdown -= 1.0;
         if self.spawn_countdown <= 0.0 {
             self.spawn_grain();
             // Reset countdown to the inverse of the grain frequency
@@ -290,6 +289,7 @@ impl Effect for PitchShiftEffect {
             // than assigning so a slight over-countdown carries over.
             self.spawn_countdown += self.sample_rate / self.grain_freq_hz;
         }
+        self.spawn_countdown -= 1.0;
 
         // ----- Stage 3: sum windowed grain reads -----
         let mut out_l = 0.0_f32;
@@ -369,6 +369,216 @@ impl Effect for PitchShiftEffect {
 mod tests {
     use super::*;
     use crate::effects::{Effect, ParamFormat, ParamScaling};
+
+    #[test]
+    fn triangle_window_matches_reference_ages_and_clamps_outside_the_grain() {
+        for (age, expected) in [
+            (-4.0, 0.0),
+            (0.0, 0.0),
+            (4.0, 0.5),
+            (8.0, 1.0),
+            (12.0, 0.5),
+            (16.0, 0.0),
+            (20.0, 0.0),
+        ] {
+            assert_eq!(PitchShiftEffect::triangle_window(age, 16.0), expected);
+        }
+    }
+
+    #[test]
+    fn fractional_reads_interpolate_across_positive_and_negative_wraps() {
+        let buffer = [2.0, 6.0, -2.0, 10.0];
+        for (position, expected) in [
+            (0.25, 3.0),
+            (1.5, 2.0),
+            (3.75, 4.0),
+            (-0.25, 4.0),
+            (-4.25, 4.0),
+            (8.25, 3.0),
+            (-1.0, 10.0),
+        ] {
+            assert_eq!(PitchShiftEffect::read_frac(&buffer, position), expected);
+        }
+    }
+
+    #[test]
+    fn new_grains_capture_pitch_detune_and_duration_without_changing_live_grains() {
+        let mut effect = PitchShiftEffect::new();
+        effect.set_sample_rate(1_000.0);
+        effect.set_param(0, 12.0);
+        effect.set_param(2, 20.0);
+        effect.set_param(4, 50.0);
+        effect.write_idx = 100;
+        effect.spawn_grain();
+        let first = effect.grains[0];
+        let detune = 2.0_f64.powf(25.0 / 1_200.0);
+        assert!((first.start_pos - 60.0).abs() < 1e-5);
+        assert!((first.length_samples - 20.0).abs() < 1e-5);
+        assert!((f64::from(first.rate_l) - 2.0 / detune).abs() < 1e-6);
+        assert!((f64::from(first.rate_r) - 2.0 * detune).abs() < 1e-6);
+        effect.set_param(0, -12.0);
+        effect.set_param(2, 100.0);
+        effect.set_param(4, 0.0);
+        effect.spawn_grain();
+        assert_eq!(effect.grains[0].start_pos, first.start_pos);
+        assert_eq!(effect.grains[0].length_samples, first.length_samples);
+        assert_eq!(effect.grains[0].rate_l, first.rate_l);
+        assert_eq!(effect.grains[0].rate_r, first.rate_r);
+        let second = effect.grains[1];
+        assert!((second.start_pos - 50.0).abs() < 1e-5);
+        assert!((second.length_samples - 100.0).abs() < 1e-5);
+        assert_eq!((second.rate_l, second.rate_r), (0.5, 0.5));
+    }
+
+    #[test]
+    fn grain_allocator_searches_across_the_pool_boundary_before_replacing_live_audio() {
+        for extra_dead_slot in [None, Some(14)] {
+            let mut effect = PitchShiftEffect::new();
+            effect.next_slot = 15;
+            effect.grains.fill(Grain {
+                start_pos: 42.0,
+                age_samples: 2.0,
+                length_samples: 10.0,
+                rate_l: 1.0,
+                rate_r: 1.0,
+            });
+            effect.grains[2].age_samples = 10.0;
+            if let Some(index) = extra_dead_slot {
+                effect.grains[index].age_samples = 10.0;
+            }
+            let before = effect.grains;
+            effect.spawn_grain();
+            assert_eq!(effect.grains[2].age_samples, 0.0);
+            assert_eq!(effect.next_slot, 3);
+            for (index, grain) in effect.grains.iter().enumerate() {
+                if index != 2 {
+                    assert_eq!(grain.age_samples, before[index].age_samples);
+                    assert_eq!(grain.start_pos, before[index].start_pos);
+                }
+            }
+        }
+        let mut effect = PitchShiftEffect::new();
+        effect.grains.fill(Grain {
+            start_pos: 42.0,
+            age_samples: 2.0,
+            length_samples: 10.0,
+            rate_l: 1.0,
+            rate_r: 1.0,
+        });
+        effect.next_slot = 7;
+        effect.spawn_grain();
+        assert_eq!(effect.grains[7].age_samples, 0.0);
+        assert_eq!(effect.next_slot, 8);
+    }
+
+    #[test]
+    fn feedback_is_signed_capped_and_independent_between_channels() {
+        for (percent, gain) in [
+            (50.0, 0.5),
+            (-50.0, -0.5),
+            (95.0, 0.95),
+            (-95.0, -0.95),
+            (100.0, 0.95),
+            (-100.0, -0.95),
+        ] {
+            let mut effect = PitchShiftEffect::new();
+            effect.set_param(3, percent);
+            effect.fb_l = 0.25;
+            effect.fb_r = -0.5;
+            effect.process_sample(0.125, -0.25);
+            assert!((effect.delay_l[0] - (0.125 + 0.25 * gain)).abs() < 1e-7);
+            assert!((effect.delay_r[0] - (-0.25 - 0.5 * gain)).abs() < 1e-7);
+        }
+    }
+
+    #[test]
+    fn unity_pitch_reproduces_stereo_history_across_a_full_buffer_wrap() {
+        let mut effect = PitchShiftEffect::new();
+        effect.set_sample_rate(1_024.0);
+        effect.set_param(1, 64.0);
+        effect.set_param(2, 31.25);
+        let input = |sample: usize| {
+            (
+                (sample % 257) as f32 / 256.0 - 0.5,
+                ((sample * 3 + 7) % 251) as f32 / 256.0 - 0.25,
+            )
+        };
+        for sample in 0..96_064 {
+            let dry = input(sample);
+            let output = effect.process_sample(dry.0, dry.1);
+            if sample >= 32 {
+                let expected = input(sample - 32);
+                assert!(
+                    (output.0 - expected.0).abs() < 1e-6,
+                    "{sample}: {output:?}, {expected:?}"
+                );
+                assert!((output.1 - expected.1).abs() < 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn isolated_grain_resamples_both_channels_at_the_captured_pitch_and_detune() {
+        for (pitch, start, rate) in [(12.0, 80.0, 2.0), (-12.0, 95.0, 0.5)] {
+            let mut effect = PitchShiftEffect::new();
+            effect.set_sample_rate(1_000.0);
+            effect.set_param(0, pitch);
+            effect.set_param(1, 5.0);
+            effect.set_param(2, 10.0);
+            effect.set_param(4, 50.0);
+            effect.write_idx = 100;
+            for index in 0..110 {
+                effect.delay_l[index] = 0.5 + index as f32 / 1_024.0;
+                effect.delay_r[index] = -0.25 - index as f32 / 512.0;
+            }
+            let detune = 2.0_f64.powf(25.0 / 1_200.0);
+            for age in 0..10 {
+                let live_position = (100 + age) as f32;
+                let output = effect
+                    .process_sample(0.5 + live_position / 1_024.0, -0.25 - live_position / 512.0);
+                let expected = if age == 0 {
+                    (0.0, 0.0)
+                } else {
+                    (
+                        0.5 + (start + f64::from(age) * rate / detune) / 1_024.0,
+                        -0.25 - (start + f64::from(age) * rate * detune) / 512.0,
+                    )
+                };
+                assert!(
+                    (f64::from(output.0) - expected.0).abs() < 1e-6,
+                    "pitch {pitch}, age {age}: {output:?}, expected {expected:?}"
+                );
+                assert!(
+                    (f64::from(output.1) - expected.1).abs() < 1e-6,
+                    "pitch {pitch}, age {age}: {output:?}, expected {expected:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grain_clock_starts_immediately_and_preserves_complete_intervals() {
+        for (sample_rate, frequency, expected) in [
+            (1_000.0, 100.0, &[0, 10, 20, 30][..]),
+            (24_000.0, 40.0, &[0, 600, 1_200][..]),
+            (1_000.0, 30.0, &[0, 34, 67, 100, 134][..]),
+        ] {
+            let mut effect = PitchShiftEffect::new();
+            effect.set_sample_rate(sample_rate);
+            effect.set_param(1, frequency);
+            for _ in 0..2 {
+                effect.reset();
+                let mut spawns = Vec::new();
+                for sample in 0..=*expected.last().unwrap() {
+                    effect.process_sample(0.0, 0.0);
+                    if effect.grains.iter().any(|grain| grain.age_samples == 1.0) {
+                        spawns.push(sample);
+                    }
+                }
+                assert_eq!(spawns, expected, "{sample_rate} Hz, {frequency} grains/s");
+            }
+        }
+    }
 
     #[test]
     fn pitch_shift_lists_five_parameters_with_the_expected_specs() {

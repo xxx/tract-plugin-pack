@@ -4,6 +4,7 @@ examine_re = [
     '^tract-effects/src/effects/(compressor|limiter|gate|transient_shaper)\.rs:',
     '^tract-effects/src/effects/(bitcrush|distortion|downsample|wavefolder)\.rs:',
     '^tract-effects/src/effects/(haas|stereo_widener)\.rs:',
+    '^tract-effects/src/effects/(frequency_shift|pitch_shift|varispeed)\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -43,4 +44,6 @@ exclude_re = [
     '^tract-effects/src/effects/wavefolder\.rs:\d+:20: replace > with >= in FolderCell::func_ad1$',
     # The outer region has signum +/-1, so multiplication and division agree.
     '^tract-effects/src/effects/wavefolder\.rs:\d+:33: replace \* with / in FolderCell::func$',
+    # At a triangle window's midpoint, both branches return exactly 1.
+    '^tract-effects/src/effects/(pitch_shift|varispeed)\.rs:\d+:18: replace < with <= in (PitchShiftEffect|VarispeedEffect)::triangle_window$',
 ]
