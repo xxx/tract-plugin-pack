@@ -9,6 +9,7 @@ examine_re = [
     '^tract-effects/src/effects/(diode|ladder)\.rs:',
     '^tract-effects/src/effects/(phaser_filter|sallen_key)\.rs:',
     '^tract-effects/src/effects/(auto_pan|ring|tremolo)\.rs:',
+    '^tract-effects/src/effects/(chorus|flanger)\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -63,4 +64,6 @@ exclude_re = [
     '^tract-effects/src/effects/(auto_pan|tremolo)\.rs:\d+:59: replace - with (\+|/) in <impl Effect for (AutoPanEffect|TremoloEffect)>::set_param$',
     # The Ring setter bounds stored shapes to 0..1 before this defensive cap.
     '^tract-effects/src/effects/ring\.rs:\d+:84: replace - with (\+|/) in <impl Effect for RingEffect>::process_sample$',
+    # Triangle arms agree exactly at 1/4 and 3/4 of a cycle.
+    '^tract-effects/src/effects/flanger\.rs:\d+:(14|21): replace < with <= in FlangerEffect::triangle_lfo$',
 ]

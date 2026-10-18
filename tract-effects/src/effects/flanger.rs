@@ -298,6 +298,238 @@ mod tests {
     use crate::effects::{Effect, ParamFormat, ParamScaling};
 
     #[test]
+    fn fractional_reads_interpolate_across_the_ring_boundary() {
+        let history = [2.0, -4.0, 6.0, 10.0, -8.0, 14.0, 3.0, -5.0];
+        for (write, delay, expected) in [
+            (0, 2.25, 5.75),
+            (1, 2.25, -3.0),
+            (7, 2.25, 8.5),
+            (2, 2.25, 0.25),
+            (0, 5.5, 8.0),
+            (7, 6.0, -4.0),
+            (0, 2.0, 3.0),
+        ] {
+            assert_eq!(FlangerEffect::read_frac(&history, write, delay), expected);
+        }
+    }
+
+    #[test]
+    fn fractional_delay_splits_a_stereo_impulse_between_adjacent_samples() {
+        let mut effect = FlangerEffect::new();
+        effect.set_sample_rate(8_000.0);
+        for (index, value) in [1.0, 0.0, 1.5625, 0.0, 0.0].into_iter().enumerate() {
+            effect.set_param(index, value);
+        }
+        for sample in 0..64 {
+            let input = if sample == 0 { 1.0 } else { 0.0 };
+            let expected = if sample == 12 || sample == 13 {
+                (0.5, -0.125)
+            } else {
+                (0.0, 0.0)
+            };
+            assert_eq!(
+                effect.process_sample(input, -0.25 * input),
+                expected,
+                "sample {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn signed_feedback_echoes_include_the_previous_wet_sample_delay() {
+        for (percentage, alpha) in [
+            (-100.0, -0.97_f64),
+            (-50.0, -0.5),
+            (0.0, 0.0),
+            (50.0, 0.5),
+            (100.0, 0.97),
+        ] {
+            let mut effect = FlangerEffect::new();
+            effect.set_sample_rate(8_000.0);
+            for (index, value) in [1.0, 0.0, 2.0, percentage, 0.0].into_iter().enumerate() {
+                effect.set_param(index, value);
+            }
+            for sample in 0_usize..(2 * 4096 + 64) {
+                // D=16, then one extra sample per feedback recirculation.
+                let expected = if sample >= 16 && (sample - 16) % 17 == 0 {
+                    alpha.powi(((sample - 16) / 17) as i32)
+                } else {
+                    0.0
+                };
+                let input = if sample == 0 { 1.0 } else { 0.0 };
+                let (left, right) = effect.process_sample(input, -0.25 * input);
+                assert!(
+                    (left as f64 - expected).abs() < 2e-6,
+                    "feedback {percentage}, sample {sample}: {left} vs {expected}"
+                );
+                assert!((right as f64 + 0.25 * expected).abs() < 1e-6);
+            }
+        }
+    }
+
+    fn filled_ramp() -> FlangerEffect {
+        let mut effect = FlangerEffect::new();
+        effect.set_sample_rate(48_000.0);
+        for (index, value) in [1.0, 50.0, 3.0, 0.0, 50.0].into_iter().enumerate() {
+            effect.set_param(index, value);
+        }
+        for (index, (left, right)) in effect
+            .delay_l
+            .iter_mut()
+            .zip(&mut effect.delay_r)
+            .enumerate()
+        {
+            *left = index as f32 / 1_024.0;
+            *right = -(index as f32) / 2_048.0;
+        }
+        effect.write_idx = 2_000;
+        effect
+    }
+
+    fn wave(turns: f64) -> f64 {
+        2.0 / std::f64::consts::PI * (std::f64::consts::TAU * turns).sin().asin()
+    }
+
+    #[test]
+    fn modulation_and_width_place_the_fractional_taps_on_the_input_history() {
+        for turns in [0.0, 0.0625, 0.125, 0.25, 0.5, 0.75, 0.875] {
+            for width in [0.0, 25.0, 50.0, 100.0] {
+                let mut effect = filled_ramp();
+                effect.lfo_phase = turns as f32;
+                effect.set_param(4, width);
+                let delay_l = 144.0 + 120.0 * wave(turns);
+                let delay_r = 144.0 + 120.0 * wave(turns + width as f64 / 200.0);
+                let (left, right) = effect.process_sample(0.0, 0.0);
+                assert!(
+                    (left as f64 - (2_000.0 - delay_l) / 1_024.0).abs() < 2e-6,
+                    "phase {turns}, width {width}: left {left}"
+                );
+                assert!(
+                    (right as f64 + (2_000.0 - delay_r) / 2_048.0).abs() < 2e-6,
+                    "phase {turns}, width {width}: right {right}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn delay_limits_preserve_causality_and_the_available_history() {
+        let mut floor = filled_ramp();
+        floor.set_param(1, 100.0);
+        floor.set_param(2, 0.5);
+        floor.set_param(4, 0.0);
+        let turns = 0.75;
+        floor.lfo_phase = turns as f32;
+        assert_eq!(
+            floor.process_sample(0.0, 0.0),
+            (1_998.0 / 1_024.0, -1_998.0 / 2_048.0)
+        );
+
+        let mut ceiling = FlangerEffect::new();
+        ceiling.set_sample_rate(384_000.0);
+        for (index, value) in [1.0, 0.0, 15.0, 0.0, 0.0].into_iter().enumerate() {
+            ceiling.set_param(index, value);
+        }
+        for sample in 0..(4096 + 8) {
+            let input = if sample == 0 { 1.0 } else { 0.0 };
+            let expected = if sample == 4096 - 2 {
+                (1.0, -0.25)
+            } else {
+                (0.0, 0.0)
+            };
+            assert_eq!(
+                ceiling.process_sample(input, -0.25 * input),
+                expected,
+                "sample {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn rate_and_sample_rate_changes_preserve_clock_and_delay_history() {
+        let mut effect = filled_ramp();
+        effect.set_param(2, 5.0);
+        let mut turns = 0.9995;
+        effect.lfo_phase = turns as f32;
+        let mut write = 2_000.0;
+        for (sample_rate, rate) in [(32_000.0, 10.0), (48_000.0, 2.0), (96_000.0, 7.0)] {
+            effect.set_sample_rate(sample_rate);
+            effect.set_param(0, rate);
+            for _ in 0..16 {
+                let delay_l = (5.0 + 2.5 * wave(turns)) * sample_rate as f64 / 1_000.0;
+                let delay_r = (5.0 + 2.5 * wave(turns + 0.25)) * sample_rate as f64 / 1_000.0;
+                let (left, right) = effect.process_sample(0.0, 0.0);
+                assert!((left as f64 - (write - delay_l) / 1_024.0).abs() < 5e-6);
+                assert!((right as f64 + (write - delay_r) / 2_048.0).abs() < 5e-6);
+                assert!((0.0..1.0).contains(&effect.lfo_phase));
+                turns = (turns + rate as f64 / sample_rate as f64).fract();
+                write += 1.0;
+            }
+        }
+    }
+
+    fn configured_effect() -> FlangerEffect {
+        let mut effect = FlangerEffect::new();
+        effect.set_sample_rate(32_000.0);
+        for (index, value) in [7.0, 60.0, 4.0, -70.0, 35.0].into_iter().enumerate() {
+            effect.set_param(index, value);
+        }
+        effect
+    }
+
+    #[test]
+    fn reset_replays_a_fresh_processor_with_the_same_parameters() {
+        let mut used = configured_effect();
+        let mut fresh = configured_effect();
+        for sample in 0..(4096 + 37) {
+            used.process_sample((sample as f32 * 0.13).sin(), (sample as f32 * 0.31).cos());
+        }
+        used.reset();
+        used.set_param(99, 123.0);
+        for sample in 0..(4096 + 256) {
+            let input = ((sample as f32 * 0.17).cos(), (sample as f32 * 0.29).sin());
+            assert_eq!(
+                used.process_sample(input.0, input.1),
+                fresh.process_sample(input.0, input.1)
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_limits_preserve_the_running_history() {
+        for (index, value, endpoint) in [
+            (0, -1.0, 0.05),
+            (0, 99.0, 10.0),
+            (1, -1.0, 0.0),
+            (1, 999.0, 100.0),
+            (2, -1.0, 0.5),
+            (2, 999.0, 15.0),
+            (3, -999.0, -100.0),
+            (3, 999.0, 100.0),
+            (4, -1.0, 0.0),
+            (4, 999.0, 100.0),
+        ] {
+            let mut clamped = configured_effect();
+            let mut reference = configured_effect();
+            for sample in 0..256 {
+                let input = ((sample as f32 * 0.19).sin(), (sample as f32 * 0.37).cos());
+                clamped.process_sample(input.0, input.1);
+                reference.process_sample(input.0, input.1);
+            }
+            clamped.set_param(index, value);
+            reference.set_param(index, endpoint);
+            clamped.set_param(99, -123.0);
+            for sample in 0..2_200 {
+                let input = ((sample as f32 * 0.23).cos(), (sample as f32 * 0.41).sin());
+                assert_eq!(
+                    clamped.process_sample(input.0, input.1),
+                    reference.process_sample(input.0, input.1)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn flanger_lists_five_parameters_with_the_expected_specs() {
         let f = FlangerEffect::new();
         let specs = f.parameters();
@@ -323,6 +555,33 @@ mod tests {
         // Flanger defaults to hot feedback (50 % vs Chorus's 0 %).
         assert_eq!(specs[3].default, 50.0);
         assert_eq!(specs[4].name, "Width");
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| (spec.min, spec.max, spec.default))
+                .collect::<Vec<_>>(),
+            [
+                (0.05, 10.0, 0.3),
+                (0.0, 100.0, 70.0),
+                (0.5, 15.0, 3.0),
+                (-100.0, 100.0, 50.0),
+                (0.0, 100.0, 70.0)
+            ]
+        );
+        assert!(matches!(
+            specs[1].format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: "%"
+            }
+        ));
+        assert!(specs[3..].iter().all(|spec| matches!(
+            spec.format,
+            ParamFormat::Number {
+                decimals: 0,
+                unit: "%"
+            }
+        )));
     }
 
     #[test]
