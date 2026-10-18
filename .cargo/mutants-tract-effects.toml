@@ -25,6 +25,7 @@ examine_re = [
     '^tract-effects/src/effects/spectral_compress\.rs:',
     '^tract-effects/src/effects/spectral_smear\.rs:',
     '^tract-effects/src/effects/spectral_corrupt\.rs:',
+    '^tract-effects/src/effects/spectral_lofi\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -115,4 +116,6 @@ exclude_re = [
     '^tract-effects/src/effects/spectral_corrupt\.rs:17:39: replace / with \*$',
     # Zero Amount returns through the deadband before choosing quiet/loud ranks.
     "^tract-effects/src/effects/spectral_corrupt\\.rs:\\d+:33: replace > with >= in <impl SpectralTransform for TransformCtx<'_>>::transform$",
+    # Extra mask entries are unused by the supported FFT sizes.
+    '^tract-effects/src/effects/spectral_lofi\.rs:14:39: replace / with \*$',
 ]
