@@ -1,13 +1,8 @@
-# Runtime and editor coverage; drawing and interaction coverage are in progress.
+# Runtime and editor view coverage; the remaining editor rollout is in progress.
 examine_re = [
     '^tract-effects/src/(compressor|modulation|randomize|undo)\.rs:',
     '^tract-effects/src/effects/',
-    '^tract-effects/src/editor/view\.rs:\d+:\d+: replace draw_(section_header|mseg_controls|mseg_playhead|trigger_controls) with',
-    '^tract-effects/src/editor/view\.rs:\d+:\d+: .* in draw_(section_header|mseg_controls|mseg_playhead|trigger_controls)$',
-    '^tract-effects/src/editor/view\.rs:\d+:\d+: replace (effect_layout|in_rect|enum_trigger_width_for|effect_hit) ->',
-    '^tract-effects/src/editor/view\.rs:\d+:\d+: .* in (effect_layout|in_rect|enum_trigger_width_for|effect_hit)$',
-    '^tract-effects/src/editor/view\.rs:\d+:\d+: replace (segment_to_slot|slot_to_segment|kind_items|target_items|target_from_item|target_to_item|trigger_items|trigger_from_item|trigger_to_item|beats_norm_to_value|beats_value_to_norm|format_beats_label) ->',
-    '^tract-effects/src/editor/view\.rs:\d+:\d+: .* in (segment_to_slot|slot_to_segment|kind_items|target_items|target_from_item|target_to_item|trigger_items|trigger_from_item|trigger_to_item|beats_norm_to_value|beats_value_to_norm|format_beats_label)$',
+    '^tract-effects/src/editor/view\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
