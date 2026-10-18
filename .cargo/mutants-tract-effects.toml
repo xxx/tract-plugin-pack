@@ -11,6 +11,7 @@ examine_re = [
     '^tract-effects/src/effects/(auto_pan|ring|tremolo)\.rs:',
     '^tract-effects/src/effects/(chorus|flanger)\.rs:',
     '^tract-effects/src/effects/(phaser|vibrato)\.rs:',
+    '^tract-effects/src/effects/fm\.rs:',
 ]
 all_features = true
 test_tool = "nextest"
@@ -71,4 +72,8 @@ exclude_re = [
     '^tract-effects/src/effects/vibrato\.rs:(97:22|99:29): replace < with <= in VibratoEffect::eval_lfo$',
     # Higher Shape selectors still choose the Saw fallback.
     '^tract-effects/src/effects/vibrato\.rs:\d+:59: replace - with (\+|/) in <impl Effect for VibratoEffect>::set_param$',
+    # Mode and Topology are stored as 0 or 1, so neither can equal 0.5.
+    '^tract-effects/src/effects/fm\.rs:\d+:(22|46|51): replace < with <= in <impl Effect for FmEffect>::process_sample$',
+    # Equal target/envelope values make either smoothing coefficient multiply zero.
+    '^tract-effects/src/effects/fm\.rs:\d+:42: replace > with >= in <impl Effect for FmEffect>::process_sample$',
 ]
