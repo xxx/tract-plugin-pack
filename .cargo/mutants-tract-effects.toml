@@ -1,7 +1,9 @@
-# Runtime, editor mappings, layout, and hit testing; editor coverage is in progress.
+# Runtime and editor coverage; drawing and interaction coverage are in progress.
 examine_re = [
     '^tract-effects/src/(compressor|modulation|randomize|undo)\.rs:',
     '^tract-effects/src/effects/',
+    '^tract-effects/src/editor/view\.rs:\d+:\d+: replace draw_(section_header|mseg_controls|mseg_playhead|trigger_controls) with',
+    '^tract-effects/src/editor/view\.rs:\d+:\d+: .* in draw_(section_header|mseg_controls|mseg_playhead|trigger_controls)$',
     '^tract-effects/src/editor/view\.rs:\d+:\d+: replace (effect_layout|in_rect|enum_trigger_width_for|effect_hit) ->',
     '^tract-effects/src/editor/view\.rs:\d+:\d+: .* in (effect_layout|in_rect|enum_trigger_width_for|effect_hit)$',
     '^tract-effects/src/editor/view\.rs:\d+:\d+: replace (segment_to_slot|slot_to_segment|kind_items|target_items|target_from_item|target_to_item|trigger_items|trigger_from_item|trigger_to_item|beats_norm_to_value|beats_value_to_norm|format_beats_label) ->',
@@ -15,6 +17,8 @@ additional_cargo_test_args = ["--profile=mutants"]
 gitignore = true
 
 exclude_re = [
+    # A zero-width divider paints no pixels.
+    '^tract-effects/src/editor/view\.rs:\d+:15: replace > with >= in draw_section_header$',
     # None and invalid targets share the zero fallback.
     '^tract-effects/src/editor/view\.rs:\d+:9: delete match arm None in target_to_item$',
     # Clamping and rounding already restrict the index to 0..10.

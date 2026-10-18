@@ -1003,6 +1003,343 @@ mod tests {
         a.0 < b.0 + b.2 && b.0 < a.0 + a.2 && a.1 < b.1 + b.3 && b.1 < a.1 + a.3
     }
 
+    mod control_drawing {
+        use super::*;
+
+        fn canvas() -> Pixmap {
+            let mut pixmap = Pixmap::new(900, 320).unwrap();
+            pixmap.fill(tiny_skia::Color::from_rgba8(12, 24, 36, 255));
+            pixmap
+        }
+
+        fn assert_pixels(actual: &Pixmap, expected: &Pixmap, case: &str) {
+            assert_eq!(
+                (actual.width(), actual.height()),
+                (expected.width(), expected.height())
+            );
+            let mismatch = actual
+                .data()
+                .iter()
+                .zip(expected.data())
+                .position(|(a, b)| a != b);
+            assert!(
+                mismatch.is_none(),
+                "{case}: first differing byte {mismatch:?}"
+            );
+        }
+
+        #[test]
+        fn section_headers_place_caption_and_divider_at_each_scale() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            for (scale, rect, size, baseline, rule_y, rule_h, gap, right) in [
+                (
+                    1.0,
+                    (20.0, 10.0, 200.0, 24.0),
+                    13.0,
+                    26.5,
+                    21.5,
+                    1.0,
+                    8.0,
+                    220.0,
+                ),
+                (
+                    2.0,
+                    (60.0, 40.0, 260.0, 38.0),
+                    26.0,
+                    70.0,
+                    58.0,
+                    2.0,
+                    16.0,
+                    320.0,
+                ),
+                (
+                    0.5,
+                    (30.0, 20.0, 220.0, 18.0),
+                    6.5,
+                    30.25,
+                    28.5,
+                    1.0,
+                    4.0,
+                    250.0,
+                ),
+            ] {
+                let mut actual = canvas();
+                draw_section_header(&mut actual, &mut tr, rect, "EFFECT", scale);
+                let mut expected = canvas();
+                tr.draw_text(
+                    &mut expected,
+                    rect.0,
+                    baseline,
+                    "EFFECT",
+                    size,
+                    widgets::color_muted(),
+                );
+                let rule_x = rect.0 + tr.text_width("EFFECT", size) + gap;
+                widgets::draw_rect(
+                    &mut expected,
+                    rule_x,
+                    rule_y,
+                    right - rule_x,
+                    rule_h,
+                    widgets::color_border(),
+                );
+                assert_pixels(&actual, &expected, &format!("header scale {scale}"));
+            }
+        }
+
+        #[test]
+        fn narrow_headers_keep_the_caption_without_painting_a_negative_divider() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            for width in [0.0, 4.0] {
+                let mut actual = canvas();
+                draw_section_header(
+                    &mut actual,
+                    &mut tr,
+                    (20.0, 10.0, width, 24.0),
+                    "MODULATION",
+                    1.0,
+                );
+                let mut expected = canvas();
+                tr.draw_text(
+                    &mut expected,
+                    20.0,
+                    26.5,
+                    "MODULATION",
+                    13.0,
+                    widgets::color_muted(),
+                );
+                assert_pixels(&actual, &expected, "caption-only header");
+            }
+        }
+
+        #[test]
+        fn mseg_time_and_beat_modes_render_their_selected_units_and_lengths() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            let mut lay = super::super::effect_layout((0.0, 0.0, 1_200.0, 640.0), 1.0);
+            lay.mseg_sync = (20.0, 20.0, 140.0, 30.0);
+            lay.mseg_length = (190.0, 18.0, 250.0, 34.0);
+            for (mode, seconds, beats, active, label, norm) in [
+                (widgets::SyncMode::Time, 0.05, 256.0, 0, "0.05 s", 0.0),
+                (widgets::SyncMode::Time, 32.0, 0.25, 0, "32.00 s", 1.0),
+                (widgets::SyncMode::Beat, 32.0, 8.0, 1, "2 bars", 0.5),
+                (widgets::SyncMode::Beat, 0.05, 256.0, 1, "64 bars", 1.0),
+            ] {
+                let mseg = widgets::MsegData {
+                    sync_mode: mode,
+                    time_seconds: seconds,
+                    beats,
+                    ..Default::default()
+                };
+                let mut actual = canvas();
+                draw_mseg_controls(&mut actual, &mut tr, &mseg, 1.0, &lay);
+                let mut expected = canvas();
+                widgets::controls::draw_stepped_selector(
+                    &mut expected,
+                    &mut tr,
+                    20.0,
+                    20.0,
+                    140.0,
+                    30.0,
+                    &["Time", "Beat"],
+                    active,
+                    None,
+                );
+                widgets::draw_slider(
+                    &mut expected,
+                    &mut tr,
+                    190.0,
+                    18.0,
+                    250.0,
+                    34.0,
+                    "Length",
+                    label,
+                    norm,
+                    None,
+                    false,
+                );
+                assert_pixels(&actual, &expected, label);
+            }
+        }
+
+        #[test]
+        fn playheads_clamp_phases_and_stay_inside_the_scaled_plot() {
+            let color = tiny_skia::Color::from_rgba8(0xE8, 0xC9, 0x8A, 0x80);
+            for (scale, line_w) in [(0.5, 1.0), (1.0, 1.0), (2.0, 2.0)] {
+                let pane = (20.0 * scale, 30.0 * scale, 180.0 * scale, 160.0 * scale);
+                for (phase, x) in [
+                    (-2.0, 25.5 * scale),
+                    (0.0, 25.5 * scale),
+                    (0.25, 67.75 * scale),
+                    (0.5, 110.0 * scale),
+                    (1.0, 194.5 * scale - line_w),
+                    (3.0, 194.5 * scale - line_w),
+                ] {
+                    let mut actual = canvas();
+                    draw_mseg_playhead(&mut actual, pane, phase, scale);
+                    let mut expected = canvas();
+                    widgets::draw_rect(&mut expected, x, 51.5 * scale, line_w, 91.0 * scale, color);
+                    assert_pixels(
+                        &actual,
+                        &expected,
+                        &format!("playhead phase {phase}, scale {scale}"),
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn collapsed_plots_leave_the_background_untouched() {
+            for scale in [0.5, 2.0] {
+                for (width, height) in [(0.0, 160.0), (180.0, 20.0), (0.0, 20.0)] {
+                    let mut actual = canvas();
+                    draw_mseg_playhead(
+                        &mut actual,
+                        (20.0 * scale, 30.0 * scale, width * scale, height * scale),
+                        0.75,
+                        scale,
+                    );
+                    assert_pixels(&actual, &canvas(), "collapsed plot");
+                }
+            }
+        }
+
+        fn trigger_layout(scale: f32) -> EffectLayout {
+            let mut lay = super::super::effect_layout((0.0, 0.0, 1_200.0, 640.0), scale);
+            lay.trigger = (20.0 * scale, 12.0 * scale, 140.0 * scale, 34.0 * scale);
+            lay.trigger_rate = (190.0 * scale, 8.0 * scale, 72.0 * scale, 80.0 * scale);
+            lay.trigger_aux = (300.0 * scale, 12.0 * scale, 84.0 * scale, 72.0 * scale);
+            lay
+        }
+
+        #[test]
+        fn free_and_cell_sources_draw_only_their_dropdown_label_and_open_state() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            for scale in [0.5, 2.0] {
+                let lay = trigger_layout(scale);
+                for (source, label) in [
+                    (TriggerSource::Free, "Free run"),
+                    (TriggerSource::CellLight, "Cell light"),
+                    (TriggerSource::CellStep, "Cell step"),
+                ] {
+                    for open in [false, true] {
+                        let mut actual = canvas();
+                        draw_trigger_controls(&mut actual, &mut tr, source, open, scale, &lay);
+                        let mut expected = canvas();
+                        widgets::dropdown::draw_dropdown_trigger(
+                            &mut expected,
+                            &mut tr,
+                            lay.trigger,
+                            label,
+                            open,
+                        );
+                        assert_pixels(&actual, &expected, label);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn free_hz_draws_the_rate_dial_with_logarithmic_positions_and_hertz_text() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            for scale in [0.5, 2.0] {
+                let lay = trigger_layout(scale);
+                for (hz, norm, text) in [
+                    (0.05, 0.0, "0.05 Hz"),
+                    (1.0, 0.5, "1 Hz"),
+                    (20.0, 1.0, "20 Hz"),
+                ] {
+                    for open in [false, true] {
+                        let mut actual = canvas();
+                        draw_trigger_controls(
+                            &mut actual,
+                            &mut tr,
+                            TriggerSource::FreeHz { hz },
+                            open,
+                            scale,
+                            &lay,
+                        );
+                        let mut expected = canvas();
+                        widgets::dropdown::draw_dropdown_trigger(
+                            &mut expected,
+                            &mut tr,
+                            lay.trigger,
+                            "Free Hz",
+                            open,
+                        );
+                        widgets::param_dial::draw_dial(
+                            &mut expected,
+                            &mut tr,
+                            226.0 * scale,
+                            48.0 * scale,
+                            30.0 * scale,
+                            "Rate",
+                            text,
+                            norm,
+                        );
+                        assert_pixels(&actual, &expected, &format!("rate {hz}, scale {scale}"));
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn transient_draws_inverse_sensitivity_and_logarithmic_hold_dials() {
+            let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+            for scale in [0.5, 2.0] {
+                let lay = trigger_layout(scale);
+                for (threshold, hold_ms, sens_norm, sens_text, hold_norm, hold_text) in [
+                    (1.05, 5.0, 1.0, "100%", 0.0, "5 ms"),
+                    (6.0, 500.0, 0.0, "0%", 1.0, "500 ms"),
+                ] {
+                    for open in [false, true] {
+                        let mut actual = canvas();
+                        draw_trigger_controls(
+                            &mut actual,
+                            &mut tr,
+                            TriggerSource::Transient { threshold, hold_ms },
+                            open,
+                            scale,
+                            &lay,
+                        );
+                        let mut expected = canvas();
+                        widgets::dropdown::draw_dropdown_trigger(
+                            &mut expected,
+                            &mut tr,
+                            lay.trigger,
+                            "Transient",
+                            open,
+                        );
+                        widgets::param_dial::draw_dial(
+                            &mut expected,
+                            &mut tr,
+                            226.0 * scale,
+                            48.0 * scale,
+                            30.0 * scale,
+                            "Sens",
+                            sens_text,
+                            sens_norm,
+                        );
+                        widgets::param_dial::draw_dial(
+                            &mut expected,
+                            &mut tr,
+                            342.0 * scale,
+                            48.0 * scale,
+                            30.0 * scale,
+                            "Hold",
+                            hold_text,
+                            hold_norm,
+                        );
+                        assert_pixels(
+                            &actual,
+                            &expected,
+                            &format!("threshold {threshold}, hold {hold_ms}, scale {scale}"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     mod layout_and_hits {
         use super::super::{effect_hit as hit, effect_layout as layout};
         use super::*;
