@@ -1772,6 +1772,481 @@ mod tests {
         }
     }
 
+    mod editor_press {
+        use super::*;
+        use widgets::dropdown::{DropdownEvent, DropdownKey, RowKind, dropdown_popup_layout};
+
+        fn center(rect: (f32, f32, f32, f32)) -> (f32, f32) {
+            (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0)
+        }
+
+        fn press(session: &mut Session<'_>, rect: (f32, f32, f32, f32)) -> bool {
+            let (x, y) = center(rect);
+            session.state.effect_dial_drag.set_mouse(x, y);
+            session.on_effect_press(x, y, false)
+        }
+
+        fn select_node(session: &mut Session<'_>) {
+            let data = &mut session.modulation.msegs[session.state.selected_mseg];
+            let node = data.nodes[1];
+            let layout =
+                widgets::mseg::mseg_layout(session.layout.mseg_pane, false, session.scale_factor);
+            let (x, y) = (
+                widgets::mseg::phase_to_x(&layout, node.time),
+                widgets::mseg::value_to_y(&layout, node.value),
+            );
+            session.state.mseg_edit.on_mouse_down(
+                x,
+                y,
+                data,
+                session.layout.mseg_pane,
+                session.scale_factor,
+                false,
+            );
+            session.state.mseg_edit.on_mouse_up(
+                data,
+                session.layout.mseg_pane,
+                session.scale_factor,
+            );
+            assert!(session.state.mseg_edit.is_node_selected(1));
+        }
+
+        #[test]
+        fn navigation_requests_and_missed_presses_preserve_host_configuration() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                for (rect, handled, back, randomize) in [
+                    (session.layout.back, true, true, false),
+                    (session.layout.randomize, true, false, true),
+                    ((-100.0, -100.0, 1.0, 1.0), false, false, false),
+                ] {
+                    session.response = EditorResponse::default();
+                    assert_eq!(press(session, rect), handled);
+                    assert_eq!(
+                        (
+                            session.response.back,
+                            session.response.randomize,
+                            session.response.changed,
+                            session.response.captured
+                        ),
+                        (back, randomize, false, false)
+                    );
+                    assert_eq!(*session.effect, effect);
+                    assert_eq!(*session.modulation, modulation);
+                }
+            });
+        }
+
+        #[test]
+        fn kind_menu_opens_with_filter_sections_and_the_current_kind_highlighted() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let effect = *session.effect;
+                let rect = session.layout.kind;
+                assert!(press(session, rect));
+                assert!(
+                    session
+                        .state
+                        .effect_dropdown
+                        .is_open_for(EffectAction::Kind)
+                );
+                let items = session.dropdown_items();
+                let win = (session.physical_width, session.physical_height);
+                let popup =
+                    dropdown_popup_layout(&session.state.effect_dropdown, &items, win).unwrap();
+                assert!(popup.filter_rect.is_some());
+                assert!(
+                    popup
+                        .visible_rows
+                        .iter()
+                        .any(|row| row.kind == RowKind::Header)
+                );
+                let Some(DropdownEvent::Selected(EffectAction::Kind, index)) = session
+                    .state
+                    .effect_dropdown
+                    .on_key(DropdownKey::Enter, &items, win)
+                else {
+                    panic!("kind menu did not select an effect");
+                };
+                assert_eq!(EffectKind::ALL[index], EffectKind::Svf);
+                assert_eq!(*session.effect, effect);
+                assert!(!session.response.changed);
+            });
+        }
+
+        #[test]
+        fn enum_popups_use_centered_overflow_width_and_scaled_minimum_row_height() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.scale_factor = 1.5;
+                session.layout = view::effect_layout((16.0, 16.0, 1_304.0, 640.0), 1.5);
+                session.physical_width = 2_004.0;
+                session.physical_height = 1_020.0;
+                session.effect.params[2] = 1.7;
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                for (height, expected_y, expected_h, row_height) in
+                    [(75.0, 167.5, 101.0, 33.0), (132.0, 202.96, 128.72, 42.24)]
+                {
+                    session.layout.dials[2] = (1_000.0, 100.0, 67.5, height);
+                    let rect = session.layout.dials[2];
+                    assert!(press(session, rect));
+                    assert!(
+                        session
+                            .state
+                            .effect_dropdown
+                            .is_open_for(EffectAction::ParamDropdown(2))
+                    );
+                    let items = session.dropdown_items();
+                    assert_eq!(items, ["Lowpass", "Bandpass", "Highpass"]);
+                    let win = (session.physical_width, session.physical_height);
+                    let popup =
+                        dropdown_popup_layout(&session.state.effect_dropdown, &items, win).unwrap();
+                    for (actual, expected) in [
+                        popup.popup_rect.0,
+                        popup.popup_rect.1,
+                        popup.popup_rect.2,
+                        popup.popup_rect.3,
+                    ]
+                    .into_iter()
+                    .zip([991.0, expected_y, 85.5, expected_h])
+                    {
+                        assert!(
+                            (actual - expected).abs() < 0.01,
+                            "dial height {height}: {actual} != {expected}"
+                        );
+                    }
+                    assert!(popup.filter_rect.is_none());
+                    assert!(!popup.opens_upward);
+                    assert_eq!(popup.visible_rows.len(), 3);
+                    assert!((popup.visible_rows[0].rect.3 - row_height).abs() < 0.01);
+                    assert!(matches!(
+                        session
+                            .state
+                            .effect_dropdown
+                            .on_key(DropdownKey::Enter, &items, win),
+                        Some(DropdownEvent::Selected(EffectAction::ParamDropdown(2), 2))
+                    ));
+                    assert_eq!(session.state.effect_dial_drag.active_action(), None);
+                    assert_eq!(*session.effect, effect);
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(!session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn target_menu_uses_the_selected_route_and_is_inactive_for_amp() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.modulation.targets = [
+                    Some(ModulationTarget::EffectParameter(0)),
+                    Some(ModulationTarget::EffectParameter(3)),
+                    Some(ModulationTarget::Mix),
+                ];
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                for (slot, item) in [(1, 1), (2, 4), (3, 5)] {
+                    session.state.selected_mseg = slot;
+                    let rect = session.layout.target;
+                    assert!(press(session, rect));
+                    let items = session.dropdown_items();
+                    assert_eq!(
+                        items,
+                        ["(none)", "Cutoff", "Resonance", "Type", "Poles", "Mix"]
+                    );
+                    let win = (session.physical_width, session.physical_height);
+                    assert!(
+                        matches!(session.state.effect_dropdown.on_key(DropdownKey::Enter, &items, win), Some(DropdownEvent::Selected(EffectAction::Target, index)) if index == item)
+                    );
+                    assert_eq!(*session.effect, effect);
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(!session.response.changed);
+                }
+                session.state.selected_mseg = 0;
+                let rect = session.layout.target;
+                assert!(!press(session, rect));
+                assert!(!session.state.dropdown_open());
+            });
+        }
+
+        #[test]
+        fn depth_press_starts_each_slot_at_its_bipolar_value_and_ignores_amp() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.modulation.depths = [-0.6, 0.2, 0.75];
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                for (slot, expected) in [(1, 0.2), (2, 0.6), (3, 0.875)] {
+                    session.state.selected_mseg = slot;
+                    session.state.effect_click.last_action = None;
+                    let rect = session.layout.depth;
+                    assert!(press(session, rect));
+                    assert_eq!(
+                        session.state.effect_dial_drag.active_action(),
+                        Some(&EffectHit::Depth)
+                    );
+                    let norm = session
+                        .state
+                        .effect_dial_drag
+                        .update_drag(false, 0.0)
+                        .unwrap();
+                    assert!((norm - expected).abs() < 1e-6, "slot {slot}: {norm}");
+                    session.state.effect_dial_drag.end_drag();
+                    assert_eq!(*session.effect, effect);
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(!session.response.changed);
+                }
+                session.state.selected_mseg = 0;
+                let rect = session.layout.depth;
+                assert!(!press(session, rect));
+                assert_eq!(session.state.effect_dial_drag.active_action(), None);
+            });
+        }
+
+        #[test]
+        fn continuous_dial_and_mix_presses_start_at_the_host_value_without_editing_it() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.effect.params[0] = 200.0;
+                session.effect.params[1] = 0.27;
+                session.effect.mix = 0.37;
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                for (hit, rect, expected) in [
+                    (EffectHit::Dial(0), session.layout.dials[0], 1.0 / 3.0),
+                    (EffectHit::Dial(1), session.layout.dials[1], 0.27),
+                    (EffectHit::Mix, session.layout.mix, 0.37),
+                ] {
+                    session.state.effect_click.last_action = None;
+                    assert!(press(session, rect));
+                    assert_eq!(session.state.effect_dial_drag.active_action(), Some(&hit));
+                    let norm = session
+                        .state
+                        .effect_dial_drag
+                        .update_drag(false, 0.0)
+                        .unwrap();
+                    assert!((norm - expected).abs() < 1e-6);
+                    session.state.effect_dial_drag.end_drag();
+                    assert_eq!(*session.effect, effect);
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(!session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn trigger_dials_start_at_rate_sensitivity_or_hold_and_reject_inactive_modes() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let effect = *session.effect;
+                for (trigger, rate, hold) in [
+                    (TriggerSource::Free, None, None),
+                    (TriggerSource::CellLight, None, None),
+                    (TriggerSource::CellStep, None, None),
+                    (TriggerSource::FreeHz { hz: 0.223_606_8 }, Some(0.25), None),
+                    (
+                        TriggerSource::Transient {
+                            threshold: 2.509_980_2,
+                            hold_ms: 50.0,
+                        },
+                        Some(0.5),
+                        Some(0.5),
+                    ),
+                    (
+                        TriggerSource::Transient {
+                            threshold: 1.05,
+                            hold_ms: 5.0,
+                        },
+                        Some(1.0),
+                        Some(0.0),
+                    ),
+                ] {
+                    session.modulation.trigger = trigger;
+                    let modulation = session.modulation.clone();
+                    for (hit, rect, expected) in [
+                        (EffectHit::TriggerRate, session.layout.trigger_rate, rate),
+                        (EffectHit::TriggerAux, session.layout.trigger_aux, hold),
+                    ] {
+                        session.state.effect_click.last_action = None;
+                        assert_eq!(press(session, rect), expected.is_some());
+                        if let Some(expected) = expected {
+                            assert_eq!(session.state.effect_dial_drag.active_action(), Some(&hit));
+                            let norm = session
+                                .state
+                                .effect_dial_drag
+                                .update_drag(false, 0.0)
+                                .unwrap();
+                            assert!(
+                                (norm - expected).abs() < 1e-6,
+                                "{trigger:?}, {hit:?}: {norm}"
+                            );
+                            session.state.effect_dial_drag.end_drag();
+                        } else {
+                            assert_eq!(session.state.effect_dial_drag.active_action(), None);
+                        }
+                        assert_eq!(*session.effect, effect);
+                        assert_eq!(*session.modulation, modulation);
+                        assert!(!session.response.changed);
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn trigger_menu_highlight_follows_the_host_filtered_order() {
+            with_session(
+                &[
+                    TriggerChoice::Transient,
+                    TriggerChoice::FreeHz,
+                    TriggerChoice::Free,
+                ],
+                EffectKind::Svf,
+                |session| {
+                    for (trigger, expected) in [
+                        (
+                            TriggerSource::Transient {
+                                threshold: 2.5,
+                                hold_ms: 73.0,
+                            },
+                            0,
+                        ),
+                        (TriggerSource::FreeHz { hz: 3.7 }, 1),
+                        (TriggerSource::Free, 2),
+                        (TriggerSource::CellLight, 0),
+                    ] {
+                        session.modulation.trigger = trigger;
+                        let rect = session.layout.trigger;
+                        assert!(press(session, rect));
+                        let items = session.dropdown_items();
+                        assert_eq!(items, ["Transient", "Free Hz", "Free run"]);
+                        let win = (session.physical_width, session.physical_height);
+                        assert!(
+                            matches!(session.state.effect_dropdown.on_key(DropdownKey::Enter, &items, win), Some(DropdownEvent::Selected(EffectAction::Trigger, index)) if index == expected)
+                        );
+                        assert_eq!(session.modulation.trigger, trigger);
+                        assert!(!session.response.changed);
+                    }
+                },
+            );
+        }
+
+        #[test]
+        fn mseg_tab_reselection_preserves_nodes_and_switching_tabs_clears_selection() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                let rect = session.layout.mseg_selector;
+                for (segment, slot) in [(0, 1), (1, 2), (2, 3), (3, 0)] {
+                    session.state.selected_mseg = 1;
+                    select_node(session);
+                    let x = rect.0 + (segment as f32 + 0.5) * rect.2 / 4.0;
+                    assert!(session.on_effect_press(x, rect.1 + rect.3 / 2.0, false));
+                    assert_eq!(session.state.selected_mseg, slot);
+                    assert_eq!(
+                        session.state.mseg_edit.selection_count(),
+                        u32::from(slot == 1)
+                    );
+                    assert_eq!(*session.effect, effect);
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(!session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn mseg_press_routes_selection_and_snap_changes_to_the_active_curve() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let effect = *session.effect;
+                for slot in 0..4 {
+                    session.state.selected_mseg = slot;
+                    session.state.mseg_edit = widgets::mseg::MsegEditState::new();
+                    let original = session.modulation.clone();
+                    let layout = widgets::mseg::mseg_layout(
+                        session.layout.mseg_pane,
+                        false,
+                        session.scale_factor,
+                    );
+                    let node = session.modulation.msegs[slot].nodes[1];
+                    let point = (
+                        widgets::mseg::phase_to_x(&layout, node.time),
+                        widgets::mseg::value_to_y(&layout, node.value),
+                    );
+                    session.state.mseg_last_click_pos = (-999.0, -999.0);
+                    session.response = EditorResponse::default();
+                    assert!(session.on_effect_press(point.0, point.1, false));
+                    assert!(session.state.mseg_edit.is_node_selected(1));
+                    assert_eq!(*session.modulation, original);
+                    assert!(!session.response.changed);
+                    session.state.mseg_edit.on_mouse_up(
+                        &mut session.modulation.msegs[slot],
+                        session.layout.mseg_pane,
+                        session.scale_factor,
+                    );
+                    session.state.mseg_last_click_pos = (-999.0, -999.0);
+                    assert!(session.on_effect_press(point.0, point.1, true));
+                    assert_eq!(session.state.mseg_edit.selection_count(), 0);
+                    assert_eq!(*session.modulation, original);
+                    assert!(!session.response.changed);
+                    session.state.mseg_edit.on_mouse_up(
+                        &mut session.modulation.msegs[slot],
+                        session.layout.mseg_pane,
+                        session.scale_factor,
+                    );
+                    let point = (
+                        layout.strip.0 + 20.0 * session.scale_factor,
+                        layout.strip.1 + layout.strip.3 / 2.0,
+                    );
+                    session.state.mseg_last_click_pos = (-999.0, -999.0);
+                    assert!(session.on_effect_press(point.0, point.1, false));
+                    let mut expected = original.clone();
+                    expected.msegs[slot].snap = !original.msegs[slot].snap;
+                    assert_eq!(*session.modulation, expected);
+                    assert_eq!(*session.effect, effect);
+                    assert!(session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn sync_and_length_controls_use_the_selected_clock() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.state.selected_mseg = 2;
+                let original = session.modulation.clone();
+                let effect = *session.effect;
+                let rect = session.layout.mseg_sync;
+                for (segment, mode, expected) in [
+                    (0, widgets::SyncMode::Time, 0.0),
+                    (1, widgets::SyncMode::Beat, 0.4),
+                ] {
+                    session.modulation.msegs[2].time_seconds = 0.05;
+                    session.modulation.msegs[2].beats = 4.0;
+                    let mut before = session.modulation.clone();
+                    session.response = EditorResponse::default();
+                    let x = rect.0 + (segment as f32 + 0.5) * rect.2 / 2.0;
+                    assert!(session.on_effect_press(x, rect.1 + rect.3 / 2.0, false));
+                    before.msegs[2].sync_mode = mode;
+                    assert_eq!(*session.modulation, before);
+                    assert!(session.response.changed);
+                    session.response = EditorResponse::default();
+                    let length = session.layout.mseg_length;
+                    assert!(press(session, length));
+                    assert_eq!(
+                        session.state.effect_dial_drag.active_action(),
+                        Some(&EffectHit::MsegLength)
+                    );
+                    let norm = session
+                        .state
+                        .effect_dial_drag
+                        .update_drag(false, 0.0)
+                        .unwrap();
+                    assert!((norm - expected).abs() < 1e-6);
+                    session.state.effect_dial_drag.end_drag();
+                    assert!(!session.response.changed);
+                    assert_eq!(*session.effect, effect);
+                    for slot in [0, 1, 3] {
+                        assert_eq!(session.modulation.msegs[slot], original.msegs[slot]);
+                    }
+                }
+            });
+        }
+    }
+
     mod mseg_click {
         use super::*;
         use std::time::{Duration, Instant};
