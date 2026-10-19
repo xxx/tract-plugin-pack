@@ -1,6 +1,6 @@
 # Tract Plugin Pack
 
-A collection of audio effect plugins (VST3, CLAP, standalone) built with [nih-plug](https://github.com/robbert-vdh/nih-plug) in Rust.
+A collection of audio effect plugins (VST3, CLAP, standalone) built with [nih-plug](https://github.com/robbert-vdh/nih-plug).
 
 ## Plugins
 
@@ -202,8 +202,6 @@ cargo xtask bundle -p gs-meter
 cargo build --bin gs-meter --release
 ```
 
-The bundler is a pinned dependency of `xtask`, fetched and compiled automatically by Cargo. No separate bundler installation is needed.
-
 `cargo xtask bundle` defaults to `--redistributable`. It discovers all workspace crates with a `cdylib` target and passes them to one bundler invocation, so newly added plugins are included automatically. Use `-p <plugin>` to build a specific plugin; repeat `-p` to select several. Both modes replace inherited `target-cpu` and `target-feature` settings; redistributable builds use the generic target CPU, including when your Cargo config enables host optimizations. Other flags from `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` are preserved; Cargo config rustflags are overridden.
 
 Additional Cargo build options are forwarded, for example `cargo xtask bundle --redistributable --locked` or `cargo xtask bundle --profile profiling`. Without an explicit profile, the command uses `--release`. On macOS, `cargo xtask bundle-universal` builds the whole collection for Intel and Apple Silicon; both Rust targets must be installed. Universal builds use redistributable mode.
@@ -220,7 +218,7 @@ cargo xtask native build --release --bin gs-meter
 
 On supported x86_64 hosts, native binaries require Haswell-compatible CPUs. Use `cargo xtask bundle --redistributable` for the collection's portable builds.
 
-The bundler outputs plugin bundles and standalone applications to `target/bundled/` (or `<target-dir>/bundled/` when overriding Cargo's target directory). The pinned bundler revision preserves hyphens in standalone executable names such as `gs-meter`. Standalone executables are also available in `target/release/`; a custom profile or cross-compilation target changes that build directory. CI uploads the complete bundled collection.
+The bundler outputs plugin bundles and standalone applications to `target/bundled/` (or `<target-dir>/bundled/` when overriding Cargo's target directory). Standalone executables are also available in `target/release/`; a custom profile or cross-compilation target changes that build directory.
 
 Copy either the `.vst3` or `.clap` file (you only need one -- use whichever your DAW supports) to your plugin directory:
 
