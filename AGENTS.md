@@ -38,7 +38,7 @@ Workspace packages inherit the Rust 2024 edition from `[workspace.package]`; the
 ```bash
 cargo xtask bundle --redistributable       # all plugins: VST3 + CLAP + standalone, release
 cargo xtask bundle --native                # all plugins, host-optimized release
-cargo nih-plug bundle <plugin> --release   # VST3 + CLAP bundle
+cargo xtask bundle -p <plugin>             # VST3 + CLAP + standalone
 cargo build --bin <plugin> --release       # standalone
 cargo build --bin <plugin>                 # debug standalone (GUI testing without DAW)
 

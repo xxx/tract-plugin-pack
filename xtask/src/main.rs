@@ -15,6 +15,7 @@ fn main() -> Result<()> {
             print_help()
         }
         Some(task @ ("bundle" | "bundle-universal")) => bundle::run(task, &rest)?,
+        Some("__bundle") => nih_plug_xtask::main_with_args("cargo xtask", rest)?,
         Some("native") => run_native(&rest)?,
         Some("bench-compare") => bench_compare()?,
         _ => print_help(),
@@ -25,12 +26,13 @@ fn main() -> Result<()> {
 fn print_help() {
     eprintln!(
         "Tasks:
-  bundle [--native | --redistributable] [cargo build args...]
-                              Build all plugins (VST3 + CLAP + standalone), release by default.
+  bundle [--native | --redistributable] [-p <plugin>...] [cargo build args...]
+                              Build plugins (VST3 + CLAP + standalone), release by default.
+                              Without -p, build all plugins in the workspace.
                               Redistributable is the default and uses the generic target CPU.
                               Native uses the same CPU detection as the native wrapper below.
-  bundle-universal [cargo build args...]
-                              Build all plugins for both macOS architectures (redistributable).
+  bundle-universal [-p <plugin>...] [cargo build args...]
+                              Build plugins for both macOS architectures (redistributable).
   native <cargo args...>      Run `cargo <args>` with target-cpu auto-tuned to the build host.
                               On x86_64 with AVX2+FMA+BMI2 this sets -C target-cpu=haswell,
                               which lets tiny-skia and auto-vectorized code use AVX2 paths.
@@ -42,7 +44,7 @@ Examples:
   cargo xtask bundle --native
   cargo xtask bundle --profile profiling
   cargo xtask bundle-universal
-  cargo xtask native nih-plug bundle wavetable-filter --release
+  cargo xtask bundle --native -p wavetable-filter
   cargo xtask native build --release --bin gs-meter
   cargo xtask bench-compare"
     );

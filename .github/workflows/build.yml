@@ -37,12 +37,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cargo/bin
             target
           key: build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Install cargo-nih-plug
-        run: cargo install --force --locked --git https://github.com/xxx/nih-plug.git --rev 2882e1642946103f39a5e068c8c8ebc901a6599e cargo-nih-plug
 
       - name: Build all plugins and standalones
         run: cargo xtask bundle --redistributable --locked

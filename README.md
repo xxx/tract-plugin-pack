@@ -191,9 +191,6 @@ sudo apt install libxcb1-dev libx11-xcb-dev libx11-dev libxcursor-dev \
 ## Building
 
 ```bash
-# Install or update the bundler
-cargo install --force --locked --git https://github.com/xxx/nih-plug.git --rev 2882e1642946103f39a5e068c8c8ebc901a6599e cargo-nih-plug
-
 # Build the entire collection (VST3 + CLAP + standalone, release mode)
 cargo xtask bundle --redistributable
 
@@ -201,11 +198,13 @@ cargo xtask bundle --redistributable
 cargo xtask bundle --native
 
 # Build one plugin or standalone individually
-cargo nih-plug bundle gs-meter --release
+cargo xtask bundle -p gs-meter
 cargo build --bin gs-meter --release
 ```
 
-`cargo xtask bundle` defaults to `--redistributable`. It discovers all workspace crates with a `cdylib` target and passes them to one bundler invocation, so newly added plugins are included automatically. Both modes replace inherited `target-cpu` and `target-feature` settings; redistributable builds use the generic target CPU, including when your Cargo config enables host optimizations. Other flags from `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` are preserved; Cargo config rustflags are overridden.
+The bundler is a pinned dependency of `xtask`, fetched and compiled automatically by Cargo. No separate bundler installation is needed.
+
+`cargo xtask bundle` defaults to `--redistributable`. It discovers all workspace crates with a `cdylib` target and passes them to one bundler invocation, so newly added plugins are included automatically. Use `-p <plugin>` to build a specific plugin; repeat `-p` to select several. Both modes replace inherited `target-cpu` and `target-feature` settings; redistributable builds use the generic target CPU, including when your Cargo config enables host optimizations. Other flags from `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` are preserved; Cargo config rustflags are overridden.
 
 Additional Cargo build options are forwarded, for example `cargo xtask bundle --redistributable --locked` or `cargo xtask bundle --profile profiling`. Without an explicit profile, the command uses `--release`. On macOS, `cargo xtask bundle-universal` builds the whole collection for Intel and Apple Silicon; both Rust targets must be installed. Universal builds use redistributable mode.
 
@@ -215,7 +214,7 @@ For local builds that exploit your CPU's SIMD (tiny-skia's AVX2 raster paths, au
 
 ```bash
 cargo xtask bundle --native
-cargo xtask native nih-plug bundle wavetable-filter --release
+cargo xtask bundle --native -p wavetable-filter
 cargo xtask native build --release --bin gs-meter
 ```
 
