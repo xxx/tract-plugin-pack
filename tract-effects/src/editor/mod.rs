@@ -1486,6 +1486,418 @@ mod tests {
         check(&mut session);
     }
 
+    mod rendering {
+        use super::*;
+
+        const GHOSTS: [[(usize, u32); 3]; 4] = [
+            [(1, 0xffc85860), (2, 0xc378ff60), (3, 0x66d9a060)],
+            [(0, 0x4fc3f760), (2, 0xc378ff60), (3, 0x66d9a060)],
+            [(0, 0x4fc3f760), (1, 0xffc85860), (3, 0x66d9a060)],
+            [(0, 0x4fc3f760), (1, 0xffc85860), (2, 0xc378ff60)],
+        ];
+
+        fn canvas() -> tiny_skia::Pixmap {
+            let mut pm = tiny_skia::Pixmap::new(1_336, 680).unwrap();
+            pm.fill(tiny_skia::Color::from_rgba8(12, 24, 36, 255));
+            pm
+        }
+
+        fn geometry(session: &Session<'_>) -> EditorGeometry {
+            EditorGeometry {
+                layout: session.layout,
+                scale: session.scale_factor,
+                window_size: (session.physical_width, session.physical_height),
+            }
+        }
+
+        fn render(session: &mut Session<'_>) -> tiny_skia::Pixmap {
+            let mut pm = canvas();
+            let geometry = geometry(session);
+            session.state.draw(
+                &mut pm,
+                session.text_renderer,
+                session.effect,
+                session.modulation,
+                session.phases,
+                geometry,
+            );
+            pm
+        }
+
+        fn assert_region(
+            actual: &tiny_skia::Pixmap,
+            expected: &tiny_skia::Pixmap,
+            rect: (f32, f32, f32, f32),
+            case: &str,
+        ) {
+            let (x, y, w, h) = (
+                rect.0 as usize,
+                rect.1 as usize,
+                rect.2 as usize,
+                rect.3 as usize,
+            );
+            let stride = actual.width() as usize * 4;
+            for row in y..y + h {
+                let start = row * stride + x * 4;
+                let end = start + w * 4;
+                let a = &actual.data()[start..end];
+                let b = &expected.data()[start..end];
+                assert!(
+                    a == b,
+                    "{case}: pixel difference on row {row}, channel {:?}",
+                    a.iter().zip(b).position(|(a, b)| a != b)
+                );
+            }
+        }
+
+        fn pane_reference(
+            session: &mut Session<'_>,
+            slot: usize,
+            tooltip: Option<&str>,
+        ) -> tiny_skia::Pixmap {
+            let mut pm = canvas();
+            let (r, g, b) = [
+                (0x4f, 0xc3, 0xf7),
+                (0xff, 0xc8, 0x58),
+                (0xc3, 0x78, 0xff),
+                (0x66, 0xd9, 0xa0),
+            ][slot];
+            widgets::mseg::draw_mseg(
+                &mut pm,
+                session.text_renderer,
+                session.layout.mseg_pane,
+                &session.modulation.msegs[slot],
+                &session.state.mseg_edit,
+                session.scale_factor,
+                tiny_skia::Color::from_rgba8(r, g, b, 255),
+                tooltip.map(|text| (0, text)),
+            );
+            for (ghost, rgba) in GHOSTS[slot] {
+                widgets::mseg::draw_mseg_ghost(
+                    &mut pm,
+                    session.layout.mseg_pane,
+                    &session.modulation.msegs[ghost],
+                    &session.state.mseg_edit,
+                    session.scale_factor,
+                    rgba,
+                );
+            }
+            view::draw_mseg_playhead(
+                &mut pm,
+                session.layout.mseg_pane,
+                session.phases[slot],
+                session.scale_factor,
+            );
+            pm
+        }
+
+        fn flat_curves(session: &mut Session<'_>) {
+            for (slot, value) in [0.2, 0.4, 0.6, 0.8].into_iter().enumerate() {
+                let mut curve = widgets::MsegData::default();
+                curve.nodes[0].value = value;
+                curve.nodes[1].value = value;
+                session.modulation.msegs[slot] = curve;
+            }
+            session.phases = [0.15, 0.35, 0.55, 0.75];
+        }
+
+        #[test]
+        fn modulation_display_routes_phases_depths_polarity_and_slot_colors() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.effect.params[0] = 200.0;
+                session.effect.params[1] = 0.2;
+                session.effect.mix = 0.25;
+                session.modulation.targets = [
+                    Some(ModulationTarget::EffectParameter(0)),
+                    Some(ModulationTarget::EffectParameter(1)),
+                    Some(ModulationTarget::Mix),
+                ];
+                session.modulation.depths = [0.3, 0.4, -0.5];
+                session.modulation.msegs = [widgets::MsegData::default(); 4];
+                session.modulation.msegs[2].polarity = widgets::Polarity::Bipolar;
+                session.phases = [0.11, 0.25, 0.75, 0.4];
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                let display = session.compute_modulated_norms();
+                for (actual, expected, slot) in [
+                    (display.parameters[0], 49.0 / 120.0, 1),
+                    (display.parameters[1], 0.4, 2),
+                    (display.mix, 0.05, 3),
+                ] {
+                    let (value, color_slot) = actual.unwrap();
+                    assert!((value - expected).abs() < 1e-5, "slot {slot}: {value}");
+                    assert_eq!(color_slot, slot);
+                }
+                assert_eq!(&display.parameters[2..], &[None; 3]);
+                assert_eq!(*session.effect, effect);
+                assert_eq!(*session.modulation, modulation);
+            });
+        }
+
+        #[test]
+        fn modulation_display_skips_missing_targets_and_zero_depth_preserves_the_base() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.effect.mix = 0.25;
+                session.modulation.targets = [
+                    None,
+                    Some(ModulationTarget::EffectParameter(MAX_EFFECT_PARAMS)),
+                    Some(ModulationTarget::Mix),
+                ];
+                session.modulation.depths = [0.9, 0.9, 0.0];
+                session.phases = [0.0, 0.2, 0.4, 0.8];
+                let display = session.compute_modulated_norms();
+                assert_eq!(display.parameters, [None; MAX_EFFECT_PARAMS]);
+                assert_eq!(display.mix, Some((0.25, 3)));
+                session.modulation.targets = [None; 3];
+                let display = session.compute_modulated_norms();
+                assert_eq!(display.parameters, [None; MAX_EFFECT_PARAMS]);
+                assert_eq!(display.mix, None);
+            });
+        }
+
+        #[test]
+        fn duplicate_display_targets_use_the_last_slot_and_extremes_are_clamped() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.effect.params[0] = 200.0;
+                session.effect.params[1] = 0.2;
+                session.effect.mix = 0.25;
+                session.modulation.targets = [Some(ModulationTarget::EffectParameter(1)); 3];
+                session.modulation.depths = [0.1, 0.2, 0.3];
+                session.modulation.msegs = [widgets::MsegData::default(); 4];
+                session.phases = [0.0, 0.25, 0.75, 0.4];
+                let display = session.compute_modulated_norms();
+                let (norm, slot) = display.parameters[1].unwrap();
+                assert!((norm - 0.32).abs() < 1e-6);
+                assert_eq!(slot, 3);
+                assert_eq!(display.parameters[0], None);
+                assert_eq!(display.mix, None);
+                session.modulation.targets = [
+                    Some(ModulationTarget::EffectParameter(1)),
+                    Some(ModulationTarget::Mix),
+                    Some(ModulationTarget::EffectParameter(0)),
+                ];
+                session.modulation.depths = [1.0, -1.0, 1.0];
+                session.phases = [0.0, 0.9, 0.9, 0.9];
+                let display = session.compute_modulated_norms();
+                assert_eq!(display.parameters[1], Some((1.0, 1)));
+                assert_eq!(display.mix, Some((0.0, 2)));
+                assert_eq!(display.parameters[0], Some((1.0, 3)));
+            });
+        }
+
+        #[test]
+        fn public_draw_layers_literal_ghost_colors_and_forwards_the_selected_playhead() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                flat_curves(session);
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                for (selection, slot) in [(0, 0), (1, 1), (2, 2), (3, 3), (usize::MAX, 3)] {
+                    session.state.selected_mseg = selection;
+                    let actual = render(session);
+                    let expected = pane_reference(session, slot, None);
+                    assert_region(
+                        &actual,
+                        &expected,
+                        session.layout.mseg_pane,
+                        &format!("selected slot {selection}"),
+                    );
+                    assert_eq!(*session.effect, effect);
+                    assert_eq!(*session.modulation, modulation);
+                }
+            });
+        }
+
+        #[test]
+        fn hovered_tooltips_use_the_active_slots_target_depth_base_and_polarity() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                flat_curves(session);
+                session.effect.params[1] = 0.2;
+                session.effect.mix = 0.25;
+                session.modulation.targets = [
+                    Some(ModulationTarget::EffectParameter(1)),
+                    Some(ModulationTarget::Mix),
+                    None,
+                ];
+                session.modulation.depths = [0.4, 0.3, -0.2];
+                for (slot, value, polarity, text) in [
+                    (
+                        0,
+                        0.25,
+                        widgets::Polarity::Unipolar,
+                        "X 0%  Y 0.25\n-12.0 dB",
+                    ),
+                    (1, 0.5, widgets::Polarity::Unipolar, "X 0%  Y 0.50\n0.40"),
+                    (2, 0.75, widgets::Polarity::Bipolar, "X 0%  Y +0.50\n40 %"),
+                    (3, 0.3, widgets::Polarity::Unipolar, "X 0%  Y 0.30"),
+                ] {
+                    session.state.selected_mseg = slot;
+                    session.state.mseg_edit = widgets::mseg::MsegEditState::new();
+                    let curve = &mut session.modulation.msegs[slot];
+                    curve.nodes[0].value = value;
+                    curve.nodes[1].value = value;
+                    curve.polarity = polarity;
+                    let layout = widgets::mseg::mseg_layout(
+                        session.layout.mseg_pane,
+                        false,
+                        session.scale_factor,
+                    );
+                    session.state.mseg_edit.on_mouse_move(
+                        widgets::mseg::phase_to_x(&layout, 0.0),
+                        widgets::mseg::value_to_y(&layout, value),
+                        curve,
+                        session.layout.mseg_pane,
+                        session.scale_factor,
+                        false,
+                    );
+                    assert_eq!(session.state.mseg_edit.hovered_node(), Some(0));
+                    let actual = render(session);
+                    let expected = pane_reference(session, slot, Some(text));
+                    assert_region(
+                        &actual,
+                        &expected,
+                        session.layout.mseg_pane,
+                        &format!("tooltip slot {slot}"),
+                    );
+                }
+            });
+        }
+
+        #[test]
+        fn selected_route_controls_render_each_slots_target_and_depth() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.modulation.targets = [
+                    Some(ModulationTarget::EffectParameter(0)),
+                    Some(ModulationTarget::EffectParameter(1)),
+                    Some(ModulationTarget::Mix),
+                ];
+                session.modulation.depths = [-0.6, 0.2, 0.75];
+                for (selection, slot, target, depth) in [
+                    (0, 0, None, 0.0),
+                    (1, 1, Some(ModulationTarget::EffectParameter(0)), -0.6),
+                    (2, 2, Some(ModulationTarget::EffectParameter(1)), 0.2),
+                    (3, 3, Some(ModulationTarget::Mix), 0.75),
+                    (usize::MAX, 3, Some(ModulationTarget::Mix), 0.75),
+                ] {
+                    session.state.selected_mseg = selection;
+                    let actual = render(session);
+                    let mut expected = canvas();
+                    view::draw_modulation_controls(
+                        &mut expected,
+                        session.text_renderer,
+                        slot,
+                        EffectKind::Svf,
+                        target,
+                        depth,
+                        false,
+                        session.scale_factor,
+                        &session.layout,
+                    );
+                    let left = session.layout.mseg_selector.0;
+                    let top = session.layout.depth.1;
+                    let right = session.layout.depth.0 + session.layout.depth.2;
+                    assert_region(
+                        &actual,
+                        &expected,
+                        (left, top, right - left, session.layout.depth.3),
+                        &format!("route slot {selection}"),
+                    );
+                }
+            });
+        }
+
+        #[test]
+        fn text_fields_render_the_pending_buffer_with_either_caret_phase() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.modulation.targets = [None; 3];
+                for (hit, buffer, rect) in [
+                    (EffectHit::Dial(0), "12345", session.layout.dials[0]),
+                    (EffectHit::Mix, "12.5", session.layout.mix),
+                ] {
+                    session.state.text_edit.begin(hit, buffer);
+                    let actual = render(session);
+                    let mut options = [canvas(), canvas()];
+                    for (pm, caret) in options.iter_mut().zip([false, true]) {
+                        let (dial, mix) = match hit {
+                            EffectHit::Dial(i) => (Some((i, buffer, caret)), None),
+                            EffectHit::Mix => (None, Some((buffer, caret))),
+                            _ => unreachable!(),
+                        };
+                        view::draw_effect_section(
+                            pm,
+                            session.text_renderer,
+                            session.effect,
+                            false,
+                            dial,
+                            mix,
+                            None,
+                            &view::ModulationDisplay::default(),
+                            session.scale_factor,
+                            &session.layout,
+                        );
+                    }
+                    let (x, y, w, h) = (
+                        rect.0 as usize,
+                        rect.1 as usize,
+                        rect.2 as usize,
+                        rect.3 as usize,
+                    );
+                    let matches = |expected: &tiny_skia::Pixmap| {
+                        (y..y + h).all(|row| {
+                            let start = (row * actual.width() as usize + x) * 4;
+                            actual.data()[start..start + w * 4]
+                                == expected.data()[start..start + w * 4]
+                        })
+                    };
+                    assert!(
+                        options.iter().any(matches),
+                        "{hit:?} did not render its pending buffer"
+                    );
+                }
+            });
+        }
+
+        #[test]
+        fn public_popup_draw_is_an_overlay_only_when_a_menu_is_open() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let mut actual = canvas();
+                let original = canvas();
+                let geometry = geometry(session);
+                session.state.draw_popup(
+                    &mut actual,
+                    session.text_renderer,
+                    session.effect,
+                    geometry,
+                );
+                assert_eq!(actual.data(), original.data());
+                let items = ["Lowpass", "Bandpass", "Highpass"];
+                session.state.effect_dropdown.open(
+                    EffectAction::ParamDropdown(2),
+                    (400.0, 100.0, 120.0, 30.0),
+                    widgets::dropdown::DropdownList::flat(&items),
+                    1,
+                    false,
+                    geometry.window_size,
+                );
+                session.state.draw_popup(
+                    &mut actual,
+                    session.text_renderer,
+                    session.effect,
+                    geometry,
+                );
+                let mut expected = canvas();
+                widgets::dropdown::draw_dropdown_popup(
+                    &mut expected,
+                    session.text_renderer,
+                    &session.state.effect_dropdown,
+                    &items,
+                    geometry.window_size,
+                );
+                assert!(actual.data() != original.data());
+                assert_region(&actual, &expected, (0.0, 0.0, 1_336.0, 680.0), "enum popup");
+            });
+        }
+    }
+
     mod editor_helpers {
         use super::*;
 
