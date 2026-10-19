@@ -288,3 +288,413 @@ fn canceled_interaction_rebases_a_dial_drag_without_another_pointer_move() {
     }
     assert_eq!(drag(true), drag(false));
 }
+
+mod event_dispatch {
+    use super::*;
+    use widgets::dropdown::{DropdownPopupLayout, RowKind, dropdown_popup_layout};
+
+    fn popup(h: &Harness) -> DropdownPopupLayout {
+        let items = view::kind_items().items;
+        dropdown_popup_layout(&h.editor.effect_dropdown, &items, h.geometry.window_size).unwrap()
+    }
+
+    fn open_kind_menu(h: &mut Harness) {
+        h.click(h.geometry.layout.kind);
+        assert!(h.editor.effect_dropdown.is_open_for(EffectAction::Kind));
+    }
+
+    fn key_event(h: &mut Harness, key: Key, state: KeyState) -> EditorResponse {
+        h.send(Event::Keyboard(KeyboardEvent {
+            key,
+            state,
+            ..KeyboardEvent::default()
+        }))
+    }
+
+    fn select_node(h: &mut Harness, slot: usize, node_index: usize) -> usize {
+        h.editor.selected_mseg = slot;
+        h.editor.mseg_edit = widgets::mseg::MsegEditState::new();
+        let index = slot.min(3);
+        h.modulation.msegs[index] = widgets::MsegData {
+            snap: false,
+            ..Default::default()
+        };
+        h.modulation.msegs[index].insert_node(0.4, 0.35).unwrap();
+        let node = h.modulation.msegs[index].nodes[node_index];
+        let layout =
+            widgets::mseg::mseg_layout(h.geometry.layout.mseg_pane, false, h.geometry.scale);
+        h.move_to(
+            widgets::mseg::phase_to_x(&layout, node.time),
+            widgets::mseg::value_to_y(&layout, node.value),
+            Modifiers::empty(),
+        );
+        h.editor.mseg_last_click_pos = (-999.0, -999.0);
+        assert!(h.press(MouseButton::Left).captured);
+        let release = h.release();
+        assert!(!release.changed);
+        assert!(!release.captured);
+        assert!(h.editor.mseg_edit.is_node_selected(node_index));
+        index
+    }
+
+    #[test]
+    fn popup_navigation_keys_select_the_expected_registry_item() {
+        let last = EffectKind::ALL.len() - 1;
+        for (keys, index) in [
+            (vec![Key::Home], 0),
+            (vec![Key::End], last),
+            (vec![Key::Home, Key::ArrowDown], 1),
+            (vec![Key::End, Key::ArrowUp], last - 1),
+            (vec![Key::Home, Key::PageDown], 11),
+            (vec![Key::End, Key::PageUp], last - 11),
+        ] {
+            let mut h = Harness::new();
+            let modulation = h.modulation.clone();
+            open_kind_menu(&mut h);
+            for key in keys {
+                let response = h.key(key);
+                assert!(response.captured);
+                assert!(!response.changed);
+            }
+            let response = h.key(Key::Enter);
+            assert!(response.captured);
+            assert!(response.changed);
+            assert!(!h.editor.dropdown_open());
+            assert_eq!(h.effect.kind, EffectKind::ALL[index]);
+            assert_eq!(
+                h.effect.params,
+                effects::default_params_for_kind(EffectKind::ALL[index])
+            );
+            assert_eq!(h.modulation.msegs, modulation.msegs);
+            assert_eq!(h.modulation.depths, modulation.depths);
+            assert_eq!(h.modulation.trigger, modulation.trigger);
+        }
+    }
+
+    #[test]
+    fn popup_key_releases_are_captured_without_navigation_or_dismissal() {
+        let mut h = Harness::new();
+        let original = h.effect;
+        open_kind_menu(&mut h);
+        for key in [
+            Key::ArrowDown,
+            Key::Enter,
+            Key::Escape,
+            Key::Backspace,
+            Key::Character("svf".into()),
+        ] {
+            let response = key_event(&mut h, key, KeyState::Up);
+            assert!(response.captured);
+            assert!(!response.changed);
+            assert!(h.editor.dropdown_open());
+            assert_eq!(h.effect, original);
+        }
+        assert!(h.key(Key::Enter).changed);
+        assert_eq!(h.effect, original);
+        assert!(!h.editor.dropdown_open());
+        open_kind_menu(&mut h);
+        let response = h.key(Key::Escape);
+        assert!(response.captured);
+        assert!(!response.changed);
+        assert!(!h.editor.captures_keyboard());
+        assert_eq!(h.effect, original);
+    }
+
+    #[test]
+    fn popup_filter_backspace_restores_a_match_after_a_multi_character_paste() {
+        let mut h = Harness::new();
+        open_kind_menu(&mut h);
+        assert!(h.key(Key::Character("svfx".into())).captured);
+        assert!(popup(&h).visible_rows.is_empty());
+        assert!(h.key(Key::Backspace).captured);
+        let kinds: Vec<_> = popup(&h)
+            .visible_rows
+            .iter()
+            .filter(|row| row.kind == RowKind::Item)
+            .map(|row| EffectKind::ALL[row.item_index])
+            .collect();
+        assert_eq!(kinds, [EffectKind::Svf]);
+        let response = h.key(Key::Enter);
+        assert!(response.captured);
+        assert!(response.changed);
+        assert_eq!(h.effect.kind, EffectKind::Svf);
+        assert!(!h.editor.dropdown_open());
+    }
+
+    #[test]
+    fn pixel_and_line_wheels_scroll_equally_and_closed_menus_ignore_wheels() {
+        for delta in [
+            baseview::ScrollDelta::Lines { x: 0.0, y: -1.0 },
+            baseview::ScrollDelta::Pixels { x: 0.0, y: -20.0 },
+        ] {
+            let mut h = Harness::new();
+            let effect = h.effect;
+            let modulation = h.modulation.clone();
+            let event = Event::Mouse(MouseEvent::WheelScrolled {
+                delta,
+                modifiers: Modifiers::empty(),
+            });
+            let ignored = h.send(event.clone());
+            assert!(!ignored.captured);
+            assert!(!ignored.changed);
+            open_kind_menu(&mut h);
+            h.key(Key::Home);
+            let initial = popup(&h);
+            let before_y = initial
+                .visible_rows
+                .iter()
+                .find(|row| row.kind == RowKind::Item && row.item_index == 0)
+                .unwrap()
+                .rect
+                .1;
+            let response = h.send(event);
+            assert!(response.captured);
+            assert!(!response.changed);
+            let after = popup(&h);
+            let after_y = after
+                .visible_rows
+                .iter()
+                .find(|row| row.kind == RowKind::Item && row.item_index == 0)
+                .map(|row| row.rect.1);
+            assert_eq!(after_y, Some(before_y - 32.0));
+            assert_eq!(h.effect, effect);
+            assert_eq!(h.modulation, modulation);
+        }
+    }
+
+    #[test]
+    fn text_paste_backspace_and_enter_commit_to_the_active_control() {
+        for (hit, text, shortened) in [
+            (EffectHit::Dial(0), "1250", "125"),
+            (EffectHit::Mix, "12.5", "12."),
+        ] {
+            let mut h = Harness::new();
+            let original = h.effect;
+            let modulation = h.modulation.clone();
+            h.editor.text_edit.begin(hit, "");
+            assert!(h.key(Key::Character(text.into())).captured);
+            assert_eq!(h.editor.text_edit.active_for(&hit), Some(text));
+            assert_eq!(h.effect, original);
+            assert!(h.key(Key::Backspace).captured);
+            assert_eq!(h.editor.text_edit.active_for(&hit), Some(shortened));
+            let response = h.key(Key::Enter);
+            assert!(response.captured);
+            assert!(response.changed);
+            let mut expected = original;
+            match hit {
+                EffectHit::Dial(0) => expected.params[0] = 125.0,
+                EffectHit::Mix => expected.mix = 0.12,
+                _ => unreachable!(),
+            }
+            assert_eq!(h.effect, expected);
+            assert_eq!(h.modulation, modulation);
+            assert!(!h.editor.captures_keyboard());
+        }
+    }
+
+    #[test]
+    fn text_key_releases_and_unhandled_keys_preserve_the_pending_edit() {
+        let mut h = Harness::new();
+        let effect = h.effect;
+        let modulation = h.modulation.clone();
+        h.editor.text_edit.begin(EffectHit::Mix, "25");
+        for key in [
+            Key::Character("999".into()),
+            Key::Backspace,
+            Key::Enter,
+            Key::Escape,
+        ] {
+            let response = key_event(&mut h, key, KeyState::Up);
+            assert!(response.captured);
+            assert!(!response.changed);
+            assert_eq!(h.editor.text_edit.active_for(&EffectHit::Mix), Some("25"));
+        }
+        let response = h.key(Key::Tab);
+        assert!(!response.captured);
+        assert!(!response.changed);
+        assert_eq!(h.editor.text_edit.active_for(&EffectHit::Mix), Some("25"));
+        let response = h.key(Key::Escape);
+        assert!(response.captured);
+        assert!(!response.changed);
+        assert!(!h.editor.captures_keyboard());
+        assert_eq!(h.effect, effect);
+        assert_eq!(h.modulation, modulation);
+        assert!(!h.key(Key::Enter).captured);
+    }
+
+    #[test]
+    fn popup_keyboard_focus_takes_priority_over_a_pending_text_edit() {
+        let mut h = Harness::new();
+        let original = h.effect;
+        open_kind_menu(&mut h);
+        h.editor.text_edit.begin(EffectHit::Mix, "25");
+        let response = h.key(Key::Escape);
+        assert!(response.captured);
+        assert!(!response.changed);
+        assert!(!h.editor.dropdown_open());
+        assert_eq!(h.editor.text_edit.active_for(&EffectHit::Mix), Some("25"));
+        assert_eq!(h.effect, original);
+        assert!(h.key(Key::Enter).changed);
+        assert_eq!(
+            h.effect,
+            TrackEffect {
+                mix: 0.25,
+                ..original
+            }
+        );
+    }
+
+    #[test]
+    fn delete_and_backspace_remove_only_selected_interior_nodes_on_key_down() {
+        for key in [Key::Delete, Key::Backspace] {
+            for slot in [0, 1, 2, 3, usize::MAX] {
+                let mut h = Harness::new();
+                let index = select_node(&mut h, slot, 1);
+                let effect = h.effect;
+                let mut expected = h.modulation.clone();
+                let response = h.key(key.clone());
+                assert!(response.captured);
+                assert!(response.changed);
+                assert_eq!(h.modulation.msegs[index].node_count, 2);
+                let nodes = h.modulation.msegs[index].active();
+                assert_eq!(
+                    (nodes[0].time, nodes[0].value, nodes[1].time, nodes[1].value),
+                    (0.0, 0.0, 1.0, 1.0)
+                );
+                expected.msegs[index] = h.modulation.msegs[index];
+                assert_eq!(h.modulation, expected);
+                assert_eq!(h.effect, effect);
+                assert_eq!(h.editor.mseg_edit.selection_count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn key_up_and_unrelated_keys_do_not_delete_selected_nodes() {
+        let mut h = Harness::new();
+        select_node(&mut h, 1, 1);
+        let effect = h.effect;
+        let modulation = h.modulation.clone();
+        for (key, state) in [
+            (Key::Delete, KeyState::Up),
+            (Key::Backspace, KeyState::Up),
+            (Key::Enter, KeyState::Down),
+            (Key::Character("x".into()), KeyState::Down),
+            (Key::ArrowLeft, KeyState::Down),
+        ] {
+            let response = key_event(&mut h, key, state);
+            assert!(!response.captured);
+            assert!(!response.changed);
+            assert_eq!(h.effect, effect);
+            assert_eq!(h.modulation, modulation);
+            assert!(h.editor.mseg_edit.is_node_selected(1));
+        }
+    }
+
+    #[test]
+    fn delete_keys_report_no_edit_for_empty_selection_or_pinned_endpoints() {
+        for selected in [None, Some(0), Some(2)] {
+            let mut h = Harness::new();
+            select_node(&mut h, 1, selected.unwrap_or(1));
+            if selected.is_none() {
+                h.editor.clear_selection();
+            }
+            let effect = h.effect;
+            let modulation = h.modulation.clone();
+            for key in [Key::Delete, Key::Backspace] {
+                let response = h.key(key);
+                assert!(!response.captured);
+                assert!(!response.changed);
+                assert_eq!(h.effect, effect);
+                assert_eq!(h.modulation, modulation);
+            }
+        }
+    }
+
+    #[test]
+    fn mseg_motion_reports_edits_and_release_stops_the_gesture_without_another_edit() {
+        for slot in [0, 1, 2, 3, usize::MAX] {
+            let mut h = Harness::new();
+            let index = select_node(&mut h, slot, 1);
+            let layout =
+                widgets::mseg::mseg_layout(h.geometry.layout.mseg_pane, false, h.geometry.scale);
+            let node = h.modulation.msegs[index].nodes[1];
+            h.move_to(
+                widgets::mseg::phase_to_x(&layout, node.time),
+                widgets::mseg::value_to_y(&layout, node.value),
+                Modifiers::empty(),
+            );
+            h.editor.mseg_last_click_pos = (-999.0, -999.0);
+            h.press(MouseButton::Left);
+            let response = h.move_to(
+                widgets::mseg::phase_to_x(&layout, 0.6),
+                widgets::mseg::value_to_y(&layout, 0.7),
+                Modifiers::empty(),
+            );
+            assert!(response.changed);
+            assert!(!response.captured);
+            assert!((h.modulation.msegs[index].nodes[1].time - 0.6).abs() < 1e-5);
+            assert!((h.modulation.msegs[index].nodes[1].value - 0.7).abs() < 1e-5);
+            let response = h.release();
+            assert!(!response.changed);
+            assert!(!response.captured);
+            let after = h.modulation.clone();
+            let response = h.move_to(
+                widgets::mseg::phase_to_x(&layout, 0.8),
+                widgets::mseg::value_to_y(&layout, 0.2),
+                Modifiers::empty(),
+            );
+            assert!(!response.changed);
+            assert_eq!(h.modulation, after);
+        }
+    }
+
+    #[test]
+    fn popup_pointer_motion_changes_the_highlight_used_by_enter() {
+        let mut h = Harness::new();
+        open_kind_menu(&mut h);
+        h.key(Key::Home);
+        let row = popup(&h)
+            .visible_rows
+            .into_iter()
+            .find(|row| row.kind == RowKind::Item && row.item_index == 2)
+            .unwrap();
+        let response = h.move_to(
+            row.rect.0 + row.rect.2 / 2.0,
+            row.rect.1 + row.rect.3 / 2.0,
+            Modifiers::empty(),
+        );
+        assert!(!response.changed);
+        assert_eq!(h.editor.mouse_pos, h.pointer);
+        let response = h.key(Key::Enter);
+        assert!(response.captured);
+        assert!(response.changed);
+        assert_eq!(h.effect.kind, EffectKind::ALL[2]);
+    }
+
+    #[test]
+    fn popup_mouse_selection_applies_the_item_and_outside_clicks_are_consumed() {
+        let mut h = Harness::new();
+        open_kind_menu(&mut h);
+        h.key(Key::Home);
+        let row = popup(&h)
+            .visible_rows
+            .into_iter()
+            .find(|row| row.kind == RowKind::Item && row.item_index == 1)
+            .unwrap();
+        let response = h.click(row.rect);
+        assert!(response.captured);
+        assert!(response.changed);
+        assert_eq!(h.effect.kind, EffectKind::ALL[1]);
+        assert!(!h.editor.dropdown_open());
+        open_kind_menu(&mut h);
+        let before = h.effect;
+        let response = h.click(h.geometry.layout.back);
+        assert!(response.captured);
+        assert!(!response.changed);
+        assert!(!response.back);
+        assert!(!h.editor.dropdown_open());
+        assert_eq!(h.effect, before);
+        assert!(h.click(h.geometry.layout.back).back);
+    }
+}
