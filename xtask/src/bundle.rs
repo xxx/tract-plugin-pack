@@ -12,14 +12,31 @@ enum BuildMode {
 #[derive(Debug)]
 struct Options {
     mode: BuildMode,
+    packages: Vec<String>,
     cargo_args: Vec<String>,
 }
 
 impl Options {
     fn parse(args: &[String]) -> Result<Self> {
         let mut mode = None;
+        let mut packages = Vec::new();
         let mut cargo_args = Vec::new();
-        for arg in args {
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            if arg == "-p" || arg == "--package" || arg.starts_with("--package=") {
+                let name = match arg.strip_prefix("--package=") {
+                    Some(name) => name,
+                    None => args
+                        .next()
+                        .context("Missing package name after -p/--package")?,
+                };
+                ensure!(
+                    !name.is_empty() && !name.starts_with('-'),
+                    "Missing package name after {arg}"
+                );
+                packages.push(name.to_owned());
+                continue;
+            }
             let selected = match arg.as_str() {
                 "--native" => Some(BuildMode::Native),
                 "--redistributable" => Some(BuildMode::Redistributable),
@@ -46,6 +63,7 @@ impl Options {
         }
         Ok(Self {
             mode: mode.unwrap_or(BuildMode::Redistributable),
+            packages,
             cargo_args,
         })
     }
@@ -116,17 +134,21 @@ pub(super) fn run(task: &str, args: &[String]) -> Result<()> {
         "--native cannot be used with bundle-universal; use redistributable builds for both architectures"
     );
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let metadata = Command::new("cargo")
-        .args(["metadata", "--no-deps", "--format-version", "1"])
-        .current_dir(&root)
-        .output()
-        .context("Could not run cargo metadata")?;
-    ensure!(
-        metadata.status.success(),
-        "cargo metadata failed: {}",
-        String::from_utf8_lossy(&metadata.stderr)
-    );
-    let plugins = plugin_names(&metadata.stdout)?;
+    let plugins = if options.packages.is_empty() {
+        let metadata = Command::new("cargo")
+            .args(["metadata", "--no-deps", "--format-version", "1"])
+            .current_dir(&root)
+            .output()
+            .context("Could not run cargo metadata")?;
+        ensure!(
+            metadata.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&metadata.stderr)
+        );
+        plugin_names(&metadata.stdout)?
+    } else {
+        options.packages
+    };
     let cpu = match options.mode {
         BuildMode::Redistributable => "generic",
         BuildMode::Native => super::detect_target_cpu().unwrap_or("generic"),
@@ -143,8 +165,10 @@ pub(super) fn run(task: &str, args: &[String]) -> Result<()> {
             .map(String::from)
             .collect(),
     };
-    let mut command = Command::new("cargo");
-    command.args(["nih-plug", task]);
+    // Set build flags on a child process without mutating this process's environment.
+    let mut command =
+        Command::new(env::current_exe().context("Could not locate xtask executable")?);
+    command.args(["__bundle", task]);
     for plugin in &plugins {
         command.args(["-p", plugin]);
     }
@@ -164,8 +188,8 @@ pub(super) fn run(task: &str, args: &[String]) -> Result<()> {
     );
     let status = command
         .status()
-        .context("Could not run cargo nih-plug; install cargo-nih-plug first")?;
-    ensure!(status.success(), "cargo nih-plug {task} failed");
+        .context("Could not run the integrated bundler")?;
+    ensure!(status.success(), "cargo xtask {task} failed");
     Ok(())
 }
 
@@ -203,6 +227,41 @@ mod tests {
                 "--release"
             ]
         );
+    }
+
+    #[test]
+    fn explicit_packages_are_separated_from_build_options() {
+        let options = Options::parse(&strings(&[
+            "--native",
+            "--locked",
+            "-p",
+            "gs-meter",
+            "--package",
+            "gain-brain",
+            "--profile=profiling",
+        ]))
+        .unwrap();
+        assert_eq!(options.packages, ["gs-meter", "gain-brain"]);
+        assert_eq!(options.cargo_args, ["--locked", "--profile=profiling"]);
+    }
+
+    #[test]
+    fn accepts_package_with_equals() {
+        let options = Options::parse(&strings(&["--package=gs-meter"])).unwrap();
+        assert_eq!(options.packages, ["gs-meter"]);
+        assert_eq!(options.cargo_args, ["--release"]);
+    }
+
+    #[test]
+    fn rejects_missing_package_names() {
+        for args in [&["-p"][..], &["--package", "--locked"], &["--package="]] {
+            assert!(Options::parse(&strings(args)).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn universal_rejects_native_mode_before_building() {
+        assert!(run("bundle-universal", &strings(&["--native"])).is_err());
     }
 
     #[test]
