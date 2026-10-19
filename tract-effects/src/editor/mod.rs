@@ -995,7 +995,10 @@ impl<'a> Session<'a> {
     }
 
     fn mseg_double_click_check(&mut self, x: f32, y: f32) -> bool {
-        let now = std::time::Instant::now();
+        self.mseg_double_click_check_at(x, y, std::time::Instant::now())
+    }
+
+    fn mseg_double_click_check_at(&mut self, x: f32, y: f32, now: std::time::Instant) -> bool {
         let elapsed_ms = now
             .duration_since(self.state.mseg_last_click_time)
             .as_millis();
@@ -1766,6 +1769,131 @@ mod tests {
                 assert_eq!(tracker.last_time, now);
                 assert_eq!(tracker.last_action, Some(action));
             }
+        }
+    }
+
+    mod mseg_click {
+        use super::*;
+        use std::time::{Duration, Instant};
+
+        #[test]
+        fn wrapper_records_the_first_press_with_the_current_time_and_position() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                let before = Instant::now();
+                assert!(!session.mseg_double_click_check(45.0, 55.0));
+                let after = Instant::now();
+                assert!((before..=after).contains(&session.state.mseg_last_click_time));
+                assert_eq!(session.state.mseg_last_click_pos, (45.0, 55.0));
+                assert_eq!(*session.effect, effect);
+                assert_eq!(*session.modulation, modulation);
+                assert!(!session.response.changed);
+            });
+        }
+
+        #[test]
+        fn nearby_presses_must_be_strictly_less_than_four_hundred_ms_apart() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let anchor = Instant::now();
+                for (elapsed, expected) in [
+                    (Duration::ZERO, true),
+                    (Duration::from_millis(399), true),
+                    (Duration::from_micros(399_999), true),
+                    (Duration::from_millis(400), false),
+                    (Duration::from_micros(400_001), false),
+                    (Duration::from_secs(1), false),
+                ] {
+                    session.state.mseg_last_click_time = anchor;
+                    session.state.mseg_last_click_pos = (17.25, -23.5);
+                    let now = anchor + elapsed;
+                    assert_eq!(
+                        session.mseg_double_click_check_at(17.25, -23.5, now),
+                        expected,
+                        "after {elapsed:?}"
+                    );
+                    assert_eq!(session.state.mseg_last_click_time, now);
+                    assert_eq!(session.state.mseg_last_click_pos, (17.25, -23.5));
+                }
+            });
+        }
+
+        #[test]
+        fn quick_presses_must_be_strictly_inside_an_eight_pixel_circle() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let anchor = Instant::now();
+                let previous = (37.25, -19.5);
+                for (dx, dy, expected) in [
+                    (0.0, 0.0, true),
+                    (7.999, 0.0, true),
+                    (8.0, 0.0, false),
+                    (8.001, 0.0, false),
+                    (-7.5, 0.0, true),
+                    (-8.0, 0.0, false),
+                    (0.0, 7.999, true),
+                    (0.0, 8.0, false),
+                    (0.0, 8.001, false),
+                    (0.0, -7.5, true),
+                    (0.0, -8.0, false),
+                    (3.0, 4.0, true),
+                    (-3.0, 4.0, true),
+                    (3.0, -4.0, true),
+                    (-3.0, -4.0, true),
+                    (6.0, 6.0, false),
+                    (-6.0, 6.0, false),
+                    (6.0, -6.0, false),
+                    (-6.0, -6.0, false),
+                    (9.0, 0.0, false),
+                    (0.0, 9.0, false),
+                ] {
+                    session.state.mseg_last_click_time = anchor;
+                    session.state.mseg_last_click_pos = previous;
+                    let now = anchor + Duration::from_millis(100);
+                    let point = (previous.0 + dx, previous.1 + dy);
+                    assert_eq!(
+                        session.mseg_double_click_check_at(point.0, point.1, now),
+                        expected,
+                        "offset ({dx}, {dy})"
+                    );
+                    assert_eq!(session.state.mseg_last_click_time, now);
+                    assert_eq!(session.state.mseg_last_click_pos, point);
+                }
+            });
+        }
+
+        #[test]
+        fn every_press_updates_both_history_fields_even_after_a_miss() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let anchor = Instant::now();
+                session.state.mseg_last_click_time = anchor;
+                session.state.mseg_last_click_pos = (-999.0, -999.0);
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                for (millis, x, y, expected) in [
+                    (0, 10.0, 20.0, false),
+                    (100, 13.0, 24.0, true),
+                    (200, 21.0, 24.0, false),
+                    (250, 24.0, 28.0, true),
+                    (650, 24.0, 28.0, false),
+                    (651, 24.0, 28.0, true),
+                    (700, 30.0, 22.0, false),
+                    (750, 27.0, 26.0, true),
+                    (1_149, 27.0, 26.0, true),
+                    (1_549, 27.0, 26.0, false),
+                ] {
+                    let now = anchor + Duration::from_millis(millis);
+                    assert_eq!(
+                        session.mseg_double_click_check_at(x, y, now),
+                        expected,
+                        "press at {millis} ms"
+                    );
+                    assert_eq!(session.state.mseg_last_click_time, now);
+                    assert_eq!(session.state.mseg_last_click_pos, (x, y));
+                    assert_eq!(*session.effect, effect);
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(!session.response.changed);
+                }
+            });
         }
     }
 
