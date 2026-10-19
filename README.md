@@ -302,7 +302,8 @@ local commands, and CI behaviour.
 
 ## License
 
-GPL-3.0-or-later
+Licensed under the GNU General Public License, version 3 or (at your option)
+any later version: ([LICENSE](LICENSE) or <https://www.gnu.org/licenses/gpl-3.0.html>)
 
 ## Author
 
