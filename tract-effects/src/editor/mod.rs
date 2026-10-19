@@ -1769,6 +1769,592 @@ mod tests {
         }
     }
 
+    mod editor_timing {
+        use super::*;
+
+        #[test]
+        fn normalized_dials_and_mix_read_host_values_and_missing_controls_use_fallbacks() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.effect.params[0] = 200.0;
+                session.effect.params[1] = 0.27;
+                session.effect.mix = 0.23;
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                assert!((session.normalized_for_hit(EffectHit::Dial(0)) - 1.0 / 3.0).abs() < 1e-6);
+                assert_eq!(session.normalized_for_hit(EffectHit::Dial(1)), 0.27);
+                assert_eq!(session.normalized_for_hit(EffectHit::Mix), 0.23);
+                for index in [4, MAX_EFFECT_PARAMS, usize::MAX] {
+                    assert_eq!(session.normalized_for_hit(EffectHit::Dial(index)), 0.0);
+                }
+                for hit in [
+                    EffectHit::Back,
+                    EffectHit::Kind,
+                    EffectHit::Randomize,
+                    EffectHit::Target,
+                    EffectHit::Trigger,
+                    EffectHit::MsegSelector(3),
+                ] {
+                    assert_eq!(session.normalized_for_hit(hit), 0.5, "{hit:?}");
+                }
+                assert_eq!(*session.effect, effect);
+                assert_eq!(*session.modulation, modulation);
+                assert!(!session.response.changed);
+            });
+        }
+
+        #[test]
+        fn normalized_depth_uses_each_assignable_slot_and_amp_stays_at_the_midpoint() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                for slot in 0..4 {
+                    session.state.selected_mseg = slot;
+                    for (depth, expected) in [
+                        (-2.0, 0.0),
+                        (-1.0, 0.0),
+                        (-0.5, 0.25),
+                        (0.0, 0.5),
+                        (0.5, 0.75),
+                        (1.0, 1.0),
+                        (2.0, 1.0),
+                    ] {
+                        session.modulation.depths = [0.1, 0.2, 0.3];
+                        if slot != 0 {
+                            session.modulation.depths[slot - 1] = depth;
+                        }
+                        let modulation = session.modulation.clone();
+                        assert_eq!(
+                            session.normalized_for_hit(EffectHit::Depth),
+                            if slot == 0 { 0.5 } else { expected }
+                        );
+                        assert_eq!(*session.modulation, modulation);
+                        assert!(!session.response.changed);
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn trigger_norms_read_logarithmic_rate_inverse_sensitivity_and_hold() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                for (hz, expected) in [(0.05, 0.0), (0.223_606_8, 0.25), (1.0, 0.5), (20.0, 1.0)] {
+                    session.modulation.trigger = TriggerSource::FreeHz { hz };
+                    assert!(
+                        (session.normalized_for_hit(EffectHit::TriggerRate) - expected).abs()
+                            < 1e-6
+                    );
+                    assert_eq!(session.normalized_for_hit(EffectHit::TriggerAux), 0.5);
+                }
+                for (threshold, hold_ms, sensitivity, hold) in [
+                    (6.0, 5.0, 0.0, 0.0),
+                    (2.509_980_2, 50.0, 0.5, 0.5),
+                    (1.05, 500.0, 1.0, 1.0),
+                ] {
+                    session.modulation.trigger = TriggerSource::Transient { threshold, hold_ms };
+                    let before = session.modulation.clone();
+                    assert!(
+                        (session.normalized_for_hit(EffectHit::TriggerRate) - sensitivity).abs()
+                            < 1e-6
+                    );
+                    assert!(
+                        (session.normalized_for_hit(EffectHit::TriggerAux) - hold).abs() < 1e-6
+                    );
+                    assert_eq!(*session.modulation, before);
+                }
+                for trigger in [
+                    TriggerSource::Free,
+                    TriggerSource::CellLight,
+                    TriggerSource::CellStep,
+                ] {
+                    session.modulation.trigger = trigger;
+                    assert_eq!(session.normalized_for_hit(EffectHit::TriggerRate), 0.5);
+                    assert_eq!(session.normalized_for_hit(EffectHit::TriggerAux), 0.5);
+                }
+                assert!(!session.response.changed);
+            });
+        }
+
+        #[test]
+        fn length_norm_reads_the_selected_clock_and_clamps_oversized_slots() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                for (slot, index) in [(0, 0), (1, 1), (2, 2), (3, 3), (usize::MAX, 3)] {
+                    session.state.selected_mseg = slot;
+                    for (seconds, expected) in [(0.05, 0.0), (1.264_911, 0.5), (32.0, 1.0)] {
+                        let mseg = &mut session.modulation.msegs[index];
+                        mseg.sync_mode = widgets::SyncMode::Time;
+                        mseg.time_seconds = seconds;
+                        let before = session.modulation.clone();
+                        assert!((session.active_mseg_length_norm() - expected).abs() < 1e-6);
+                        assert!(
+                            (session.normalized_for_hit(EffectHit::MsegLength) - expected).abs()
+                                < 1e-6
+                        );
+                        assert_eq!(*session.modulation, before);
+                    }
+                    for (beats, expected) in [
+                        (0.25, 0.0),
+                        (1.0, 0.2),
+                        (4.0, 0.4),
+                        (8.0, 0.5),
+                        (256.0, 1.0),
+                    ] {
+                        let mseg = &mut session.modulation.msegs[index];
+                        mseg.sync_mode = widgets::SyncMode::Beat;
+                        mseg.beats = beats;
+                        assert_eq!(session.active_mseg_length_norm(), expected);
+                        assert_eq!(session.normalized_for_hit(EffectHit::MsegLength), expected);
+                    }
+                    assert!(!session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn sync_selection_changes_only_the_active_mseg_mode_and_reports_reselection() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let original = session.modulation.clone();
+                let effect = *session.effect;
+                for (slot, index) in [(0, 0), (1, 1), (2, 2), (3, 3), (usize::MAX, 3)] {
+                    session.state.selected_mseg = slot;
+                    for (segment, mode) in [
+                        (0, widgets::SyncMode::Time),
+                        (1, widgets::SyncMode::Beat),
+                        (usize::MAX, widgets::SyncMode::Beat),
+                    ] {
+                        *session.modulation = original.clone();
+                        let mut expected = original.clone();
+                        expected.msegs[index].sync_mode = mode;
+                        for _ in 0..2 {
+                            session.response = EditorResponse::default();
+                            session.apply_mseg_sync(segment);
+                            assert_eq!(*session.modulation, expected);
+                            assert_eq!(*session.effect, effect);
+                            assert!(session.response.changed);
+                        }
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn time_length_drag_preserves_beats_and_every_other_envelope() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let original = session.modulation.clone();
+                let effect = *session.effect;
+                for (slot, index) in [(0, 0), (1, 1), (2, 2), (3, 3), (usize::MAX, 3)] {
+                    session.state.selected_mseg = slot;
+                    for (norm, seconds) in [
+                        (-1.0, 0.05),
+                        (0.0, 0.05),
+                        (0.5, 1.264_911),
+                        (1.0, 32.0),
+                        (2.0, 32.0),
+                    ] {
+                        *session.modulation = original.clone();
+                        session.modulation.msegs[index].sync_mode = widgets::SyncMode::Time;
+                        let mut expected = session.modulation.clone();
+                        session.response = EditorResponse::default();
+                        session.apply_mseg_length_drag(norm);
+                        let actual = session.modulation.msegs[index].time_seconds;
+                        assert!(
+                            (actual - seconds).abs() < 1e-4,
+                            "slot {slot}, norm {norm}: {actual}"
+                        );
+                        expected.msegs[index].time_seconds = actual;
+                        assert_eq!(*session.modulation, expected);
+                        assert_eq!(*session.effect, effect);
+                        assert!(session.response.changed);
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn beat_length_drag_snaps_to_musical_steps_and_preserves_seconds() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let original = session.modulation.clone();
+                let effect = *session.effect;
+                for (slot, index) in [(0, 0), (1, 1), (2, 2), (3, 3), (usize::MAX, 3)] {
+                    session.state.selected_mseg = slot;
+                    for (norm, beats) in [
+                        (-1.0, 0.25),
+                        (0.0, 0.25),
+                        (0.4, 4.0),
+                        (0.449, 4.0),
+                        (0.451, 8.0),
+                        (1.0, 256.0),
+                        (2.0, 256.0),
+                    ] {
+                        *session.modulation = original.clone();
+                        session.modulation.msegs[index].sync_mode = widgets::SyncMode::Beat;
+                        let mut expected = session.modulation.clone();
+                        expected.msegs[index].beats = beats;
+                        session.response = EditorResponse::default();
+                        session.apply_mseg_length_drag(norm);
+                        assert_eq!(*session.modulation, expected, "slot {slot}, norm {norm}");
+                        assert_eq!(*session.effect, effect);
+                        assert!(session.response.changed);
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn free_hz_rate_drag_uses_the_log_range_and_preserves_other_configuration() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.modulation.trigger = TriggerSource::FreeHz { hz: 3.7 };
+                let original = session.modulation.clone();
+                let effect = *session.effect;
+                for (norm, expected_hz) in [
+                    (-0.5, 0.05),
+                    (0.0, 0.05),
+                    (0.25, 0.223_606_8),
+                    (0.5, 1.0),
+                    (1.0, 20.0),
+                    (1.5, 20.0),
+                ] {
+                    *session.modulation = original.clone();
+                    session.response = EditorResponse::default();
+                    session.apply_trigger_rate_drag(norm);
+                    let TriggerSource::FreeHz { hz } = session.modulation.trigger else {
+                        panic!("rate drag changed trigger kind")
+                    };
+                    assert!((hz - expected_hz).abs() < 1e-5);
+                    let mut expected = original.clone();
+                    expected.trigger = TriggerSource::FreeHz { hz };
+                    assert_eq!(*session.modulation, expected);
+                    assert_eq!(*session.effect, effect);
+                    assert!(session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn sensitivity_drag_lowers_the_threshold_as_it_increases_and_preserves_hold() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.modulation.trigger = TriggerSource::Transient {
+                    threshold: 3.2,
+                    hold_ms: 73.0,
+                };
+                let original = session.modulation.clone();
+                let effect = *session.effect;
+                for (norm, expected_threshold) in [
+                    (-0.5, 6.0),
+                    (0.0, 6.0),
+                    (0.5, 2.509_980_2),
+                    (1.0, 1.05),
+                    (1.5, 1.05),
+                ] {
+                    *session.modulation = original.clone();
+                    session.response = EditorResponse::default();
+                    session.apply_trigger_rate_drag(norm);
+                    let TriggerSource::Transient { threshold, hold_ms } =
+                        session.modulation.trigger
+                    else {
+                        panic!("sensitivity drag changed trigger kind")
+                    };
+                    assert!((threshold - expected_threshold).abs() < 1e-5);
+                    assert_eq!(hold_ms, 73.0);
+                    let mut expected = original.clone();
+                    expected.trigger = TriggerSource::Transient {
+                        threshold,
+                        hold_ms: 73.0,
+                    };
+                    assert_eq!(*session.modulation, expected);
+                    assert_eq!(*session.effect, effect);
+                    assert!(session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn hold_drag_uses_the_log_range_without_changing_sensitivity() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.modulation.trigger = TriggerSource::Transient {
+                    threshold: 2.5,
+                    hold_ms: 73.0,
+                };
+                let original = session.modulation.clone();
+                let effect = *session.effect;
+                for (norm, expected_hold) in [
+                    (-0.5, 5.0),
+                    (0.0, 5.0),
+                    (0.25, 15.811_388),
+                    (0.5, 50.0),
+                    (1.0, 500.0),
+                    (1.5, 500.0),
+                ] {
+                    *session.modulation = original.clone();
+                    session.response = EditorResponse::default();
+                    session.apply_trigger_aux_drag(norm);
+                    let TriggerSource::Transient { threshold, hold_ms } =
+                        session.modulation.trigger
+                    else {
+                        panic!("hold drag changed trigger kind")
+                    };
+                    assert_eq!(threshold, 2.5);
+                    assert!((hold_ms - expected_hold).abs() < 1e-4);
+                    let mut expected = original.clone();
+                    expected.trigger = TriggerSource::Transient {
+                        threshold: 2.5,
+                        hold_ms,
+                    };
+                    assert_eq!(*session.modulation, expected);
+                    assert_eq!(*session.effect, effect);
+                    assert!(session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn trigger_resets_restore_only_the_supported_control_default() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                for (before, rate, aux, rate_changed, aux_changed) in [
+                    (
+                        TriggerSource::Free,
+                        TriggerSource::Free,
+                        TriggerSource::Free,
+                        false,
+                        false,
+                    ),
+                    (
+                        TriggerSource::CellLight,
+                        TriggerSource::CellLight,
+                        TriggerSource::CellLight,
+                        false,
+                        false,
+                    ),
+                    (
+                        TriggerSource::CellStep,
+                        TriggerSource::CellStep,
+                        TriggerSource::CellStep,
+                        false,
+                        false,
+                    ),
+                    (
+                        TriggerSource::FreeHz { hz: 3.7 },
+                        TriggerSource::FreeHz { hz: 1.0 },
+                        TriggerSource::FreeHz { hz: 3.7 },
+                        true,
+                        false,
+                    ),
+                    (
+                        TriggerSource::Transient {
+                            threshold: 2.5,
+                            hold_ms: 73.0,
+                        },
+                        TriggerSource::Transient {
+                            threshold: 1.5,
+                            hold_ms: 73.0,
+                        },
+                        TriggerSource::Transient {
+                            threshold: 2.5,
+                            hold_ms: 50.0,
+                        },
+                        true,
+                        true,
+                    ),
+                ] {
+                    session.modulation.trigger = before;
+                    let original = session.modulation.clone();
+                    let effect = *session.effect;
+                    session.response = EditorResponse::default();
+                    session.reset_trigger_rate_to_default();
+                    let mut expected = original.clone();
+                    expected.trigger = rate;
+                    assert_eq!(*session.modulation, expected);
+                    assert_eq!(session.response.changed, rate_changed);
+
+                    *session.modulation = original.clone();
+                    session.response = EditorResponse::default();
+                    session.reset_trigger_aux_to_default();
+                    expected.trigger = aux;
+                    assert_eq!(*session.modulation, expected);
+                    assert_eq!(*session.effect, effect);
+                    assert_eq!(session.response.changed, aux_changed);
+                }
+            });
+        }
+
+        #[test]
+        fn inactive_trigger_drags_and_non_draggable_hits_preserve_state_and_dirty_flags() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                for (trigger, hits) in [
+                    (
+                        TriggerSource::Free,
+                        &[EffectHit::TriggerRate, EffectHit::TriggerAux][..],
+                    ),
+                    (
+                        TriggerSource::CellLight,
+                        &[EffectHit::TriggerRate, EffectHit::TriggerAux][..],
+                    ),
+                    (
+                        TriggerSource::CellStep,
+                        &[EffectHit::TriggerRate, EffectHit::TriggerAux][..],
+                    ),
+                    (
+                        TriggerSource::FreeHz { hz: 3.7 },
+                        &[EffectHit::TriggerAux][..],
+                    ),
+                ] {
+                    session.modulation.trigger = trigger;
+                    let before = session.modulation.clone();
+                    let effect = *session.effect;
+                    for &hit in hits.iter().chain(
+                        [
+                            EffectHit::Back,
+                            EffectHit::Kind,
+                            EffectHit::Randomize,
+                            EffectHit::Target,
+                            EffectHit::Trigger,
+                            EffectHit::MsegSelector(2),
+                        ]
+                        .iter(),
+                    ) {
+                        for dirty in [false, true] {
+                            session.response.changed = dirty;
+                            session.apply_drag(hit, 0.75);
+                            assert_eq!(*session.modulation, before);
+                            assert_eq!(*session.effect, effect);
+                            assert_eq!(session.response.changed, dirty);
+                        }
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn trigger_selection_carries_settings_within_a_family_and_defaults_across_families() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let effect = *session.effect;
+                for (before, hz, threshold, hold_ms) in [
+                    (TriggerSource::Free, 1.0, 1.5, 50.0),
+                    (TriggerSource::CellLight, 1.0, 1.5, 50.0),
+                    (TriggerSource::CellStep, 1.0, 1.5, 50.0),
+                    (TriggerSource::FreeHz { hz: 3.7 }, 3.7, 1.5, 50.0),
+                    (
+                        TriggerSource::Transient {
+                            threshold: 2.5,
+                            hold_ms: 73.0,
+                        },
+                        1.0,
+                        2.5,
+                        73.0,
+                    ),
+                ] {
+                    session.modulation.trigger = before;
+                    let original = session.modulation.clone();
+                    for (index, trigger) in [
+                        TriggerSource::Free,
+                        TriggerSource::CellLight,
+                        TriggerSource::CellStep,
+                        TriggerSource::FreeHz { hz },
+                        TriggerSource::Transient { threshold, hold_ms },
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        *session.modulation = original.clone();
+                        session.response = EditorResponse::default();
+                        session.apply_trigger_selection(index);
+                        let mut expected = original.clone();
+                        expected.trigger = trigger;
+                        assert_eq!(*session.modulation, expected);
+                        assert_eq!(*session.effect, effect);
+                        assert!(session.response.changed);
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn filtered_trigger_selection_uses_host_order_and_missing_items_fall_back_to_free() {
+            with_session(
+                &[
+                    TriggerChoice::Transient,
+                    TriggerChoice::FreeHz,
+                    TriggerChoice::CellStep,
+                ],
+                EffectKind::Svf,
+                |session| {
+                    for (index, trigger) in [
+                        (
+                            0,
+                            TriggerSource::Transient {
+                                threshold: 1.5,
+                                hold_ms: 50.0,
+                            },
+                        ),
+                        (1, TriggerSource::FreeHz { hz: 2.0 }),
+                        (2, TriggerSource::CellStep),
+                        (3, TriggerSource::Free),
+                        (usize::MAX, TriggerSource::Free),
+                    ] {
+                        session.modulation.trigger = TriggerSource::FreeHz { hz: 2.0 };
+                        session.response = EditorResponse::default();
+                        session.apply_trigger_selection(index);
+                        assert_eq!(session.modulation.trigger, trigger);
+                        assert!(session.response.changed);
+                    }
+                },
+            );
+            with_session(&[], EffectKind::Svf, |session| {
+                session.modulation.trigger = TriggerSource::FreeHz { hz: 2.0 };
+                session.apply_trigger_selection(0);
+                assert_eq!(session.modulation.trigger, TriggerSource::Free);
+                assert!(session.response.changed);
+            });
+        }
+
+        #[test]
+        fn drag_dispatch_applies_each_supported_control() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.apply_drag(EffectHit::Dial(1), 0.25);
+                assert_eq!(session.effect.params[1], 0.25);
+                assert!(session.response.changed);
+
+                session.state.selected_mseg = 3;
+                session.response = EditorResponse::default();
+                session.apply_drag(EffectHit::Depth, 0.75);
+                assert_eq!(session.modulation.depths[2], 0.5);
+                assert!(session.response.changed);
+
+                session.modulation.trigger = TriggerSource::FreeHz { hz: 3.7 };
+                session.response = EditorResponse::default();
+                session.apply_drag(EffectHit::TriggerRate, 0.5);
+                let TriggerSource::FreeHz { hz } = session.modulation.trigger else {
+                    panic!("rate drag changed trigger kind")
+                };
+                assert!((hz - 1.0).abs() < 1e-6);
+                assert!(session.response.changed);
+
+                session.modulation.trigger = TriggerSource::Transient {
+                    threshold: 2.5,
+                    hold_ms: 73.0,
+                };
+                session.response = EditorResponse::default();
+                session.apply_drag(EffectHit::TriggerAux, 0.5);
+                assert_eq!(
+                    session.modulation.trigger,
+                    TriggerSource::Transient {
+                        threshold: 2.5,
+                        hold_ms: 50.0
+                    }
+                );
+                assert!(session.response.changed);
+
+                session.modulation.msegs[3].sync_mode = widgets::SyncMode::Beat;
+                session.response = EditorResponse::default();
+                session.apply_drag(EffectHit::MsegLength, 0.4);
+                assert_eq!(session.modulation.msegs[3].beats, 4.0);
+                assert!(session.response.changed);
+
+                session.response = EditorResponse::default();
+                session.apply_drag(EffectHit::Mix, 0.37);
+                assert_eq!(session.effect.mix, 0.37);
+                assert!(session.response.changed);
+            });
+        }
+    }
+
     mod editor_edits {
         use super::*;
 
