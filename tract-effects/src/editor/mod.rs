@@ -1769,6 +1769,578 @@ mod tests {
         }
     }
 
+    mod editor_text {
+        use super::*;
+
+        fn center(rect: (f32, f32, f32, f32)) -> (f32, f32) {
+            (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0)
+        }
+
+        fn select_interior_node(session: &mut Session<'_>) -> (f32, f32) {
+            let slot = session.state.selected_mseg.min(3);
+            let data = &mut session.modulation.msegs[slot];
+            let index = data.insert_node(0.5, 0.35).unwrap();
+            let node = data.nodes[index];
+            let layout =
+                widgets::mseg::mseg_layout(session.layout.mseg_pane, false, session.scale_factor);
+            let point = (
+                widgets::mseg::phase_to_x(&layout, node.time),
+                widgets::mseg::value_to_y(&layout, node.value),
+            );
+            session.state.mseg_edit.on_mouse_down(
+                point.0,
+                point.1,
+                data,
+                session.layout.mseg_pane,
+                session.scale_factor,
+                false,
+            );
+            session.state.mseg_edit.on_mouse_up(
+                data,
+                session.layout.mseg_pane,
+                session.scale_factor,
+            );
+            assert!(session.state.mseg_edit.is_node_selected(index));
+            point
+        }
+
+        fn open_menu(editor: &mut EffectEditor) {
+            editor.effect_dropdown.open(
+                EffectAction::Kind,
+                (20.0, 20.0, 140.0, 30.0),
+                widgets::dropdown::DropdownList::flat(&["one", "two"]),
+                0,
+                true,
+                (800.0, 600.0),
+            );
+        }
+
+        #[test]
+        fn dial_text_parses_units_and_clamps_only_the_edited_parameter() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let original = *session.effect;
+                let modulation = session.modulation.clone();
+                for (index, text, value) in [
+                    (0, "800", 800.0),
+                    (0, " 1.5 kHz ", 1_500.0),
+                    (0, "2K", 2_000.0),
+                    (0, "0", 20.0),
+                    (0, "30000", 20_000.0),
+                    (1, ".25", 0.25),
+                    (1, "-1", 0.0),
+                    (1, "2", 1.0),
+                ] {
+                    *session.effect = original;
+                    session.response = EditorResponse::default();
+                    session.commit_dial_text_edit(index, text);
+                    let mut expected = original;
+                    expected.params[index] = value;
+                    assert_eq!(*session.effect, expected, "parameter {index}, text {text}");
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn invalid_dial_text_and_missing_parameters_preserve_configuration_and_dirty_flags() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                for (index, text) in [
+                    (0, ""),
+                    (0, "bad"),
+                    (0, "NaN"),
+                    (0, "inf"),
+                    (0, "-inf"),
+                    (0, "1e100"),
+                    (1, "NaN"),
+                    (4, "0.75"),
+                    (MAX_EFFECT_PARAMS, "0.75"),
+                    (usize::MAX, "0.75"),
+                ] {
+                    for dirty in [false, true] {
+                        session.response.changed = dirty;
+                        session.commit_dial_text_edit(index, text);
+                        assert_eq!(*session.effect, effect);
+                        assert_eq!(*session.modulation, modulation);
+                        assert_eq!(session.response.changed, dirty);
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn mix_text_accepts_finite_percentages_and_clamps_the_blend() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                for (text, mix) in [
+                    ("25", 0.25),
+                    (" 12.5 ", 0.125),
+                    ("-20", 0.0),
+                    ("250", 1.0),
+                    ("1e2", 1.0),
+                    ("0", 0.0),
+                ] {
+                    session.response = EditorResponse::default();
+                    session.commit_mix_text_edit(text);
+                    assert_eq!(*session.effect, TrackEffect { mix, ..effect });
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn invalid_mix_text_preserves_the_blend_and_existing_dirty_flags() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.effect.mix = 0.37;
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                for text in ["", "bad", "25 %", "NaN", "inf", "-inf", "1e100"] {
+                    for dirty in [false, true] {
+                        session.response.changed = dirty;
+                        session.commit_mix_text_edit(text);
+                        assert_eq!(*session.effect, effect, "{text}");
+                        assert_eq!(*session.modulation, modulation);
+                        assert_eq!(session.response.changed, dirty);
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn pressing_the_edited_control_cancels_while_other_presses_commit() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let original = *session.effect;
+                let modulation = session.modulation.clone();
+                for (action, text, rect) in [
+                    (EffectHit::Dial(0), "800", session.layout.dials[0]),
+                    (EffectHit::Mix, "25", session.layout.mix),
+                ] {
+                    for same_control in [true, false] {
+                        *session.effect = original;
+                        session.state.text_edit.begin(action, text);
+                        session.response = EditorResponse::default();
+                        let (x, y) = if same_control {
+                            center(rect)
+                        } else {
+                            (-100.0, -100.0)
+                        };
+                        session.finalize_dial_edit_for_press(x, y);
+                        let mut expected = original;
+                        if !same_control {
+                            match action {
+                                EffectHit::Dial(0) => expected.params[0] = 800.0,
+                                EffectHit::Mix => expected.mix = 0.25,
+                                _ => unreachable!(),
+                            }
+                        }
+                        assert_eq!(*session.effect, expected);
+                        assert_eq!(*session.modulation, modulation);
+                        assert!(!session.state.text_edit.is_active());
+                        assert_eq!(session.response.changed, !same_control);
+                        assert!(!session.response.captured);
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn idle_and_unsupported_text_finalization_leave_host_state_unchanged() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                for active in [false, true] {
+                    if active {
+                        session.state.text_edit.begin(EffectHit::Depth, "0.75");
+                    }
+                    for dirty in [false, true] {
+                        session.response.changed = dirty;
+                        session.finalize_dial_edit_for_press(-100.0, -100.0);
+                        assert_eq!(*session.effect, effect);
+                        assert_eq!(*session.modulation, modulation);
+                        assert!(!session.state.text_edit.is_active());
+                        assert_eq!(session.response.changed, dirty);
+                    }
+                }
+            });
+        }
+
+        #[test]
+        fn public_finish_commits_before_host_focus_moves_even_when_pointer_stays_on_the_dial() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let original = *session.effect;
+                let modulation = session.modulation.clone();
+                for (action, text, rect, cutoff, mix, changed) in [
+                    (
+                        EffectHit::Dial(0),
+                        "800",
+                        session.layout.dials[0],
+                        800.0,
+                        1.0,
+                        true,
+                    ),
+                    (
+                        EffectHit::Mix,
+                        "25",
+                        session.layout.mix,
+                        2_000.0,
+                        0.25,
+                        true,
+                    ),
+                    (
+                        EffectHit::Dial(0),
+                        "NaN",
+                        session.layout.dials[0],
+                        2_000.0,
+                        1.0,
+                        false,
+                    ),
+                ] {
+                    *session.effect = original;
+                    session.state.text_edit.begin(action, text);
+                    let response = session.state.finish_text_edit(EditorContext {
+                        pointer_position: center(rect),
+                        effect: session.effect,
+                        modulation: session.modulation,
+                        text_renderer: session.text_renderer,
+                        geometry: EditorGeometry {
+                            layout: session.layout,
+                            scale: session.scale_factor,
+                            window_size: (session.physical_width, session.physical_height),
+                        },
+                    });
+                    let mut expected = original;
+                    expected.params[0] = cutoff;
+                    expected.mix = mix;
+                    assert_eq!(*session.effect, expected);
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(!session.state.captures_keyboard());
+                    assert_eq!(
+                        (
+                            response.changed,
+                            response.captured,
+                            response.back,
+                            response.randomize
+                        ),
+                        (changed, false, false, false)
+                    );
+                }
+                let before = *session.effect;
+                let response = session.state.finish_text_edit(EditorContext {
+                    pointer_position: (0.0, 0.0),
+                    effect: session.effect,
+                    modulation: session.modulation,
+                    text_renderer: session.text_renderer,
+                    geometry: EditorGeometry {
+                        layout: session.layout,
+                        scale: session.scale_factor,
+                        window_size: (session.physical_width, session.physical_height),
+                    },
+                });
+                assert_eq!(*session.effect, before);
+                assert!(!response.changed);
+            });
+        }
+
+        #[test]
+        fn right_press_commits_every_dial_mix_transition_before_seeding_the_next_edit() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.effect.mix = 0.374;
+                let original = *session.effect;
+                let modulation = session.modulation.clone();
+                for (previous, text, next, seed, cutoff, mix) in [
+                    (
+                        EffectHit::Dial(0),
+                        "800",
+                        EffectHit::Dial(1),
+                        "0.10",
+                        800.0,
+                        0.374,
+                    ),
+                    (
+                        EffectHit::Mix,
+                        "25",
+                        EffectHit::Dial(1),
+                        "0.10",
+                        2_000.0,
+                        0.25,
+                    ),
+                    (
+                        EffectHit::Dial(0),
+                        "800",
+                        EffectHit::Mix,
+                        "37",
+                        800.0,
+                        0.374,
+                    ),
+                    (EffectHit::Mix, "25", EffectHit::Mix, "25", 2_000.0, 0.25),
+                ] {
+                    *session.effect = original;
+                    session.state.text_edit.begin(previous, text);
+                    session.mouse_pos = center(if next == EffectHit::Mix {
+                        session.layout.mix
+                    } else {
+                        session.layout.dials[1]
+                    });
+                    session.response = EditorResponse::default();
+                    assert!(matches!(
+                        session.on_right_press(),
+                        baseview::EventStatus::Captured
+                    ));
+                    let mut expected = original;
+                    expected.params[0] = cutoff;
+                    expected.mix = mix;
+                    assert_eq!(*session.effect, expected);
+                    assert_eq!(*session.modulation, modulation);
+                    assert_eq!(session.state.text_edit.active_for(&next), Some(seed));
+                    assert!(session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn right_press_seeds_bare_parameter_values_and_rounded_mix_percentages() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.effect.params[0] = 1_500.0;
+                session.effect.params[1] = 0.1234;
+                for (index, seed) in [(0, "1500"), (1, "0.12")] {
+                    session.state.text_edit.cancel();
+                    session.mouse_pos = center(session.layout.dials[index]);
+                    session.response = EditorResponse::default();
+                    assert!(matches!(
+                        session.on_right_press(),
+                        baseview::EventStatus::Captured
+                    ));
+                    assert_eq!(
+                        session.state.text_edit.active_for(&EffectHit::Dial(index)),
+                        Some(seed)
+                    );
+                    assert!(!session.response.changed);
+                }
+                for (mix, seed) in [(0.0, "0"), (0.374, "37"), (0.376, "38"), (1.0, "100")] {
+                    session.state.text_edit.cancel();
+                    session.effect.mix = mix;
+                    let before = *session.effect;
+                    session.mouse_pos = center(session.layout.mix);
+                    session.response = EditorResponse::default();
+                    assert!(matches!(
+                        session.on_right_press(),
+                        baseview::EventStatus::Captured
+                    ));
+                    assert_eq!(
+                        session.state.text_edit.active_for(&EffectHit::Mix),
+                        Some(seed)
+                    );
+                    assert_eq!(*session.effect, before);
+                    assert!(!session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn right_press_during_drag_and_on_enum_controls_preserves_an_active_edit() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.state.text_edit.begin(EffectHit::Mix, "25");
+                session
+                    .state
+                    .effect_dial_drag
+                    .begin_drag(EffectHit::Dial(0), 0.5, false);
+                session.mouse_pos = center(session.layout.dials[1]);
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                assert!(matches!(
+                    session.on_right_press(),
+                    baseview::EventStatus::Captured
+                ));
+                assert_eq!(
+                    session.state.effect_dial_drag.active_action(),
+                    Some(&EffectHit::Dial(0))
+                );
+                assert_eq!(
+                    session.state.text_edit.active_for(&EffectHit::Mix),
+                    Some("25")
+                );
+                assert!(!session.response.changed);
+                session.state.effect_dial_drag.end_drag();
+                session.mouse_pos = center(session.layout.dials[2]);
+                assert!(matches!(
+                    session.on_right_press(),
+                    baseview::EventStatus::Ignored
+                ));
+                assert_eq!(
+                    session.state.text_edit.active_for(&EffectHit::Mix),
+                    Some("25")
+                );
+                assert_eq!(*session.effect, effect);
+                assert_eq!(*session.modulation, modulation);
+                assert!(!session.response.changed);
+            });
+        }
+
+        #[test]
+        fn right_press_on_non_text_controls_or_outside_preserves_the_pending_edit() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.state.text_edit.begin(EffectHit::Mix, "25");
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                for point in [
+                    center(session.layout.depth),
+                    center(session.layout.trigger),
+                    (-100.0, -100.0),
+                ] {
+                    session.mouse_pos = point;
+                    assert!(matches!(
+                        session.on_right_press(),
+                        baseview::EventStatus::Captured
+                    ));
+                    assert_eq!(
+                        session.state.text_edit.active_for(&EffectHit::Mix),
+                        Some("25")
+                    );
+                    assert_eq!(*session.effect, effect);
+                    assert_eq!(*session.modulation, modulation);
+                    assert!(!session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn right_press_toggles_only_the_selected_mseg_segment() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                let original = session.modulation.clone();
+                let effect = *session.effect;
+                let layout = widgets::mseg::mseg_layout(
+                    session.layout.mseg_pane,
+                    false,
+                    session.scale_factor,
+                );
+                session.mouse_pos = (
+                    widgets::mseg::phase_to_x(&layout, 0.33),
+                    widgets::mseg::value_to_y(&layout, 0.2),
+                );
+                for (slot, index, segment) in [
+                    (0, 0, 0),
+                    (1, 1, 0),
+                    (2, 2, 0),
+                    (3, 3, 1),
+                    (usize::MAX, 3, 1),
+                ] {
+                    session.state.selected_mseg = slot;
+                    *session.modulation = original.clone();
+                    session.response = EditorResponse::default();
+                    assert!(matches!(
+                        session.on_right_press(),
+                        baseview::EventStatus::Captured
+                    ));
+                    let mut expected = original.clone();
+                    expected.msegs[index].nodes[segment].stepped =
+                        !original.msegs[index].nodes[segment].stepped;
+                    assert_eq!(*session.modulation, expected);
+                    assert_eq!(*session.effect, effect);
+                    assert!(session.response.changed);
+                }
+            });
+        }
+
+        #[test]
+        fn right_press_on_a_selected_node_opens_transforms_without_editing_the_curve() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                session.mouse_pos = select_interior_node(session);
+                let original = session.modulation.clone();
+                assert!(matches!(
+                    session.on_right_press(),
+                    baseview::EventStatus::Captured
+                ));
+                assert!(
+                    session
+                        .state
+                        .mseg_edit
+                        .dropdown_is_open_for(widgets::mseg::StripId::Transform)
+                );
+                assert_eq!(*session.modulation, original);
+                assert!(!session.response.changed);
+            });
+        }
+
+        #[test]
+        fn clearing_node_selection_preserves_other_editor_interactions() {
+            with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
+                select_interior_node(session);
+                open_menu(session.state);
+                session.state.text_edit.begin(EffectHit::Mix, "25");
+                session
+                    .state
+                    .effect_dial_drag
+                    .begin_drag(EffectHit::Dial(0), 0.5, false);
+                let effect = *session.effect;
+                let modulation = session.modulation.clone();
+                session.state.clear_selection();
+                assert_eq!(session.state.mseg_edit.selection_count(), 0);
+                assert_eq!(session.state.selected_mseg, 1);
+                assert!(session.state.dropdown_open());
+                assert_eq!(
+                    session.state.text_edit.active_for(&EffectHit::Mix),
+                    Some("25")
+                );
+                assert_eq!(
+                    session.state.effect_dial_drag.active_action(),
+                    Some(&EffectHit::Dial(0))
+                );
+                assert_eq!(*session.effect, effect);
+                assert_eq!(*session.modulation, modulation);
+            });
+        }
+
+        #[test]
+        fn cancellation_resets_gestures_and_click_history_but_preserves_host_choices_and_active_slot()
+         {
+            with_session(
+                &[TriggerChoice::FreeHz, TriggerChoice::Transient],
+                EffectKind::Svf,
+                |session| {
+                    session.state.selected_mseg = 3;
+                    let point = select_interior_node(session);
+                    open_menu(session.state);
+                    session.state.text_edit.begin(EffectHit::Mix, "25");
+                    session.state.effect_dial_drag.set_mouse(100.0, 200.0);
+                    session
+                        .state
+                        .effect_dial_drag
+                        .begin_drag(EffectHit::Dial(0), 0.5, false);
+                    session.state.mouse_pos = point;
+                    session.state.mseg_last_click_pos = point;
+                    session.state.effect_click.last_action = Some(EffectHit::Mix);
+                    let effect = *session.effect;
+                    let modulation = session.modulation.clone();
+                    let before = std::time::Instant::now();
+                    session.state.cancel_interaction();
+                    let after = std::time::Instant::now();
+                    assert_eq!(session.state.selected_mseg, 3);
+                    assert_eq!(
+                        session.state.trigger_choices,
+                        &[TriggerChoice::FreeHz, TriggerChoice::Transient]
+                    );
+                    assert!(!session.state.captures_keyboard());
+                    assert!(!session.state.dropdown_open());
+                    assert_eq!(session.state.effect_dial_drag.active_action(), None);
+                    assert_eq!(session.state.effect_dial_drag.mouse_pos(), (0.0, 0.0));
+                    assert!(!session.state.effect_dial_drag.mouse_in_window());
+                    assert_eq!(session.state.mseg_edit.selection_count(), 0);
+                    assert_eq!(session.state.mouse_pos, (0.0, 0.0));
+                    assert_eq!(session.state.mseg_last_click_pos, (-999.0, -999.0));
+                    assert_eq!(session.state.effect_click.last_action, None);
+                    assert!((before..=after).contains(&session.state.mseg_last_click_time));
+                    assert!((before..=after).contains(&session.state.effect_click.last_time));
+                    assert_eq!(*session.effect, effect);
+                    assert_eq!(*session.modulation, modulation);
+                },
+            );
+        }
+    }
+
     mod editor_timing {
         use super::*;
 
