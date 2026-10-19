@@ -13,6 +13,8 @@ examine_re = [
     '^tract-effects/src/editor/mod\.rs:\d+:\d+: .* in (EffectEditor::(clear_selection|cancel_interaction|finish_text_edit)|Session<[^>]+>::(on_right_press|commit_dial_text_edit|commit_mix_text_edit|finalize_dial_edit_for_press))$',
     '^tract-effects/src/editor/mod\.rs:\d+:\d+: replace Session<[^>]+>::mseg_double_click_check(_at)? ->',
     '^tract-effects/src/editor/mod\.rs:\d+:\d+: .* in Session<[^>]+>::mseg_double_click_check(_at)?$',
+    '^tract-effects/src/editor/mod\.rs:\d+:\d+: replace Session<[^>]+>::on_effect_press ->',
+    '^tract-effects/src/editor/mod\.rs:\d+:\d+: .* in Session<[^>]+>::on_effect_press$',
 ]
 all_features = true
 test_tool = "nextest"
