@@ -18,7 +18,7 @@ The plugin supports two filtering modes:
 - **Raw** — Direct time-domain convolution. Linear-phase response with pre-ringing around transients.
 - **Phaseless** — STFT magnitude-only filtering. Preserves transient shape with no pre-ringing, at the cost of slight temporal smearing from the STFT overlap-add process.
 
-![Wavetable Filter interface](screenshot.png){ width=100% }
+![Wavetable Filter interface](screenshot.png){ width=80% }
 
 # Interface
 
@@ -32,7 +32,7 @@ The editor window is freely resizable — drag any edge or corner to change its 
 
 ## Visualizations
 
-- **3D Wavetable View** (left) — Shows all frames of the loaded wavetable in an overhead perspective. The active frame is highlighted in orange. Click anywhere in the view to toggle between the 3D overview and a 2D face-on view of the current interpolated frame.
+- **3D Wavetable View** (left) — Shows evenly spaced frames across the loaded wavetable in an overhead perspective. The number of visible frames adapts to the panel height to keep the traces readable. The active frame is highlighted in orange. Click anywhere in the view to toggle between the 3D overview and a 2D face-on view of the current interpolated frame.
 - **Filter Response** (right) — Shows the frequency response of the current filter kernel on a log-frequency/dB scale. A faint amber shadow shows the input audio spectrum when audio is flowing, making it easier to set the cutoff by eye. The red vertical line marks the cutoff frequency.
 
 ## Controls
@@ -122,7 +122,7 @@ Surge-compatible wavetable format with frame metadata embedded in the file heade
 - **Use Phaseless mode on transient-heavy material** (drums, percussion) to avoid the pre-ringing artifacts of linear-phase filtering.
 - **Use Raw mode for sustained sounds** (pads, drones) where linear-phase clarity matters more than transient preservation.
 - **The Filter Response view shows your input spectrum** as a faint amber shadow when audio is playing. Use this to visually align the cutoff with the content you want to shape.
-- **Click the wavetable view** to toggle between the 3D overview (all frames) and a 2D face-on view of the current interpolated frame.
+- **Click the wavetable view** to toggle between the 3D overview of the table and a 2D face-on view of the current interpolated frame.
 
 # System Requirements
 
