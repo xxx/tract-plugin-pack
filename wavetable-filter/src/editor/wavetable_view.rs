@@ -15,8 +15,6 @@ pub(crate) struct FrameCache {
     pub global_max: f32,
     /// Pre-rasterized 3D background (all strands + bg fill + border + zero line).
     /// Rebuilt only when the wavetable version changes or the viewport resizes.
-    /// Drawing an active strand on top of this is essentially free compared to
-    /// rasterizing ~40 anti-aliased 200-point strokes every frame.
     pub bg_pixmap: Option<Pixmap>,
     pub bg_key: (u32, u32, u32, usize),
 }
@@ -119,21 +117,16 @@ pub(crate) fn draw_wavetable_view(
 
     let w_px = w.ceil() as u32;
     let h_px = h.ceil() as u32;
+    let layout = StackLayout::new(
+        w_px as f32,
+        h_px as f32,
+        frame_count,
+        cache.global_min,
+        cache.global_max,
+    );
     let key = (w_px, h_px, cache.cached_version, frame_count);
     if cache.bg_pixmap.is_none() || cache.bg_key != key {
-        cache.bg_pixmap = build_3d_background_pixmap(
-            cache.cached_version,
-            &cache.cached_frames,
-            cache.global_min,
-            cache.global_max,
-            w_px,
-            h_px,
-            padding,
-            width,
-            height,
-            frame_count,
-            frame_size,
-        );
+        cache.bg_pixmap = build_3d_background_pixmap(&cache.cached_frames, w_px, h_px, &layout);
         cache.bg_key = key;
     }
 
@@ -149,22 +142,14 @@ pub(crate) fn draw_wavetable_view(
         fill_view_bg(pixmap, x, y, w, h);
     }
 
-    let range = (cache.global_max - cache.global_min).max(0.001);
     let current_frame_idx = (current_frame_pos * (frame_count - 1) as f32).round() as usize;
     draw_active_strand(
         pixmap,
         &cache.cached_frames,
         current_frame_idx,
-        cache.global_min,
-        range,
-        x,
-        y,
-        h,
-        padding,
-        width,
-        height,
-        frame_count,
-        frame_size,
+        x.round(),
+        y.round(),
+        &layout,
     );
 }
 
@@ -236,61 +221,97 @@ fn blit_opaque(dst: &mut Pixmap, src: &Pixmap, dst_x: i32, dst_y: i32) {
     }
 }
 
-/// Render the full 3D background (bg fill, border, all stridden strands, zero line)
-/// into a fresh `(w_px, h_px)` pixmap. Strand coords are in local viewport space.
-#[allow(clippy::too_many_arguments)]
-fn build_3d_background_pixmap(
-    _version: u32,
-    frames: &[Vec<f32>],
-    global_min: f32,
-    global_max: f32,
-    w_px: u32,
-    h_px: u32,
+struct StackLayout {
     padding: f32,
-    width: f32,
-    height: f32,
-    frame_count: usize,
-    frame_size: usize,
-) -> Option<Pixmap> {
-    let mut bg = Pixmap::new(w_px, h_px)?;
-    // Fill + border into the cache pixmap at local (0,0).
-    fill_view_bg(&mut bg, 0.0, 0.0, w_px as f32, h_px as f32);
+    wave_width: f32,
+    wave_height: f32,
+    depth_x: f32,
+    depth_y: f32,
+    sample_min: f32,
+    sample_range: f32,
+}
 
-    let range = (global_max - global_min).max(0.001);
-
-    const MAX_STRANDS: usize = 48;
-    let stride = frame_count.div_ceil(MAX_STRANDS).max(1);
-
-    // All strands, back-to-front. No active skipping — the active strand is
-    // overlaid on the target pixmap separately.
-    for frame_idx in (0..frame_count).rev() {
-        if frame_idx % stride != 0 {
-            continue;
+impl StackLayout {
+    fn new(w: f32, h: f32, frame_count: usize, global_min: f32, global_max: f32) -> Self {
+        let padding = 12.0;
+        let width = w - padding * 2.0;
+        let height = h - padding * 2.0;
+        let (depth_x, depth_y) = if frame_count > 1 {
+            (width * 0.16, height * 0.62)
+        } else {
+            (0.0, 0.0)
+        };
+        let sample_min = global_min.min(-0.0005);
+        let sample_max = global_max.max(0.0005);
+        Self {
+            padding,
+            wave_width: width - depth_x,
+            wave_height: height - depth_y,
+            depth_x,
+            depth_y,
+            sample_min,
+            sample_range: sample_max - sample_min,
         }
-        let frame = &frames[frame_idx];
-        let depth = frame_idx as f32 / frame_count.max(1) as f32;
-        let perspective_x = depth * 80.0;
-        let perspective_y = -depth * 80.0;
-        let alpha = 0.3 + (1.0 - depth) * 0.4;
+    }
 
-        let draw_w = (width * 0.7) as usize;
-        let pts = draw_w.min(frame_size).max(1);
+    fn project(&self, phase: f32, sample: f32, depth: f32) -> (f32, f32) {
+        let normalized = (sample - self.sample_min) / self.sample_range;
+        (
+            self.padding + phase * self.wave_width + depth * self.depth_x,
+            self.padding + (1.0 - depth) * self.depth_y + (1.0 - normalized) * self.wave_height,
+        )
+    }
 
+    fn strand_count(&self, frame_count: usize) -> usize {
+        // Keep adjacent traces readable, including when the panel is short.
+        let capacity = (self.depth_y / 14.0) as usize + 1;
+        frame_count.min(capacity.clamp(2, 32))
+    }
+
+    fn strand_path(&self, frame: &[f32], depth: f32) -> Option<tiny_skia::Path> {
+        let points = (self.wave_width.ceil() as usize).clamp(2, frame.len());
         let mut pb = PathBuilder::new();
-        for pi in 0..pts {
-            let t = pi as f32 / pts as f32;
-            let si = ((t * frame_size as f32) as usize).min(frame_size - 1);
-            let normalized = (frame[si] - global_min) / range;
-            // Local coords: bounds_x = bounds_y = 0.
-            let x = padding + t * (width * 0.7) + perspective_x;
-            let y = h_px as f32 - padding * 2.0 - (normalized * height * 0.4) + perspective_y;
+        for pi in 0..points {
+            let phase = pi as f32 / (points - 1) as f32;
+            let si = pi * (frame.len() - 1) / (points - 1);
+            let (x, y) = self.project(phase, frame[si], depth);
             if pi == 0 {
                 pb.move_to(x, y);
             } else {
                 pb.line_to(x, y);
             }
         }
-        if let Some(path) = pb.finish() {
+        pb.finish()
+    }
+}
+
+fn frame_depth(frame_idx: usize, frame_count: usize) -> f32 {
+    frame_idx as f32 / frame_count.saturating_sub(1).max(1) as f32
+}
+
+/// Render the static stack in local viewport coordinates.
+fn build_3d_background_pixmap(
+    frames: &[Vec<f32>],
+    w_px: u32,
+    h_px: u32,
+    layout: &StackLayout,
+) -> Option<Pixmap> {
+    let mut bg = Pixmap::new(w_px, h_px)?;
+    // Fill + border into the cache pixmap at local (0,0).
+    fill_view_bg(&mut bg, 0.0, 0.0, w_px as f32, h_px as f32);
+
+    draw_stack_zero_plane(&mut bg, layout, frames.len() > 1);
+    let strand_count = layout.strand_count(frames.len());
+
+    // All strands, back-to-front. No active skipping — the active strand is
+    // overlaid on the target pixmap separately.
+    for strand in (0..strand_count).rev() {
+        // Include both ends of the table even when most frames are omitted.
+        let frame_idx = strand * (frames.len() - 1) / (strand_count - 1).max(1);
+        let frame = &frames[frame_idx];
+        let depth = frame_depth(frame_idx, frames.len());
+        let alpha = 0.2 + (1.0 - depth) * 0.35;
+        if let Some(path) = layout.strand_path(frame, depth) {
             let r = (50.0 + (1.0 - depth) * 100.0) as u8;
             let g = (100.0 + (1.0 - depth) * 100.0) as u8;
             let a = (alpha * 255.0) as u8;
@@ -306,58 +327,60 @@ fn build_3d_background_pixmap(
         }
     }
 
-    // Zero line in the cached bg.
-    draw_zero_line(&mut bg, padding, padding + height * 0.5, width);
     Some(bg)
 }
 
 /// Draw the orange active strand on top of the blitted background.
-#[allow(clippy::too_many_arguments)]
 fn draw_active_strand(
     pixmap: &mut Pixmap,
     frames: &[Vec<f32>],
     current_frame_idx: usize,
-    global_min: f32,
-    range: f32,
     bounds_x: f32,
     bounds_y: f32,
-    bounds_h: f32,
-    padding: f32,
-    width: f32,
-    height: f32,
-    frame_count: usize,
-    frame_size: usize,
+    layout: &StackLayout,
 ) {
-    if current_frame_idx >= frame_count {
+    let Some(frame) = frames.get(current_frame_idx) else {
         return;
-    }
-    let frame = &frames[current_frame_idx];
-    let depth = current_frame_idx as f32 / frame_count.max(1) as f32;
-    let perspective_x = depth * 80.0;
-    let perspective_y = -depth * 80.0;
-
-    let draw_w = (width * 0.7) as usize;
-    let pts = draw_w.min(frame_size).max(1);
-    let mut pb = PathBuilder::new();
-    for pi in 0..pts {
-        let t = pi as f32 / pts as f32;
-        let si = ((t * frame_size as f32) as usize).min(frame_size - 1);
-        let normalized = (frame[si] - global_min) / range;
-        let x = bounds_x + padding + t * (width * 0.7) + perspective_x;
-        let y = bounds_y + bounds_h - padding * 2.0 - (normalized * height * 0.4) + perspective_y;
-        if pi == 0 {
-            pb.move_to(x, y);
-        } else {
-            pb.line_to(x, y);
-        }
-    }
-    if let Some(path) = pb.finish() {
+    };
+    let depth = frame_depth(current_frame_idx, frames.len());
+    if let Some(path) = layout.strand_path(frame, depth) {
         let mut paint = Paint::default();
         paint.set_color_rgba8(255, 200, 100, 255);
         paint.anti_alias = true;
         let stroke = Stroke {
             width: 2.5,
             line_cap: LineCap::Round,
+            ..Default::default()
+        };
+        pixmap.stroke_path(
+            &path,
+            &paint,
+            &stroke,
+            Transform::from_translate(bounds_x, bounds_y),
+            None,
+        );
+    }
+}
+
+fn draw_stack_zero_plane(pixmap: &mut Pixmap, layout: &StackLayout, has_depth: bool) {
+    let mut pb = PathBuilder::new();
+    let (x, y) = layout.project(0.0, 0.0, 0.0);
+    pb.move_to(x, y);
+    let (x, y) = layout.project(1.0, 0.0, 0.0);
+    pb.line_to(x, y);
+    if has_depth {
+        for (phase, depth) in [(1.0, 1.0), (0.0, 1.0)] {
+            let (x, y) = layout.project(phase, 0.0, depth);
+            pb.line_to(x, y);
+        }
+        pb.close();
+    }
+    if let Some(path) = pb.finish() {
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(80, 80, 90, 100);
+        paint.anti_alias = true;
+        let stroke = Stroke {
+            width: 0.5,
             ..Default::default()
         };
         pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
