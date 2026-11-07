@@ -111,6 +111,11 @@ impl StftAnalyzer {
         self.input_pos = (self.input_pos + 1) & (self.fft_size - 1);
     }
 
+    /// Return the input from `fft_size` samples ago, before the next [`write`](Self::write).
+    pub fn delayed_sample(&self) -> f32 {
+        self.input_ring[self.input_pos]
+    }
+
     /// Extract the latest `fft_size` samples (oldest-first, Hann-windowed) and
     /// forward-FFT them; return the spectrum plus the synthesis window. Call
     /// this once per hop. Skip it to suppress frame work (e.g. `satch`'s
@@ -161,6 +166,22 @@ mod tests {
     fn latency_is_fft_size() {
         assert_eq!(StftAnalyzer::new(2048, 512).latency_samples(), 2048);
         assert_eq!(StftAnalyzer::new(4096, 1024).latency_samples(), 4096);
+    }
+
+    #[test]
+    fn delayed_sample_tracks_exact_input_across_ring_wraps_and_reset() {
+        let mut analyzer = StftAnalyzer::new(32, 8);
+        for sample in 0..133 {
+            let expected = if sample < 32 {
+                0.0
+            } else {
+                (sample - 32) as f32
+            };
+            assert_eq!(analyzer.delayed_sample(), expected);
+            analyzer.write(sample as f32);
+        }
+        analyzer.reset();
+        assert_eq!(analyzer.delayed_sample(), 0.0);
     }
 
     #[test]

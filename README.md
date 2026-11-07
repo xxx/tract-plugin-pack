@@ -116,14 +116,14 @@ A multichannel real-time oscilloscope with beat sync. Multiple instances share a
 
 ### Satch
 
-A detail-preserving spectral saturator. Uses FFT-based spectral analysis to preserve quiet frequency components through the clipping process, producing textured flat-top clipping instead of featureless flat tops.
+A detail-preserving spectral saturator. Uses FFT-based spectral analysis to preserve quiet frequency components through the clipping process, reserving headroom beneath the output ceiling for the restored detail.
 
 - Independent **Gain** (input boost) and **Threshold** (clip ceiling) controls
-- **Detail** knob preserves quiet harmonics through clipped regions via per-bin spectral magnitude saturation
+- **Detail** knob protects quiet spectral components and lowers the internal clipping level to leave room for their peaks
 - **Knee** crossfades between hard clip (0%) and soft tanh saturation (100%)
 - Clip-aware detail blend — only affects clipped portions, unclipped material is unchanged
 - CPU-rendered GUI (tiny-skia + softbuffer), freely resizable
-- ~0.82 MB RSS and 0.14% CPU per instance (100 instances @ 13.7% CPU, 82 MB total)
+- Historical benchmark before the headroom revision: ~0.82 MB RSS and 0.14% CPU per instance (100 instances @ 13.7% CPU, 82 MB total)
 - Inspired by [Newfangled Audio Saturate](https://www.newfangledaudio.com/saturate)
 
 ### Six Pack

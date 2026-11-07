@@ -1,23 +1,15 @@
-//! FFT-based spectral clipper with detail preservation.
+//! Spectral detail preservation with headroom beneath a fixed output ceiling.
 //!
-//! Architecture inspired by Newfangled Audio Saturate:
+//! Peak-relative STFT masking extracts quiet components; an inverse FFT
+//! reconstructs their waveform. Recent waveform peaks reserve steady headroom
+//! with a smooth release. The protected component bypasses the waveshaper,
+//! whose internal ceiling is lowered by that reservation. Gain applies to both
+//! paths. Excessive detail is scaled to at most half the ceiling so it cannot
+//! invert a saturated lobe.
 //!
-//! **Step 1 — Spectral split (loud/quiet separation):**
-//! STFT the input, split bins into loud (dominant, above -6 dB of peak) and
-//! quiet (detail, below -20 dB of peak) paths with a smooth crossfade in the
-//! transition band. ISTFT each path separately via overlap-add.
-//!
-//! **Step 2 — Time-domain clip + detail addition:**
-//! Apply gain boost and clip at ±threshold to the full reconstructed signal
-//! (loud + quiet = delayed input). This produces flat-top clipping at
-//! ±threshold. Then ADD the quiet (detail) component on top. The detail rides
-//! symmetrically around the clip level, producing the characteristic waveform:
-//! flat tops with small ripple from preserved spectral detail.
-//!
-//! `gain` boosts the signal. `threshold` sets the clip ceiling.
-//! Small signals pass through unchanged; loud signals clip at ±threshold.
-//!
-//! FFT size 2048, hop size 512 (75% overlap, 4x redundancy), Hann window.
+//! Detail engages smoothly between one and two times the output threshold;
+//! samples below the threshold retain the ordinary hard/soft waveshaper output.
+//! FFT size 2048 and hop 512 give the plugin its fixed 2048-sample latency.
 
 use crate::stft_analysis::StftAnalyzer;
 use rustfft::num_complex::Complex;
@@ -50,8 +42,7 @@ pub fn saturate_td(x: f32, gain: f32, threshold: f32, knee: f32) -> f32 {
     hard + knee * (soft - hard)
 }
 
-/// Like `saturate_td` but also returns `tanh(gained / threshold)` for reuse
-/// in the clip mask (avoids computing tanh twice per sample).
+/// Like [`saturate_td`], also returning the normalized tanh transfer value.
 #[inline]
 pub fn saturate_td_with_tanh(x: f32, gain: f32, threshold: f32, knee: f32) -> (f32, f32) {
     saturate_td_with_tanh_fast(x, gain, threshold, 1.0 / threshold, knee)
@@ -78,26 +69,81 @@ pub fn saturate_td_with_tanh_fast(
     (hard + knee * (soft - hard), tanh_val)
 }
 
-/// STFT-based spectral clipper with detail preservation.
+struct DetailPeak {
+    block_peaks: Vec<f32>,
+    block_index: usize,
+    samples_in_block: usize,
+    hop_size: usize,
+    window_peak: f32,
+    held_peak: f32,
+    release: f32,
+    active: bool,
+}
+
+impl DetailPeak {
+    fn new(fft_size: usize, hop_size: usize) -> Self {
+        Self {
+            block_peaks: vec![0.0; fft_size / hop_size + 1],
+            block_index: 0,
+            samples_in_block: 0,
+            hop_size,
+            window_peak: 0.0,
+            held_peak: 0.0,
+            // Recover about 98% of an expired peak over one FFT window.
+            release: (-4.0 / fft_size as f32).exp(),
+            active: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.clear_peaks();
+        self.block_index = 0;
+        self.samples_in_block = 0;
+    }
+
+    fn clear_peaks(&mut self) {
+        self.block_peaks.fill(0.0);
+        self.window_peak = 0.0;
+        self.held_peak = 0.0;
+        self.active = false;
+    }
+
+    fn advance(&mut self) {
+        self.samples_in_block += 1;
+        if self.samples_in_block == self.hop_size {
+            self.samples_in_block = 0;
+            self.block_index = (self.block_index + 1) % self.block_peaks.len();
+            self.block_peaks[self.block_index] = 0.0;
+            self.window_peak = self.block_peaks.iter().copied().fold(0.0, f32::max);
+        }
+    }
+
+    fn process(&mut self, quiet: f32, enabled: bool) -> f32 {
+        if !enabled {
+            if self.active {
+                self.clear_peaks();
+            }
+            // Bypass keeps block boundaries aligned with continuously active processing.
+            self.advance();
+            return 0.0;
+        }
+        self.active = true;
+        let magnitude = quiet.abs();
+        self.block_peaks[self.block_index] = self.block_peaks[self.block_index].max(magnitude);
+        self.window_peak = self.window_peak.max(magnitude);
+        self.held_peak = self.window_peak.max(self.held_peak * self.release);
+        let output = self.held_peak;
+
+        self.advance();
+        output
+    }
+}
+
+/// Allocation-free streaming spectral clipper with a latency of `fft_size` samples.
 ///
-/// Feed one sample at a time via [`process_sample`]. Internally it accumulates
-/// samples, triggers FFT processing every `hop_size` samples, and reads from
-/// overlap-add output buffers.
-///
-/// Architecture:
-///
-/// - The STFT analysis front-end (input ring, analysis window, forward FFT,
-///   COLA synthesis window) is owned by the [`StftAnalyzer`] field `stft`.
-/// - `loud_output_ring` / `quiet_output_ring` (size `2 * fft_size` each):
-///   separate overlap-add accumulation buffers for the loud and quiet spectral
-///   paths. The waveshaper clips the FULL signal (loud + quiet = delayed input)
-///   at ±threshold, then the quiet (detail) component is added on top. This
-///   produces flat-top clipping with symmetric detail ripple around the clip
-///   level.
-/// - `read_pos` advances one sample at a time through the output rings.
-/// - Every `hop_size` samples, the analyzer produces an FFT frame, which is
-///   split into loud/quiet bins, and each path is ISTFT'd and overlap-added
-///   into its respective output ring buffer.
+/// The analyzer's input ring also supplies the exact delayed dry signal.
+/// An overlap-add ring supplies the quiet waveform; recent block peaks hold
+/// its headroom steady without introducing another audio delay.
 pub struct SpectralClipper {
     fft_size: usize,
     hop_size: usize,
@@ -114,19 +160,16 @@ pub struct SpectralClipper {
     mag_buf: Vec<f32>,
 
     // Ring buffers
-    /// Overlap-add accumulation buffer for loud bins (above threshold). Size = 2 x fft_size.
-    loud_output_ring: Vec<f64>,
-    /// Overlap-add accumulation buffer for quiet bins (below threshold). Size = 2 x fft_size.
+    /// Reconstructed quiet component.
     quiet_output_ring: Vec<f64>,
+    detail_peak: DetailPeak,
     /// Current read position in output rings.
     read_pos: usize,
     /// Sample counter within current hop.
     hop_counter: usize,
 
     // Pre-allocated inverse-FFT (ISTFT) input buffers
-    /// Loud bins (above threshold) for separate ISTFT.
-    loud_buf: Vec<Complex<f32>>,
-    /// Quiet bins (below threshold) for separate ISTFT.
+    /// Conjugate-symmetric quiet spectrum for inverse FFT.
     quiet_buf: Vec<Complex<f32>>,
 }
 
@@ -151,11 +194,10 @@ impl SpectralClipper {
             fft_inverse,
             scratch: vec![Complex::new(0.0, 0.0); scratch_len],
             mag_buf: vec![0.0; fft_size],
-            loud_output_ring: vec![0.0; out_ring_size],
             quiet_output_ring: vec![0.0; out_ring_size],
+            detail_peak: DetailPeak::new(fft_size, hop_size),
             read_pos: 0,
             hop_counter: 0,
-            loud_buf: vec![Complex::new(0.0, 0.0); fft_size],
             quiet_buf: vec![Complex::new(0.0, 0.0); fft_size],
         }
     }
@@ -168,34 +210,21 @@ impl SpectralClipper {
     /// Reset all internal state (ring buffers, counters) to zero.
     pub fn reset(&mut self) {
         self.stft.reset();
-        self.loud_output_ring.fill(0.0);
         self.quiet_output_ring.fill(0.0);
+        self.detail_peak.reset();
         self.read_pos = 0;
         self.hop_counter = 0;
-        for bin in self.loud_buf.iter_mut() {
-            *bin = Complex::new(0.0, 0.0);
-        }
         for bin in self.quiet_buf.iter_mut() {
             *bin = Complex::new(0.0, 0.0);
         }
     }
 
-    /// Process a single input sample and return the corresponding output sample.
-    ///
-    /// `gain` boosts the input. `threshold` sets the clip ceiling (linear).
-    /// `knee` controls hard/soft clipping blend.
-    ///
-    /// When `skip_fft` is true, the FFT frame processing is skipped (the input
-    /// ring and counters are still maintained). This is used when the spectral
-    /// output won't be used (e.g. detail=0 or mix=0) to avoid FFT overhead.
-    /// When `skip_fft` transitions back to false, there will be a brief settling
-    /// period (~4 hops) as the output rings refill.
+    /// Process one sample with full detail preservation.
     pub fn process_sample(&mut self, input: f32, gain: f32, threshold: f32, knee: f32) -> f32 {
-        let inv_threshold = 1.0 / threshold;
-        self.process_sample_inner(input, gain, threshold, inv_threshold, knee, false)
+        self.process_sample_with_detail(input, gain, threshold, 1.0, knee)
     }
 
-    /// Like `process_sample` but allows skipping FFT frame processing.
+    /// Process ordinary saturation without FFT work, while maintaining ring timing.
     pub fn process_sample_skip_fft(
         &mut self,
         input: f32,
@@ -203,14 +232,10 @@ impl SpectralClipper {
         threshold: f32,
         knee: f32,
     ) -> f32 {
-        let inv_threshold = 1.0 / threshold;
-        self.process_sample_inner(input, gain, threshold, inv_threshold, knee, true)
+        self.process_sample_with_detail(input, gain, threshold, 0.0, knee)
     }
 
-    /// Fast variant of [`process_sample`] that takes a precomputed
-    /// `inv_threshold = 1.0 / threshold`, avoiding a division per call.
-    /// Used from the plugin `process()` loop where `inv_threshold` is
-    /// computed once per sample and shared across both channels.
+    /// Full-detail processing with a precomputed reciprocal of `threshold`.
     #[inline]
     pub fn process_sample_fast(
         &mut self,
@@ -220,10 +245,10 @@ impl SpectralClipper {
         inv_threshold: f32,
         knee: f32,
     ) -> f32 {
-        self.process_sample_inner(input, gain, threshold, inv_threshold, knee, false)
+        self.process_sample_with_detail_fast(input, gain, threshold, inv_threshold, 1.0, knee)
     }
 
-    /// Fast variant of [`process_sample_skip_fft`] with precomputed `inv_threshold`.
+    /// FFT-skipped processing with a precomputed reciprocal of `threshold`.
     #[inline]
     pub fn process_sample_skip_fft_fast(
         &mut self,
@@ -233,92 +258,82 @@ impl SpectralClipper {
         inv_threshold: f32,
         knee: f32,
     ) -> f32 {
-        self.process_sample_inner(input, gain, threshold, inv_threshold, knee, true)
+        self.process_sample_with_detail_fast(input, gain, threshold, inv_threshold, 0.0, knee)
     }
 
-    fn process_sample_inner(
+    /// Process one sample with `detail` in `0..=1`, automatically skipping FFTs at zero.
+    ///
+    /// Re-enabling detail fills the spectral output over approximately four hops;
+    /// the delayed dry path remains complete throughout that transition.
+    pub fn process_sample_with_detail(
+        &mut self,
+        input: f32,
+        gain: f32,
+        threshold: f32,
+        detail: f32,
+        knee: f32,
+    ) -> f32 {
+        self.process_sample_with_detail_fast(input, gain, threshold, 1.0 / threshold, detail, knee)
+    }
+
+    /// Like [`Self::process_sample_with_detail`] with a precomputed threshold reciprocal.
+    #[inline]
+    pub fn process_sample_with_detail_fast(
         &mut self,
         input: f32,
         gain: f32,
         threshold: f32,
         inv_threshold: f32,
+        detail: f32,
         knee: f32,
-        skip_fft: bool,
     ) -> f32 {
-        let out_len = self.loud_output_ring.len();
-
-        // Write input into the analyzer's input ring.
+        let dry = self.stft.delayed_sample();
         self.stft.write(input);
 
-        // Read from both output ring buffers (properly reconstructed via COLA)
-        let loud_td = self.loud_output_ring[self.read_pos] as f32;
-        let quiet_td = self.quiet_output_ring[self.read_pos] as f32;
-
-        // Clear after reading
-        self.loud_output_ring[self.read_pos] = 0.0;
+        let quiet = self.quiet_output_ring[self.read_pos] as f32;
         self.quiet_output_ring[self.read_pos] = 0.0;
-
-        let original = loud_td + quiet_td;
-
-        // Clip the FULL reconstructed signal at ±threshold, then ADD the
-        // quiet (detail) component back on top.
-        //
-        // This produces the correct waveform shape: the waveshaper clips the
-        // full signal to flat tops at ±threshold, then the detail rides
-        // symmetrically on top as ripple.
-        //
-        // Why not clip just the loud path? Because loud_td and quiet_td are
-        // correlated (they sum to the original), so clipping only the loud
-        // path leaves a "bias" from leaked fundamental energy in quiet_td.
-        // Clipping the full signal first eliminates this correlation.
-        let gained_full = gain * original;
-        let hard_full = gained_full.clamp(-threshold, threshold);
-        let soft_full = threshold * (gained_full * inv_threshold).tanh();
-        let clipped_full = hard_full + knee * (soft_full - hard_full);
-        let processed = clipped_full + quiet_td;
-
-        // Safety clip: detail can ride above the threshold level, but bound
-        // it to prevent extreme values. Allow 50% overshoot above threshold.
-        let safety = threshold * 1.5;
-        let output = processed.clamp(-safety, safety);
-
-        self.read_pos = (self.read_pos + 1) % out_len;
-
+        self.read_pos = (self.read_pos + 1) % self.quiet_output_ring.len();
         self.hop_counter += 1;
-
-        // Process an FFT frame every hop_size samples.
-        // When skip_fft is true, reset the counter but don't run the FFT —
-        // the output rings will read as zeros (from the clearing above).
         if self.hop_counter >= self.hop_size {
             self.hop_counter = 0;
-            if !skip_fft {
+            if detail > 0.0 {
                 self.process_frame();
             }
         }
 
-        output
+        let quiet_peak = self.detail_peak.process(quiet, detail > 0.0);
+        let (standard, _) = saturate_td_with_tanh_fast(dry, gain, threshold, inv_threshold, knee);
+        let gained = gain * dry;
+        if detail <= 0.0 || gained.abs() <= threshold {
+            return standard;
+        }
+
+        // Hold waveform peaks so headroom does not modulate the quiet oscillations.
+        let amount = gain.abs() * detail.clamp(0.0, 1.0);
+        let mut headroom = amount * quiet_peak;
+        let mut preserved = gain.signum() * amount * quiet;
+        // Soft-knee rounding also reduces the body available to support the detail.
+        let maximum_headroom = 0.5 * standard.abs();
+        if headroom > maximum_headroom {
+            preserved *= maximum_headroom / headroom;
+            headroom = maximum_headroom;
+        }
+        if headroom == 0.0 {
+            return standard;
+        }
+
+        // Remove the protected component before shaping so it is added only once.
+        let inner_threshold = threshold - headroom;
+        let shaped = saturate_td(gained - preserved, 1.0, inner_threshold, knee) + preserved;
+        let activation = (gained.abs() * inv_threshold - 1.0).clamp(0.0, 1.0);
+        let blend = activation * activation * (3.0 - 2.0 * activation);
+        (standard + blend * (shaped - standard)).clamp(-threshold, threshold)
     }
 
-    /// Loud/quiet split spectral clipper with detail preservation.
-    ///
-    /// **Step 1+2:** The windowed-frame extract and forward FFT are owned by
-    /// the [`StftAnalyzer`]; `analyze()` returns the spectrum (not yet
-    /// normalised) and the COLA synthesis window. This frame normalises the
-    /// spectrum by `1/N` and caches per-bin magnitudes.
-    ///
-    /// **Step 3:** Split bins into loud (above threshold) and quiet (below).
-    /// Threshold is peak-relative: loud bins are within 6 dB of the frame's
-    /// spectral peak; quiet bins are more than 20 dB below the peak.
-    ///
-    /// **Step 4:** ISTFT both paths separately.
-    ///
-    /// **Step 5:** Overlap-add each path linearly (with the synthesis window and
-    /// COLA normalization) into separate output ring buffers. No nonlinear
-    /// processing here — tanh is applied AFTER reconstruction in
-    /// `process_sample()` to preserve COLA normalization.
+    /// Reconstruct the quiet signal with a peak-relative spectral mask.
     fn process_frame(&mut self) {
         let n = self.fft_size;
-        let out_len = self.loud_output_ring.len();
+        let out_len = self.quiet_output_ring.len();
 
         // 1+2. Analysis front-end (windowed extract + forward FFT) is owned by
         //      the StftAnalyzer. Normalize the spectrum by 1/N and cache
@@ -357,39 +372,24 @@ impl SpectralClipper {
             let mag_sq = self.mag_buf[k];
             if mag_sq >= hi_sq {
                 // Clearly loud — 100% to loud path
-                self.loud_buf[k] = frame.spectrum[k];
                 self.quiet_buf[k] = Complex::new(0.0, 0.0);
             } else if mag_sq <= lo_sq {
                 // Clearly quiet — 100% to quiet path (detail preserved)
-                self.loud_buf[k] = Complex::new(0.0, 0.0);
                 self.quiet_buf[k] = frame.spectrum[k];
             } else {
                 // Transition band — smooth crossfade (sqrt only here).
-                // quiet = fft - loud avoids a second complex multiply.
                 let mag = mag_sq.sqrt();
                 let t = (mag - lo) * inv_band; // 0 at lo, 1 at hi
-                self.loud_buf[k] = frame.spectrum[k] * t;
-                self.quiet_buf[k] = frame.spectrum[k] - self.loud_buf[k];
+                self.quiet_buf[k] = frame.spectrum[k] * (1.0 - t);
             }
         }
 
-        // 4. ISTFT both paths.
-        // Since we divided by N above, rustfft's unnormalized IFFT
-        // produces correctly scaled time-domain signals.
-        self.fft_inverse
-            .process_with_scratch(&mut self.loud_buf, &mut self.scratch);
         self.fft_inverse
             .process_with_scratch(&mut self.quiet_buf, &mut self.scratch);
 
-        // 5. Overlap-add both paths LINEARLY into their respective output rings.
-        //    The synthesis window (= analysis_window / cola_factor) comes from
-        //    the analyzer. No nonlinear processing here — tanh is applied
-        //    post-reconstruction in process_sample() to preserve COLA
-        //    normalization.
         for i in 0..n {
             let out_idx = (self.read_pos + i) % out_len;
             let w = frame.synthesis_window[i];
-            self.loud_output_ring[out_idx] += (self.loud_buf[i].re * w) as f64;
             self.quiet_output_ring[out_idx] += (self.quiet_buf[i].re * w) as f64;
         }
     }
@@ -418,13 +418,20 @@ mod tests {
     }
 
     #[test]
-    fn quiet_detail_is_bounded_by_the_safety_ceiling() {
+    fn oversized_detail_is_scaled_without_clipping_or_inverting_the_lobe() {
         for sign in [-1.0, 1.0] {
-            let mut clipper = SpectralClipper::new(32, 8);
-            clipper.loud_output_ring[0] = -3.0 * sign;
-            clipper.quiet_output_ring[0] = 3.2 * sign;
-            let output = clipper.process_sample(0.0, 1.0, 0.4, 0.0);
-            assert!((output - 0.6 * sign as f32).abs() < 1e-6);
+            let mut clipper = SpectralClipper::new(64, 16);
+            for sample in 0..1024 {
+                let angle = std::f64::consts::TAU * 8.0 * sample as f64 / 64.0;
+                let input = 0.8 * sign + 0.1 * angle.sin() as f32;
+                let output = clipper.process_sample(input, 16.0, 0.4, 0.0);
+                if sample >= 256 {
+                    let expected = 0.2 * sign + 0.2 * angle.sin() as f32;
+                    assert!((output - expected).abs() < 2e-6, "{output} vs {expected}");
+                    assert!(output.abs() <= 0.4);
+                    assert!(output * sign >= -1e-6);
+                }
+            }
         }
     }
 
@@ -457,7 +464,12 @@ mod tests {
             clipper.process_sample(0.25, 1.0, 1.0, 0.0);
             assert_eq!(clipper.hop_counter, i % 8);
             if i < 8 {
-                assert!(clipper.loud_output_ring.iter().all(|&sample| sample == 0.0));
+                assert!(
+                    clipper
+                        .quiet_output_ring
+                        .iter()
+                        .all(|&sample| sample == 0.0)
+                );
             }
         }
     }
@@ -532,12 +544,12 @@ mod tests {
     }
 
     #[test]
-    fn soft_knee_normalizes_by_nonunit_threshold_after_reconstruction() {
+    fn soft_knee_normalizes_by_nonunit_threshold_after_headroom_release() {
         let mut clipper = SpectralClipper::new(64, 16);
         let expected = 0.37 * (1.5_f32 * 0.8 / 0.37).tanh();
-        for i in 0..512 {
+        for i in 0..1024 {
             let output = clipper.process_sample(0.8, 1.5, 0.37, 1.0);
-            if i >= 256 {
+            if i >= 512 {
                 assert!(
                     (output - expected).abs() < 1e-5,
                     "sample {i}: {output}, expected {expected}"
@@ -728,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reconstruction_sine() {
+    fn subthreshold_sine_follows_the_exact_delayed_waveshaper() {
         // At gain=1, threshold=1: small signal should reconstruct well.
         let input = make_sine(1000.0, 0.1, 16384);
         let output = run_spectral(&input, 1.0, 1.0);
@@ -739,7 +751,7 @@ mod tests {
         let mut rms_signal = 0.0_f64;
         let compare_len = input.len() - skip - latency;
         for i in 0..compare_len {
-            let inp = input[i + skip - latency] as f64;
+            let inp = (input[i + skip - latency] as f64).tanh();
             let out = output[i + skip] as f64;
             rms_error += (out - inp).powi(2);
             rms_signal += inp.powi(2);
@@ -751,22 +763,19 @@ mod tests {
         } else {
             f64::INFINITY
         };
-        assert!(
-            snr > 20.0,
-            "SNR {snr:.1} too low — reconstruction is broken"
-        );
+        assert!(snr > 1e6, "SNR {snr:.1} too low for the delayed dry path");
     }
 
     #[test]
-    fn test_reconstruction_dc() {
+    fn subthreshold_dc_follows_the_exact_dry_delay() {
         let input = vec![0.05_f32; 16384];
         let output = run_spectral(&input, 1.0, 1.0);
 
         let skip = 4096;
         for (i, &s) in output.iter().enumerate().skip(skip) {
             assert!(
-                (s - 0.05).abs() < 0.02,
-                "DC reconstruction failed at {i}: got {s}",
+                (s - 0.05_f32.tanh()).abs() < 1e-6,
+                "Delayed soft-shaped DC mismatch at {i}: got {s}",
             );
         }
     }
@@ -830,49 +839,17 @@ mod tests {
 
     #[test]
     fn test_spectral_output_bounded() {
-        // Output should be bounded by the safety clip at ±threshold*1.5.
+        // Full-detail wet output respects the final ceiling.
         let input = make_sine(440.0, 0.8, 32768);
         let threshold = 1.0_f32;
         let mut sc = SpectralClipper::new(2048, 512);
         for &s in &input {
             let out = sc.process_sample(s, 10.0, threshold, 1.0);
             assert!(
-                out.abs() <= threshold * 1.5 + 0.01,
-                "output {out} exceeds safety clip"
+                out.abs() <= threshold,
+                "output {out} exceeds the final ceiling"
             );
         }
-    }
-
-    #[test]
-    fn test_spectral_preserves_quiet_detail() {
-        let num = 32768;
-        let sr = 48000.0;
-
-        let input: Vec<f32> = (0..num)
-            .map(|i| {
-                let t = i as f32 / sr;
-                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
-            })
-            .collect();
-
-        let mut sc = SpectralClipper::new(2048, 512);
-        let mut output = Vec::new();
-        for &s in &input {
-            output.push(sc.process_sample(s, 10.0, 1.0, 1.0));
-        }
-
-        let skip = 8192;
-        let mut hf_energy = 0.0_f64;
-        for i in (skip + 1)..output.len() {
-            let diff = (output[i] - output[i - 1]) as f64;
-            hf_energy += diff * diff;
-        }
-        hf_energy = (hf_energy / (output.len() - skip - 1) as f64).sqrt();
-
-        assert!(
-            hf_energy > 0.001,
-            "5kHz detail should survive spectral clipping, hf_energy={hf_energy}"
-        );
     }
 
     // ── Detail preservation: spectral vs time-domain comparison ────────
@@ -937,48 +914,6 @@ mod tests {
             sp_5k_energy > td_5k_energy,
             "spectral should preserve more 5kHz detail than TD: spectral={sp_5k_energy:.6}, td={td_5k_energy:.6}"
         );
-    }
-
-    #[test]
-    fn test_spectral_preserves_detail_across_gain_levels() {
-        let num = 32768;
-        let sr = 48000.0;
-        let skip = 8192;
-        let threshold = 1.0_f32;
-
-        for gain_db in [6.0, 12.0, 18.0, 24.0] {
-            let gain = 10.0_f32.powf(gain_db / 20.0);
-
-            let input: Vec<f32> = (0..num)
-                .map(|i| {
-                    let t = i as f32 / sr;
-                    0.8 * (2.0 * PI * 100.0 * t).sin() + 0.03 * (2.0 * PI * 3000.0 * t).sin()
-                })
-                .collect();
-
-            let mut sc = SpectralClipper::new(2048, 512);
-            let sp_output: Vec<f32> = input
-                .iter()
-                .map(|&s| sc.process_sample(s, gain, threshold, 1.0))
-                .collect();
-
-            let sp_hf = hf_energy_rms(&sp_output, skip);
-
-            assert!(
-                sp_hf > 0.001,
-                "at {gain_db} dB, spectral HF energy ({sp_hf:.6}) should be non-trivial"
-            );
-        }
-    }
-
-    /// Compute RMS of sample-to-sample differences (high-frequency energy proxy).
-    fn hf_energy_rms(signal: &[f32], skip: usize) -> f64 {
-        let mut energy = 0.0_f64;
-        for i in (skip + 1)..signal.len() {
-            let d = (signal[i] - signal[i - 1]) as f64;
-            energy += d * d;
-        }
-        (energy / (signal.len() - skip - 1) as f64).sqrt()
     }
 
     #[test]
@@ -1109,653 +1044,428 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_spectral_preserves_detail_on_flat_tops() {
-        let num = 65536;
-
-        let input: Vec<f32> = (0..num)
-            .map(|i| {
-                let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
-            })
-            .collect();
-
-        let output = run_spectral(&input, 10.0, 1.0);
-
-        let skip = 8192;
-        let out_peak = peak_after(&output, skip);
-
-        let flat_threshold = out_peak * 0.90;
-        let mut flat_samples: Vec<f32> = Vec::new();
-        for &s in &output[skip..] {
-            if s.abs() > flat_threshold {
-                flat_samples.push(s);
-            }
-        }
-
-        let mut variation = 0.0_f64;
-        for i in 1..flat_samples.len() {
-            let diff = (flat_samples[i] - flat_samples[i - 1]).abs() as f64;
-            variation += diff;
-        }
-        let avg_variation = if flat_samples.len() > 1 {
-            variation / (flat_samples.len() - 1) as f64
-        } else {
-            0.0
-        };
-
-        assert!(
-            flat_samples.len() > 100,
-            "should have enough flat-top samples to measure, got {}",
-            flat_samples.len()
-        );
-        assert!(
-            avg_variation > 0.001,
-            "flat sections should have detail ripple: avg_variation={avg_variation:.6} (need >0.001)"
-        );
+    fn quiet_tone(sample: usize, fft_size: usize, bin: usize) -> f32 {
+        (std::f64::consts::TAU * bin as f64 * sample as f64 / fft_size as f64).sin() as f32
     }
 
     #[test]
-    fn test_td_destroys_detail_on_flat_tops() {
-        let gain = 10.0_f32;
-        let threshold = 1.0_f32;
-        let num = 65536;
-
-        let input: Vec<f32> = (0..num)
-            .map(|i| {
-                let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
-            })
-            .collect();
-
-        let td_output: Vec<f32> = input
-            .iter()
-            .map(|&s| saturate_td(s, gain, threshold, 1.0))
-            .collect();
-
-        let out_peak = peak_after(&td_output, 0);
-        let flat_threshold = out_peak * 0.90;
-
-        let mut flat_samples: Vec<f32> = Vec::new();
-        for &s in &td_output {
-            if s.abs() > flat_threshold {
-                flat_samples.push(s);
+    fn recent_peaks_are_held_for_a_window_then_release_smoothly() {
+        for offset in 0..8 {
+            let mut peak = DetailPeak::new(32, 8);
+            for _ in 0..offset {
+                peak.process(0.0, true);
             }
+            assert_eq!(peak.process(-1.0, true), 1.0);
+            for _ in 0..32 {
+                assert_eq!(peak.process(0.25, true), 1.0);
+            }
+            let mut previous = 1.0_f32;
+            for _ in 0..64 {
+                let current = peak.process(0.25, true);
+                assert!((0.25..=previous).contains(&current));
+                assert!(current >= previous * (-4.0_f32 / 32.0).exp() - 1e-6);
+                previous = current;
+            }
+            assert_eq!(previous, 0.25);
         }
-
-        let mut variation = 0.0_f64;
-        for i in 1..flat_samples.len() {
-            let diff = (flat_samples[i] - flat_samples[i - 1]).abs() as f64;
-            variation += diff;
-        }
-        let avg_variation = if flat_samples.len() > 1 {
-            variation / (flat_samples.len() - 1) as f64
-        } else {
-            0.0
-        };
-
-        assert!(
-            avg_variation < 0.02,
-            "TD flat sections should be smooth: avg_variation={avg_variation:.6} (need <0.02)"
-        );
     }
 
     #[test]
-    fn test_spectral_detail_better_than_td() {
-        let gain = 10.0_f32;
-        let threshold = 1.0_f32;
-        let num = 65536;
-
-        let input: Vec<f32> = (0..num)
-            .map(|i| {
-                let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
-            })
-            .collect();
-
-        let sp_output = run_spectral(&input, gain, threshold);
-        let sp_skip = 8192;
-        let sp_peak = peak_after(&sp_output, sp_skip);
-
-        let td_output: Vec<f32> = input
-            .iter()
-            .map(|&s| saturate_td(s, gain, threshold, 1.0))
-            .collect();
-        let td_peak = peak_after(&td_output, 0);
-
-        fn flat_variation(signal: &[f32], peak: f32) -> f64 {
-            let threshold = peak * 0.90;
-            let flat: Vec<f32> = signal
-                .iter()
-                .filter(|&&s| s.abs() > threshold)
-                .copied()
-                .collect();
-            if flat.len() < 2 {
-                return 0.0;
-            }
-            let mut var = 0.0_f64;
-            for i in 1..flat.len() {
-                var += (flat[i] - flat[i - 1]).abs() as f64;
-            }
-            var / (flat.len() - 1) as f64
+    fn an_expired_peak_loses_about_98_percent_over_one_window() {
+        let mut peak = DetailPeak::new(32, 8);
+        peak.process(1.0, true);
+        let mut value = 1.0;
+        for _ in 1..72 {
+            value = peak.process(0.0, true);
         }
-
-        let sp_var = flat_variation(&sp_output[sp_skip..], sp_peak);
-        let td_var = flat_variation(&td_output, td_peak);
-
-        assert!(
-            sp_var > td_var * 2.0,
-            "spectral should preserve much more detail than TD: sp_var={sp_var:.6}, td_var={td_var:.6}"
-        );
+        assert!((value - 0.018_315_64).abs() < 1e-6, "{value}");
     }
 
     #[test]
-    fn test_spectral_output_bounded_with_detail() {
-        let gain = 10.0_f32;
-        let threshold = 1.0_f32;
-        let num = 65536;
+    fn disabling_detail_forgets_the_held_peak_without_reallocating() {
+        let mut peak = DetailPeak::new(32, 8);
+        let storage = peak.block_peaks.as_ptr();
+        for _ in 0..100 {
+            peak.process(1.0, true);
+        }
+        assert_eq!(peak.process(2.0, false), 0.0);
+        assert!(!peak.active);
+        assert_eq!(peak.held_peak, 0.0);
+        assert!(peak.block_peaks.iter().all(|&x| x == 0.0));
+        assert_eq!(peak.process(0.0, true), 0.0);
+        assert_eq!(peak.block_peaks.as_ptr(), storage);
+    }
 
-        let input: Vec<f32> = (0..num)
-            .map(|i| {
-                let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.1 * (2.0 * PI * 5000.0 * t).sin()
-            })
-            .collect();
+    #[test]
+    fn the_peak_window_keeps_the_same_clock_across_detail_enable_changes() {
+        let mut active = DetailPeak::new(32, 8);
+        let mut switched = DetailPeak::new(32, 8);
+        for sample in 0..1000 {
+            let quiet = if sample % 101 == 0 { 1.0 } else { 0.1 };
+            let expected = active.process(quiet, true);
+            let enabled = sample >= 19 && !(241..319).contains(&sample);
+            let actual = switched.process(quiet, enabled);
+            if (100..241).contains(&sample) || sample >= 400 {
+                assert_eq!(actual, expected, "sample {sample}");
+            }
+        }
+    }
 
-        let output = run_spectral(&input, gain, threshold);
-        for (i, &s) in output.iter().enumerate() {
+    #[test]
+    fn quiet_bursts_and_level_changes_stay_bounded_without_inverting_clipped_lobes() {
+        for sign in [-1.0, 1.0] {
+            for (gain, threshold) in [(4.0, 1.0), (16.0, 0.063)] {
+                let mut clipper = SpectralClipper::new(512, 128);
+                for sample in 0..12_288 {
+                    let amplitude = match sample {
+                        0..2048 | 4096..6144 | 8192.. => 0.0,
+                        2048..4096 => 0.02,
+                        _ => 0.12,
+                    };
+                    let quiet = amplitude
+                        * (quiet_tone(sample, 512, 47) + 0.5 * quiet_tone(sample + 13, 512, 93));
+                    let pending_quiet = clipper.quiet_output_ring[clipper.read_pos] as f32;
+                    let output = clipper.process_sample(0.8 * sign + quiet, gain, threshold, 0.375);
+                    assert!(clipper.detail_peak.held_peak >= pending_quiet.abs());
+                    assert!(output.is_finite() && output.abs() <= threshold);
+                    assert!(
+                        output * sign >= -1e-6,
+                        "sample {sample}, sign {sign}, gain {gain}, T {threshold}: {output}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fft_skip_and_reenable_do_not_retain_old_headroom_on_a_constant_signal() {
+        let mut clipper = SpectralClipper::new(512, 128);
+        for sample in 0..4096 {
+            clipper.process_sample(0.8 + 0.02 * quiet_tone(sample, 512, 47), 4.0, 1.0, 0.0);
+        }
+        assert!(clipper.detail_peak.held_peak > 0.01);
+        for _ in 0..2048 {
+            assert_eq!(clipper.process_sample_skip_fft(0.8, 4.0, 1.0, 0.0), 1.0);
+            assert_eq!(clipper.detail_peak.held_peak, 0.0);
+        }
+        for _ in 0..2048 {
+            let output = clipper.process_sample(0.8, 4.0, 1.0, 0.0);
             assert!(
-                s.abs() <= threshold * 1.5 + 0.01,
-                "output {s} at sample {i} exceeds safety clip bound"
+                (output - 1.0).abs() < 2e-6,
+                "{output}, quiet peak {}",
+                clipper.detail_peak.held_peak
             );
         }
     }
 
     #[test]
-    fn test_spectral_peak_from_tanh_not_safety_clip() {
-        let gain = 10.0_f32;
-        let threshold = 1.0_f32;
-        let num = 65536;
-
-        let input: Vec<f32> = (0..num)
-            .map(|i| {
-                let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
-            })
-            .collect();
-
-        let output = run_spectral(&input, gain, threshold);
-        let skip = 8192;
-        let out_peak = peak_after(&output, skip);
-
-        assert!(
-            out_peak > 0.8,
-            "output peak {out_peak:.4} too low — gain should boost signal"
-        );
-        assert!(
-            out_peak < threshold * 1.45,
-            "output peak {out_peak:.4} is at the safety clip ceiling — \
-             tanh should be doing the clipping, not the safety clip"
-        );
-    }
-
-    #[test]
-    fn test_spectral_no_samples_at_safety_clip() {
-        let gain = 10.0_f32;
-        let threshold = 1.0_f32;
-        let num = 65536;
-
-        let input: Vec<f32> = (0..num)
-            .map(|i| {
-                let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
-            })
-            .collect();
-
-        let output = run_spectral(&input, gain, threshold);
-        let skip = 8192;
-
-        let safety_clip = threshold * 1.5;
-        let at_clip = output[skip..]
-            .iter()
-            .filter(|&&s| (s.abs() - safety_clip).abs() < 1e-6)
-            .count();
-
-        assert!(
-            at_clip == 0,
-            "found {at_clip} samples at exact safety clip level — \
-             safety clip is destroying detail (should be 0)"
-        );
-    }
-
-    // ── Clip-aware detail blend tests (mirrors lib.rs pipeline) ─────────
-
-    /// Simulate the full plugin pipeline: TD saturation + spectral + clip-aware blend.
-    fn blend_with_clip_mask(input: &[f32], gain: f32, threshold: f32, detail: f32) -> Vec<f32> {
-        let mut sc = SpectralClipper::new(2048, 512);
-
-        let delay_len = 2048;
-        let mut dry_delay = vec![0.0_f32; delay_len];
-        let mut delay_pos = 0;
-
-        let mut output = Vec::with_capacity(input.len());
-
-        for &sample in input {
-            let dry = dry_delay[delay_pos];
-            dry_delay[delay_pos] = sample;
-            delay_pos = (delay_pos + 1) % delay_len;
-
-            let (td, tanh_val) = saturate_td_with_tanh(dry, gain, threshold, 1.0);
-            let sp = sc.process_sample(sample, gain, threshold, 1.0);
-
-            let clip_mask = tanh_val * tanh_val;
-            let lost = sp - td;
-            let wet = td + detail * clip_mask * lost;
-
-            output.push(wet);
-        }
-
-        output
-    }
-
-    #[test]
-    fn test_clip_blend_unclipped_matches_td() {
-        // Quiet signal at high gain: clip mask activates but (sp - td) ≈ 0
-        // for linear-region signals, so blended ≈ td.
-        let gain = 10.0_f32;
-        let threshold = 1.0_f32;
-        let detail = 1.0;
-
-        let input = make_sine(440.0, 0.05, 32768);
-
-        let delay_len = 2048;
-        let mut dry_delay = vec![0.0_f32; delay_len];
-        let mut delay_pos = 0;
-        let td_output: Vec<f32> = input
-            .iter()
-            .map(|&s| {
-                let dry = dry_delay[delay_pos];
-                dry_delay[delay_pos] = s;
-                delay_pos = (delay_pos + 1) % delay_len;
-                saturate_td(dry, gain, threshold, 1.0)
-            })
-            .collect();
-
-        let blended = blend_with_clip_mask(&input, gain, threshold, detail);
-
-        let skip = 8192;
-        let mut rms_diff = 0.0_f64;
-        let mut rms_signal = 0.0_f64;
-        let count = blended.len() - skip;
-        for i in skip..blended.len() {
-            let diff = (blended[i] - td_output[i]).abs();
-            rms_diff += (diff as f64).powi(2);
-            rms_signal += (td_output[i] as f64).powi(2);
-        }
-        rms_diff = (rms_diff / count as f64).sqrt();
-        rms_signal = (rms_signal / count as f64).sqrt();
-
-        let relative_error = if rms_signal > 1e-10 {
-            rms_diff / rms_signal
-        } else {
-            rms_diff
-        };
-        assert!(
-            relative_error < 0.05,
-            "unclipped material should match TD within 5%: relative_error={relative_error:.6}"
-        );
-    }
-
-    #[test]
-    fn test_clip_blend_adds_detail_in_clipped_regions() {
-        let gain = 10.0_f32;
-        let threshold = 1.0_f32;
-
-        let num = 65536;
-        let input: Vec<f32> = (0..num)
-            .map(|i| {
-                let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.15 * (2.0 * PI * 1000.0 * t).sin()
-            })
-            .collect();
-
-        let delay_len = 2048;
-        let mut dry_delay = vec![0.0_f32; delay_len];
-        let mut delay_pos = 0;
-        let td_output: Vec<f32> = input
-            .iter()
-            .map(|&s| {
-                let dry = dry_delay[delay_pos];
-                dry_delay[delay_pos] = s;
-                delay_pos = (delay_pos + 1) % delay_len;
-                saturate_td(dry, gain, threshold, 1.0)
-            })
-            .collect();
-
-        let blended = blend_with_clip_mask(&input, gain, threshold, 1.0);
-
-        let skip = 8192;
-
-        fn flat_variation(signal: &[f32], skip: usize) -> f64 {
-            let peak = signal[skip..].iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
-            let threshold = peak * 0.90;
-            let flat: Vec<f32> = signal[skip..]
-                .iter()
-                .filter(|&&s| s.abs() > threshold)
-                .copied()
-                .collect();
-            if flat.len() < 2 {
-                return 0.0;
-            }
-            let mut var = 0.0_f64;
-            for i in 1..flat.len() {
-                var += (flat[i] - flat[i - 1]).abs() as f64;
-            }
-            var / (flat.len() - 1) as f64
-        }
-
-        let td_var = flat_variation(&td_output, skip);
-        let blended_var = flat_variation(&blended, skip);
-
-        assert!(
-            blended_var > td_var * 1.5,
-            "clip-aware blend should add detail in clipped regions: blended_var={blended_var:.6}, td_var={td_var:.6}, ratio={:.2}x",
-            blended_var / td_var.max(1e-10)
-        );
-    }
-
-    #[test]
-    fn test_clip_blend_peaks_match_td() {
-        let gain = 10.0_f32;
-        let threshold = 1.0_f32;
-
-        let num = 65536;
-        let input: Vec<f32> = (0..num)
-            .map(|i| {
-                let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.15 * (2.0 * PI * 1000.0 * t).sin()
-            })
-            .collect();
-
-        let delay_len = 2048;
-        let mut dry_delay = vec![0.0_f32; delay_len];
-        let mut delay_pos = 0;
-        let td_output: Vec<f32> = input
-            .iter()
-            .map(|&s| {
-                let dry = dry_delay[delay_pos];
-                dry_delay[delay_pos] = s;
-                delay_pos = (delay_pos + 1) % delay_len;
-                saturate_td(dry, gain, threshold, 1.0)
-            })
-            .collect();
-
-        let blended = blend_with_clip_mask(&input, gain, threshold, 1.0);
-
-        let skip = 8192;
-        let td_peak = td_output[skip..]
-            .iter()
-            .fold(0.0_f32, |m, &s| m.max(s.abs()));
-        let blended_peak = blended[skip..].iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
-
-        let ratio = blended_peak / td_peak;
-        // In the new architecture (no amount crossfade), spectral detail rides
-        // above the threshold clip level, producing up to ~20% overshoot with
-        // 0.15 amplitude detail content. The safety clip bounds this at 1.5x.
-        assert!(
-            (0.85..=1.25).contains(&ratio),
-            "blended peak should be within +25%/-15% of TD peak: td_peak={td_peak:.4}, blended_peak={blended_peak:.4}, ratio={ratio:.4}"
-        );
-    }
-
-    // ── Detail at threshold level (spec test 5) ────���─────────────────────
-
-    #[test]
-    fn test_detail_at_threshold_level() {
-        // gain=1, threshold=0.5, detail=100%, composite signal
-        // Detail variation should be > 1.5x TD at the ±0.5 flat sections.
-        let gain = 1.0_f32;
-        let threshold = 0.5_f32;
-
-        let num = 65536;
-        let input: Vec<f32> = (0..num)
-            .map(|i| {
-                let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
-            })
-            .collect();
-
-        // TD-only path (with delay alignment)
-        let delay_len = 2048;
-        let mut dry_delay_td = vec![0.0_f32; delay_len];
-        let mut pos_td = 0;
-        let td_output: Vec<f32> = input
-            .iter()
-            .map(|&s| {
-                let dry = dry_delay_td[pos_td];
-                dry_delay_td[pos_td] = s;
-                pos_td = (pos_td + 1) % delay_len;
-                saturate_td(dry, gain, threshold, 1.0)
-            })
-            .collect();
-
-        // Full blend pipeline
-        let blended = blend_with_clip_mask(&input, gain, threshold, 1.0);
-
-        let skip = 8192;
-
-        fn flat_variation(signal: &[f32], skip: usize) -> f64 {
-            let peak = signal[skip..].iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
-            let thresh = peak * 0.90;
-            let flat: Vec<f32> = signal[skip..]
-                .iter()
-                .filter(|&&s| s.abs() > thresh)
-                .copied()
-                .collect();
-            if flat.len() < 2 {
-                return 0.0;
-            }
-            let mut var = 0.0_f64;
-            for i in 1..flat.len() {
-                var += (flat[i] - flat[i - 1]).abs() as f64;
-            }
-            var / (flat.len() - 1) as f64
-        }
-
-        let td_var = flat_variation(&td_output, skip);
-        let blended_var = flat_variation(&blended, skip);
-
-        assert!(
-            blended_var > td_var * 1.5,
-            "detail at threshold level should preserve variation: blended_var={blended_var:.6}, td_var={td_var:.6}"
-        );
-    }
-
-    // ── Detail at gain level (spec test 6) ──────────────────────────────
-
-    #[test]
-    fn test_detail_at_gain_level() {
-        // gain=10, threshold=1.0, detail=100%
-        // Detail variation should be > 1.5x TD at the ±1.0 flat sections.
-        let gain = 10.0_f32;
-        let threshold = 1.0_f32;
-
-        let num = 65536;
-        let input: Vec<f32> = (0..num)
-            .map(|i| {
-                let t = i as f32 / SR;
-                0.8 * (2.0 * PI * 100.0 * t).sin() + 0.05 * (2.0 * PI * 5000.0 * t).sin()
-            })
-            .collect();
-
-        let delay_len = 2048;
-        let mut dry_delay_td = vec![0.0_f32; delay_len];
-        let mut pos_td = 0;
-        let td_output: Vec<f32> = input
-            .iter()
-            .map(|&s| {
-                let dry = dry_delay_td[pos_td];
-                dry_delay_td[pos_td] = s;
-                pos_td = (pos_td + 1) % delay_len;
-                saturate_td(dry, gain, threshold, 1.0)
-            })
-            .collect();
-
-        let blended = blend_with_clip_mask(&input, gain, threshold, 1.0);
-
-        let skip = 8192;
-
-        fn flat_variation(signal: &[f32], skip: usize) -> f64 {
-            let peak = signal[skip..].iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
-            let thresh = peak * 0.90;
-            let flat: Vec<f32> = signal[skip..]
-                .iter()
-                .filter(|&&s| s.abs() > thresh)
-                .copied()
-                .collect();
-            if flat.len() < 2 {
-                return 0.0;
-            }
-            let mut var = 0.0_f64;
-            for i in 1..flat.len() {
-                var += (flat[i] - flat[i - 1]).abs() as f64;
-            }
-            var / (flat.len() - 1) as f64
-        }
-
-        let td_var = flat_variation(&td_output, skip);
-        let blended_var = flat_variation(&blended, skip);
-
-        assert!(
-            blended_var > td_var * 1.5,
-            "detail at gain level should preserve variation: blended_var={blended_var:.6}, td_var={td_var:.6}"
-        );
-    }
-
-    // ── Full pipeline tests with threshold ──────────────────────────────
-
-    #[test]
-    fn test_pipeline_peak_clamped_at_threshold() {
-        // gain=8 (~18dB), threshold=0.5 — output peak should be at threshold.
-        let gain = 8.0_f32;
-        let threshold = 0.5_f32;
-        let knee = 1.0;
-
-        let num_samples = 32768;
-        let freq = 440.0_f32;
-        let sr = 48000.0_f32;
-        let amplitude = 0.8_f32;
-
-        let input: Vec<f32> = (0..num_samples)
-            .map(|i| amplitude * (2.0 * PI * freq * i as f32 / sr).sin())
-            .collect();
-
-        let mut sc = SpectralClipper::new(2048, 512);
-        let spectral_out: Vec<f32> = input
-            .iter()
-            .map(|&s| sc.process_sample(s, gain, threshold, knee))
-            .collect();
-
-        let latency = 2048;
-        let mut dry_delay = vec![0.0_f32; latency];
-        let mut dry_pos = 0;
-        let mut output = Vec::with_capacity(num_samples);
-
-        for i in 0..num_samples {
-            let dry = dry_delay[dry_pos];
-            dry_delay[dry_pos] = input[i];
-            dry_pos = (dry_pos + 1) % latency;
-
-            let (td, tanh_val) = saturate_td_with_tanh(dry, gain, threshold, knee);
-            let sp = spectral_out[i];
-
-            let clip_mask = tanh_val * tanh_val;
-            let lost = sp - td;
-            let wet = td + 1.0 * clip_mask * lost;
-            output.push(wet);
-        }
-
-        let skip = latency + 4096;
-        let peak = output[skip..].iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
-
-        // TD clips at threshold, spectral detail can ride slightly above
-        assert!(
-            peak < threshold * 1.5 + 0.01,
-            "output peak {peak} should not far exceed threshold {threshold}"
-        );
-        assert!(
-            peak > threshold * 0.85,
-            "output peak {peak} should reach near threshold {threshold}"
-        );
-    }
-
-    #[test]
-    fn test_pipeline_detail_variation_with_gain() {
-        // At high gain (18dB), the clip mask is near 1.0 for loud signals,
-        // so the spectral detail term adds variation in clipped regions.
-        let gain = 8.0_f32;
-        let threshold = 1.0_f32;
-        let knee = 1.0;
-
-        let num_samples = 32768;
-        let freq = 440.0_f32;
-        let sr = 48000.0_f32;
-        let amplitude = 0.8_f32;
-
-        let input: Vec<f32> = (0..num_samples)
-            .map(|i| amplitude * (2.0 * PI * freq * i as f32 / sr).sin())
-            .collect();
-
-        let mut sc = SpectralClipper::new(2048, 512);
-        let spectral_out: Vec<f32> = input
-            .iter()
-            .map(|&s| sc.process_sample(s, gain, threshold, knee))
-            .collect();
-
-        let latency = 2048;
-        let mut dry_delay = vec![0.0_f32; latency];
-        let mut dry_pos = 0;
-
-        let mut output_td = Vec::with_capacity(num_samples);
-        let mut output_detail = Vec::with_capacity(num_samples);
-
-        for i in 0..num_samples {
-            let dry = dry_delay[dry_pos];
-            dry_delay[dry_pos] = input[i];
-            dry_pos = (dry_pos + 1) % latency;
-
-            let (td, tanh_val) = saturate_td_with_tanh(dry, gain, threshold, knee);
-            let sp = spectral_out[i];
-            let clip_mask = tanh_val * tanh_val;
-
-            let lost = sp - td;
-            output_td.push(td);
-            output_detail.push(td + 1.0 * clip_mask * lost);
-        }
-
-        let skip = latency + 4096;
-
-        let mut td_var = 0.0_f64;
-        let mut detail_var = 0.0_f64;
-        let mut count = 0usize;
-        for i in skip..num_samples.saturating_sub(1) {
-            let orig = input[i.saturating_sub(latency)];
-            if orig.abs() > 0.7 {
-                let d_td = (output_td[i + 1] - output_td[i]).abs() as f64;
-                let d_detail = (output_detail[i + 1] - output_detail[i]).abs() as f64;
-                td_var += d_td;
-                detail_var += d_detail;
-                count += 1;
+    fn a_quiet_level_drop_releases_the_clip_line_smoothly_to_its_new_level() {
+        for sign in [-1.0, 1.0] {
+            let mut clipper = SpectralClipper::new(512, 128);
+            let mut previous_line = 1.0;
+            for sample in 0..10_240 {
+                let amplitude = if sample < 4096 { 0.02 } else { 0.005 };
+                let input = 0.8 * sign + amplitude * quiet_tone(sample, 512, 47);
+                let quiet = clipper.quiet_output_ring[clipper.read_pos] as f32;
+                let output = clipper.process_sample(input, 4.0, 1.0, 0.0);
+                let line = sign * (output - 4.0 * quiet);
+                if sample >= 5120 {
+                    assert!(
+                        line - previous_line < 0.001,
+                        "sample {sample}: clip line jumped {previous_line} -> {line}"
+                    );
+                }
+                if sample >= 8192 {
+                    let expected = 0.98 * sign + 0.02 * quiet_tone(sample - 512, 512, 47);
+                    assert!((output - expected).abs() < 1e-5, "{output} vs {expected}");
+                }
+                previous_line = line;
             }
         }
+    }
+
+    #[test]
+    fn balanced_multitone_detail_keeps_a_steady_clip_line_and_equal_excursions() {
+        let period: Vec<f32> = (0..512)
+            .map(|sample| {
+                0.02 * quiet_tone(sample, 512, 17)
+                    + 0.014 * quiet_tone(sample, 512, 51)
+                    + 0.009 * quiet_tone(sample, 512, 85)
+            })
+            .collect();
+        let peak = period.iter().map(|q| q.abs()).fold(0.0_f32, f32::max);
+        for sign in [-1.0, 1.0] {
+            for detail in [0.25, 1.0] {
+                let mut clipper = SpectralClipper::new(512, 128);
+                let center = sign * (1.0 - 4.0 * detail * peak);
+                let mut low = f32::INFINITY;
+                let mut high = f32::NEG_INFINITY;
+                for sample in 0..8192 {
+                    let quiet = period[sample % period.len()];
+                    let output = clipper.process_sample_with_detail(
+                        0.8 * sign + quiet,
+                        4.0,
+                        1.0,
+                        detail,
+                        0.0,
+                    );
+                    if sample >= 6144 {
+                        let expected = center + 4.0 * detail * quiet;
+                        assert!(
+                            (output - expected).abs() < 5e-6,
+                            "sign {sign}, Detail {detail}, sample {sample}: {output} vs {expected}"
+                        );
+                        assert!(output.abs() <= 1.0);
+                        low = low.min(output);
+                        high = high.max(output);
+                    }
+                }
+                assert!(((high - center) - (center - low)).abs() < 5e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn naturally_asymmetric_detail_keeps_its_original_waveform() {
+        let period: Vec<f32> = (0..512)
+            .map(|sample| {
+                let phase = std::f64::consts::TAU * 17.0 * sample as f64 / 512.0;
+                (0.02 * phase.sin() + 0.012 * (2.0 * phase).cos()) as f32
+            })
+            .collect();
+        let peak = period.iter().map(|q| q.abs()).fold(0.0_f32, f32::max);
+        let mut clipper = SpectralClipper::new(512, 128);
+        for sample in 0..8192 {
+            let quiet = period[sample % period.len()];
+            let output = clipper.process_sample(0.8 + quiet, 4.0, 1.0, 0.0);
+            if sample >= 6144 {
+                let expected = 1.0 - 4.0 * peak + 4.0 * quiet;
+                assert!((output - expected).abs() < 5e-6, "{output} vs {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn quiet_waveform_reconstructs_a_known_sine_and_holds_its_peak() {
+        let mut clipper = SpectralClipper::new(2048, 512);
+        for sample in 0..12_288 {
+            if sample >= 8192 {
+                let angle = std::f64::consts::TAU * 215.0 * (sample - 2048) as f64 / 2048.0;
+                let real = clipper.quiet_output_ring[clipper.read_pos] as f32;
+                assert!((real - 0.02 * angle.sin() as f32).abs() < 2e-6);
+                assert!((clipper.detail_peak.held_peak - 0.02).abs() < 2e-6);
+            }
+            clipper.process_sample(0.8 + 0.02 * quiet_tone(sample, 2048, 215), 1.0, 1.0, 0.0);
+        }
+    }
+
+    #[test]
+    fn quiet_nyquist_is_preserved_at_its_original_amplitude() {
+        let mut clipper = SpectralClipper::new(64, 16);
+        for sample in 0..1024 {
+            let parity = if sample % 2 == 0 { 1.0 } else { -1.0 };
+            if sample >= 256 {
+                let real = clipper.quiet_output_ring[clipper.read_pos] as f32;
+                assert!((real - 0.02 * parity).abs() < 1e-6);
+            }
+            clipper.process_sample(0.8 + 0.02 * parity, 4.0, 1.0, 0.0);
+        }
+    }
+
+    #[test]
+    fn zero_detail_skips_spectral_frames_but_keeps_the_input_ring_ready() {
+        let mut clipper = SpectralClipper::new(512, 128);
+        for sample in 0..2048 {
+            let input = 0.8 + 0.02 * quiet_tone(sample, 512, 47);
+            clipper.process_sample_with_detail(input, 4.0, 0.5, 0.0, 0.0);
+        }
+        assert!(clipper.mag_buf.iter().all(|&x| x == 0.0));
+        assert!(clipper.quiet_output_ring.iter().all(|&x| x == 0.0));
+        for sample in 2048..2176 {
+            let input = 0.8 + 0.02 * quiet_tone(sample, 512, 47);
+            clipper.process_sample(input, 4.0, 0.5, 0.0);
+        }
+        assert!(clipper.mag_buf.iter().any(|&x| x > 0.0));
+    }
+
+    #[test]
+    fn partial_clipping_blends_the_headroom_curve_smoothly_for_all_knees() {
+        for threshold in [0.4_f32, 0.8] {
+            for sign in [-1.0, 1.0] {
+                for knee in [0.0_f32, 0.375, 1.0] {
+                    let mut clipper = SpectralClipper::new(512, 128);
+                    let gain = 4.0;
+                    let detail = 0.75;
+                    let amplitude = 0.02 * threshold;
+                    for sample in 0..4096 {
+                        let tone = quiet_tone(sample, 512, 47);
+                        let input = (sign * 1.5 * threshold + amplitude * tone) / gain;
+                        let actual = clipper
+                            .process_sample_with_detail(input, gain, threshold, detail, knee);
+                        if sample >= 2048 {
+                            let t = f64::from(threshold);
+                            let gained = f64::from(input) * f64::from(gain);
+                            let protected = f64::from(detail * amplitude * tone);
+                            let inner = t - f64::from(detail * amplitude);
+                            let shape = |x: f64, ceiling: f64| {
+                                let hard = x.clamp(-ceiling, ceiling);
+                                let soft = ceiling * (x / ceiling).tanh();
+                                hard * (1.0 - f64::from(knee)) + soft * f64::from(knee)
+                            };
+                            let ordinary = shape(gained, t);
+                            let candidate = shape(gained - protected, inner) + protected;
+                            let over = (gained.abs() - t) / t;
+                            let blend = 3.0 * over.powi(2) - 2.0 * over.powi(3);
+                            let expected = ordinary * (1.0 - blend) + candidate * blend;
+                            assert!(
+                                (f64::from(actual) - expected).abs() < 1e-6,
+                                "T {threshold}, sign {sign}, Knee {knee}: {actual} vs {expected}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn restored_tone_tracks_the_internal_clip_line_and_reaches_the_final_ceiling() {
+        for sign in [-1.0, 1.0] {
+            for detail in [0.0, 0.25, 0.5, 1.0] {
+                for knee in [0.0, 0.375, 1.0] {
+                    let mut clipper = SpectralClipper::new(512, 128);
+                    let amplitude = 10.0 * 0.02 * detail;
+                    let mut peak = 0.0_f32;
+                    for sample in 0..4096 {
+                        let tone = quiet_tone(sample, 512, 47);
+                        let output = clipper.process_sample_with_detail(
+                            0.8 * sign + 0.02 * tone,
+                            10.0,
+                            1.0,
+                            detail,
+                            knee,
+                        );
+                        if sample >= 2048 {
+                            let expected = sign * (1.0 - amplitude) + amplitude * tone;
+                            assert!(
+                                (output - expected).abs() < 3e-6,
+                                "sign {sign}, Detail {detail}, Knee {knee}: {output} vs {expected}"
+                            );
+                            assert!(output.abs() <= 1.0);
+                            peak = peak.max(output.abs());
+                        }
+                    }
+                    assert!((peak - 1.0).abs() < 3e-6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oscillating_carrier_preserves_the_quiet_waveform_without_flat_ceiling_sections() {
+        let mut clipper = SpectralClipper::new(512, 128);
+        let mut compared = 0;
+        let mut near_ceiling = 0;
+        for sample in 0..16_384 {
+            let loud = 0.8 * quiet_tone(sample, 512, 8);
+            let quiet = 0.02 * quiet_tone(sample, 512, 47);
+            let output = clipper.process_sample(loud + quiet, 8.0, 1.0, 0.0);
+            if sample >= 8192 && (8.0 * loud).abs() > 3.0 {
+                let expected = loud.signum() * 0.84 + 8.0 * quiet;
+                assert!((output - expected).abs() < 1e-5, "{output} vs {expected}");
+                compared += 1;
+                if output.abs() > 1.0 - 1e-5 {
+                    near_ceiling += 1;
+                }
+            }
+        }
+        assert!(compared > 1000);
         assert!(
-            count > 100,
-            "should have enough clipped samples: count={count}"
+            near_ceiling < compared / 20,
+            "{near_ceiling}/{compared} at ceiling"
         );
-        assert!(
-            detail_var > td_var * 1.05,
-            "detail output should have more variation than TD in clipped regions: \
-             detail_var={detail_var:.6}, td_var={td_var:.6}, count={count}"
+    }
+
+    #[test]
+    fn subthreshold_detail_and_fft_reenable_do_not_colour_the_delayed_signal() {
+        for knee in [0.0, 0.375, 1.0] {
+            let mut active = SpectralClipper::new(512, 128);
+            let mut switched = SpectralClipper::new(512, 128);
+            let mut ordinary = SpectralClipper::new(512, 128);
+            for sample in 0..8192 {
+                let input = 0.8 * quiet_tone(sample, 512, 8) + 0.02 * quiet_tone(sample, 512, 47);
+                let expected = ordinary.process_sample_skip_fft(input, 1.0, 1.0, knee);
+                assert_eq!(active.process_sample(input, 1.0, 1.0, knee), expected);
+                let detail = if (2000..5000).contains(&sample) {
+                    0.0
+                } else {
+                    1.0
+                };
+                assert_eq!(
+                    switched.process_sample_with_detail(input, 1.0, 1.0, detail, knee),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn live_headroom_parameters_remain_finite_bounded_and_match_the_fast_api() {
+        let mut reference = SpectralClipper::new(512, 128);
+        let mut fast = SpectralClipper::new(512, 128);
+        let settings = [
+            (1.0, 1.0, 0.0, 0.0),
+            (4.0, 0.5, 0.25, 0.375),
+            (16.0, 0.063, 1.0, 1.0),
+            (2.0, 0.1, 0.75, 0.0),
+            (1.0, 1.0, 0.0, 1.0),
+        ];
+        for sample in 0..12_288 {
+            let (gain, threshold, detail, knee) = settings[(sample / 701) % settings.len()];
+            let input = 0.8 * quiet_tone(sample, 512, 3)
+                + 0.15 * quiet_tone(sample, 512, 47)
+                + 0.02 * quiet_tone(sample, 512, 93);
+            let expected =
+                reference.process_sample_with_detail(input, gain, threshold, detail, knee);
+            let actual = fast.process_sample_with_detail_fast(
+                input,
+                gain,
+                threshold,
+                1.0 / threshold,
+                detail,
+                knee,
+            );
+            assert_eq!(actual, expected);
+            assert!(actual.is_finite() && actual.abs() <= threshold);
+        }
+    }
+
+    #[test]
+    fn reset_reuses_storage_and_clears_the_quiet_signal_and_headroom_history() {
+        let mut clipper = SpectralClipper::new(512, 128);
+        let pointers = (
+            clipper.quiet_output_ring.as_ptr(),
+            clipper.detail_peak.block_peaks.as_ptr(),
+            clipper.quiet_buf.as_ptr(),
         );
+        for sample in 0..2048 {
+            clipper.process_sample(0.8 + 0.02 * quiet_tone(sample, 512, 47), 4.0, 0.5, 0.375);
+        }
+        assert!(clipper.detail_peak.held_peak > 0.001);
+        clipper.reset();
+        assert_eq!(
+            pointers,
+            (
+                clipper.quiet_output_ring.as_ptr(),
+                clipper.detail_peak.block_peaks.as_ptr(),
+                clipper.quiet_buf.as_ptr()
+            )
+        );
+        assert!(clipper.quiet_output_ring.iter().all(|&x| x == 0.0));
+        assert_eq!(clipper.detail_peak.held_peak, 0.0);
+        assert!(clipper.detail_peak.block_peaks.iter().all(|&x| x == 0.0));
+        for _ in 0..2048 {
+            assert_eq!(clipper.process_sample(0.0, 4.0, 0.5, 0.375), 0.0);
+        }
     }
 }

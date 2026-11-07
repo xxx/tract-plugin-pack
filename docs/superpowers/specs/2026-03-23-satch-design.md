@@ -1,3 +1,26 @@
+# satch Detail Preservation Revision — 2026-11-06
+
+This contract supersedes the DSP architecture in the historical Phase 1 proposal below. The agreed target is the visible and audible effect of quiet variations surviving clipped peaks, with detail oscillating around an internal clip line below the final output ceiling. No reference implementation is required.
+
+## Current behavior
+
+- Gain, Threshold, Detail, Knee, Mix, parameter IDs, and the 2048-sample latency are retained. Both the plugin and shared Satch effect use the same DSP implementation.
+- Detail at zero is ordinary hard/soft time-domain saturation. Below Threshold, all Detail settings return that same waveshaper output exactly, including at soft Knee.
+- Quiet content is identified by the existing peak-relative STFT mask (2048-point periodic Hann, hop 512). A quiet-path inverse FFT reconstructs its waveform without another transform or additional latency. A preallocated history of `N/H + 1` hop-sized peak blocks reserves headroom from actual waveform peaks for at least one FFT window; expired peaks release with coefficient `exp(-4/N)`.
+- Gain applies to both the full signal and the protected quiet component. Detail controls the protected fraction. That fraction is removed before shaping, then added back once after shaping.
+- The internal threshold is reduced by the protected held peak; Threshold remains the final wet output ceiling. For an isolated quiet sine of gained amplitude A under a strongly clipped positive carrier, hard Knee and full Detail produce approximately `Threshold - A + A*sin(phase)`; the negative carrier uses `-Threshold + A + A*sin(phase)`.
+- If the protected held peak exceeds half the ordinary shaped output magnitude (at most half of Threshold), scale the protected waveform to that headroom budget. This prevents the quiet oscillation from reversing a strongly clipped lobe's polarity.
+- Preservation fades in using smoothstep from gained input magnitude Threshold to twice Threshold. The final clamp guards floating-point error; it must not routinely flatten recovered sine peaks.
+- At Detail zero, FFT work is skipped and held peaks are cleared, while exact delayed dry and both spectral/history block clocks continue. Re-enabling Detail refills the spectral output over four hops and rebuilds the headroom history; reset clears quiet and peak history without reallocating.
+
+## Validation
+
+Use source-tracked quiet sine and multi-tone tests to verify amplitude, phase, a steady internal clip line, and the final ceiling for both polarities and intermediate Detail settings. Symmetric periodic detail must retain balanced excursions; naturally asymmetric detail must retain its waveform. Newly larger peaks require immediate headroom attack; after a level drop, the old reservation holds for about one window and releases smoothly. Test the release rate and recovery to the new level. Also cover exact subthreshold identity, equivalent gain staging, extreme gain/low ceiling, changing parameters, FFT re-enable, dry/wet alignment, reset, and existing consumers. Extra high-frequency energy or variation alone does not establish detail preservation.
+
+---
+
+## Historical Phase 1 proposal
+
 # satch Phase 1 Design Spec — Spectral Clipper MVP
 
 ## Overview
@@ -190,7 +213,7 @@ Three dials stacked vertically. Same tiny-skia rendering as other plugins.
 
 ## Non-Goals (Phase 1)
 
-- No oversampling (STFT handles antialiasing via windowing)
+- No oversampling (time-domain waveshaping can still alias)
 - No multiband
 - No presets
 - No metering beyond basic level display
