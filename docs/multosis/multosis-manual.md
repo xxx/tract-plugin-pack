@@ -607,12 +607,12 @@ The two FFT-fixed effects in this category — **Satch** (2048-pt) and **Warp Zo
 
 ### Satch
 
-Distortion-adjacent, FFT-fixed at 2048-pt. Detail-preserving spectral saturator. Per-bin magnitude saturation: detail bins pass through clipping unaffected so highs survive.
+FFT-fixed at 2048-pt. A detail-preserving spectral saturator: quiet components bypass the waveshaper, with recent waveform peaks reserving steady headroom beneath the final ceiling and a smooth release when they recede. It uses the same processor as the standalone Satch plugin.
 
 - **Gain** (0..24 dB, default 0) — input gain into the saturator.
-- **Threshold** (-24..0 dB, default 0) — saturation onset.
-- **Detail** (0..100 %, default 0) — how aggressively quiet bins are spared.
-- **Knee** (0..100 %, default 100) — soft-knee width on the per-bin clip.
+- **Threshold** (-24..0 dB, default 0) — final wet output ceiling.
+- **Detail** (0..100 %, default 0) — the amount of quiet content protected during clipping. Below Threshold, the ordinary waveshaper output is unchanged; at extreme settings the protected detail is scaled to fit the available headroom.
+- **Knee** (0..100 %, default 100) — blend from hard clipping to soft tanh shaping.
 
 **Latency:** 2 048 samples (~42.7 ms at 48 kHz).
 

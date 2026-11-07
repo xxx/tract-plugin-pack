@@ -1,24 +1,10 @@
 use super::{Effect, ParamFormat, ParamScaling, ParamSpec};
 
-/// A detail-preserving spectral saturator, ported from the `satch` plugin.
-/// Wraps two `SpectralClipper`s (one per channel) plus per-channel dry-delay
-/// buffers (matching the spectral path's 2048-sample latency), exposing
-/// four modulatable params (Gain, Threshold, Detail, Knee).
+/// The shared Satch spectral saturator, with independent stereo processors.
 ///
-/// **Algorithm** (per sample, per channel):
-/// 1. Pull the delayed dry from the per-channel dry-delay buffer.
-/// 2. Time-domain saturate the delayed dry → `td` (returns tanh value for
-///    the clip mask).
-/// 3. Spectral path on undelayed input → `sp` (the FFT-based detail-
-///    preserving clip with a built-in 2048-sample delay).
-/// 4. Detail rescue: `wet = (td + detail * clip * (sp − td)).clamp(±threshold)`
-///    where `clip = tanh²(gain·input/threshold)` only fires where the
-///    waveshaper is actively clipping.
-///
-/// **Latency**: 2048 samples (= FFT size) ≈ 43 ms at 48 kHz. multosis
-/// reports this to the host via `Effect::latency_samples`, so PDC keeps
-/// the chain aligned automatically. The per-row Mix dial blends in-time
-/// dry against this delayed wet — for clean saturation, run Mix at 100 %.
+/// Each processor owns its fixed 2048-sample delay, spectral separation,
+/// detail headroom, and final waveshaping; host parameters remain Gain,
+/// Threshold, Detail, and Knee.
 pub struct SatchEffect {
     gain_db: f32,
     threshold_db: f32,
@@ -34,14 +20,6 @@ pub struct SatchEffect {
     threshold_linear: f32,
     spectral_l: tract_dsp::spectral_clipper::SpectralClipper,
     spectral_r: tract_dsp::spectral_clipper::SpectralClipper,
-    /// Dry delay buffers — must be FFT_SIZE long so the time-domain
-    /// waveshaper sees the same sample the spectral path was fed
-    /// FFT_SIZE samples ago. Required by the algorithm itself
-    /// (`td` and `sp` need to operate on time-aligned signals for
-    /// `lost = sp − td` to be the spectral path's detail bonus).
-    dry_delay_l: Vec<f32>,
-    dry_delay_r: Vec<f32>,
-    dry_delay_pos: usize,
 }
 
 impl SatchEffect {
@@ -117,9 +95,6 @@ impl SatchEffect {
                 Self::FFT_SIZE,
                 Self::HOP_SIZE,
             ),
-            dry_delay_l: vec![0.0; Self::FFT_SIZE],
-            dry_delay_r: vec![0.0; Self::FFT_SIZE],
-            dry_delay_pos: 0,
         }
     }
 }
@@ -132,80 +107,29 @@ impl Default for SatchEffect {
 
 impl Effect for SatchEffect {
     fn process_sample(&mut self, left: f32, right: f32) -> (f32, f32) {
-        // Gain and threshold are precomputed in `set_param` — zero
-        // `powf`/`exp` calls per sample here.
         let gain = self.gain_linear;
         let threshold = self.threshold_linear;
         let inv_threshold = 1.0 / threshold;
         let detail = self.detail_pct * 0.01;
         let knee = self.knee_pct * 0.01;
-        // Skip-FFT optimisation: when Detail is zero, the spectral term
-        // is multiplied by zero in the blend, so the FFT pipeline can
-        // skip the expensive frame work. Ring state still advances;
-        // re-enabling Detail refills the output over roughly four hops.
-        let skip_fft = detail <= 0.0;
-
-        // Pull the delayed dry; the spectral path operates on undelayed
-        // input but its output emerges 2048 samples late, so we
-        // time-align by waveshaping the same-old dry sample.
-        let dry_l = self.dry_delay_l[self.dry_delay_pos];
-        let dry_r = self.dry_delay_r[self.dry_delay_pos];
-        self.dry_delay_l[self.dry_delay_pos] = left;
-        self.dry_delay_r[self.dry_delay_pos] = right;
-        self.dry_delay_pos = (self.dry_delay_pos + 1) % self.dry_delay_l.len();
-
-        // Time-domain waveshaper on the delayed dry (returns tanh so we
-        // can build the clip mask without recomputing it).
-        let (td_l, tanh_l) = tract_dsp::spectral_clipper::saturate_td_with_tanh_fast(
-            dry_l,
-            gain,
-            threshold,
-            inv_threshold,
-            knee,
-        );
-        let (td_r, tanh_r) = tract_dsp::spectral_clipper::saturate_td_with_tanh_fast(
-            dry_r,
-            gain,
-            threshold,
-            inv_threshold,
-            knee,
-        );
-
-        // Spectral path: gives the detail-preserved reconstruction. With
-        // skip_fft we still advance ring/counter state (the clipper
-        // handles that internally) but bypass the FFT frame work.
-        let sp_l = if skip_fft {
-            self.spectral_l
-                .process_sample_skip_fft_fast(left, gain, threshold, inv_threshold, knee)
-        } else {
-            self.spectral_l
-                .process_sample_fast(left, gain, threshold, inv_threshold, knee)
-        };
-        let sp_r = if skip_fft {
-            self.spectral_r.process_sample_skip_fft_fast(
+        (
+            self.spectral_l.process_sample_with_detail_fast(
+                left,
+                gain,
+                threshold,
+                inv_threshold,
+                detail,
+                knee,
+            ),
+            self.spectral_r.process_sample_with_detail_fast(
                 right,
                 gain,
                 threshold,
                 inv_threshold,
+                detail,
                 knee,
-            )
-        } else {
-            self.spectral_r
-                .process_sample_fast(right, gain, threshold, inv_threshold, knee)
-        };
-
-        // Clip mask: tanh²(gained/threshold) is ~0 below the knee and ~1
-        // above, so detail is only added where the waveshaper is
-        // actively clipping. Without this gate the detail term would
-        // colour sub-threshold material that the user expects to pass
-        // through clean.
-        let clip_l = tanh_l * tanh_l;
-        let clip_r = tanh_r * tanh_r;
-        let lost_l = sp_l - td_l;
-        let lost_r = sp_r - td_r;
-        let wet_l = (td_l + detail * clip_l * lost_l).clamp(-threshold, threshold);
-        let wet_r = (td_r + detail * clip_r * lost_r).clamp(-threshold, threshold);
-        (wet_l, wet_r)
+            ),
+        )
     }
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -215,13 +139,6 @@ impl Effect for SatchEffect {
     fn reset(&mut self) {
         self.spectral_l.reset();
         self.spectral_r.reset();
-        for s in self.dry_delay_l.iter_mut() {
-            *s = 0.0;
-        }
-        for s in self.dry_delay_r.iter_mut() {
-            *s = 0.0;
-        }
-        self.dry_delay_pos = 0;
     }
 
     fn parameters(&self) -> &'static [ParamSpec] {
@@ -273,20 +190,98 @@ mod tests {
         )
     }
 
-    fn reference_mix(
-        dry: f32,
-        spectral: f32,
-        gain: f64,
-        threshold: f64,
-        detail: f64,
-        knee: f64,
-    ) -> f64 {
+    fn detail_tone(sample: usize) -> f32 {
+        (std::f64::consts::TAU * 215.0 * sample as f64 / 2048.0).sin() as f32
+    }
+
+    #[test]
+    fn detail_preserves_both_halves_of_a_quiet_tone_beneath_the_ceiling() {
+        let gain = 10.0_f32.powf(12.0 / 20.0);
+        for detail in [25.0, 50.0, 100.0] {
+            let mut effect = configured([12.0, 0.0, detail, 0.0]);
+            let amplitude = gain * 0.02 * detail / 100.0;
+            for sample in 0..16_384 {
+                let quiet = 0.02 * detail_tone(sample);
+                let output = effect.process_sample(0.8 + quiet, -0.8 + quiet);
+                if sample >= 8192 {
+                    let preserved = amplitude * detail_tone(sample - 2048);
+                    for (actual, sign) in [(output.0, 1.0), (output.1, -1.0)] {
+                        let expected = sign * (1.0 - amplitude) + preserved;
+                        assert!(actual.abs() <= 1.0, "ceiling exceeded: {actual}");
+                        assert!(
+                            (actual - expected).abs() < 1e-5,
+                            "Detail {detail}, sample {sample}: {actual}, expected {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multitone_detail_is_balanced_around_a_steady_internal_clip_line() {
+        let mut effect = configured([12.041_2, 0.0, 100.0, 0.0]);
+        let gain = 10.0_f32.powf(12.041_2 / 20.0);
+        let period: Vec<f32> = (0..2048)
+            .map(|sample| {
+                let phase = std::f64::consts::TAU * 65.0 * sample as f64 / 2048.0;
+                (0.02 * phase.sin() + 0.014 * (3.0 * phase).sin() + 0.009 * (5.0 * phase).sin())
+                    as f32
+            })
+            .collect();
+        let peak = period.iter().map(|q| q.abs()).fold(0.0_f32, f32::max);
+        let center = 1.0 - gain * peak;
+        for sample in 0..24_576 {
+            let quiet = period[sample % period.len()];
+            let (left, right) = effect.process_sample(0.8 + quiet, -0.8 + quiet);
+            if sample >= 16_384 {
+                let preserved = gain * quiet;
+                assert!((left - (center + preserved)).abs() < 1e-5);
+                assert!((right - (-center + preserved)).abs() < 1e-5);
+                assert!(left.abs() <= 1.0 && right.abs() <= 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn detail_does_not_change_material_below_the_threshold_for_any_knee() {
+        for knee in [0.0, 37.5, 100.0] {
+            let mut standard = configured([0.0, 0.0, 0.0, knee]);
+            let mut preserved = configured([0.0, 0.0, 100.0, knee]);
+            for sample in 0..16_384 {
+                let loud = (std::f64::consts::TAU * 8.0 * sample as f64 / 2048.0).sin() as f32;
+                let input = 0.8 * loud + 0.02 * detail_tone(sample);
+                assert_eq!(
+                    preserved.process_sample(input, -input),
+                    standard.process_sample(input, -input),
+                    "Knee {knee}, sample {sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn detail_recovery_depends_on_the_gained_signal_not_the_input_gain_staging() {
+        for detail in [0.0, 40.0, 100.0] {
+            let mut direct = configured([0.0, -20.0, detail, 0.0]);
+            let mut boosted = configured([20.0, -20.0, detail, 0.0]);
+            for sample in 0..16_384 {
+                let input = 0.8 + 0.02 * detail_tone(sample);
+                let a = direct.process_sample(input, -input);
+                let b = boosted.process_sample(input * 0.1, -input * 0.1);
+                assert!(
+                    (a.0 - b.0).abs() < 2e-6 && (a.1 - b.1).abs() < 2e-6,
+                    "Detail {detail}, sample {sample}: {a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
+    fn reference_td(dry: f32, gain: f64, threshold: f64, knee: f64) -> f64 {
         let gained = dry as f64 * gain;
         let hard = gained.clamp(-threshold, threshold);
-        let tanh = (gained / threshold).tanh();
-        let td = (1.0 - knee) * hard + knee * threshold * tanh;
-        let weight = detail * tanh.powi(2);
-        ((1.0 - weight) * td + weight * spectral as f64).clamp(-threshold, threshold)
+        let soft = threshold * (gained / threshold).tanh();
+        (1.0 - knee) * hard + knee * soft
     }
 
     #[test]
@@ -324,14 +319,8 @@ mod tests {
                         };
                         let actual = effect.process_sample(input.0, input.1);
                         for (actual, delayed) in [(actual.0, dry.0), (actual.1, dry.1)] {
-                            let expected = reference_mix(
-                                delayed,
-                                0.0,
-                                gain,
-                                threshold,
-                                0.0,
-                                knee_pct as f64 / 100.0,
-                            );
+                            let expected =
+                                reference_td(delayed, gain, threshold, knee_pct as f64 / 100.0);
                             assert!(
                                 (actual as f64 - expected).abs() < 2e-6,
                                 "Gain {gain_db}, Threshold {threshold_db}, Knee {knee_pct}, sample {sample}: {actual} vs {expected}"
@@ -344,87 +333,18 @@ mod tests {
     }
 
     #[test]
-    fn detail_uses_a_single_tanh_squared_gate_and_the_aligned_spectral_output() {
-        use tract_dsp::spectral_clipper::SpectralClipper;
-        let mut detail_energy = 0.0;
-        let mut clipped_samples = 0;
-        for knee_pct in [0.0, 37.5, 100.0] {
-            for detail_pct in [20.0, 65.0, 100.0] {
-                let mut effect = configured([12.0, -6.0, detail_pct, knee_pct]);
-                let mut left = SpectralClipper::new(2_048, 512);
-                let mut right = SpectralClipper::new(2_048, 512);
-                let gain = 10.0_f64.powf(12.0 / 20.0);
-                let threshold = 10.0_f64.powf(-6.0 / 20.0);
-                for sample in 0..8_192 {
-                    let input = input_at(sample);
-                    let dry = if sample < 2_048 {
-                        (0.0, 0.0)
-                    } else {
-                        input_at(sample - 2_048)
-                    };
-                    let spectral = (
-                        left.process_sample(
-                            input.0,
-                            gain as f32,
-                            threshold as f32,
-                            knee_pct / 100.0,
-                        ),
-                        right.process_sample(
-                            input.1,
-                            gain as f32,
-                            threshold as f32,
-                            knee_pct / 100.0,
-                        ),
-                    );
-                    let actual = effect.process_sample(input.0, input.1);
-                    for (actual, delayed, sp) in
-                        [(actual.0, dry.0, spectral.0), (actual.1, dry.1, spectral.1)]
-                    {
-                        let expected = reference_mix(
-                            delayed,
-                            sp,
-                            gain,
-                            threshold,
-                            detail_pct as f64 / 100.0,
-                            knee_pct as f64 / 100.0,
-                        );
-                        assert!(
-                            (actual as f64 - expected).abs() < 3e-6,
-                            "Detail {detail_pct}, Knee {knee_pct}, sample {sample}: {actual} vs {expected}"
-                        );
-                        let td = reference_mix(
-                            delayed,
-                            0.0,
-                            gain,
-                            threshold,
-                            0.0,
-                            knee_pct as f64 / 100.0,
-                        );
-                        detail_energy += (expected - td).powi(2);
-                        if (expected.abs() - threshold).abs() < 1e-10 {
-                            clipped_samples += 1;
-                        }
-                    }
-                }
-            }
-        }
-        assert!(detail_energy > 0.001);
-        assert!(clipped_samples > 0);
-    }
-
-    #[test]
-    fn live_parameter_and_detail_changes_follow_the_documented_skip_schedule() {
+    fn shared_processor_receives_live_parameters_and_fft_skip_transitions() {
         use tract_dsp::spectral_clipper::SpectralClipper;
         let mut effect = SatchEffect::new();
-        let mut left = SpectralClipper::new(2_048, 512);
-        let mut right = SpectralClipper::new(2_048, 512);
+        let mut left = SpectralClipper::new(2048, 512);
+        let mut right = SpectralClipper::new(2048, 512);
         let mut params = [6.0, -3.0, 0.0, 100.0];
         for sample in 0..12_288 {
             let next = match sample {
                 0 => Some(params),
-                3_333 => Some([12.0, -6.0, 75.0, 37.5]),
-                6_145 => Some([3.0, -12.0, 0.0, 0.0]),
-                8_191 => Some([18.0, -9.0, 35.0, 100.0]),
+                3333 => Some([12.0, -6.0, 75.0, 37.5]),
+                6145 => Some([3.0, -12.0, 0.0, 0.0]),
+                8191 => Some([18.0, -9.0, 35.0, 100.0]),
                 10_007 => Some([0.0, 0.0, 100.0, 55.0]),
                 _ => None,
             };
@@ -434,48 +354,30 @@ mod tests {
                     effect.set_param(slot, value);
                 }
             }
-            let gain = 10.0_f64.powf(params[0] as f64 / 20.0);
-            let threshold = 10.0_f64.powf(params[1] as f64 / 20.0);
+            let gain = 10.0_f32.powf(params[0] / 20.0);
+            let threshold = 10.0_f32.powf(params[1] / 20.0);
             let input = input_at(sample);
-            let dry = if sample < 2_048 {
-                (0.0, 0.0)
-            } else {
-                input_at(sample - 2_048)
-            };
-            let mut spectral = [0.0; 2];
-            for ((clipper, input), output) in [(&mut left, input.0), (&mut right, input.1)]
-                .into_iter()
-                .zip(&mut spectral)
-            {
-                *output = if params[2] == 0.0 {
-                    clipper.process_sample_skip_fft(
-                        input,
-                        gain as f32,
-                        threshold as f32,
-                        params[3] / 100.0,
-                    )
-                } else {
-                    clipper.process_sample(input, gain as f32, threshold as f32, params[3] / 100.0)
-                };
-            }
             let actual = effect.process_sample(input.0, input.1);
-            for (actual, delayed, sp) in [
-                (actual.0, dry.0, spectral[0]),
-                (actual.1, dry.1, spectral[1]),
-            ] {
-                let expected = reference_mix(
-                    delayed,
-                    sp,
+            let expected = (
+                left.process_sample_with_detail(
+                    input.0,
                     gain,
                     threshold,
-                    params[2] as f64 / 100.0,
-                    params[3] as f64 / 100.0,
-                );
-                assert!(
-                    (actual as f64 - expected).abs() < 3e-6,
-                    "sample {sample}: {actual} vs {expected}"
-                );
-            }
+                    params[2] / 100.0,
+                    params[3] / 100.0,
+                ),
+                right.process_sample_with_detail(
+                    input.1,
+                    gain,
+                    threshold,
+                    params[2] / 100.0,
+                    params[3] / 100.0,
+                ),
+            );
+            assert!((actual.0 - expected.0).abs() < 3e-6, "sample {sample}");
+            assert!((actual.1 - expected.1).abs() < 3e-6, "sample {sample}");
+            assert!(actual.0.is_finite() && actual.1.is_finite());
+            assert!(actual.0.abs() <= threshold + 1e-6 && actual.1.abs() <= threshold + 1e-6);
         }
     }
 
@@ -524,12 +426,10 @@ mod tests {
     }
 
     #[test]
-    fn reset_replays_a_fresh_stereo_processor_and_reuses_dry_delay_storage() {
+    fn reset_replays_a_fresh_stereo_processor() {
         for detail in [0.0, 40.0, 100.0] {
             let params = [12.0, -9.0, detail, 37.5];
             let mut used = configured(params);
-            let storage = (used.dry_delay_l.as_ptr(), used.dry_delay_r.as_ptr());
-            let capacities = (used.dry_delay_l.capacity(), used.dry_delay_r.capacity());
             let mut warm_energy = [0.0; 2];
             for sample in 0..10_000 {
                 let input = input_at(sample);
@@ -547,18 +447,6 @@ mod tests {
                     fresh.process_sample(input.0, input.1)
                 );
             }
-            assert_eq!(
-                (used.dry_delay_l.as_ptr(), used.dry_delay_r.as_ptr()),
-                storage
-            );
-            assert_eq!(
-                (used.dry_delay_l.len(), used.dry_delay_r.len()),
-                (2_048, 2_048)
-            );
-            assert_eq!(
-                (used.dry_delay_l.capacity(), used.dry_delay_r.capacity()),
-                capacities
-            );
         }
     }
 
@@ -668,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn satch_reset_zeroes_dry_delay_and_clipper_state() {
+    fn satch_reset_clears_delayed_audio_and_spectral_state() {
         let mut s = SatchEffect::new();
         s.set_sample_rate(48_000.0);
         s.set_param(0, 12.0);
@@ -680,9 +568,6 @@ mod tests {
             let _ = s.process_sample(dry, dry);
         }
         s.reset();
-        assert!(s.dry_delay_l.iter().all(|&v| v == 0.0));
-        assert!(s.dry_delay_r.iter().all(|&v| v == 0.0));
-        assert_eq!(s.dry_delay_pos, 0);
         // First post-reset sample is finite + L==R symmetric for mono input.
         let (l, r) = s.process_sample(0.5, 0.5);
         assert!(l.is_finite() && r.is_finite());

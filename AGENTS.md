@@ -13,7 +13,7 @@ Tract Plugin Pack — a Cargo workspace of audio effect plugins (VST3, CLAP, sta
 - **gs-meter** — loudness meter + gain utility. dB mode (peak, true peak, RMS, crest) and LUFS mode (EBU R128, LRA). Designed for 100+ instances.
 - **gain-brain** — gain utility with cross-instance group linking (16 groups, Absolute/Relative, Invert). Inspired by BlueCat Gain Suite.
 - **tinylimit** — low-latency wideband peak limiter. Feed-forward + lookahead, dual-stage envelope, soft knee, optional ISP, 7 presets. Inspired by DMG TrackLimit.
-- **satch** — detail-preserving spectral saturator. FFT per-bin magnitude saturation preserves quiet components through clipping.
+- **satch** — detail-preserving spectral saturator. FFT quiet-component separation reserves headroom beneath the output ceiling for preserved detail.
 - **six-pack** — six-band parallel "distort the difference" multiband saturator. 6 algorithms, per-band M/S routing, linear-phase oversampling, de-emphasis.
 - **pope-scope** — multichannel oscilloscope with beat sync. Shared global store across 16 instances, 3 display modes, hierarchical mipmap ring buffer.
 - **warp-zone** — spectral shifter/stretcher (phase vocoder). Shift, Stretch, Freeze, Feedback, frequency range. 4096-pt FFT, 1024 hop, ~85 ms latency.
@@ -93,7 +93,7 @@ Common shape per plugin: `lib.rs` (plugin struct, params, `process()`), `editor.
 
 **tinylimit** — `limiter.rs` (gain computer, dual-stage envelope, lookahead backward pass); `true_peak.rs` (ITU polyphase FIR, copied from gs-meter).
 
-**satch** — `spectral.rs` (FFT per-bin magnitude saturation, detail preservation).
+**satch** — `spectral.rs` (re-exports shared `tract_dsp::spectral_clipper`); `lib.rs` (host parameters and latency-aligned dry/wet mixing). Shared core extracts a quiet waveform, holds recent waveform peaks to reserve steady headroom beneath the final ceiling, and adds protected detail after waveshaping.
 
 **six-pack** — `svf.rs` (TPT SVF mix-form, analytic unity at 0 dB); `saturation.rs` (6 waveshapers); `bands.rs` (per-band SVF pair + M/S routing); `oversampling.rs` (polyphase 4/8/16×); `spectrum.rs`; `editor/{curve_view,band_labels,bottom_strip}.rs`.
 
