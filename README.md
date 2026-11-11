@@ -4,17 +4,6 @@ A collection of audio effect plugins (VST3, CLAP, standalone) built with [nih-pl
 
 ## Plugins
 
-### Gated
-
-A rhythmic amplitude gate inspired by Kilohearts Trance Gate, with a circular
-step editor and eight automatable pattern slots.
-
-- 1–64 on/off steps per pattern, explicit ties, and global ADSR/Gate controls
-- DAW-position sync, straight/dotted/triplet resolutions, and 0–100% swing
-- Random population with Density and Tie Probability, copy/paste, rotation, undo/redo
-- Linked stereo or mono, dry/wet Mix, zero latency, no audio-thread allocations
-- CPU-rendered, freely resizable GUI; VST3, CLAP, and standalone
-
 ### Gain Brain
 
 A lightweight gain utility with cross-instance group linking. Multiple instances can be assigned to the same group (1-16), and changing gain on any grouped instance applies that change to all others.
@@ -25,6 +14,17 @@ A lightweight gain utility with cross-instance group linking. Multiple instances
 - CPU-rendered GUI with rotary dial (tiny-skia + softbuffer), freely resizable
 - ~0.62 MB RSS and 0.03% CPU per instance (200 instances grouped @ 6.3% CPU, 123 MB total)
 - Inspired by [BlueCat's Gain Suite](https://www.bluecataudio.com/Products/Product_GainSuite/)
+
+### Gated
+
+A rhythmic amplitude gate inspired by Kilohearts Trance Gate, with a circular
+step editor and eight automatable pattern slots.
+
+- 1–64 on/off steps per pattern, explicit ties, and global ADSR/Gate controls
+- DAW-position sync, straight/dotted/triplet resolutions, and 0–100% swing
+- Random population with Density and Tie Probability, copy/paste, rotation, undo/redo
+- Linked stereo or mono, dry/wet Mix, zero latency, no audio-thread allocations
+- CPU-rendered, freely resizable GUI; VST3, CLAP, and standalone
 
 ### GS Meter
 
@@ -242,9 +242,9 @@ Copy either the `.vst3` or `.clap` file (you only need one -- use whichever your
 ```
 tract-plugin-pack/
 ├── gain-brain/             # Gain utility with group linking
+├── gated/                  # Circular rhythmic gate with ADSR, swing, and random population
 ├── gs-meter/               # Loudness meter + gain utility
 ├── hd26/                   # Unison-detune chorus + pseudo-stereo widener (Serum-inspired)
-├── gated/                  # Circular rhythmic gate with ADSR, swing, and random population
 ├── imagine/                # Multiband stereo imager modeled on Ozone Imager
 ├── miff/                   # MSEG hand-drawn FIR convolution filter
 ├── minitosis/              # Single-effect processor with four MSEGs
@@ -262,6 +262,7 @@ tract-plugin-pack/
 ├── tract-effects/          # Shared effects, modulation runtime, and effect/MSEG editor
 ├── docs/                   # Plugin manuals
 │   ├── gain-brain/
+│   ├── gated/
 │   ├── gs-meter/
 │   ├── hd26/
 │   ├── imagine/
