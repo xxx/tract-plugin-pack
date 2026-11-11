@@ -4,6 +4,7 @@ Each plugin keeps its user manual under `docs/<plugin>/`:
 
 | Plugin | Markdown | PDF |
 |---|---|---|
+| Gated | [gated-manual.md](gated/gated-manual.md) | [gated-manual.pdf](gated/gated-manual.pdf) |
 | Gain Brain | [gain-brain-manual.md](gain-brain/gain-brain-manual.md) | [gain-brain-manual.pdf](gain-brain/gain-brain-manual.pdf) |
 | GS Meter | [gs-meter-manual.md](gs-meter/gs-meter-manual.md) | [gs-meter-manual.pdf](gs-meter/gs-meter-manual.pdf) |
 | Imagine | [imagine/imagine-manual.md](imagine/imagine-manual.md) | [imagine/imagine-manual.pdf](imagine/imagine-manual.pdf) |

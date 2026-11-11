@@ -1,0 +1,11 @@
+# Initial Trance Gate slot rhythms, in playback order.
+# x = on; - = off; = = on and tied to the next step.
+# Source and license: ../THIRD_PARTY_NOTICES.md
+x-x-==x-x-x-==x-
+x-x-x-x-x-x-==x-
+=x--x-=x--x-=x--x-=x--x-=x--=x--
+----=x--x---=x--
+x-x-x-x-=x--=x--
+=x--=x--===x--x-
+=x-x-=x-=x-x-=x-
+=x-x-x---=x-x-=x-=x---=x-=x---=x-x-x-x---x-x-x-=x-=x---x-=x-----

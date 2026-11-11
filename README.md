@@ -4,6 +4,17 @@ A collection of audio effect plugins (VST3, CLAP, standalone) built with [nih-pl
 
 ## Plugins
 
+### Gated
+
+A rhythmic amplitude gate inspired by Kilohearts Trance Gate, with a circular
+step editor and eight automatable pattern slots.
+
+- 1–64 on/off steps per pattern, explicit ties, and global ADSR/Gate controls
+- DAW-position sync, straight/dotted/triplet resolutions, and 0–100% swing
+- Random population with Density and Tie Probability, copy/paste, rotation, undo/redo
+- Linked stereo or mono, dry/wet Mix, zero latency, no audio-thread allocations
+- CPU-rendered, freely resizable GUI; VST3, CLAP, and standalone
+
 ### Gain Brain
 
 A lightweight gain utility with cross-instance group linking. Multiple instances can be assigned to the same group (1-16), and changing gain on any grouped instance applies that change to all others.
@@ -233,6 +244,7 @@ tract-plugin-pack/
 ├── gain-brain/             # Gain utility with group linking
 ├── gs-meter/               # Loudness meter + gain utility
 ├── hd26/                   # Unison-detune chorus + pseudo-stereo widener (Serum-inspired)
+├── gated/                  # Circular rhythmic gate with ADSR, swing, and random population
 ├── imagine/                # Multiband stereo imager modeled on Ozone Imager
 ├── miff/                   # MSEG hand-drawn FIR convolution filter
 ├── minitosis/              # Single-effect processor with four MSEGs
@@ -281,6 +293,7 @@ local commands, and CI behaviour.
 ## Documentation
 
 - [Gain Brain Manual](docs/gain-brain/gain-brain-manual.md)
+- [Gated Manual](docs/gated/gated-manual.md)
 - [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
 - [HD26 Manual](docs/hd26/hd26-manual.md)
 - [Imagine Manual](docs/imagine/imagine-manual.md)
