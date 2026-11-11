@@ -14,9 +14,12 @@ https://kilohearts.com/products/trance_gate.
    CPU-rendered, freely resizable editor and zero reported latency.
 2. Eight numbered slots select both the edited and sounding pattern. Selection
    is automatable and switches immediately at the incoming pattern's song
-   position, with a short gain transition.
+   position, with a short gain transition. New instances populate all eight slots
+   with the initial Trance Gate rhythms documented by synthahol-phase-plant
+   (source/attribution in `gated/THIRD_PARTY_NOTICES.md`). Slot lengths are
+   16, 16, 32, 16, 16, 16, 16, and 64. Saved projects retain their stored bank.
 3. Each slot stores 1–64 binary steps, outgoing ties, and its length. Length
-   defaults to 16. Drag the large central count up to increase or down to decrease
+   starts at the slot's factory value. Drag the large central count up to increase or down to decrease
    length, using 4 logical pixels per step and Shift for ten-times-finer movement.
    The count highlights and displays a hint while hovered or dragged. There are
    no +/− buttons. A drag edits the slot grabbed at its start and is one undo

@@ -110,10 +110,54 @@ pub struct PatternBank {
     pub patterns: [Pattern; SLOT_COUNT],
 }
 
+// Initial Trance Gate rhythms, adapted to bitsets; see THIRD_PARTY_NOTICES.md.
+const FACTORY_PATTERNS: [Pattern; SLOT_COUNT] = [
+    Pattern {
+        length: 16,
+        active: [0x7575, 0],
+        ties: [0x3030, 0],
+    },
+    Pattern {
+        length: 16,
+        active: [0x7555, 0],
+        ties: [0x3000, 0],
+    },
+    Pattern {
+        length: 32,
+        active: [0x334d_34d3, 0],
+        ties: [0x1104_1041, 0],
+    },
+    Pattern {
+        length: 16,
+        active: [0x3130, 0],
+        ties: [0x1010, 0],
+    },
+    Pattern {
+        length: 16,
+        active: [0x3355, 0],
+        ties: [0x1100, 0],
+    },
+    Pattern {
+        length: 16,
+        active: [0x4f33, 0],
+        ties: [0x0711, 0],
+    },
+    Pattern {
+        length: 16,
+        active: [0x6b6b, 0],
+        ties: [0x2121, 0],
+    },
+    Pattern {
+        length: 64,
+        active: [0x068d_aa2a_c6c6_d62b, 0],
+        ties: [0x0204_8000_4242_4201, 0],
+    },
+];
+
 impl Default for PatternBank {
     fn default() -> Self {
         Self {
-            patterns: [Pattern::default(); SLOT_COUNT],
+            patterns: FACTORY_PATTERNS,
         }
     }
 }
@@ -138,6 +182,59 @@ impl Random {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn factory_patterns_match_the_reference_rhythms_and_ties() {
+        let bank = PatternBank::default();
+        let patterns: Vec<_> = include_str!("../test-data/factory-patterns.txt")
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .collect();
+        assert_eq!(patterns.len(), SLOT_COUNT);
+        for (slot, expected) in patterns.into_iter().enumerate() {
+            let pattern = bank.patterns[slot];
+            assert_eq!(pattern.len(), expected.len(), "slot {} length", slot + 1);
+            for (step, state) in expected.bytes().enumerate() {
+                assert_eq!(
+                    pattern.is_on(step),
+                    state != b'-',
+                    "slot {} step {} on",
+                    slot + 1,
+                    step + 1
+                );
+                assert_eq!(
+                    pattern.tied(step),
+                    state == b'=',
+                    "slot {} step {} tie",
+                    slot + 1,
+                    step + 1
+                );
+                assert_eq!(pattern.ties[0] & (1 << step) != 0, state == b'=');
+            }
+            let visible = if pattern.len() == 64 {
+                u64::MAX
+            } else {
+                (1 << pattern.len()) - 1
+            };
+            assert_eq!(pattern.active[0] & !visible, 0);
+            assert_eq!(pattern.ties[0] & !visible, 0);
+            assert_eq!((pattern.active[1], pattern.ties[1]), (0, 0));
+        }
+    }
+
+    #[test]
+    fn restoring_an_existing_bank_keeps_its_edited_patterns() {
+        let bank = PatternBank {
+            patterns: [Pattern::default(); SLOT_COUNT],
+        };
+        let mut edited = bank;
+        edited.patterns[2].set_on(0, false);
+        edited.patterns[4].set_length(7);
+        edited.patterns[4].set_tie(0, true);
+        let state = serde_json::to_string(&edited).unwrap();
+        assert_eq!(serde_json::from_str::<PatternBank>(&state).unwrap(), edited);
+        assert_ne!(edited, PatternBank::default());
+    }
 
     #[test]
     fn length_is_bounded_and_hidden_steps_survive() {

@@ -32,7 +32,8 @@ cargo run -p gated -- --backend dummy
 ## Quick start
 
 1. Insert Gated on sustained audio and start the DAW transport.
-2. Click ring segments to turn steps off or on. All 16 default steps start on.
+2. Try the eight numbered slots for different starting rhythms. Click ring
+   segments to turn steps off or on.
 3. Drag across segments to enable and tie a longer held gate.
 4. Adjust Gate and Release for choppy or flowing articulation. Add Swing.
 5. Select another numbered slot to edit and hear another rhythm, or use Randomize.
@@ -42,7 +43,7 @@ cargo run -p gated -- --backend dummy
 | Control | Range / default | Behavior |
 |---|---|---|
 | Pattern | 1–8 / 1 | Selects both the playing and edited slot; automatable. |
-| Steps | 1–64 / 16 | Drag the large central number up/down to change this slot's length. Hold Shift for fine adjustment. |
+| Steps | 1–64 / varies by slot | Drag the large central number up/down to change this slot's length. Hold Shift for fine adjustment. |
 | Attack | 0–2000 ms / 2 ms | Time from zero to full level. |
 | Decay | 0–2000 ms / 50 ms | Time from full level to Sustain. |
 | Sustain | 0–100% / 100% | Held level after Attack and Decay. |
@@ -56,7 +57,11 @@ cargo run -p gated -- --backend dummy
 | Bypass | Off | Passes input through while the clock follows the song. |
 
 The steps, ties, and length belong to each slot. All other controls are global.
-Each slot initially contains the same 16 active, untied steps.
+New instances start with eight different rhythms, including ties. Slots 1, 2,
+and 4–7 use 16 steps; slot 3 uses 32 and slot 8 uses 64. These are adapted from
+the initial Trance Gate patterns recorded by the independently developed
+[synthahol-phase-plant reader](https://github.com/softdevca/synthahol-phase-plant/blob/12226ba38afdf887214ffad9a14c191ef3e3d0ca/src/effect/trance_gate.rs).
+All slots remain editable. Saved projects retain their stored patterns.
 
 ## Pattern editing
 
@@ -121,3 +126,7 @@ are planned separately.
 ## Formats and license
 
 VST3, CLAP, and standalone. GPL-3.0-or-later, matching the plugin pack.
+
+The initial pattern data is adapted from the Apache-2.0-licensed
+synthahol-phase-plant project by Sheldon Young. Attribution and the upstream
+license are included under `gated/THIRD_PARTY_NOTICES.md` and `gated/licenses/`.
