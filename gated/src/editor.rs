@@ -13,6 +13,9 @@ use crate::dsp::RESOLUTIONS;
 use crate::pattern::{MAX_STEPS, Pattern, PatternBank, Random};
 use crate::{GatedParams, Telemetry};
 
+#[cfg(target_os = "macos")]
+mod macos;
+
 const WIDTH: u32 = 480;
 const HEIGHT: u32 = 840;
 const RING_X: f32 = 240.0;
@@ -168,6 +171,7 @@ struct Panel {
     rng: Random,
     layout: Layout,
     size: (f32, f32),
+    window_info: baseview::WindowInfo,
 }
 
 impl Panel {
@@ -180,6 +184,7 @@ impl Panel {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let observed_generation = params.state_generation.load(Ordering::Acquire);
+        let (width, height) = params.editor_state.size();
         Self {
             params,
             telemetry,
@@ -194,9 +199,53 @@ impl Panel {
             observed_generation,
             cancelled_dial: None,
             rng: Random::new(seed),
-            layout: Layout::new(WIDTH, HEIGHT),
-            size: (WIDTH as f32, HEIGHT as f32),
+            layout: Layout::new(width, height),
+            size: (width as f32, height as f32),
+            window_info: baseview::WindowInfo::from_logical_size(
+                baseview::Size::new(width as f64, height as f64),
+                1.0,
+            ),
         }
+    }
+
+    fn resized(&mut self, info: baseview::WindowInfo) {
+        let inside = self.drag.mouse_in_window();
+        let (x, y) = self.drag.mouse_pos();
+        let ratio = (info.scale() / self.window_info.scale()) as f32;
+        self.drag.set_mouse(x * ratio, y * ratio);
+        if !inside {
+            self.drag.on_cursor_left();
+        }
+        self.window_info = info;
+        let logical = info.logical_size();
+        self.params.editor_state.store_size(
+            (logical.width.round() as u32).max(1),
+            (logical.height.round() as u32).max(1),
+        );
+    }
+
+    fn move_pointer(&mut self, position: baseview::Point) {
+        let scale = self.window_info.scale();
+        self.drag
+            .set_mouse((position.x * scale) as f32, (position.y * scale) as f32);
+    }
+
+    fn take_resize_request(&self, pending: &AtomicU64, physical: bool) -> Option<baseview::Size> {
+        let packed = pending.swap(0, Ordering::Relaxed);
+        let width = (packed >> 32) as u32;
+        let height = packed as u32;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        if physical && self.window_info.physical_size() == baseview::PhySize::new(width, height) {
+            return None;
+        }
+        let requested = if physical {
+            baseview::PhySize::new(width, height).to_logical(&self.window_info)
+        } else {
+            baseview::Size::new(width as f64, height as f64)
+        };
+        (requested != self.window_info.logical_size()).then_some(requested)
     }
 
     fn bank(&self) -> PatternBank {
@@ -786,15 +835,16 @@ impl Panel {
                 position,
                 modifiers,
             }) => {
-                let (x, y) = (position.x as f32, position.y as f32);
-                self.drag.set_mouse(x, y);
+                self.move_pointer(*position);
+                let (x, y) = self.drag.mouse_pos();
                 if self.dropdown.is_open() {
                     self.dropdown.on_mouse_move(x, y, &RESOLUTIONS, self.size);
                 } else if let Some(Action::Dial(dial)) = self.drag.active_action().copied() {
                     let p = param(&self.params, dial);
-                    if let Some(value) = self.drag.update_drag(
+                    if let Some(value) = self.drag.update_drag_with_sensitivity(
                         modifiers.contains(Modifiers::SHIFT),
                         p.modulated_normalized_value(),
+                        600.0 * self.window_info.scale() as f32,
                     ) {
                         ParamSetter::new(context).set_parameter_normalized(p, value);
                     }
@@ -899,7 +949,11 @@ impl Panel {
                     baseview::ScrollDelta::Lines { y, .. } => *y,
                     baseview::ScrollDelta::Pixels { y, .. } => *y / 32.0,
                 };
-                self.dropdown.on_wheel(y, &RESOLUTIONS, self.size);
+                self.dropdown.on_wheel(
+                    y * self.window_info.scale() as f32,
+                    &RESOLUTIONS,
+                    self.size,
+                );
             }
             Event::Keyboard(ev) => {
                 if ev.state == KeyState::Down {
@@ -993,13 +1047,46 @@ struct GatedWindow {
     pending_resize: Arc<AtomicU64>,
 }
 
+impl GatedWindow {
+    fn synchronize_geometry(&mut self, info: baseview::WindowInfo) {
+        let current = self.panel.window_info;
+        if current.logical_size() == info.logical_size()
+            && current.physical_size() == info.physical_size()
+            && current.scale() == info.scale()
+        {
+            return;
+        }
+        self.panel.end_gesture(self.context.as_ref(), false);
+        self.panel.dropdown.close();
+        self.panel.resized(info);
+        self.surface
+            .resize(info.physical_size().width, info.physical_size().height);
+        self.panel.draw(&mut self.surface.pixmap);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn synchronize_native_geometry(&mut self, window: &baseview::Window<'_>) {
+        if let Some(info) = macos::window_info(window) {
+            self.synchronize_geometry(info);
+        }
+    }
+}
+
 impl baseview::WindowHandler for GatedWindow {
     fn on_frame(&mut self, window: &mut baseview::Window) {
-        widgets::consume_pending_resize(
-            &self.pending_resize,
-            (self.surface.pixmap.width(), self.surface.pixmap.height()),
-            window,
-        );
+        #[cfg(target_os = "macos")]
+        self.synchronize_native_geometry(window);
+        // macOS plug-in APIs use points; the standalone wrapper reports physical pixels.
+        let physical =
+            !cfg!(target_os = "macos") || self.context.plugin_api() == PluginApi::Standalone;
+        if let Some(size) = self
+            .panel
+            .take_resize_request(&self.pending_resize, physical)
+        {
+            window.resize(size);
+        }
+        #[cfg(target_os = "macos")]
+        self.synchronize_native_geometry(window);
         self.panel.draw(&mut self.surface.pixmap);
         self.panel.finish_cancelled_dial(self.context.as_ref());
         self.surface.present();
@@ -1009,12 +1096,14 @@ impl baseview::WindowHandler for GatedWindow {
         _window: &mut baseview::Window,
         event: baseview::Event,
     ) -> baseview::EventStatus {
-        if let baseview::Event::Window(baseview::WindowEvent::Resized(info)) = &event {
-            self.surface.resize_and_persist(
-                info.physical_size().width,
-                info.physical_size().height,
-                &self.panel.params.editor_state,
-            );
+        let info = match &event {
+            baseview::Event::Window(baseview::WindowEvent::Resized(info)) => Some(*info),
+            _ => None,
+        };
+        #[cfg(target_os = "macos")]
+        let info = macos::window_info(_window).or(info);
+        if let Some(info) = info {
+            self.synchronize_geometry(info);
         }
         self.panel.event(&event, self.context.as_ref())
     }
@@ -1099,6 +1188,180 @@ pub fn render_preview(path: &std::path::Path, width: u32, height: u32) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retina_reopen_preserves_logical_dimensions_instead_of_growing() {
+        let mut params = Arc::new(GatedParams::default());
+        params.editor_state.store_size(600, 900);
+        for scale in [2.0, 2.0, 1.5, 1.0, 2.0] {
+            let editor = create(params.clone(), Arc::new(Telemetry::default())).unwrap();
+            assert_eq!(editor.size(), (600, 900));
+            let mut panel = Panel::new(params.clone(), Arc::new(Telemetry::default()));
+            let info =
+                baseview::WindowInfo::from_logical_size(baseview::Size::new(600.0, 900.0), scale);
+            panel.resized(info);
+            assert_eq!(editor.size(), (600, 900));
+            assert_eq!(info.physical_size().width, (600.0 * scale) as u32);
+            assert_eq!(info.physical_size().height, (900.0 * scale) as u32);
+            let state = params.serialize_fields();
+            let restored = GatedParams::default();
+            restored.deserialize_fields(&state);
+            params = Arc::new(restored);
+        }
+    }
+
+    #[test]
+    fn logical_pointer_positions_hit_rendered_controls_on_retina() {
+        let mut panel = Panel::new(
+            Arc::new(GatedParams::default()),
+            Arc::new(Telemetry::default()),
+        );
+        for scale in [1.0, 1.5, 2.0] {
+            let info =
+                baseview::WindowInfo::from_logical_size(baseview::Size::new(480.0, 840.0), scale);
+            panel.resized(info);
+            let size = info.physical_size();
+            let mut image = Pixmap::new(size.width, size.height).unwrap();
+            panel.draw(&mut image);
+            for (x, y, expected) in [
+                (49.0, 71.5, Action::Slot(0)),
+                (427.0, 71.5, Action::Slot(7)),
+                (240.0, 250.0, Action::Length(0)),
+                (330.0, 670.0, Action::Dial(Dial::Swing)),
+                (99.0, 672.0, Action::Resolution),
+                (95.0, 776.0, Action::Randomize),
+                (202.0, 500.0, Action::Rotate(false)),
+            ] {
+                panel.move_pointer(baseview::Point::new(x, y));
+                assert_eq!(
+                    panel.drag.hit_test().map(|region| region.action),
+                    Some(expected),
+                    "scale {scale}"
+                );
+            }
+            let angle = TAU / 32.0 - FRAC_PI_2;
+            panel.move_pointer(baseview::Point::new(
+                (RING_X + 160.0 * angle.cos()) as f64,
+                (RING_Y + 160.0 * angle.sin()) as f64,
+            ));
+            let (x, y) = panel.drag.mouse_pos();
+            assert_eq!(panel.layout.ring_step(x, y, 16), Some(0));
+        }
+    }
+
+    #[test]
+    fn pending_host_resize_uses_the_correct_units_and_does_not_repeat() {
+        let mut panel = Panel::new(
+            Arc::new(GatedParams::default()),
+            Arc::new(Telemetry::default()),
+        );
+        panel.resized(baseview::WindowInfo::from_logical_size(
+            baseview::Size::new(480.0, 840.0),
+            2.0,
+        ));
+        let physical = AtomicU64::new((960_u64 << 32) | 1680);
+        assert_eq!(panel.take_resize_request(&physical, true), None);
+        assert_eq!(physical.load(Ordering::Relaxed), 0);
+        let logical = AtomicU64::new((480_u64 << 32) | 840);
+        assert_eq!(panel.take_resize_request(&logical, false), None);
+        physical.store((1200_u64 << 32) | 2000, Ordering::Relaxed);
+        assert_eq!(
+            panel.take_resize_request(&physical, true),
+            Some(baseview::Size::new(600.0, 1000.0))
+        );
+        panel.resized(baseview::WindowInfo::from_physical_size(
+            baseview::PhySize::new(1200, 2000),
+            2.0,
+        ));
+        physical.store((1200_u64 << 32) | 2000, Ordering::Relaxed);
+        assert_eq!(panel.take_resize_request(&physical, true), None);
+        assert_eq!(panel.params.editor_state.size(), (600, 1000));
+        logical.store((500_u64 << 32) | 900, Ordering::Relaxed);
+        assert_eq!(
+            panel.take_resize_request(&logical, false),
+            Some(baseview::Size::new(500.0, 900.0))
+        );
+        panel.resized(baseview::WindowInfo::from_logical_size(
+            baseview::Size::new(501.0, 841.0),
+            1.5,
+        ));
+        physical.store((752_u64 << 32) | 1262, Ordering::Relaxed);
+        assert_eq!(panel.take_resize_request(&physical, true), None);
+    }
+
+    #[test]
+    fn backing_scale_changes_reproject_the_cached_pointer_before_the_next_click() {
+        let mut panel = Panel::new(
+            Arc::new(GatedParams::default()),
+            Arc::new(Telemetry::default()),
+        );
+        panel.move_pointer(baseview::Point::new(49.0, 71.5));
+        panel.resized(baseview::WindowInfo::from_logical_size(
+            baseview::Size::new(480.0, 840.0),
+            2.0,
+        ));
+        panel.draw(&mut Pixmap::new(960, 1680).unwrap());
+        assert_eq!(
+            panel.drag.hit_test().map(|region| region.action),
+            Some(Action::Slot(0))
+        );
+        assert_eq!(panel.drag.mouse_pos(), (98.0, 143.0));
+        panel.drag.on_cursor_left();
+        panel.resized(baseview::WindowInfo::from_logical_size(
+            baseview::Size::new(480.0, 840.0),
+            1.0,
+        ));
+        assert!(!panel.drag.mouse_in_window());
+        assert_eq!(panel.drag.mouse_pos(), (49.0, 71.5));
+    }
+
+    #[test]
+    fn retina_length_drags_and_popup_hit_testing_use_physical_coordinates() {
+        let mut panel = Panel::new(
+            Arc::new(GatedParams::default()),
+            Arc::new(Telemetry::default()),
+        );
+        panel.resized(baseview::WindowInfo::from_logical_size(
+            baseview::Size::new(480.0, 840.0),
+            2.0,
+        ));
+        let mut image = Pixmap::new(960, 1680).unwrap();
+        panel.draw(&mut image);
+        panel.move_pointer(baseview::Point::new(240.0, 250.0));
+        panel.begin_length_drag(0, false);
+        panel.move_pointer(baseview::Point::new(240.0, 218.0));
+        panel.update_length_drag(0, false);
+        assert_eq!(panel.bank().patterns[0].len(), 24);
+        panel.drag.end_drag();
+        panel.dropdown.open(
+            Action::Resolution,
+            panel.layout.rect(24.0, 658.0, 150.0, 29.0),
+            widgets::DropdownList::flat(&RESOLUTIONS),
+            12,
+            false,
+            panel.size,
+        );
+        let layout =
+            widgets::dropdown_popup_layout(&panel.dropdown, &RESOLUTIONS, panel.size).unwrap();
+        let row = layout
+            .visible_rows
+            .iter()
+            .find(|row| row.kind == widgets::RowKind::Item)
+            .unwrap();
+        let (x, y, w, h) = row.rect;
+        panel.move_pointer(baseview::Point::new(
+            ((x + w * 0.5) / 2.0) as f64,
+            ((y + h * 0.5) / 2.0) as f64,
+        ));
+        let (x, y) = panel.drag.mouse_pos();
+        assert_eq!(
+            panel.dropdown.on_mouse_down(x, y, &RESOLUTIONS, panel.size),
+            Some(widgets::DropdownEvent::Selected(
+                Action::Resolution,
+                row.item_index
+            ))
+        );
+    }
 
     #[test]
     fn reset_restores_each_slots_factory_pattern_as_one_undoable_edit() {

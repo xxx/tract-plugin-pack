@@ -11,7 +11,11 @@ https://kilohearts.com/products/trance_gate.
 ## Behavior
 
 1. Build a VST3, CLAP, and standalone plugin called Gated, with the pack's
-   CPU-rendered, freely resizable editor and zero reported latency.
+   CPU-rendered, freely resizable editor and zero reported latency. Persist and
+   report logical editor dimensions independently of the display's backing
+   resolution. Reopening on Retina displays preserves window size. All pointer
+   interactions and dragging remain aligned with rendered controls at 1×, 1.5×,
+   and 2× backing scales.
 2. Eight numbered slots select both the edited and sounding pattern. Selection
    is automatable and switches immediately at the incoming pattern's song
    position, with a short gain transition. New instances populate all eight slots
