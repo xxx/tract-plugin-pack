@@ -74,8 +74,6 @@ struct GsMeterWindow {
     physical_width: u32,
     physical_height: u32,
     scale_factor: f32,
-    /// Packed (w << 32 | h) pending host-initiated resize, read on next frame.
-    pending_resize: Arc<std::sync::atomic::AtomicU64>,
 
     params: Arc<GsMeterParams>,
     readings: Arc<MeterReadings>,
@@ -101,7 +99,6 @@ impl GsMeterWindow {
         params: Arc<GsMeterParams>,
         readings: Arc<MeterReadings>,
         should_reset: Arc<AtomicBool>,
-        pending_resize: Arc<std::sync::atomic::AtomicU64>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -119,7 +116,6 @@ impl GsMeterWindow {
             physical_width: pw,
             physical_height: ph,
             scale_factor,
-            pending_resize,
             params,
             readings,
             should_reset,
@@ -658,11 +654,8 @@ impl GsMeterWindow {
     }
 
     fn resize_buffers(&mut self) {
-        self.surface.resize_and_persist(
-            self.physical_width,
-            self.physical_height,
-            &self.params.editor_state,
-        );
+        self.surface
+            .resize(self.physical_width, self.physical_height);
     }
 }
 
@@ -761,13 +754,22 @@ fn format_lu(val: f32) -> String {
     }
 }
 
-impl baseview::WindowHandler for GsMeterWindow {
-    fn on_frame(&mut self, window: &mut baseview::Window) {
-        widgets::consume_pending_resize(
-            &self.pending_resize,
-            (self.physical_width, self.physical_height),
+impl widgets::PhysicalEditor for GsMeterWindow {
+    fn prepare_resize(&mut self, window: &mut baseview::Window<'_>, _backing_scale: f32) {
+        baseview::WindowHandler::on_event(
+            self,
             window,
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                modifiers: Default::default(),
+            }),
         );
+        self.last_click_action = None;
+    }
+}
+
+impl baseview::WindowHandler for GsMeterWindow {
+    fn on_frame(&mut self, _window: &mut baseview::Window) {
         self.draw();
         self.surface.present();
     }
@@ -784,7 +786,7 @@ impl baseview::WindowHandler for GsMeterWindow {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
                 // Derive scale factor from the new size
-                let sf = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+                let sf = widgets::editor_scale(info, WINDOW_WIDTH);
                 self.scale_factor = sf;
                 self.resize_buffers();
             }
@@ -971,15 +973,11 @@ impl Editor for GsMeterEditor {
                 gl_config: None,
             },
             move |window| {
-                GsMeterWindow::new(
-                    window,
-                    gui_context,
-                    params,
-                    readings,
-                    should_reset,
-                    pending_resize,
-                    sf,
-                )
+                let editor_state = params.editor_state.clone();
+                let dpi_api = gui_context.plugin_api();
+                let inner =
+                    GsMeterWindow::new(window, gui_context, params, readings, should_reset, sf);
+                widgets::EditorWindow::new(inner, editor_state, pending_resize, dpi_api)
             },
         );
 

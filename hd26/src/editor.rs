@@ -102,7 +102,6 @@ struct Hd26Window {
     physical_width: u32,
     physical_height: u32,
     scale_factor: f32,
-    pending_resize: Arc<AtomicU64>,
     params: Arc<Hd26Params>,
     telemetry: Arc<Telemetry>,
     text_renderer: widgets::TextRenderer,
@@ -119,7 +118,6 @@ impl Hd26Window {
         gui_context: Arc<dyn GuiContext>,
         params: Arc<Hd26Params>,
         telemetry: Arc<Telemetry>,
-        pending_resize: Arc<AtomicU64>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -133,7 +131,6 @@ impl Hd26Window {
             physical_width: pw,
             physical_height: ph,
             scale_factor,
-            pending_resize,
             params,
             telemetry,
             text_renderer,
@@ -464,21 +461,29 @@ impl Hd26Window {
     }
 
     fn resize_buffers(&mut self) {
-        self.surface.resize_and_persist(
-            self.physical_width,
-            self.physical_height,
-            &self.params.editor_state,
+        self.surface
+            .resize(self.physical_width, self.physical_height);
+    }
+}
+
+impl widgets::PhysicalEditor for Hd26Window {
+    fn prepare_resize(&mut self, window: &mut baseview::Window<'_>, backing_scale: f32) {
+        baseview::WindowHandler::on_event(
+            self,
+            window,
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                modifiers: Default::default(),
+            }),
         );
+        self.commit_text_edit();
+        self.drag.set_input_scale(backing_scale);
+        self.drag.clear_double_click();
     }
 }
 
 impl baseview::WindowHandler for Hd26Window {
-    fn on_frame(&mut self, window: &mut baseview::Window) {
-        widgets::consume_pending_resize(
-            &self.pending_resize,
-            (self.physical_width, self.physical_height),
-            window,
-        );
+    fn on_frame(&mut self, _window: &mut baseview::Window) {
         self.draw();
         self.surface.present();
     }
@@ -492,8 +497,7 @@ impl baseview::WindowHandler for Hd26Window {
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
-                self.scale_factor =
-                    (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+                self.scale_factor = widgets::editor_scale(info, WINDOW_WIDTH);
                 self.resize_buffers();
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorMoved {
@@ -643,7 +647,10 @@ impl Editor for Hd26Editor {
                 gl_config: None,
             },
             move |window| {
-                Hd26Window::new(window, gui_context, params, telemetry, pending_resize, sf)
+                let editor_state = params.editor_state.clone();
+                let dpi_api = gui_context.plugin_api();
+                let inner = Hd26Window::new(window, gui_context, params, telemetry, sf);
+                widgets::EditorWindow::new(inner, editor_state, pending_resize, dpi_api)
             },
         );
         self.params.editor_state.set_open(true);

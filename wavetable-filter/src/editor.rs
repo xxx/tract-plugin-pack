@@ -20,8 +20,6 @@ use crate::{PendingReload, WavetableFilterParams};
 
 pub const WINDOW_WIDTH: u32 = 900;
 pub const WINDOW_HEIGHT: u32 = 640;
-const MIN_WIDTH: u32 = 700;
-const MIN_HEIGHT: u32 = 500;
 
 pub use widgets::EditorState;
 
@@ -60,6 +58,18 @@ pub(crate) enum ButtonAction {
 const TOP_STRIP_H: f32 = 40.0;
 const STRIP_PAD: f32 = 8.0;
 
+fn visualization_bounds(width: f32, height: f32, scale: f32) -> Option<[tiny_skia::Rect; 2]> {
+    let padding = 10.0 * scale;
+    let top = TOP_STRIP_H * scale + padding;
+    let plot_height = height - (TOP_STRIP_H + 76.0 + 3.0 + 5.0) * scale - 2.0 * padding;
+    let plot_width = (width - 3.0 * padding) * 0.5;
+    let bounds = [
+        tiny_skia::Rect::from_xywh(padding, top, plot_width, plot_height)?,
+        tiny_skia::Rect::from_xywh(2.0 * padding + plot_width, top, plot_width, plot_height)?,
+    ];
+    bounds.iter().all(|rect| !rect.is_empty()).then_some(bounds)
+}
+
 fn format_wavetable_label(path: &str) -> String {
     std::path::Path::new(path)
         .file_stem()
@@ -77,7 +87,6 @@ struct WavetableFilterWindow {
     physical_height: u32,
     scale_factor: f32,
     shared_scale: Arc<AtomicCell<f32>>,
-    pending_resize: Arc<AtomicU64>,
 
     params: Arc<WavetableFilterParams>,
     text_renderer: widgets::TextRenderer,
@@ -112,7 +121,6 @@ impl WavetableFilterWindow {
         wavetable_version: Arc<AtomicU32>,
         shared_input_spectrum: Arc<Mutex<(f32, Vec<f32>)>>,
         shared_scale: Arc<AtomicCell<f32>>,
-        pending_resize: Arc<AtomicU64>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -130,7 +138,6 @@ impl WavetableFilterWindow {
             physical_height: ph,
             scale_factor,
             shared_scale,
-            pending_resize,
             params,
             text_renderer,
             drag: widgets::DragState::new(),
@@ -380,69 +387,62 @@ impl WavetableFilterWindow {
 
         // ── Visualization area ──
         let dial_row_h = 76.0 * s;
-        let dial_row_gap_top = 3.0 * s;
         let dial_row_gap_bot = 5.0 * s;
-        let viz_top = strip_h;
-        let viz_bot = h - dial_row_h - dial_row_gap_top - dial_row_gap_bot;
-        let viz_h = (viz_bot - viz_top).max(1.0);
-        let viz_pad = 10.0 * s;
-        let col_w = (w - viz_pad * 3.0) * 0.5;
-        let left_x = viz_pad;
-        let right_x = viz_pad * 2.0 + col_w;
+        if let Some([left, right]) = visualization_bounds(w, h, s) {
+            wavetable_view::refresh_frame_cache(
+                &mut self.frame_cache,
+                &self.shared_wavetable,
+                &self.wavetable_version,
+            );
 
-        wavetable_view::refresh_frame_cache(
-            &mut self.frame_cache,
-            &self.shared_wavetable,
-            &self.wavetable_version,
-        );
+            use nih_plug::prelude::Param;
+            let current_frame_pos = self.params.frame_position.modulated_normalized_value();
 
-        use nih_plug::prelude::Param;
-        let current_frame_pos = self.params.frame_position.modulated_normalized_value();
+            wavetable_view::draw_wavetable_view(
+                &mut self.surface.pixmap,
+                &mut self.frame_cache,
+                left.x(),
+                left.y(),
+                left.width(),
+                left.height(),
+                current_frame_pos,
+                self.show_2d,
+            );
 
-        wavetable_view::draw_wavetable_view(
-            &mut self.surface.pixmap,
-            &mut self.frame_cache,
-            left_x,
-            viz_top + viz_pad,
-            col_w,
-            viz_h - viz_pad * 2.0,
-            current_frame_pos,
-            self.show_2d,
-        );
+            self.drag.push_region(
+                left.x(),
+                left.y(),
+                left.width(),
+                left.height(),
+                HitAction::Button(ButtonAction::WavetableToggle2D3D),
+            );
 
-        self.drag.push_region(
-            left_x,
-            viz_top + viz_pad,
-            col_w,
-            viz_h - viz_pad * 2.0,
-            HitAction::Button(ButtonAction::WavetableToggle2D3D),
-        );
+            let cutoff_hz = self.params.frequency.modulated_plain_value();
+            let resonance = self.params.resonance.modulated_plain_value();
 
-        let cutoff_hz = self.params.frequency.modulated_plain_value();
-        let resonance = self.params.resonance.modulated_plain_value();
-
-        filter_response_view::refresh_fft_cache(
-            &mut self.fft_cache,
-            current_frame_pos,
-            cutoff_hz,
-            resonance,
-            &self.shared_wavetable,
-        );
-        filter_response_view::refresh_input_spectrum(
-            &mut self.fft_cache,
-            &self.shared_input_spectrum,
-        );
-        filter_response_view::draw_filter_response(
-            &mut self.surface.pixmap,
-            &mut self.text_renderer,
-            &mut self.fft_cache,
-            right_x,
-            viz_top + viz_pad,
-            col_w,
-            viz_h - viz_pad * 2.0,
-            cutoff_hz,
-            resonance,
-        );
+            filter_response_view::refresh_fft_cache(
+                &mut self.fft_cache,
+                current_frame_pos,
+                cutoff_hz,
+                resonance,
+                &self.shared_wavetable,
+            );
+            filter_response_view::refresh_input_spectrum(
+                &mut self.fft_cache,
+                &self.shared_input_spectrum,
+            );
+            filter_response_view::draw_filter_response(
+                &mut self.surface.pixmap,
+                &mut self.text_renderer,
+                &mut self.fft_cache,
+                right.x(),
+                right.y(),
+                right.width(),
+                right.height(),
+                cutoff_hz,
+                resonance,
+            );
+        }
 
         // ── Dial geometry ──
         let dial_radius = 28.0 * s;
@@ -523,21 +523,29 @@ impl WavetableFilterWindow {
     }
 
     fn resize_buffers(&mut self) {
-        self.surface.resize_and_persist(
-            self.physical_width,
-            self.physical_height,
-            &self.params.editor_state,
+        self.surface
+            .resize(self.physical_width, self.physical_height);
+    }
+}
+
+impl widgets::PhysicalEditor for WavetableFilterWindow {
+    fn prepare_resize(&mut self, window: &mut baseview::Window<'_>, backing_scale: f32) {
+        baseview::WindowHandler::on_event(
+            self,
+            window,
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                modifiers: Default::default(),
+            }),
         );
+        self.commit_text_edit();
+        self.drag.set_input_scale(backing_scale);
+        self.drag.clear_double_click();
     }
 }
 
 impl baseview::WindowHandler for WavetableFilterWindow {
-    fn on_frame(&mut self, window: &mut baseview::Window) {
-        widgets::consume_pending_resize(
-            &self.pending_resize,
-            (self.physical_width, self.physical_height),
-            window,
-        );
+    fn on_frame(&mut self, _window: &mut baseview::Window) {
         self.draw();
         self.surface.present();
     }
@@ -549,9 +557,9 @@ impl baseview::WindowHandler for WavetableFilterWindow {
     ) -> baseview::EventStatus {
         match &event {
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
-                self.physical_width = info.physical_size().width.max(MIN_WIDTH);
-                self.physical_height = info.physical_size().height.max(MIN_HEIGHT);
-                let sf = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+                self.physical_width = info.physical_size().width;
+                self.physical_height = info.physical_size().height;
+                let sf = widgets::editor_scale(info, WINDOW_WIDTH);
                 self.scale_factor = sf;
                 self.shared_scale.store(sf);
                 self.resize_buffers();
@@ -725,7 +733,9 @@ impl Editor for WavetableFilterEditor {
                 gl_config: None,
             },
             move |window| {
-                WavetableFilterWindow::new(
+                let editor_state = params.editor_state.clone();
+                let dpi_api = gui_context.plugin_api();
+                let inner = WavetableFilterWindow::new(
                     window,
                     gui_context,
                     params,
@@ -735,9 +745,9 @@ impl Editor for WavetableFilterEditor {
                     wavetable_version,
                     shared_input_spectrum,
                     shared_scale,
-                    pending_resize,
                     sf,
-                )
+                );
+                widgets::EditorWindow::new(inner, editor_state, pending_resize, dpi_api)
             },
         );
 
@@ -752,12 +762,8 @@ impl Editor for WavetableFilterEditor {
         self.params.editor_state.size()
     }
 
-    fn set_scale_factor(&self, factor: f32) -> bool {
-        if self.params.editor_state.is_open() {
-            return false;
-        }
-        self.scaling_factor.store(factor);
-        true
+    fn set_scale_factor(&self, _factor: f32) -> bool {
+        false
     }
 
     fn set_size(&self, width: u32, height: u32) -> bool {
@@ -772,4 +778,167 @@ impl Editor for WavetableFilterEditor {
     fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
     fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
     fn param_values_changed(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn visualization_caches(
+        populated: bool,
+    ) -> (wavetable_view::FrameCache, filter_response_view::FftCache) {
+        let wavetable = if populated {
+            Wavetable::new(
+                (0..512)
+                    .map(|i| (i as f32 * std::f32::consts::TAU / 256.0).sin())
+                    .collect(),
+                256,
+            )
+            .unwrap()
+        } else {
+            Wavetable {
+                frames: Vec::new(),
+                frame_size: 0,
+                frame_count: 0,
+            }
+        };
+        let shared = Mutex::new(wavetable);
+        let mut frames = wavetable_view::FrameCache::new();
+        wavetable_view::refresh_frame_cache(&mut frames, &shared, &AtomicU32::new(1));
+        let mut response = filter_response_view::FftCache::new();
+        filter_response_view::refresh_fft_cache(&mut response, 0.5, 1000.0, 0.0, &shared);
+        (frames, response)
+    }
+
+    #[test]
+    fn wavetable_views_ignore_invalid_viewports_in_both_modes() {
+        for populated in [false, true] {
+            let (mut cache, _) = visualization_caches(populated);
+            for show_2d in [false, true] {
+                for (x, y, w, h) in [
+                    (10.0, 50.0, 435.0, -44.0),
+                    (5.0, 25.0, 8.5, -40.0),
+                    (0.0, 0.0, 0.0, 10.0),
+                    (0.0, 0.0, 10.0, 0.0),
+                    (f32::NAN, 0.0, 10.0, 10.0),
+                    (0.0, 0.0, f32::INFINITY, 10.0),
+                ] {
+                    let mut image = tiny_skia::Pixmap::new(64, 64).unwrap();
+                    image.fill(widgets::color_bg());
+                    let before = image.data().to_vec();
+                    wavetable_view::draw_wavetable_view(
+                        &mut image, &mut cache, x, y, w, h, 0.5, show_2d,
+                    );
+                    assert!(
+                        image.data() == before.as_slice(),
+                        "invalid viewport changed pixels: {w}×{h}, 2D={show_2d}"
+                    );
+                    assert!(cache.bg_pixmap.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn filter_response_ignores_invalid_viewports() {
+        let mut text = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+        for populated in [false, true] {
+            let (_, mut cache) = visualization_caches(populated);
+            for (x, y, w, h) in [
+                (10.0, 50.0, 435.0, -44.0),
+                (5.0, 25.0, 8.5, -40.0),
+                (0.0, 0.0, 0.0, 10.0),
+                (0.0, 0.0, 10.0, 0.0),
+                (f32::NAN, 0.0, 10.0, 10.0),
+                (0.0, 0.0, f32::INFINITY, 10.0),
+            ] {
+                let mut image = tiny_skia::Pixmap::new(64, 64).unwrap();
+                image.fill(widgets::color_bg());
+                let before = image.data().to_vec();
+                filter_response_view::draw_filter_response(
+                    &mut image, &mut text, &mut cache, x, y, w, h, 1000.0, 0.0,
+                );
+                assert!(
+                    image.data() == before.as_slice(),
+                    "invalid viewport changed pixels: {w}×{h}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_and_tiny_window_layouts_preserve_framebuffers_and_recover_after_resize() {
+        let mut text = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+        for backing in [1.0, 1.5, 2.0] {
+            for show_2d in [false, true] {
+                let (mut frames, mut response) = visualization_caches(true);
+                let mut normal_pixels = None;
+                for (width, height) in [
+                    (900, 640),
+                    (900, 100),
+                    (32, 32),
+                    (1, 1),
+                    (20, 640),
+                    (900, 144),
+                    (900, 145),
+                    (900, 640),
+                ] {
+                    let info = baseview::WindowInfo::from_logical_size(
+                        baseview::Size::new(width as f64, height as f64),
+                        backing,
+                    );
+                    let physical = info.physical_size();
+                    let scale = widgets::editor_scale(&info, WINDOW_WIDTH);
+                    let mut image =
+                        tiny_skia::Pixmap::new(physical.width, physical.height).unwrap();
+                    image.fill(widgets::color_bg());
+                    let bounds =
+                        visualization_bounds(physical.width as f32, physical.height as f32, scale);
+                    if matches!((width, height), (900, 100) | (32, 32) | (1, 1) | (900, 144)) {
+                        assert!(bounds.is_none(), "{width}×{height} at {backing}×");
+                    }
+                    if let Some([left, right]) = bounds {
+                        wavetable_view::draw_wavetable_view(
+                            &mut image,
+                            &mut frames,
+                            left.x(),
+                            left.y(),
+                            left.width(),
+                            left.height(),
+                            0.5,
+                            show_2d,
+                        );
+                        filter_response_view::draw_filter_response(
+                            &mut image,
+                            &mut text,
+                            &mut response,
+                            right.x(),
+                            right.y(),
+                            right.width(),
+                            right.height(),
+                            1000.0,
+                            0.0,
+                        );
+                    }
+                    assert_eq!(
+                        (image.width(), image.height()),
+                        (physical.width, physical.height)
+                    );
+                    if (width, height) == (900, 640) {
+                        if let Some(before) = &normal_pixels {
+                            assert!(
+                                image.data() == before,
+                                "visualizations did not recover after resizing"
+                            );
+                        } else {
+                            normal_pixels = Some(image.data().to_vec());
+                        }
+                        if !show_2d {
+                            assert!(frames.bg_pixmap.is_some());
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

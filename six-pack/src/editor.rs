@@ -112,7 +112,6 @@ struct SixPackWindow {
     physical_width: u32,
     physical_height: u32,
     scale_factor: f32,
-    pending_resize: Arc<AtomicU64>,
 
     params: Arc<SixPackParams>,
     /// Cloned from `SixPack::spectrum.bins`. Read each frame for the overlay.
@@ -149,7 +148,6 @@ impl SixPackWindow {
         spectrum_bins: Arc<[AtomicU32; N_BINS]>,
         spectrum_wet_bins: Arc<[AtomicU32; N_BINS]>,
         band_activity_bins: Arc<[AtomicU32; 6]>,
-        pending_resize: Arc<AtomicU64>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -166,7 +164,6 @@ impl SixPackWindow {
             physical_width: pw,
             physical_height: ph,
             scale_factor,
-            pending_resize,
             params,
             spectrum_bins,
             display_bins: [0.0; N_BINS],
@@ -401,11 +398,8 @@ impl SixPackWindow {
     // ── Resize ──────────────────────────────────────────────────────────
 
     fn resize_buffers(&mut self) {
-        self.surface.resize_and_persist(
-            self.physical_width,
-            self.physical_height,
-            &self.params.editor_state,
-        );
+        self.surface
+            .resize(self.physical_width, self.physical_height);
     }
 }
 
@@ -421,13 +415,24 @@ fn peak_curve(t: f32, center: f32) -> f32 {
     (1.0 - d).clamp(0.0, 1.0)
 }
 
-impl baseview::WindowHandler for SixPackWindow {
-    fn on_frame(&mut self, window: &mut baseview::Window) {
-        widgets::consume_pending_resize(
-            &self.pending_resize,
-            (self.physical_width, self.physical_height),
+impl widgets::PhysicalEditor for SixPackWindow {
+    fn prepare_resize(&mut self, window: &mut baseview::Window<'_>, backing_scale: f32) {
+        baseview::WindowHandler::on_event(
+            self,
             window,
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                modifiers: Default::default(),
+            }),
         );
+        self.commit_text_edit();
+        self.drag.set_input_scale(backing_scale);
+        self.drag.clear_double_click();
+    }
+}
+
+impl baseview::WindowHandler for SixPackWindow {
+    fn on_frame(&mut self, _window: &mut baseview::Window) {
         self.draw();
         self.surface.present();
     }
@@ -441,7 +446,7 @@ impl baseview::WindowHandler for SixPackWindow {
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
-                let sf = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+                let sf = widgets::editor_scale(info, WINDOW_WIDTH);
                 self.scale_factor = sf;
                 self.resize_buffers();
             }
@@ -776,16 +781,18 @@ impl Editor for SixPackEditor {
                 gl_config: None,
             },
             move |window| {
-                SixPackWindow::new(
+                let editor_state = params.editor_state.clone();
+                let dpi_api = gui_context.plugin_api();
+                let inner = SixPackWindow::new(
                     window,
                     gui_context,
                     params,
                     spectrum_bins,
                     spectrum_wet_bins,
                     band_activity_bins,
-                    pending_resize,
                     sf,
-                )
+                );
+                widgets::EditorWindow::new(inner, editor_state, pending_resize, dpi_api)
             },
         );
 

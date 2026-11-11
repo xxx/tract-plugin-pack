@@ -102,7 +102,6 @@ struct WarpZoneWindow {
     physical_height: u32,
     scale_factor: f32,
     shared_scale: Arc<AtomicCell<f32>>,
-    pending_resize: Arc<AtomicU64>,
 
     params: Arc<WarpZoneParams>,
     display: Arc<SpectralDisplay>,
@@ -119,7 +118,6 @@ impl WarpZoneWindow {
         params: Arc<WarpZoneParams>,
         display: Arc<SpectralDisplay>,
         shared_scale: Arc<AtomicCell<f32>>,
-        pending_resize: Arc<AtomicU64>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -137,7 +135,6 @@ impl WarpZoneWindow {
             physical_height: ph,
             scale_factor,
             shared_scale,
-            pending_resize,
             params,
             display,
             text_renderer,
@@ -509,21 +506,29 @@ impl WarpZoneWindow {
     }
 
     fn resize_buffers(&mut self) {
-        self.surface.resize_and_persist(
-            self.physical_width,
-            self.physical_height,
-            &self.params.editor_state,
+        self.surface
+            .resize(self.physical_width, self.physical_height);
+    }
+}
+
+impl widgets::PhysicalEditor for WarpZoneWindow {
+    fn prepare_resize(&mut self, window: &mut baseview::Window<'_>, backing_scale: f32) {
+        baseview::WindowHandler::on_event(
+            self,
+            window,
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                modifiers: Default::default(),
+            }),
         );
+        self.commit_text_edit();
+        self.drag.set_input_scale(backing_scale);
+        self.drag.clear_double_click();
     }
 }
 
 impl baseview::WindowHandler for WarpZoneWindow {
-    fn on_frame(&mut self, window: &mut baseview::Window) {
-        widgets::consume_pending_resize(
-            &self.pending_resize,
-            (self.physical_width, self.physical_height),
-            window,
-        );
+    fn on_frame(&mut self, _window: &mut baseview::Window) {
         self.draw();
         self.surface.present();
     }
@@ -538,7 +543,7 @@ impl baseview::WindowHandler for WarpZoneWindow {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
                 // Derive scale factor from the new size
-                let sf = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+                let sf = widgets::editor_scale(info, WINDOW_WIDTH);
                 self.scale_factor = sf;
                 self.shared_scale.store(sf);
                 self.resize_buffers();
@@ -693,15 +698,11 @@ impl Editor for WarpZoneEditor {
                 gl_config: None,
             },
             move |window| {
-                WarpZoneWindow::new(
-                    window,
-                    gui_context,
-                    params,
-                    display,
-                    shared_scale,
-                    pending_resize,
-                    sf,
-                )
+                let editor_state = params.editor_state.clone();
+                let dpi_api = gui_context.plugin_api();
+                let inner =
+                    WarpZoneWindow::new(window, gui_context, params, display, shared_scale, sf);
+                widgets::EditorWindow::new(inner, editor_state, pending_resize, dpi_api)
             },
         );
 
@@ -716,12 +717,8 @@ impl Editor for WarpZoneEditor {
         self.params.editor_state.size()
     }
 
-    fn set_scale_factor(&self, factor: f32) -> bool {
-        if self.params.editor_state.is_open() {
-            return false;
-        }
-        self.scaling_factor.store(factor);
-        true
+    fn set_scale_factor(&self, _factor: f32) -> bool {
+        false
     }
 
     fn set_size(&self, width: u32, height: u32) -> bool {

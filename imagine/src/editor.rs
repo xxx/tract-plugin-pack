@@ -102,7 +102,6 @@ struct ImagineWindow {
     physical_width: u32,
     physical_height: u32,
     scale_factor: f32,
-    pending_resize: Arc<AtomicU64>,
 
     params: Arc<ImagineParams>,
     vectorscope: Arc<VectorConsumer>,
@@ -150,7 +149,6 @@ impl ImagineWindow {
         gui_context: Arc<dyn GuiContext>,
         params: Arc<ImagineParams>,
         vectorscope: Arc<VectorConsumer>,
-        pending_resize: Arc<AtomicU64>,
         physical_width: u32,
         physical_height: u32,
         scale_factor: f32,
@@ -166,7 +164,6 @@ impl ImagineWindow {
             physical_width,
             physical_height,
             scale_factor,
-            pending_resize,
             params,
             vectorscope,
             vec_l: Vec::with_capacity(2048),
@@ -185,11 +182,8 @@ impl ImagineWindow {
     }
 
     fn resize_buffers(&mut self) {
-        self.surface.resize_and_persist(
-            self.physical_width,
-            self.physical_height,
-            &self.params.editor_state,
-        );
+        self.surface
+            .resize(self.physical_width, self.physical_height);
     }
 
     /// Compute the panel layout (mirrors the geometry used by `draw`) and
@@ -418,7 +412,7 @@ impl ImagineWindow {
             for (i, &hz) in freqs.iter().enumerate() {
                 let lx = spectrum_view::split_pixel_x(sx, sw, hz);
                 let dx = (mx - lx as f32).abs();
-                if dx <= SPLIT_HIT_TOL_PX {
+                if dx <= SPLIT_HIT_TOL_PX * self.drag.input_scale() {
                     match best {
                         Some((_, best_dx)) if dx >= best_dx => {}
                         _ => best = Some((i, dx)),
@@ -603,7 +597,7 @@ impl ImagineWindow {
             HitAction::BandStz { band } => {
                 // Anchored vertical drag.
                 let dy = self.link_baseline.anchor_y - my;
-                let delta_norm = dy / STZ_DRAG_PIXELS_PER_FULL;
+                let delta_norm = dy / (STZ_DRAG_PIXELS_PER_FULL * self.drag.input_scale());
                 let target = (self.link_baseline.dragged_baseline + delta_norm).clamp(0.0, 1.0);
                 if self.params.link_bands.value() {
                     let actual_delta = target - self.link_baseline.dragged_baseline;
@@ -824,13 +818,25 @@ struct Layout {
     global: (i32, i32, i32, i32),
 }
 
-impl baseview::WindowHandler for ImagineWindow {
-    fn on_frame(&mut self, window: &mut baseview::Window) {
-        widgets::consume_pending_resize(
-            &self.pending_resize,
-            (self.physical_width, self.physical_height),
+impl widgets::PhysicalEditor for ImagineWindow {
+    fn prepare_resize(&mut self, window: &mut baseview::Window<'_>, backing_scale: f32) {
+        baseview::WindowHandler::on_event(
+            self,
             window,
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                modifiers: Default::default(),
+            }),
         );
+        self.commit_text_edit();
+        self.drag.set_input_scale(backing_scale);
+        self.drag.clear_double_click();
+        self.last_click_target = None;
+    }
+}
+
+impl baseview::WindowHandler for ImagineWindow {
+    fn on_frame(&mut self, _window: &mut baseview::Window) {
         self.draw();
         self.surface.present();
     }
@@ -844,7 +850,7 @@ impl baseview::WindowHandler for ImagineWindow {
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
-                let sf = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+                let sf = widgets::editor_scale(info, WINDOW_WIDTH);
                 self.scale_factor = sf;
                 self.resize_buffers();
             }
@@ -983,16 +989,18 @@ impl Editor for ImagineEditor {
                 gl_config: None,
             },
             move |window| {
-                ImagineWindow::new(
+                let editor_state = params.editor_state.clone();
+                let dpi_api = gui_context.plugin_api();
+                let inner = ImagineWindow::new(
                     window,
                     gui_context,
                     params,
                     vectorscope,
-                    pending_resize,
                     persisted_w,
                     persisted_h,
                     sf,
-                )
+                );
+                widgets::EditorWindow::new(inner, editor_state, pending_resize, dpi_api)
             },
         );
 

@@ -41,6 +41,7 @@ pub struct DragState<A: Clone + PartialEq> {
     mouse_in_window: bool,
     last_click_time: Instant,
     last_click_action: Option<A>,
+    input_scale: f32,
 }
 
 impl<A: Clone + PartialEq> DragState<A> {
@@ -58,6 +59,7 @@ impl<A: Clone + PartialEq> DragState<A> {
             mouse_in_window: false,
             last_click_time: Instant::now(),
             last_click_action: None,
+            input_scale: 1.0,
         }
     }
 
@@ -127,7 +129,23 @@ impl<A: Clone + PartialEq> DragState<A> {
     /// `shift`: whether the shift key is held (enables granular/fine mode).
     /// `current_norm`: the current normalized parameter value (for shift transitions).
     pub fn update_drag(&mut self, shift: bool, current_norm: f32) -> Option<f32> {
-        self.update_drag_with_sensitivity(shift, current_norm, 600.0)
+        self.update_drag_with_sensitivity(shift, current_norm, 600.0 * self.input_scale)
+    }
+
+    /// Set the backing DPI used by default drag sensitivity and physical thresholds.
+    pub fn set_input_scale(&mut self, scale: f32) {
+        let scale = scale.max(0.01);
+        let ratio = scale / self.input_scale;
+        self.mouse_x *= ratio;
+        self.mouse_y *= ratio;
+        self.start_y *= ratio;
+        self.granular_start_y *= ratio;
+        self.input_scale = scale;
+    }
+
+    /// Physical pixels per logical point for this editor.
+    pub fn input_scale(&self) -> f32 {
+        self.input_scale
     }
 
     /// Update a drag with a custom physical-pixel distance for the full range.
@@ -212,6 +230,22 @@ impl<A: Clone + PartialEq> Default for DragState<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_drag_changes_by_the_same_amount_in_logical_points_at_every_dpi() {
+        for scale in [1.0, 1.5, 2.0] {
+            let mut drag: DragState<()> = DragState::new();
+            drag.set_input_scale(scale);
+            drag.set_mouse(100.0 * scale, 300.0 * scale);
+            drag.begin_drag((), 0.25, false);
+            drag.set_mouse(100.0 * scale, 240.0 * scale);
+            assert!((drag.update_drag(false, 0.25).unwrap() - 0.35).abs() < 1e-6);
+            drag.set_mouse(100.0 * scale, 300.0 * scale);
+            drag.begin_drag((), 0.25, true);
+            drag.set_mouse(100.0 * scale, 240.0 * scale);
+            assert!((drag.update_drag(true, 0.25).unwrap() - 0.26).abs() < 1e-6);
+        }
+    }
 
     #[test]
     fn clearing_double_click_requires_a_new_pair_on_the_same_action() {

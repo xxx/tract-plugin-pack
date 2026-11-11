@@ -108,8 +108,22 @@ impl EffectEditor {
     /// Cancel gestures tied to configuration that the host has replaced.
     pub fn cancel_interaction(&mut self) {
         let selected_mseg = self.selected_mseg;
+        let input_scale = self.effect_dial_drag.input_scale();
         *self = Self::new(self.trigger_choices);
         self.selected_mseg = selected_mseg;
+        self.effect_dial_drag.set_input_scale(input_scale);
+    }
+
+    /// End input tied to old window geometry without discarding editor preferences.
+    pub fn prepare_resize(&mut self, backing_scale: f32) {
+        self.effect_dial_drag.end_drag();
+        self.effect_dial_drag.clear_double_click();
+        self.effect_dial_drag.set_input_scale(backing_scale);
+        self.effect_dropdown.close();
+        self.text_edit.cancel();
+        self.mseg_edit.cancel_interaction();
+        self.effect_click = ClickTracker::new();
+        self.mseg_last_click_pos = (f32::NEG_INFINITY, f32::NEG_INFINITY);
     }
 
     /// Commit a typed value before focus moves to a host-owned control.
@@ -345,7 +359,11 @@ impl<'a> Session<'a> {
                     baseview::ScrollDelta::Pixels { y, .. } => *y * 0.05,
                 };
                 let items = self.dropdown_items();
-                self.state.effect_dropdown.on_wheel(dy, &items, win);
+                self.state.effect_dropdown.on_wheel(
+                    dy * self.state.effect_dial_drag.input_scale(),
+                    &items,
+                    win,
+                );
                 self.response.captured = true;
             }
             Event::Keyboard(ev) if self.state.effect_dropdown.is_open() => {
@@ -1004,7 +1022,8 @@ impl<'a> Session<'a> {
             .as_millis();
         let (px, py) = self.state.mseg_last_click_pos;
         let dist_sq = (x - px) * (x - px) + (y - py) * (y - py);
-        let is_double = elapsed_ms < 400 && dist_sq < 64.0;
+        let is_double =
+            elapsed_ms < 400 && dist_sq < (8.0 * self.state.effect_dial_drag.input_scale()).powi(2);
         self.state.mseg_last_click_time = now;
         self.state.mseg_last_click_pos = (x, y);
         is_double
@@ -3317,6 +3336,7 @@ mod tests {
                 EffectKind::Svf,
                 |session| {
                     session.state.selected_mseg = 3;
+                    session.state.effect_dial_drag.set_input_scale(2.0);
                     let point = select_interior_node(session);
                     open_menu(session.state);
                     session.state.text_edit.begin(EffectHit::Mix, "25");
@@ -3334,6 +3354,7 @@ mod tests {
                     session.state.cancel_interaction();
                     let after = std::time::Instant::now();
                     assert_eq!(session.state.selected_mseg, 3);
+                    assert_eq!(session.state.effect_dial_drag.input_scale(), 2.0);
                     assert_eq!(
                         session.state.trigger_choices,
                         &[TriggerChoice::FreeHz, TriggerChoice::Transient]

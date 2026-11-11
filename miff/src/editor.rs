@@ -42,8 +42,6 @@ pub(crate) fn event_target(mseg_rect: (f32, f32, f32, f32), x: f32, y: f32) -> E
 pub const WINDOW_WIDTH: u32 = 880;
 pub const WINDOW_HEIGHT: u32 = 620;
 // Used in the Resized event handler.
-const MIN_WIDTH: u32 = 680;
-const MIN_HEIGHT: u32 = 480;
 
 pub use widgets::EditorState;
 
@@ -150,7 +148,6 @@ struct MiffWindow {
     physical_height: u32,
     scale_factor: f32,
     shared_scale: Arc<AtomicCell<f32>>,
-    pending_resize: Arc<AtomicU64>,
 
     params: Arc<MiffParams>,
     text_renderer: widgets::TextRenderer,
@@ -185,7 +182,6 @@ impl MiffWindow {
         kernel_handoff: Arc<crate::kernel::KernelHandoff>,
         input_spectrum: Arc<Mutex<Vec<f32>>>,
         shared_scale: Arc<AtomicCell<f32>>,
-        pending_resize: Arc<AtomicU64>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -215,7 +211,6 @@ impl MiffWindow {
             physical_height: ph,
             scale_factor,
             shared_scale,
-            pending_resize,
             params,
             text_renderer,
             drag: widgets::DragState::new(),
@@ -295,11 +290,8 @@ impl MiffWindow {
     }
 
     fn resize_buffers(&mut self) {
-        self.surface.resize_and_persist(
-            self.physical_width,
-            self.physical_height,
-            &self.params.editor_state,
-        );
+        self.surface
+            .resize(self.physical_width, self.physical_height);
     }
 
     /// Check if `(x, y)` is a double-click in the MSEG region.
@@ -310,7 +302,7 @@ impl MiffWindow {
         let elapsed_ms = now.duration_since(self.mseg_last_click_time).as_millis();
         let (px, py) = self.mseg_last_click_pos;
         let dist_sq = (x - px) * (x - px) + (y - py) * (y - py);
-        let is_double = elapsed_ms < 400 && dist_sq < 64.0; // 8px radius
+        let is_double = elapsed_ms < 400 && dist_sq < (8.0 * self.drag.input_scale()).powi(2);
         self.mseg_last_click_time = now;
         self.mseg_last_click_pos = (x, y);
         is_double
@@ -545,13 +537,26 @@ impl MiffWindow {
     }
 }
 
-impl baseview::WindowHandler for MiffWindow {
-    fn on_frame(&mut self, window: &mut baseview::Window) {
-        widgets::consume_pending_resize(
-            &self.pending_resize,
-            (self.physical_width, self.physical_height),
+impl widgets::PhysicalEditor for MiffWindow {
+    fn prepare_resize(&mut self, window: &mut baseview::Window<'_>, backing_scale: f32) {
+        baseview::WindowHandler::on_event(
+            self,
             window,
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                modifiers: Default::default(),
+            }),
         );
+        self.commit_text_edit();
+        self.drag.set_input_scale(backing_scale);
+        self.drag.clear_double_click();
+        self.mseg_state.cancel_interaction();
+        self.mseg_last_click_pos = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    }
+}
+
+impl baseview::WindowHandler for MiffWindow {
+    fn on_frame(&mut self, _window: &mut baseview::Window) {
         self.draw();
         self.surface.present();
     }
@@ -568,9 +573,9 @@ impl baseview::WindowHandler for MiffWindow {
 
         match &event {
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
-                self.physical_width = info.physical_size().width.max(MIN_WIDTH);
-                self.physical_height = info.physical_size().height.max(MIN_HEIGHT);
-                let sf = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+                self.physical_width = info.physical_size().width;
+                self.physical_height = info.physical_size().height;
+                let sf = widgets::editor_scale(info, WINDOW_WIDTH);
                 self.scale_factor = sf;
                 self.shared_scale.store(sf);
                 self.resize_buffers();
@@ -1039,16 +1044,18 @@ impl Editor for MiffEditor {
                 gl_config: None,
             },
             move |window| {
-                MiffWindow::new(
+                let editor_state = params.editor_state.clone();
+                let dpi_api = gui_context.plugin_api();
+                let inner = MiffWindow::new(
                     window,
                     gui_context,
                     params,
                     kernel_handoff,
                     input_spectrum,
                     shared_scale,
-                    pending_resize,
                     sf,
-                )
+                );
+                widgets::EditorWindow::new(inner, editor_state, pending_resize, dpi_api)
             },
         );
 
@@ -1063,12 +1070,8 @@ impl Editor for MiffEditor {
         self.params.editor_state.size()
     }
 
-    fn set_scale_factor(&self, factor: f32) -> bool {
-        if self.params.editor_state.is_open() {
-            return false;
-        }
-        self.scaling_factor.store(factor);
-        true
+    fn set_scale_factor(&self, _factor: f32) -> bool {
+        false
     }
 
     fn set_size(&self, width: u32, height: u32) -> bool {

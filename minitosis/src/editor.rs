@@ -195,7 +195,6 @@ struct MinitosisWindow {
     width: u32,
     height: u32,
     scale: f32,
-    pending_resize: Arc<AtomicU64>,
     params: Arc<MinitosisParams>,
     shared: Arc<Shared>,
     executor: AsyncExecutor<Minitosis>,
@@ -222,7 +221,6 @@ impl MinitosisWindow {
         shared: Arc<Shared>,
         executor: AsyncExecutor<Minitosis>,
         gui_context: Arc<dyn GuiContext>,
-        pending_resize: Arc<AtomicU64>,
     ) -> Self {
         let (width, height) = params.editor_state.size();
         let scale = (width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
@@ -237,7 +235,6 @@ impl MinitosisWindow {
             width,
             height,
             scale,
-            pending_resize,
             params,
             shared,
             executor,
@@ -481,9 +478,24 @@ impl MinitosisWindow {
     }
 }
 
+impl widgets::PhysicalEditor for MinitosisWindow {
+    fn prepare_resize(&mut self, _window: &mut baseview::Window<'_>, backing_scale: f32) {
+        self.undo.begin_capture(self.snapshot());
+        self.end_effect_gestures();
+        self.end_output_drag();
+        self.commit_output_text();
+        self.handle_effect(&Event::Window(WindowEvent::Unfocused), true);
+        self.editor.prepare_resize(backing_scale);
+        self.output_drag.set_input_scale(backing_scale);
+        self.output_drag.clear_double_click();
+        self.output_click = ClickTracker::new();
+        let after = self.snapshot();
+        self.undo.commit_capture(&after);
+    }
+}
+
 impl baseview::WindowHandler for MinitosisWindow {
-    fn on_frame(&mut self, window: &mut baseview::Window) {
-        widgets::consume_pending_resize(&self.pending_resize, (self.width, self.height), window);
+    fn on_frame(&mut self, _window: &mut baseview::Window) {
         self.sync_selection();
         let output_edit = self
             .output_text
@@ -510,9 +522,8 @@ impl baseview::WindowHandler for MinitosisWindow {
             Event::Window(WindowEvent::Resized(info)) => {
                 self.width = info.physical_size().width;
                 self.height = info.physical_size().height;
-                self.scale = (self.width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
-                self.surface
-                    .resize_and_persist(self.width, self.height, &self.params.editor_state);
+                self.scale = widgets::editor_scale(info, WINDOW_WIDTH);
+                self.surface.resize(self.width, self.height);
             }
             Event::Window(WindowEvent::Unfocused) => {
                 self.end_effect_gestures();
@@ -692,7 +703,10 @@ impl Editor for MinitosisEditor {
                 gl_config: None,
             },
             move |window| {
-                MinitosisWindow::new(window, params, shared, executor, context, pending_resize)
+                let editor_state = params.editor_state.clone();
+                let dpi_api = context.plugin_api();
+                let inner = MinitosisWindow::new(window, params, shared, executor, context);
+                widgets::EditorWindow::new(inner, editor_state, pending_resize, dpi_api)
             },
         );
         self.params.editor_state.set_open(true);
