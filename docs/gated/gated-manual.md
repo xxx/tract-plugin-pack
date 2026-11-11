@@ -42,7 +42,7 @@ cargo run -p gated -- --backend dummy
 | Control | Range / default | Behavior |
 |---|---|---|
 | Pattern | 1–8 / 1 | Selects both the playing and edited slot; automatable. |
-| Steps | 1–64 / 16 | Length of this slot. Use the central −/+ buttons. |
+| Steps | 1–64 / 16 | Drag the large central number up/down to change this slot's length. Hold Shift for fine adjustment. |
 | Attack | 0–2000 ms / 2 ms | Time from zero to full level. |
 | Decay | 0–2000 ms / 50 ms | Time from full level to Sustain. |
 | Sustain | 0–100% / 100% | Held level after Attack and Decay. |
@@ -68,6 +68,10 @@ from the last step to the first continues across the loop boundary.
 Untied on steps restart the envelope. Tied steps hold it, with Gate shortening
 only the last step of the run. An entirely on, entirely tied pattern holds at
 Sustain. Shortening a pattern retains hidden step data for later expansion.
+
+Drag the large step count upward to lengthen the pattern or downward to shorten
+it. Hold Shift for fine adjustment. The number highlights and shows a drag hint
+on hover. Each drag is one undo action, including edits completed by focus loss.
 
 The Copy/Paste shortcuts transfer a slot's complete pattern and length. The arrow
 buttons rotate the visible steps and ties one step left/right. Randomize changes only
@@ -96,6 +100,7 @@ that limitation. A missing tempo falls back to 120 BPM.
 
 ## Mouse and keyboard
 
+- Drag the large step count up/down to change length; Shift enables fine adjustment.
 - Drag a dial vertically; hold Shift for fine adjustment.
 - Double-click a dial to restore its default.
 - Right-click a dial to type a value; Enter commits, Escape cancels.

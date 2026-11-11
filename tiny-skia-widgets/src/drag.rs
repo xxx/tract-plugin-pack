@@ -127,7 +127,19 @@ impl<A: Clone + PartialEq> DragState<A> {
     /// `shift`: whether the shift key is held (enables granular/fine mode).
     /// `current_norm`: the current normalized parameter value (for shift transitions).
     pub fn update_drag(&mut self, shift: bool, current_norm: f32) -> Option<f32> {
+        self.update_drag_with_sensitivity(shift, current_norm, 600.0)
+    }
+
+    /// Update a drag with a custom physical-pixel distance for the full range.
+    /// Shift uses ten times that distance, preserving the value on mode changes.
+    pub fn update_drag_with_sensitivity(
+        &mut self,
+        shift: bool,
+        current_norm: f32,
+        pixels_per_range: f32,
+    ) -> Option<f32> {
         self.active.as_ref()?;
+        let pixels_per_range = pixels_per_range.max(1.0);
 
         // Handle shift transitions: snapshot value when entering/leaving granular mode
         if shift && !self.last_shift {
@@ -140,10 +152,10 @@ impl<A: Clone + PartialEq> DragState<A> {
 
         let target = if shift {
             let delta_y = self.granular_start_y - self.mouse_y;
-            (self.granular_start_value + delta_y / 600.0 * 0.1).clamp(0.0, 1.0)
+            (self.granular_start_value + delta_y / pixels_per_range * 0.1).clamp(0.0, 1.0)
         } else {
             let delta_y = self.start_y - self.mouse_y;
-            (self.start_value + delta_y / 600.0).clamp(0.0, 1.0)
+            (self.start_value + delta_y / pixels_per_range).clamp(0.0, 1.0)
         };
 
         self.last_shift = shift;
@@ -195,6 +207,45 @@ impl<A: Clone + PartialEq> Default for DragState<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_sensitivity_supports_fine_control_and_shift_transitions() {
+        let mut drag: DragState<()> = DragState::new();
+        drag.set_mouse(0.0, 400.0);
+        drag.begin_drag((), 0.25, false);
+        drag.set_mouse(0.0, 350.0);
+        assert_eq!(
+            drag.update_drag_with_sensitivity(false, 0.25, 200.0),
+            Some(0.5)
+        );
+        assert_eq!(
+            drag.update_drag_with_sensitivity(true, 0.5, 200.0),
+            Some(0.5)
+        );
+        drag.set_mouse(0.0, 150.0);
+        let fine = drag.update_drag_with_sensitivity(true, 0.5, 200.0).unwrap();
+        assert!((fine - 0.6).abs() < 1e-6);
+        assert_eq!(
+            drag.update_drag_with_sensitivity(false, fine, 200.0),
+            Some(fine)
+        );
+        drag.set_mouse(0.0, 50.0);
+        assert_eq!(
+            drag.update_drag_with_sensitivity(false, fine, 200.0),
+            Some(1.0)
+        );
+        drag.end_drag();
+        assert_eq!(drag.update_drag_with_sensitivity(false, 1.0, 200.0), None);
+    }
+
+    #[test]
+    fn default_drag_retains_its_existing_sensitivity() {
+        let mut drag: DragState<()> = DragState::new();
+        drag.set_mouse(0.0, 400.0);
+        drag.begin_drag((), 0.5, false);
+        drag.set_mouse(0.0, 340.0);
+        assert!((drag.update_drag(false, 0.5).unwrap() - 0.6).abs() < 1e-6);
+    }
 
     #[test]
     fn test_mouse_in_window_starts_false() {

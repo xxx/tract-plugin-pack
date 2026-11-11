@@ -45,7 +45,7 @@ enum Dial {
 enum Action {
     Dial(Dial),
     Slot(usize),
-    Length(i32),
+    Length(usize),
     Copy,
     Paste,
     Rotate(bool),
@@ -418,31 +418,37 @@ impl Panel {
                 );
             }
         }
+        let (x, y, w, h) = self.layout.rect(172.0, 218.0, 136.0, 92.0);
+        self.drag.push_region(x, y, w, h, Action::Length(slot));
+        let length_hovered = self.drag.mouse_in_window()
+            && self
+                .drag
+                .hit_test()
+                .is_some_and(|region| matches!(region.action, Action::Length(_)));
+        let length_dragging = matches!(self.drag.active_action(), Some(Action::Length(_)));
         self.centered(
             image,
             RING_X,
             278.0,
             &pattern.len().to_string(),
             57.0,
-            widgets::color_text(),
+            if length_hovered || length_dragging {
+                accent()
+            } else {
+                widgets::color_text()
+            },
         );
         self.centered(image, RING_X, 300.0, "steps", 13.0, widgets::color_muted());
-        self.button(
-            image,
-            (182.0, 316.0, 48.0, 27.0),
-            "−",
-            Action::Length(-1),
-            false,
-            pattern.len() > 1,
-        );
-        self.button(
-            image,
-            (250.0, 316.0, 48.0, 27.0),
-            "+",
-            Action::Length(1),
-            false,
-            pattern.len() < MAX_STEPS,
-        );
+        if length_hovered || length_dragging {
+            self.centered(
+                image,
+                RING_X,
+                333.0,
+                "drag ↕ · Shift for fine",
+                11.0,
+                widgets::color_muted(),
+            );
+        }
         let status = if sounding == u32::MAX {
             "Stopped · audio passes through"
         } else if self.telemetry.song_position.load(Ordering::Relaxed) == 0 {
@@ -593,6 +599,27 @@ impl Panel {
         }
     }
 
+    fn begin_length_drag(&mut self, slot: usize, shift: bool) {
+        let bank = self.bank();
+        self.history.begin(bank);
+        let normalized = (bank.patterns[slot].len() - 1) as f32 / (MAX_STEPS - 1) as f32;
+        self.drag
+            .begin_drag(Action::Length(slot), normalized, shift);
+    }
+
+    fn update_length_drag(&mut self, slot: usize, shift: bool) {
+        let length = self.bank().patterns[slot].len();
+        let normalized = (length - 1) as f32 / (MAX_STEPS - 1) as f32;
+        let distance = 4.0 * (MAX_STEPS - 1) as f32 * self.layout.scale;
+        if let Some(value) = self
+            .drag
+            .update_drag_with_sensitivity(shift, normalized, distance)
+        {
+            let length = 1 + (value * (MAX_STEPS - 1) as f32).round() as usize;
+            self.update(slot, |pattern| pattern.set_length(length));
+        }
+    }
+
     fn end_gesture(&mut self, context: &dyn GuiContext, click: bool) {
         if let Some(gesture) = self.gesture.take() {
             if click && !gesture.moved && !gesture.erase {
@@ -602,8 +629,12 @@ impl Panel {
             }
             self.commit(context);
         }
-        if let Some(Action::Dial(dial)) = self.drag.end_drag() {
-            ParamSetter::new(context).end_set_parameter(param(&self.params, dial));
+        match self.drag.end_drag() {
+            Some(Action::Dial(dial)) => {
+                ParamSetter::new(context).end_set_parameter(param(&self.params, dial))
+            }
+            Some(Action::Length(_)) => self.commit(context),
+            _ => {}
         }
         self.dropdown.on_mouse_up();
     }
@@ -637,6 +668,7 @@ impl Panel {
         let setter = ParamSetter::new(context);
         let slot = self.slot();
         match action {
+            Action::Length(slot) => self.begin_length_drag(slot, shift),
             Action::Dial(dial) => {
                 let p = param(&self.params, dial);
                 setter.begin_set_parameter(p);
@@ -695,9 +727,6 @@ impl Panel {
             _ => {
                 self.history.begin(self.bank());
                 match action {
-                    Action::Length(delta) => self.update(slot, |p| {
-                        p.set_length((p.len() as i32 + delta).clamp(1, MAX_STEPS as i32) as usize)
-                    }),
                     Action::Paste => {
                         if let Some(pattern) = self.clipboard {
                             self.update(slot, |p| *p = pattern);
@@ -751,6 +780,8 @@ impl Panel {
                     ) {
                         ParamSetter::new(context).set_parameter_normalized(p, value);
                     }
+                } else if let Some(Action::Length(slot)) = self.drag.active_action().copied() {
+                    self.update_length_drag(slot, modifiers.contains(Modifiers::SHIFT));
                 } else if let Some(mut gesture) = self.gesture {
                     let len = self.bank().patterns[gesture.slot].len();
                     if let Some(step) = self.layout.ring_step(x, y, len)
@@ -1038,6 +1069,91 @@ pub fn render_preview(path: &std::path::Path, width: u32, height: u32) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn length_drag_is_bounded_preserves_hidden_steps_and_creates_one_undo_entry() {
+        let params = Arc::new(GatedParams::default());
+        {
+            let mut bank = params.bank.lock().unwrap();
+            bank.patterns[0].set_length(64);
+            bank.patterns[0].set_on(63, true);
+            bank.patterns[0].set_length(16);
+        }
+        let mut panel = Panel::new(params, Arc::new(Telemetry::default()));
+        let before = panel.bank();
+        panel.drag.set_mouse(240.0, 250.0);
+        panel.begin_length_drag(0, false);
+        panel.drag.set_mouse(240.0, -1000.0);
+        panel.update_length_drag(0, false);
+        assert_eq!(panel.bank().patterns[0].len(), 64);
+        panel.drag.set_mouse(240.0, 1000.0);
+        panel.update_length_drag(0, false);
+        assert_eq!(panel.bank().patterns[0].len(), 1);
+        panel.drag.set_mouse(240.0, 218.0);
+        panel.update_length_drag(0, false);
+        let after = panel.bank();
+        assert_eq!(after.patterns[0].len(), 24);
+        assert_eq!(after.patterns[0].active, before.patterns[0].active);
+        assert_eq!(after.patterns[1], before.patterns[1]);
+        assert_eq!(panel.drag.end_drag(), Some(Action::Length(0)));
+        assert!(panel.history.finish(after));
+        assert_eq!(panel.history.undo.len(), 1);
+        assert_eq!(panel.history.restore(after, false), Some(before));
+        assert_eq!(panel.history.restore(before, true), Some(after));
+    }
+
+    #[test]
+    fn length_drag_fine_control_and_sensitivity_follow_editor_scale() {
+        for (width, height) in [(480, 840), (400, 700), (960, 1680)] {
+            let mut panel = Panel::new(
+                Arc::new(GatedParams::default()),
+                Arc::new(Telemetry::default()),
+            );
+            panel.layout = Layout::new(width, height);
+            let scale = panel.layout.scale;
+            panel.drag.set_mouse(240.0 * scale, 250.0 * scale);
+            panel.begin_length_drag(0, false);
+            panel.drag.set_mouse(240.0 * scale, 218.0 * scale);
+            panel.update_length_drag(0, false);
+            assert_eq!(panel.bank().patterns[0].len(), 24);
+            panel.update_length_drag(0, true);
+            assert_eq!(panel.bank().patterns[0].len(), 24);
+            panel.drag.set_mouse(240.0 * scale, 178.0 * scale);
+            panel.update_length_drag(0, true);
+            assert_eq!(panel.bank().patterns[0].len(), 25);
+            panel.update_length_drag(0, false);
+            panel.drag.set_mouse(240.0 * scale, 174.0 * scale);
+            panel.update_length_drag(0, false);
+            assert_eq!(panel.bank().patterns[0].len(), 26);
+        }
+    }
+
+    #[test]
+    fn length_click_without_motion_does_not_create_an_undo_entry() {
+        let mut panel = Panel::new(
+            Arc::new(GatedParams::default()),
+            Arc::new(Telemetry::default()),
+        );
+        panel.begin_length_drag(0, false);
+        panel.drag.end_drag();
+        assert!(!panel.history.finish(panel.bank()));
+        assert!(panel.history.undo.is_empty());
+    }
+
+    #[test]
+    fn external_state_replacement_cancels_a_length_drag() {
+        let params = Arc::new(GatedParams::default());
+        let mut panel = Panel::new(params.clone(), Arc::new(Telemetry::default()));
+        panel.begin_length_drag(0, false);
+        panel.drag.set_mouse(0.0, -32.0);
+        panel.update_length_drag(0, false);
+        params.state_generation.fetch_add(1, Ordering::Release);
+        panel.reconcile();
+        assert!(panel.drag.active_action().is_none());
+        assert!(panel.history.pending.is_none());
+        assert!(panel.history.undo.is_empty());
+        assert_eq!(panel.cancelled_dial, None);
+    }
 
     #[test]
     fn ring_hit_testing_matches_drawing_at_different_aspect_ratios() {

@@ -16,7 +16,12 @@ https://kilohearts.com/products/trance_gate.
    is automatable and switches immediately at the incoming pattern's song
    position, with a short gain transition.
 3. Each slot stores 1–64 binary steps, outgoing ties, and its length. Length
-   defaults to 16. Shortening retains hidden steps for subsequent expansion.
+   defaults to 16. Drag the large central count up to increase or down to decrease
+   length, using 4 logical pixels per step and Shift for ten-times-finer movement.
+   The count highlights and displays a hint while hovered or dragged. There are
+   no +/− buttons. A drag edits the slot grabbed at its start and is one undo
+   action on release or focus loss; external state recall cancels it. Shortening
+   retains hidden steps for subsequent expansion.
    Storage leaves room for a later 128-step version, but v1 exposes only 64.
 4. Clicking a step toggles it. Dragging clockwise or counterclockwise across
    steps enables and ties the traversed steps. Shift-drag paints steps off.
