@@ -48,7 +48,12 @@ only the outer pointer cache would leave nested controls broken.
   plot area, narrow windows, empty/loaded tables, 2D/3D, and 1×/1.5×/2× backing.
   Invalid plots are skipped without changing framebuffer dimensions; normal
   rendering and the 3D cache recover after expansion.
-  With these regressions included, all 2,247 workspace tests pass.
+  CI mutation testing subsequently exposed missing non-1× coverage for shared
+  effect-editor wheel distances and MSEG click radii, plus untested resize
+  cleanup. Extend those event tests to 1×/1.5×/2× and cover ending dial/MSEG
+  gestures, dismissing popup/text focus, and retaining editor preferences.
+  All three reported mutations are caught by a focused rerun, without adding
+  mutation exclusions. All 2,250 workspace tests pass.
 - Mac `mini`: all plug-in libraries compile and workspace clippy passes. The
   2,198 library tests outside Minitosis pass. Minitosis aborts in
   `tests::closed_editor_switch_prepares_and_adopts_without_audio_thread_allocation`

@@ -2725,44 +2725,50 @@ mod tests {
         }
 
         #[test]
-        fn quick_presses_must_be_strictly_inside_an_eight_pixel_circle() {
+        fn quick_presses_must_be_strictly_inside_an_eight_point_circle_at_each_backing_scale() {
             with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
-                let anchor = Instant::now();
-                let previous = (37.25, -19.5);
-                for (dx, dy, expected) in [
-                    (0.0, 0.0, true),
-                    (7.999, 0.0, true),
-                    (8.0, 0.0, false),
-                    (8.001, 0.0, false),
-                    (-7.5, 0.0, true),
-                    (-8.0, 0.0, false),
-                    (0.0, 7.999, true),
-                    (0.0, 8.0, false),
-                    (0.0, 8.001, false),
-                    (0.0, -7.5, true),
-                    (0.0, -8.0, false),
-                    (3.0, 4.0, true),
-                    (-3.0, 4.0, true),
-                    (3.0, -4.0, true),
-                    (-3.0, -4.0, true),
-                    (6.0, 6.0, false),
-                    (-6.0, 6.0, false),
-                    (6.0, -6.0, false),
-                    (-6.0, -6.0, false),
-                    (9.0, 0.0, false),
-                    (0.0, 9.0, false),
-                ] {
-                    session.state.mseg_last_click_time = anchor;
-                    session.state.mseg_last_click_pos = previous;
-                    let now = anchor + Duration::from_millis(100);
-                    let point = (previous.0 + dx, previous.1 + dy);
-                    assert_eq!(
-                        session.mseg_double_click_check_at(point.0, point.1, now),
-                        expected,
-                        "offset ({dx}, {dy})"
-                    );
-                    assert_eq!(session.state.mseg_last_click_time, now);
-                    assert_eq!(session.state.mseg_last_click_pos, point);
+                for backing_scale in [1.0, 1.5, 2.0] {
+                    session.state.prepare_resize(backing_scale);
+                    let anchor = Instant::now();
+                    let previous = (37.25, -19.5);
+                    for (dx, dy, expected) in [
+                        (0.0, 0.0, true),
+                        (7.999, 0.0, true),
+                        (8.0, 0.0, false),
+                        (8.001, 0.0, false),
+                        (-7.5, 0.0, true),
+                        (-8.0, 0.0, false),
+                        (0.0, 7.999, true),
+                        (0.0, 8.0, false),
+                        (0.0, 8.001, false),
+                        (0.0, -7.5, true),
+                        (0.0, -8.0, false),
+                        (3.0, 4.0, true),
+                        (-3.0, 4.0, true),
+                        (3.0, -4.0, true),
+                        (-3.0, -4.0, true),
+                        (6.0, 6.0, false),
+                        (-6.0, 6.0, false),
+                        (6.0, -6.0, false),
+                        (-6.0, -6.0, false),
+                        (9.0, 0.0, false),
+                        (0.0, 9.0, false),
+                    ] {
+                        session.state.mseg_last_click_time = anchor;
+                        session.state.mseg_last_click_pos = previous;
+                        let now = anchor + Duration::from_millis(100);
+                        let point = (
+                            previous.0 + dx * backing_scale,
+                            previous.1 + dy * backing_scale,
+                        );
+                        assert_eq!(
+                            session.mseg_double_click_check_at(point.0, point.1, now),
+                            expected,
+                            "offset ({dx}, {dy}) at backing scale {backing_scale}"
+                        );
+                        assert_eq!(session.state.mseg_last_click_time, now);
+                        assert_eq!(session.state.mseg_last_click_pos, point);
+                    }
                 }
             });
         }
