@@ -108,8 +108,22 @@ impl EffectEditor {
     /// Cancel gestures tied to configuration that the host has replaced.
     pub fn cancel_interaction(&mut self) {
         let selected_mseg = self.selected_mseg;
+        let input_scale = self.effect_dial_drag.input_scale();
         *self = Self::new(self.trigger_choices);
         self.selected_mseg = selected_mseg;
+        self.effect_dial_drag.set_input_scale(input_scale);
+    }
+
+    /// End input tied to old window geometry without discarding editor preferences.
+    pub fn prepare_resize(&mut self, backing_scale: f32) {
+        self.effect_dial_drag.end_drag();
+        self.effect_dial_drag.clear_double_click();
+        self.effect_dial_drag.set_input_scale(backing_scale);
+        self.effect_dropdown.close();
+        self.text_edit.cancel();
+        self.mseg_edit.cancel_interaction();
+        self.effect_click = ClickTracker::new();
+        self.mseg_last_click_pos = (f32::NEG_INFINITY, f32::NEG_INFINITY);
     }
 
     /// Commit a typed value before focus moves to a host-owned control.
@@ -345,7 +359,11 @@ impl<'a> Session<'a> {
                     baseview::ScrollDelta::Pixels { y, .. } => *y * 0.05,
                 };
                 let items = self.dropdown_items();
-                self.state.effect_dropdown.on_wheel(dy, &items, win);
+                self.state.effect_dropdown.on_wheel(
+                    dy * self.state.effect_dial_drag.input_scale(),
+                    &items,
+                    win,
+                );
                 self.response.captured = true;
             }
             Event::Keyboard(ev) if self.state.effect_dropdown.is_open() => {
@@ -1004,7 +1022,8 @@ impl<'a> Session<'a> {
             .as_millis();
         let (px, py) = self.state.mseg_last_click_pos;
         let dist_sq = (x - px) * (x - px) + (y - py) * (y - py);
-        let is_double = elapsed_ms < 400 && dist_sq < 64.0;
+        let is_double =
+            elapsed_ms < 400 && dist_sq < (8.0 * self.state.effect_dial_drag.input_scale()).powi(2);
         self.state.mseg_last_click_time = now;
         self.state.mseg_last_click_pos = (x, y);
         is_double
@@ -2706,44 +2725,50 @@ mod tests {
         }
 
         #[test]
-        fn quick_presses_must_be_strictly_inside_an_eight_pixel_circle() {
+        fn quick_presses_must_be_strictly_inside_an_eight_point_circle_at_each_backing_scale() {
             with_session(TriggerChoice::ALL, EffectKind::Svf, |session| {
-                let anchor = Instant::now();
-                let previous = (37.25, -19.5);
-                for (dx, dy, expected) in [
-                    (0.0, 0.0, true),
-                    (7.999, 0.0, true),
-                    (8.0, 0.0, false),
-                    (8.001, 0.0, false),
-                    (-7.5, 0.0, true),
-                    (-8.0, 0.0, false),
-                    (0.0, 7.999, true),
-                    (0.0, 8.0, false),
-                    (0.0, 8.001, false),
-                    (0.0, -7.5, true),
-                    (0.0, -8.0, false),
-                    (3.0, 4.0, true),
-                    (-3.0, 4.0, true),
-                    (3.0, -4.0, true),
-                    (-3.0, -4.0, true),
-                    (6.0, 6.0, false),
-                    (-6.0, 6.0, false),
-                    (6.0, -6.0, false),
-                    (-6.0, -6.0, false),
-                    (9.0, 0.0, false),
-                    (0.0, 9.0, false),
-                ] {
-                    session.state.mseg_last_click_time = anchor;
-                    session.state.mseg_last_click_pos = previous;
-                    let now = anchor + Duration::from_millis(100);
-                    let point = (previous.0 + dx, previous.1 + dy);
-                    assert_eq!(
-                        session.mseg_double_click_check_at(point.0, point.1, now),
-                        expected,
-                        "offset ({dx}, {dy})"
-                    );
-                    assert_eq!(session.state.mseg_last_click_time, now);
-                    assert_eq!(session.state.mseg_last_click_pos, point);
+                for backing_scale in [1.0, 1.5, 2.0] {
+                    session.state.prepare_resize(backing_scale);
+                    let anchor = Instant::now();
+                    let previous = (37.25, -19.5);
+                    for (dx, dy, expected) in [
+                        (0.0, 0.0, true),
+                        (7.999, 0.0, true),
+                        (8.0, 0.0, false),
+                        (8.001, 0.0, false),
+                        (-7.5, 0.0, true),
+                        (-8.0, 0.0, false),
+                        (0.0, 7.999, true),
+                        (0.0, 8.0, false),
+                        (0.0, 8.001, false),
+                        (0.0, -7.5, true),
+                        (0.0, -8.0, false),
+                        (3.0, 4.0, true),
+                        (-3.0, 4.0, true),
+                        (3.0, -4.0, true),
+                        (-3.0, -4.0, true),
+                        (6.0, 6.0, false),
+                        (-6.0, 6.0, false),
+                        (6.0, -6.0, false),
+                        (-6.0, -6.0, false),
+                        (9.0, 0.0, false),
+                        (0.0, 9.0, false),
+                    ] {
+                        session.state.mseg_last_click_time = anchor;
+                        session.state.mseg_last_click_pos = previous;
+                        let now = anchor + Duration::from_millis(100);
+                        let point = (
+                            previous.0 + dx * backing_scale,
+                            previous.1 + dy * backing_scale,
+                        );
+                        assert_eq!(
+                            session.mseg_double_click_check_at(point.0, point.1, now),
+                            expected,
+                            "offset ({dx}, {dy}) at backing scale {backing_scale}"
+                        );
+                        assert_eq!(session.state.mseg_last_click_time, now);
+                        assert_eq!(session.state.mseg_last_click_pos, point);
+                    }
                 }
             });
         }
@@ -3317,6 +3342,7 @@ mod tests {
                 EffectKind::Svf,
                 |session| {
                     session.state.selected_mseg = 3;
+                    session.state.effect_dial_drag.set_input_scale(2.0);
                     let point = select_interior_node(session);
                     open_menu(session.state);
                     session.state.text_edit.begin(EffectHit::Mix, "25");
@@ -3334,6 +3360,7 @@ mod tests {
                     session.state.cancel_interaction();
                     let after = std::time::Instant::now();
                     assert_eq!(session.state.selected_mseg, 3);
+                    assert_eq!(session.state.effect_dial_drag.input_scale(), 2.0);
                     assert_eq!(
                         session.state.trigger_choices,
                         &[TriggerChoice::FreeHz, TriggerChoice::Transient]

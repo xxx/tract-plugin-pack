@@ -93,8 +93,7 @@ struct MultosisWindow {
     physical_width: u32,
     physical_height: u32,
     scale_factor: f32,
-    /// Packed `(w << 32) | h` pending host-initiated resize, read next frame.
-    pending_resize: Arc<AtomicU64>,
+
     params: Arc<MultosisParams>,
     playhead_display: Arc<PlayheadDisplay>,
     seq_status: Arc<SeqStatusDisplay>,
@@ -153,7 +152,6 @@ impl MultosisWindow {
         playhead_display: Arc<PlayheadDisplay>,
         seq_status: Arc<SeqStatusDisplay>,
         grid_handoff: Arc<GridHandoff>,
-        pending_resize: Arc<AtomicU64>,
         gui_context: Arc<dyn GuiContext>,
         reset_request: Arc<AtomicBool>,
         active_rows: Arc<AtomicU16>,
@@ -171,7 +169,6 @@ impl MultosisWindow {
             physical_width: pw,
             physical_height: ph,
             scale_factor,
-            pending_resize,
             params,
             playhead_display,
             seq_status,
@@ -202,8 +199,7 @@ impl MultosisWindow {
     fn resize_buffers(&mut self) {
         let pw = self.physical_width.max(1);
         let ph = self.physical_height.max(1);
-        self.surface
-            .resize_and_persist(pw, ph, &self.params.editor_state);
+        self.surface.resize(pw, ph);
         self.grid_cache = grid_view::GridCache::new(pw, ph);
     }
 
@@ -613,6 +609,10 @@ impl MultosisWindow {
     }
 
     fn handle_effect_event(&mut self, event: &baseview::Event) -> bool {
+        self.dispatch_effect_event(event, false)
+    }
+
+    fn dispatch_effect_event(&mut self, event: &baseview::Event, finish_text: bool) -> bool {
         let geometry = self.effect_geometry();
         let response = {
             let (Ok(mut effects), Ok(mut modulation)) = (
@@ -621,16 +621,18 @@ impl MultosisWindow {
             ) else {
                 return false;
             };
-            self.effect_editor.handle_event(
-                event,
-                EditorContext {
-                    effect: &mut effects[self.selected_track],
-                    modulation: &mut modulation[self.selected_track],
-                    text_renderer: &mut self.text_renderer,
-                    geometry,
-                    pointer_position: self.mouse_pos,
-                },
-            )
+            let context = EditorContext {
+                effect: &mut effects[self.selected_track],
+                modulation: &mut modulation[self.selected_track],
+                text_renderer: &mut self.text_renderer,
+                geometry,
+                pointer_position: self.mouse_pos,
+            };
+            if finish_text {
+                self.effect_editor.finish_text_edit(context)
+            } else {
+                self.effect_editor.handle_event(event, context)
+            }
         };
         if response.changed {
             self.mark_config_dirty();
@@ -807,13 +809,34 @@ impl MultosisWindow {
     }
 }
 
+impl widgets::PhysicalEditor for MultosisWindow {
+    fn prepare_resize(&mut self, _window: &mut baseview::Window<'_>, backing_scale: f32) {
+        self.undo.begin_capture(self.snapshot());
+        if let Some(ctrl) = self.toolbar_drag.end_drag() {
+            self.end_slider(ctrl);
+        }
+        self.left_gesture = None;
+        self.track_drag = None;
+        self.speed_dropdown.close();
+        let release = baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+            button: baseview::MouseButton::Left,
+            modifiers: Default::default(),
+        });
+        if self.view == View::Effect {
+            self.dispatch_effect_event(&release, true);
+            self.handle_effect_event(&release);
+        }
+        self.effect_editor.prepare_resize(backing_scale);
+        self.toolbar_drag.set_input_scale(backing_scale);
+        self.toolbar_drag.clear_double_click();
+        self.toolbar_click = ClickTracker::new();
+        let after = self.snapshot();
+        self.undo.commit_capture(&after);
+    }
+}
+
 impl baseview::WindowHandler for MultosisWindow {
-    fn on_frame(&mut self, window: &mut baseview::Window) {
-        widgets::consume_pending_resize(
-            &self.pending_resize,
-            (self.physical_width, self.physical_height),
-            window,
-        );
+    fn on_frame(&mut self, _window: &mut baseview::Window) {
         self.draw();
         self.surface.present();
     }
@@ -827,8 +850,7 @@ impl baseview::WindowHandler for MultosisWindow {
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
-                self.scale_factor =
-                    (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+                self.scale_factor = widgets::editor_scale(info, WINDOW_WIDTH);
                 self.resize_buffers();
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorMoved {
@@ -1019,7 +1041,8 @@ impl baseview::WindowHandler for MultosisWindow {
                 let win = (self.physical_width as f32, self.physical_height as f32);
                 if self.speed_dropdown.is_open() {
                     let items = toolbar::speed_items();
-                    self.speed_dropdown.on_wheel(dy, &items, win);
+                    self.speed_dropdown
+                        .on_wheel(dy * self.toolbar_drag.input_scale(), &items, win);
                     return baseview::EventStatus::Captured;
                 }
                 if self.view == View::Effect && self.handle_effect_event(&event) {
@@ -1190,13 +1213,14 @@ impl Editor for MultosisEditor {
                 gl_config: None,
             },
             move |window| {
-                MultosisWindow::new(
+                let editor_state = params.editor_state.clone();
+                let dpi_api = gui_context.plugin_api();
+                let inner = MultosisWindow::new(
                     window,
                     params,
                     playhead_display,
                     seq_status,
                     grid_handoff,
-                    pending_resize,
                     gui_context,
                     reset_request,
                     active_rows,
@@ -1204,7 +1228,8 @@ impl Editor for MultosisEditor {
                     config_dirty,
                     pending_track_swap,
                     sf,
-                )
+                );
+                widgets::EditorWindow::new(inner, editor_state, pending_resize, dpi_api)
             },
         );
 

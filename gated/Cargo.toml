@@ -21,9 +21,6 @@ tiny-skia-widgets = { path = "../tiny-skia-widgets" }
 keyboard-types = "0.6"
 serde = { version = "1", features = ["derive"] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow"] }
-
 [dev-dependencies]
 serde_json = "1"
 

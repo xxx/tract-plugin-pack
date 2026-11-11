@@ -52,6 +52,23 @@ impl Harness {
         )
     }
 
+    fn resize(&mut self, backing_scale: f32) {
+        self.editor.prepare_resize(backing_scale);
+        self.geometry = EditorGeometry {
+            layout: view::effect_layout(
+                (
+                    16.0 * backing_scale,
+                    16.0 * backing_scale,
+                    1304.0 * backing_scale,
+                    640.0 * backing_scale,
+                ),
+                backing_scale,
+            ),
+            scale: backing_scale,
+            window_size: (1336.0 * backing_scale, 680.0 * backing_scale),
+        };
+    }
+
     fn move_to(&mut self, x: f32, y: f32, modifiers: Modifiers) -> EditorResponse {
         self.send(Event::Mouse(MouseEvent::CursorMoved {
             position: Point::new(x as f64, y as f64),
@@ -422,44 +439,127 @@ mod event_dispatch {
     }
 
     #[test]
-    fn pixel_and_line_wheels_scroll_equally_and_closed_menus_ignore_wheels() {
-        for delta in [
-            baseview::ScrollDelta::Lines { x: 0.0, y: -1.0 },
-            baseview::ScrollDelta::Pixels { x: 0.0, y: -20.0 },
-        ] {
+    fn pixel_and_line_wheels_scroll_equally_in_logical_points_at_each_backing_scale() {
+        for backing_scale in [1.0, 1.5, 2.0] {
+            for delta in [
+                baseview::ScrollDelta::Lines { x: 0.0, y: -1.0 },
+                baseview::ScrollDelta::Pixels { x: 0.0, y: -20.0 },
+            ] {
+                let mut h = Harness::new();
+                h.resize(backing_scale);
+                let effect = h.effect;
+                let modulation = h.modulation.clone();
+                let event = Event::Mouse(MouseEvent::WheelScrolled {
+                    delta,
+                    modifiers: Modifiers::empty(),
+                });
+                let ignored = h.send(event.clone());
+                assert!(!ignored.captured);
+                assert!(!ignored.changed);
+                open_kind_menu(&mut h);
+                h.key(Key::Home);
+                let initial = popup(&h);
+                let before_y = initial
+                    .visible_rows
+                    .iter()
+                    .find(|row| row.kind == RowKind::Item && row.item_index == 0)
+                    .unwrap()
+                    .rect
+                    .1;
+                let response = h.send(event);
+                assert!(response.captured);
+                assert!(!response.changed);
+                let after = popup(&h);
+                let after_y = after
+                    .visible_rows
+                    .iter()
+                    .find(|row| row.kind == RowKind::Item && row.item_index == 0)
+                    .map(|row| row.rect.1);
+                assert_eq!(after_y, Some(before_y - 32.0 * backing_scale));
+                assert_eq!(h.effect, effect);
+                assert_eq!(h.modulation, modulation);
+            }
+        }
+    }
+
+    #[test]
+    fn resize_ends_dial_drags_and_clears_click_history_before_the_next_press() {
+        for backing_scale in [1.0, 1.5, 2.0] {
             let mut h = Harness::new();
+            h.effect.params[0] = 800.0;
+            let dial = h.geometry.layout.dials[0];
+            h.move_to(dial.0 + 30.0, dial.1 + 30.0, Modifiers::empty());
+            h.press(MouseButton::Left);
+            assert_eq!(
+                h.editor.effect_dial_drag.active_action(),
+                Some(&EffectHit::Dial(0))
+            );
+            let effect = h.effect;
+            h.resize(backing_scale);
+            assert_eq!(h.editor.effect_dial_drag.active_action(), None);
+            assert!(!h.move_to(0.0, 0.0, Modifiers::empty()).changed);
+            assert_eq!(h.effect, effect);
+            // A press after resizing starts a new gesture instead of resetting the dial.
+            h.click(h.geometry.layout.dials[0]);
+            assert_eq!(h.effect, effect);
+        }
+    }
+
+    #[test]
+    fn resize_dismisses_popup_and_text_focus_without_editing_the_document() {
+        for text_entry in [false, true] {
+            let mut h = Harness::new();
+            if text_entry {
+                let dial = h.geometry.layout.dials[0];
+                h.move_to(dial.0 + 30.0, dial.1 + 30.0, Modifiers::empty());
+                h.press(MouseButton::Right);
+                h.type_replacement("800");
+            } else {
+                open_kind_menu(&mut h);
+            }
+            assert!(h.editor.captures_keyboard());
             let effect = h.effect;
             let modulation = h.modulation.clone();
-            let event = Event::Mouse(MouseEvent::WheelScrolled {
-                delta,
-                modifiers: Modifiers::empty(),
-            });
-            let ignored = h.send(event.clone());
-            assert!(!ignored.captured);
-            assert!(!ignored.changed);
-            open_kind_menu(&mut h);
-            h.key(Key::Home);
-            let initial = popup(&h);
-            let before_y = initial
-                .visible_rows
-                .iter()
-                .find(|row| row.kind == RowKind::Item && row.item_index == 0)
-                .unwrap()
-                .rect
-                .1;
-            let response = h.send(event);
-            assert!(response.captured);
-            assert!(!response.changed);
-            let after = popup(&h);
-            let after_y = after
-                .visible_rows
-                .iter()
-                .find(|row| row.kind == RowKind::Item && row.item_index == 0)
-                .map(|row| row.rect.1);
-            assert_eq!(after_y, Some(before_y - 32.0));
+            h.resize(2.0);
+            assert!(!h.editor.captures_keyboard());
+            assert!(!h.editor.dropdown_open());
+            assert!(!h.key(Key::Enter).changed);
             assert_eq!(h.effect, effect);
             assert_eq!(h.modulation, modulation);
         }
+    }
+
+    #[test]
+    fn resize_ends_mseg_drags_without_discarding_selection_or_strip_preferences() {
+        let mut h = Harness::new();
+        h.editor = EffectEditor::new(&[TriggerChoice::FreeHz, TriggerChoice::Transient]);
+        select_node(&mut h, 3, 1);
+        h.editor.mseg_edit.set_grid_options(&[(5, 7), (9, 11)]);
+        h.editor
+            .mseg_edit
+            .set_style(widgets::mseg::randomize::RandomStyle::Spiky);
+        h.editor.mseg_edit.set_show_polarity(false);
+        h.editor.mseg_last_click_pos = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        h.press(MouseButton::Left);
+        let effect = h.effect;
+        let modulation = h.modulation.clone();
+        h.resize(2.0);
+        assert!(!h.move_to(700.0, 400.0, Modifiers::empty()).changed);
+        assert!(!h.release().changed);
+        assert_eq!(h.effect, effect);
+        assert_eq!(h.modulation, modulation);
+        assert_eq!(h.editor.selected_mseg, 3);
+        assert!(h.editor.mseg_edit.is_node_selected(1));
+        assert_eq!(h.editor.mseg_edit.grid_options(), &[(5, 7), (9, 11)]);
+        assert_eq!(
+            h.editor.mseg_edit.style(),
+            widgets::mseg::randomize::RandomStyle::Spiky
+        );
+        assert!(!h.editor.mseg_edit.show_polarity());
+        assert_eq!(
+            h.editor.trigger_choices,
+            &[TriggerChoice::FreeHz, TriggerChoice::Transient]
+        );
     }
 
     #[test]

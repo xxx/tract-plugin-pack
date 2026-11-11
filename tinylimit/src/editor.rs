@@ -129,8 +129,6 @@ struct TinylimitWindow {
     physical_width: u32,
     physical_height: u32,
     scale_factor: f32,
-    /// Packed (w << 32 | h) pending host-initiated resize, read on next frame.
-    pending_resize: Arc<std::sync::atomic::AtomicU64>,
 
     params: Arc<TinylimitParams>,
     readings: Arc<MeterReadings>,
@@ -149,7 +147,6 @@ impl TinylimitWindow {
         gui_context: Arc<dyn GuiContext>,
         params: Arc<TinylimitParams>,
         readings: Arc<MeterReadings>,
-        pending_resize: Arc<std::sync::atomic::AtomicU64>,
         scale_factor: f32,
     ) -> Self {
         let pw = (WINDOW_WIDTH as f32 * scale_factor).round() as u32;
@@ -167,7 +164,6 @@ impl TinylimitWindow {
             physical_width: pw,
             physical_height: ph,
             scale_factor,
-            pending_resize,
             params,
             readings,
             text_renderer,
@@ -698,11 +694,8 @@ impl TinylimitWindow {
     }
 
     fn resize_buffers(&mut self) {
-        self.surface.resize_and_persist(
-            self.physical_width,
-            self.physical_height,
-            &self.params.editor_state,
-        );
+        self.surface
+            .resize(self.physical_width, self.physical_height);
     }
 }
 
@@ -750,14 +743,25 @@ fn format_db(db: f32) -> String {
     }
 }
 
-impl baseview::WindowHandler for TinylimitWindow {
-    fn on_frame(&mut self, window: &mut baseview::Window) {
-        widgets::consume_pending_resize(
-            &self.pending_resize,
-            (self.physical_width, self.physical_height),
+impl widgets::PhysicalEditor for TinylimitWindow {
+    fn prepare_resize(&mut self, window: &mut baseview::Window<'_>, backing_scale: f32) {
+        baseview::WindowHandler::on_event(
+            self,
             window,
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                modifiers: Default::default(),
+            }),
         );
+        self.commit_text_edit();
+        self.drag.set_input_scale(backing_scale);
+        self.drag.clear_double_click();
+        self.dropdown.close();
+    }
+}
 
+impl baseview::WindowHandler for TinylimitWindow {
+    fn on_frame(&mut self, _window: &mut baseview::Window) {
         self.draw();
         self.surface.present();
     }
@@ -771,7 +775,7 @@ impl baseview::WindowHandler for TinylimitWindow {
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
-                let sf = (self.physical_width as f32 / WINDOW_WIDTH as f32).clamp(0.5, 4.0);
+                let sf = widgets::editor_scale(info, WINDOW_WIDTH);
                 self.scale_factor = sf;
                 self.resize_buffers();
             }
@@ -994,7 +998,10 @@ impl Editor for TinylimitEditor {
                 gl_config: None,
             },
             move |window| {
-                TinylimitWindow::new(window, gui_context, params, readings, pending_resize, sf)
+                let editor_state = params.editor_state.clone();
+                let dpi_api = gui_context.plugin_api();
+                let inner = TinylimitWindow::new(window, gui_context, params, readings, sf);
+                widgets::EditorWindow::new(inner, editor_state, pending_resize, dpi_api)
             },
         );
 

@@ -13,9 +13,6 @@ use crate::dsp::RESOLUTIONS;
 use crate::pattern::{MAX_STEPS, Pattern, PatternBank, Random};
 use crate::{GatedParams, Telemetry};
 
-#[cfg(target_os = "macos")]
-mod macos;
-
 const WIDTH: u32 = 480;
 const HEIGHT: u32 = 840;
 const RING_X: f32 = 240.0;
@@ -1066,7 +1063,7 @@ impl GatedWindow {
 
     #[cfg(target_os = "macos")]
     fn synchronize_native_geometry(&mut self, window: &baseview::Window<'_>) {
-        if let Some(info) = macos::window_info(window) {
+        if let Some(info) = widgets::native_window_info(window) {
             self.synchronize_geometry(info);
         }
     }
@@ -1101,7 +1098,7 @@ impl baseview::WindowHandler for GatedWindow {
             _ => None,
         };
         #[cfg(target_os = "macos")]
-        let info = macos::window_info(_window).or(info);
+        let info = widgets::native_window_info(_window).or(info);
         if let Some(info) = info {
             self.synchronize_geometry(info);
         }

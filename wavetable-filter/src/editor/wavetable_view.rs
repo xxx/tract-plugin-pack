@@ -2,7 +2,7 @@
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
-use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use crate::wavetable::Wavetable;
 
@@ -79,6 +79,9 @@ pub(crate) fn draw_wavetable_view(
     current_frame_pos: f32,
     show_2d: bool,
 ) {
+    let Some(bounds) = Rect::from_xywh(x, y, w, h).filter(|rect| !rect.is_empty()) else {
+        return;
+    };
     let frame_count = cache.cached_frame_count;
     let frame_size = cache.cached_frame_size;
     let padding = 20.0;
@@ -87,7 +90,7 @@ pub(crate) fn draw_wavetable_view(
 
     // 2D mode: cheap (~3 µs), no caching worth doing.
     if show_2d {
-        fill_view_bg(pixmap, x, y, w, h);
+        fill_view_bg(pixmap, bounds);
         if frame_count == 0 || frame_size == 0 || width <= 0.0 || height <= 0.0 {
             return;
         }
@@ -111,7 +114,7 @@ pub(crate) fn draw_wavetable_view(
     // pixmap, rebuild only when the wavetable or viewport changes, and overlay
     // just the active strand each frame.
     if frame_count == 0 || frame_size == 0 || width <= 0.0 || height <= 0.0 {
-        fill_view_bg(pixmap, x, y, w, h);
+        fill_view_bg(pixmap, bounds);
         return;
     }
 
@@ -139,7 +142,7 @@ pub(crate) fn draw_wavetable_view(
         // straight `copy_from_slice` is byte-identical and much cheaper.
         blit_opaque(pixmap, bg, x.round() as i32, y.round() as i32);
     } else {
-        fill_view_bg(pixmap, x, y, w, h);
+        fill_view_bg(pixmap, bounds);
     }
 
     let current_frame_idx = (current_frame_pos * (frame_count - 1) as f32).round() as usize;
@@ -154,9 +157,9 @@ pub(crate) fn draw_wavetable_view(
 }
 
 /// Fill the full view rect with bg + border. Used by 2D mode and as a fallback.
-fn fill_view_bg(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32) {
+fn fill_view_bg(pixmap: &mut Pixmap, bounds: Rect) {
     let mut bg = PathBuilder::new();
-    bg.push_rect(tiny_skia::Rect::from_xywh(x, y, w, h).expect("valid rect"));
+    bg.push_rect(bounds);
     if let Some(bg_path) = bg.finish() {
         let mut paint = Paint::default();
         paint.set_color_rgba8(20, 22, 28, 255);
@@ -298,7 +301,10 @@ fn build_3d_background_pixmap(
 ) -> Option<Pixmap> {
     let mut bg = Pixmap::new(w_px, h_px)?;
     // Fill + border into the cache pixmap at local (0,0).
-    fill_view_bg(&mut bg, 0.0, 0.0, w_px as f32, h_px as f32);
+    fill_view_bg(
+        &mut bg,
+        Rect::from_xywh(0.0, 0.0, w_px as f32, h_px as f32)?,
+    );
 
     draw_stack_zero_plane(&mut bg, layout, frames.len() > 1);
     let strand_count = layout.strand_count(frames.len());

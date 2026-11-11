@@ -206,9 +206,13 @@ pub(crate) fn draw_filter_response(
     cutoff_hz: f32,
     resonance: f32,
 ) {
+    let Some(bounds) = tiny_skia::Rect::from_xywh(x, y, w, h).filter(|rect| !rect.is_empty())
+    else {
+        return;
+    };
     // Background
     let mut bg = PathBuilder::new();
-    bg.push_rect(tiny_skia::Rect::from_xywh(x, y, w, h).expect("valid rect"));
+    bg.push_rect(bounds);
     if let Some(bg_path) = bg.finish() {
         let mut paint = Paint::default();
         paint.set_color_rgba8(20, 22, 28, 255);

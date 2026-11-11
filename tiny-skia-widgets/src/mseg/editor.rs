@@ -142,6 +142,17 @@ pub struct MsegEditState {
 }
 
 impl MsegEditState {
+    /// Cancel transient geometry-dependent input while keeping selection and strip preferences.
+    pub fn cancel_interaction(&mut self) {
+        self.drag = None;
+        self.hover = None;
+        self.marquee = None;
+        self.group_snapshot.clear();
+        self.step_last_cell = None;
+        self.dropdown.close();
+        self.text_edit.cancel();
+    }
+
     /// A full editor (playback controls + marker lane shown).
     pub fn new() -> Self {
         Self::with_curve_only(false)
@@ -1002,6 +1013,26 @@ mod tests {
     // left and right clusters meet in the middle. 1200 mirrors what
     // multosis/miff actually render.
     const RECT: (f32, f32, f32, f32) = (0.0, 0.0, 1200.0, 300.0);
+
+    #[test]
+    fn resize_cancellation_keeps_selection_and_strip_preferences() {
+        let mut state = MsegEditState::new_curve_only();
+        state.set_show_polarity(false);
+        state.set_grid_options(&[(7, 9), (32, 4)]);
+        state.style = RandomStyle::Spiky;
+        state.selection = 1 << 1;
+        state.hover = Some(1);
+        state.marquee = Some((10.0, 20.0, 100.0, 200.0));
+        state.group_snapshot.push((0.5, 0.5));
+        state.cancel_interaction();
+        assert!(state.is_curve_only());
+        assert!(!state.show_polarity);
+        assert_eq!(state.grid_options(), &[(7, 9), (32, 4)]);
+        assert_eq!(state.style, RandomStyle::Spiky);
+        assert_eq!(state.selection_count(), 1);
+        assert!(state.hover.is_none() && state.marquee.is_none() && state.drag.is_none());
+        assert!(state.group_snapshot.is_empty());
+    }
 
     #[test]
     fn new_is_full_editor() {

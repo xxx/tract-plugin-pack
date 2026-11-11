@@ -1,14 +1,15 @@
 //! Minimal widget primitives for rendering a plugin GUI using tiny-skia and fontdue.
 //!
 //! All drawing targets a [`tiny_skia::Pixmap`]. Coordinates are in physical pixels;
-//! the caller is responsible for DPI scaling. No event handling lives here — only
-//! pure drawing functions.
+//! [`EditorWindow`] converts native logical coordinates and persists logical
+//! window dimensions while renderers and widgets work in physical pixels.
 
 pub mod axis;
 pub mod controls;
 pub mod drag;
 pub mod dropdown;
 pub mod editor_base;
+pub mod editor_window;
 pub mod grid_selector;
 pub mod mseg;
 pub mod param_dial;
@@ -24,6 +25,7 @@ pub use controls::*;
 pub use drag::*;
 pub use dropdown::*;
 pub use editor_base::*;
+pub use editor_window::*;
 pub use grid_selector::*;
 pub use mseg::*;
 pub use param_dial::*;
