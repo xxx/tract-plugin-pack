@@ -8,6 +8,7 @@ Tract Plugin Pack — a Cargo workspace of audio effect plugins (VST3, CLAP, sta
 
 ### Plugins
 
+- **gated** — rhythmic amplitude gate with eight patterns, a circular 1–64-step editor, explicit wraparound ties, ADSR/Gate, DAW-position sync, swing, and density/tie-probability random population. Linked stereo/mono, zero latency. `pattern.rs` uses two-word bitsets to preserve capacity for a later 128-step version; Euclidean population is deferred. `dsp.rs` precomputes per-step note timing and reconstructs envelopes from musical position. `editor.rs` includes the native editor and offscreen renderer (`cargo run -p gated --example render -- <path.png>`).
 - **wavetable-filter** — wavetable frames as FIR kernels. Raw (direct convolution, zero latency) / Phaseless (STFT magnitude-only, no pre-ringing) modes.
 - **miff** — convolution filter whose FIR kernel is hand-drawn with an MSEG editor (sibling of wavetable-filter, but no wavetable file). Raw / Phaseless modes.
 - **gs-meter** — loudness meter + gain utility. dB mode (peak, true peak, RMS, crest) and LUFS mode (EBU R128, LRA). Designed for 100+ instances.
