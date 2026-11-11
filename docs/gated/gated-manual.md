@@ -63,6 +63,10 @@ the initial Trance Gate patterns recorded by the independently developed
 [synthahol-phase-plant reader](https://github.com/softdevca/synthahol-phase-plant/blob/12226ba38afdf887214ffad9a14c191ef3e3d0ca/src/effect/trance_gate.rs).
 All slots remain editable. Saved projects retain their stored patterns.
 
+Double-click a numbered slot to restore its own factory steps, ties, and length.
+The reset affects only that slot and is one undoable edit. A single click selects
+the slot for editing and playback as usual.
+
 ## Pattern editing
 
 Click a segment to toggle it. Drag clockwise or counterclockwise to turn on and
@@ -105,6 +109,7 @@ that limitation. A missing tempo falls back to 120 BPM.
 
 ## Mouse and keyboard
 
+- Double-click a numbered slot to restore its factory pattern and length.
 - Drag the large step count up/down to change length; Shift enables fine adjustment.
 - Drag a dial vertically; hold Shift for fine adjustment.
 - Double-click a dial to restore its default.

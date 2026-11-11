@@ -18,6 +18,11 @@ https://kilohearts.com/products/trance_gate.
    with the initial Trance Gate rhythms documented by synthahol-phase-plant
    (source/attribution in `gated/THIRD_PARTY_NOTICES.md`). Slot lengths are
    16, 16, 32, 16, 16, 16, 16, and 64. Saved projects retain their stored bank.
+   Double-clicking a numbered slot selects it and restores its own factory steps,
+   ties, and length, including hidden data. Other slots and global controls retain
+   their values. Reset is one undoable edit; a reset of an unchanged slot adds no
+   history entry. Only consecutive clicks on the same slot count as a double
+   click; intervening interactions or external state recall cancel the pair.
 3. Each slot stores 1–64 binary steps, outgoing ties, and its length. Length
    starts at the slot's factory value. Drag the large central count up to increase or down to decrease
    length, using 4 logical pixels per step and Shift for ten-times-finer movement.

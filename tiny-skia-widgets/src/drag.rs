@@ -196,6 +196,11 @@ impl<A: Clone + PartialEq> DragState<A> {
         self.last_click_action = Some(action.clone());
         is_double
     }
+
+    /// Cancel a pending double-click pair after an intervening interaction.
+    pub fn clear_double_click(&mut self) {
+        self.last_click_action = None;
+    }
 }
 
 impl<A: Clone + PartialEq> Default for DragState<A> {
@@ -207,6 +212,16 @@ impl<A: Clone + PartialEq> Default for DragState<A> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_double_click_requires_a_new_pair_on_the_same_action() {
+        let mut drag: DragState<u8> = DragState::new();
+        assert!(!drag.check_double_click(&1));
+        drag.clear_double_click();
+        assert!(!drag.check_double_click(&1));
+        assert!(drag.check_double_click(&1));
+        assert!(!drag.check_double_click(&2));
+    }
 
     #[test]
     fn custom_sensitivity_supports_fine_control_and_shift_transitions() {

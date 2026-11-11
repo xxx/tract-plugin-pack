@@ -218,6 +218,7 @@ impl Panel {
             self.gesture = None;
             self.text_edit.cancel();
             self.dropdown.close();
+            self.drag.clear_double_click();
             if let Some(Action::Dial(dial)) = self.drag.end_drag() {
                 self.cancelled_dial = Some(dial);
             }
@@ -599,6 +600,12 @@ impl Panel {
         }
     }
 
+    fn reset_pattern(&mut self, slot: usize) {
+        self.history.begin(self.bank());
+        let factory = PatternBank::default().patterns[slot];
+        self.update(slot, |pattern| *pattern = factory);
+    }
+
     fn begin_length_drag(&mut self, slot: usize, shift: bool) {
         let bank = self.bank();
         self.history.begin(bank);
@@ -664,7 +671,13 @@ impl Panel {
         }
     }
 
-    fn action(&mut self, action: Action, context: &dyn GuiContext, shift: bool) {
+    fn action(
+        &mut self,
+        action: Action,
+        context: &dyn GuiContext,
+        shift: bool,
+        double_click: bool,
+    ) {
         let setter = ParamSetter::new(context);
         let slot = self.slot();
         match action {
@@ -672,7 +685,7 @@ impl Panel {
             Action::Dial(dial) => {
                 let p = param(&self.params, dial);
                 setter.begin_set_parameter(p);
-                if self.drag.check_double_click(&action) {
+                if double_click {
                     setter.set_parameter_normalized(p, p.default_normalized_value());
                     setter.end_set_parameter(p);
                 } else {
@@ -684,6 +697,10 @@ impl Panel {
                 setter.begin_set_parameter(&self.params.pattern);
                 setter.set_parameter(&self.params.pattern, index as i32 + 1);
                 setter.end_set_parameter(&self.params.pattern);
+                if double_click {
+                    self.reset_pattern(index);
+                    self.commit(context);
+                }
             }
             Action::Bypass => {
                 setter.begin_set_parameter(&self.params.bypass);
@@ -760,6 +777,7 @@ impl Panel {
             Event::Mouse(MouseEvent::CursorEntered) => self.drag.on_cursor_entered(),
             Event::Mouse(MouseEvent::CursorLeft) => self.drag.on_cursor_left(),
             Event::Window(WindowEvent::Unfocused | WindowEvent::WillClose) => {
+                self.drag.clear_double_click();
                 self.end_gesture(context, false);
                 self.commit_text(context);
                 self.dropdown.close();
@@ -805,13 +823,21 @@ impl Panel {
                 self.commit_text(context);
                 let (x, y) = self.drag.mouse_pos();
                 if self.dropdown.is_open() {
+                    self.drag.clear_double_click();
                     let selected = self.dropdown.on_mouse_down(x, y, &RESOLUTIONS, self.size);
                     self.select_resolution(selected, context);
                 } else {
                     self.end_gesture(context, false);
                     if let Some(region) = self.drag.hit_test().cloned() {
-                        self.action(region.action, context, modifiers.contains(Modifiers::SHIFT));
+                        let double_click = self.drag.check_double_click(&region.action);
+                        self.action(
+                            region.action,
+                            context,
+                            modifiers.contains(Modifiers::SHIFT),
+                            double_click,
+                        );
                     } else {
+                        self.drag.clear_double_click();
                         let slot = self.slot();
                         let len = self.bank().patterns[slot].len();
                         if let Some(step) = self.layout.ring_step(x, y, len) {
@@ -835,6 +861,7 @@ impl Panel {
                 button: MouseButton::Right,
                 ..
             }) => {
+                self.drag.clear_double_click();
                 if self.drag.active_action().is_some()
                     || self.gesture.is_some()
                     || self.dropdown.is_open()
@@ -875,6 +902,9 @@ impl Panel {
                 self.dropdown.on_wheel(y, &RESOLUTIONS, self.size);
             }
             Event::Keyboard(ev) => {
+                if ev.state == KeyState::Down {
+                    self.drag.clear_double_click();
+                }
                 if self.text_edit.is_active() {
                     if ev.state == KeyState::Down {
                         match &ev.key {
@@ -921,7 +951,7 @@ impl Panel {
                         };
                         if let Some(action) = action {
                             self.end_gesture(context, false);
-                            self.action(action, context, false);
+                            self.action(action, context, false, false);
                         }
                     }
                 } else {
@@ -1069,6 +1099,49 @@ pub fn render_preview(path: &std::path::Path, width: u32, height: u32) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_restores_each_slots_factory_pattern_as_one_undoable_edit() {
+        let params = Arc::new(GatedParams::default());
+        {
+            let mut bank = params.bank.lock().unwrap();
+            for pattern in &mut bank.patterns {
+                pattern.length = 7;
+                pattern.active = [u64::MAX, u64::MAX];
+                pattern.ties = [u64::MAX, u64::MAX];
+            }
+        }
+        let factory = PatternBank::default();
+        let mut panel = Panel::new(params, Arc::new(Telemetry::default()));
+        for slot in 0..8 {
+            let before = panel.bank();
+            panel.reset_pattern(slot);
+            let after = panel.bank();
+            assert_eq!(after.patterns[slot], factory.patterns[slot]);
+            for other in 0..8 {
+                if other != slot {
+                    assert_eq!(after.patterns[other], before.patterns[other]);
+                }
+            }
+            assert!(panel.history.finish(after));
+            assert_eq!(panel.history.undo.len(), slot + 1);
+            assert_eq!(panel.history.restore(after, false), Some(before));
+            assert_eq!(panel.history.restore(before, true), Some(after));
+        }
+    }
+
+    #[test]
+    fn resetting_an_unchanged_factory_slot_does_not_create_an_undo_entry() {
+        let mut panel = Panel::new(
+            Arc::new(GatedParams::default()),
+            Arc::new(Telemetry::default()),
+        );
+        let before = panel.bank();
+        panel.reset_pattern(7);
+        assert!(!panel.history.finish(panel.bank()));
+        assert!(panel.history.undo.is_empty());
+        assert_eq!(panel.bank(), before);
+    }
 
     #[test]
     fn length_drag_is_bounded_preserves_hidden_steps_and_creates_one_undo_entry() {
