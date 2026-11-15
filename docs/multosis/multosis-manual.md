@@ -208,6 +208,12 @@ A strip of mode controls runs along the bottom of the MSEG editor, beneath the c
 
 ### Drawing and editing curves
 
+Rows can also use **Trigger → MIDI note**, with Note (Any/0–127) and Ch.
+(Any/1–16) filters. Route MIDI to the plugin's note input; each matching note-on
+restarts that row's four envelopes at its host offset, including inactive/muted
+rows. Note-off does not gate or release envelopes. See
+[MIDI retriggering](../mseg-editor.md#midi-retriggering) for playback and Smooth behavior.
+
 The shared [curve tools](../mseg-editor.md) add shape pens, selection handles,
 factory curves and favorites, cross-plugin copy/paste, mutation, and transforms.
 They are available from the **Tool**, **Shapes**, and **Edit** menus below the

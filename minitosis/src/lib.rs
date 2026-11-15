@@ -115,13 +115,38 @@ impl Default for Minitosis {
 }
 
 impl Minitosis {
+    fn next_midi(
+        context: &mut impl ProcessContext<Self>,
+        midi: &mut tract_effects::modulation::MidiCursor,
+        source: tract_effects::modulation::TriggerSource,
+        samples: usize,
+    ) -> Option<tract_effects::modulation::MidiNoteOn> {
+        let mut events = std::iter::from_fn(|| {
+            loop {
+                if let NoteEvent::NoteOn {
+                    timing,
+                    channel,
+                    note,
+                    velocity,
+                    ..
+                } = context.next_event()?
+                    && let Some(event) =
+                        tract_effects::modulation::MidiNoteOn::new(timing, channel, note, velocity)
+                {
+                    return Some(event);
+                }
+            }
+        });
+        midi.next_matching(&mut events, samples, |event| source.accepts_midi(event))
+    }
+
     fn render(
         &mut self,
         left: &mut [f32],
         right: &mut [f32],
         playing: bool,
         bpm: f64,
-        context: &impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let samples = left.len().min(right.len());
         let key = prepare_key(&self.params, &self.shared);
@@ -170,31 +195,56 @@ impl Minitosis {
         );
         self.processor
             .set_telemetry_enabled(request.matches(0, self.processor.key.kind));
-        self.processor.begin_block(&track, left, right, bpm);
+        self.processor.prepare_block(&track, left, right, bpm);
+        let pending = self.processor.key != key;
+        let bypass = self.params.bypass.value();
+        let source = self.processor.modulation.trigger;
+        let mut midi = tract_effects::modulation::MidiCursor::default();
+        let mut note = Self::next_midi(context, &mut midi, source, samples);
+        let mut cursor = 0;
+        let mut prepared = false;
+        while cursor < samples {
+            let mut triggered = false;
+            while let Some(event) = note.filter(|event| event.timing == cursor) {
+                self.processor.midi_note_on(event, prepared);
+                triggered = true;
+                note = Self::next_midi(context, &mut midi, source, samples);
+            }
+            let end = note.map_or(samples, |event| event.timing);
+            if triggered || !prepared {
+                self.processor
+                    .advance_segment(&track, samples - cursor, bpm);
+                prepared = true;
+                let latency = self.processor.latency() as u32;
+                if latency != self.reported_latency {
+                    context.set_latency_samples(latency);
+                    self.reported_latency = latency;
+                }
+            }
+            for i in cursor..end {
+                let wet = self.processor.process_sample(
+                    [left[i], right[i]],
+                    self.params.mix.value(),
+                    bypass || pending,
+                );
+                if self.trace_clock.tick() {
+                    self.trace_clock.record(
+                        &self.shared.telemetry,
+                        0,
+                        &self.processor.modulation_frame(),
+                    );
+                }
+                let gain = self.params.output.smoothed.next();
+                let gain = if bypass { 1.0 } else { gain };
+                left[i] = wet[0] * gain;
+                right[i] = wet[1] * gain;
+            }
+            cursor = end;
+        }
         let latency = self.processor.latency() as u32;
         if latency != self.reported_latency {
             context.set_latency_samples(latency);
             self.reported_latency = latency;
-        }
-        let pending = self.processor.key != key;
-        let bypass = self.params.bypass.value();
-        for i in 0..samples {
-            let wet = self.processor.process_sample(
-                [left[i], right[i]],
-                self.params.mix.value(),
-                bypass || pending,
-            );
-            if self.trace_clock.tick() {
-                self.trace_clock.record(
-                    &self.shared.telemetry,
-                    0,
-                    &self.processor.modulation_frame(),
-                );
-            }
-            let gain = self.params.output.smoothed.next();
-            let gain = if bypass { 1.0 } else { gain };
-            left[i] = wet[0] * gain;
-            right[i] = wet[1] * gain;
         }
         self.processor.finish_waveform_block();
         self.trace_clock.publish(
@@ -215,6 +265,7 @@ impl Plugin for Minitosis {
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
         main_input_channels: std::num::NonZeroU32::new(2),
         main_output_channels: std::num::NonZeroU32::new(2),

@@ -195,6 +195,27 @@ Audio/Freeze are editor-session preferences. They do not alter curves, saved
 project state, host automation, or undo history. Capture stops when the effect
 view closes, Audio is Off, or Freeze is active. Miff/Nap retain their static views.
 
+## MIDI retriggering
+
+Multosis/Minitosis accept MIDI note input. Route MIDI from your DAW to the plugin
+and choose **Trigger → MIDI note**. **Note** selects Any or a note number 0–127;
+**Ch.** selects Any or channel 1–16. Click these stepped controls to open their
+menus. The Note menu supports typing a number to search. MIDI note numbers avoid
+different DAWs' octave-naming conventions. Filters are saved per row/effect and
+participate in local undo.
+
+Each matching positive-velocity note-on restarts all four envelopes on that row
+at the host's note offset. Multiple notes within a block are retained. Other
+rows continue on their existing clocks. Smooth Off retains endpoint evaluation;
+positive Smooth retains its current level through the phase restart. An ongoing
+Mix transition continues from the blend actually reached, without jumping ahead.
+
+This source retriggers; it does not gate audio or follow note-off. Cyclic and
+One-shot playback, sustain/loop markers, and envelope lengths keep their existing
+rules. Zero-velocity note-ons, note-offs, and other MIDI messages do not retrigger.
+Muted/inactive/None rows and Minitosis bypass still receive matching triggers.
+Minitosis uses each effect's recalled filters as prepared processors are adopted.
+
 ## Edit commands
 
 - **Compress/Expand values/times** retain their existing behavior and require a

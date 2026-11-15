@@ -5,7 +5,9 @@ use crate::modulation::{ModulationTarget, TrackModulation, TriggerSource};
 use tiny_skia_widgets as widgets;
 
 mod live;
+mod midi;
 pub use live::{AudioGain, AudioView};
+pub use midi::MidiField;
 pub use widgets::mseg::AudioDisplay;
 pub mod view;
 use view as effect_editor;
@@ -19,6 +21,7 @@ pub enum TriggerChoice {
     CellStep,
     FreeHz,
     Transient,
+    MidiNote,
 }
 
 impl TriggerChoice {
@@ -28,6 +31,7 @@ impl TriggerChoice {
         Self::CellStep,
         Self::FreeHz,
         Self::Transient,
+        Self::MidiNote,
     ];
 
     fn item(self) -> usize {
@@ -37,6 +41,7 @@ impl TriggerChoice {
             Self::CellStep => 2,
             Self::FreeHz => 3,
             Self::Transient => 4,
+            Self::MidiNote => 5,
         }
     }
 }
@@ -337,6 +342,7 @@ impl<'a> Session<'a> {
             EffectAction::Target => self.apply_target_selection(idx),
             EffectAction::Trigger => self.apply_trigger_selection(idx),
             EffectAction::ParamDropdown(i) => self.apply_param_dropdown_selection(i, idx),
+            EffectAction::MidiFilter(field) => self.apply_midi_filter(field, idx),
             EffectAction::Audio => {
                 if idx < 4 {
                     self.state.set_audio_view(
@@ -371,6 +377,18 @@ impl<'a> Session<'a> {
         use keyboard_types::{Key, KeyState, Modifiers};
         let win = (self.physical_width, self.physical_height);
         match event {
+            Event::Window(baseview::WindowEvent::Unfocused) => {
+                self.commit_pending_text();
+                let slot = self.state.selected_mseg.min(3);
+                self.response.changed |= self.state.mseg_edit.on_mouse_up(
+                    &mut self.modulation.msegs[slot],
+                    self.layout.mseg_pane,
+                    self.scale_factor,
+                ) == Some(widgets::mseg::MsegEdit::Changed);
+                let backing = self.state.effect_dial_drag.input_scale();
+                self.state.prepare_resize(backing);
+                self.response.captured = true;
+            }
             Event::Mouse(MouseEvent::CursorMoved {
                 position,
                 modifiers,
@@ -992,6 +1010,7 @@ impl<'a> Session<'a> {
             self.scale_factor,
             &self.layout,
         );
+        self.draw_midi_controls(pixmap);
         // Active MSEG's sync/length controls (sit on the modulation row to
         // the right of the depth dial).
         effect_editor::draw_mseg_controls(
@@ -1136,6 +1155,7 @@ impl<'a> Session<'a> {
             EffectHit::Trace => {
                 self.state.trace_enabled = !self.state.trace_enabled;
             }
+            EffectHit::MidiFilter(field) => self.open_midi_filter(field),
             EffectHit::Audio => {
                 let items = live::audio_items(self.state);
                 let font_size = (lay.audio.3 * 0.5).max(10.0);
@@ -1604,13 +1624,29 @@ impl<'a> Session<'a> {
             carried_hold_ms,
         );
 
-        self.modulation.trigger = new_trigger;
+        self.modulation.trigger = if matches!(new_trigger, TriggerSource::MidiNote { .. })
+            && matches!(self.modulation.trigger, TriggerSource::MidiNote { .. })
+        {
+            self.modulation.trigger
+        } else {
+            new_trigger
+        };
         self.response.changed = true;
     }
 }
 
 fn dropdown_items(state: &EffectEditor, effect: &TrackEffect) -> Vec<&'static str> {
-    if state.effect_dropdown.is_open_for(EffectAction::Audio) {
+    if state
+        .effect_dropdown
+        .is_open_for(EffectAction::MidiFilter(MidiField::Note))
+    {
+        midi::NOTE_ITEMS.to_vec()
+    } else if state
+        .effect_dropdown
+        .is_open_for(EffectAction::MidiFilter(MidiField::Channel))
+    {
+        midi::CHANNEL_ITEMS.to_vec()
+    } else if state.effect_dropdown.is_open_for(EffectAction::Audio) {
         live::audio_items(state)
     } else if state.effect_dropdown.is_open_for(EffectAction::Target) {
         view::target_items(effect.kind)
@@ -1693,6 +1729,7 @@ enum EffectAction {
     Trigger,
     ParamDropdown(usize),
     Audio,
+    MidiFilter(MidiField),
 }
 
 /// Format a node's position and its amplitude or routed parameter value.
@@ -2253,6 +2290,7 @@ mod tests {
                         "Cell step",
                         "Free Hz",
                         "Transient",
+                        "MIDI note",
                     ],
                     [0, 1, 2, 3, 4],
                 ),

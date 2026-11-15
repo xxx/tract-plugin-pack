@@ -10,7 +10,7 @@ use tract_effects::effects::{
     Effect, EffectInstance, EffectKind, TrackEffect, default_params_for_kind,
 };
 use tract_effects::modulation::{
-    ModulationState, ModulationTarget, TrackModulation, TriggerSource,
+    MidiNoteOn, ModulationState, ModulationTarget, TrackModulation, TriggerSource,
 };
 use tract_effects::modulation_telemetry::{ModulationFrame, ModulationTelemetry, TraceClock};
 use tract_effects::waveform::{WaveformClock, WaveformTiming};
@@ -36,7 +36,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("12") => (AudioGain::Plus12, "+12 dB"),
         _ => return Err("Display gain must be -12, 0, or 12 dB".into()),
     };
-    let caption = format!("{caption} — display gain {gain_label}");
+    let midi_demo = match args.next().as_deref() {
+        None => false,
+        Some("midi") => true,
+        _ => return Err("Final argument must be midi".into()),
+    };
+    let caption = format!(
+        "{caption} — display gain {gain_label}{}",
+        if midi_demo {
+            " — MIDI note 60 / Ch. 10"
+        } else {
+            ""
+        }
+    );
     let mut pm = tiny_skia::Pixmap::new(1336, 730).ok_or("Pixmap allocation failed")?;
     let mut text = TextRenderer::new(include_bytes!(
         "../../tiny-skia-widgets/test_data/DejaVuSans.ttf"
@@ -49,7 +61,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     track.params[0] = 250.0;
     let mut config = TrackModulation {
-        trigger: TriggerSource::Free,
+        trigger: if midi_demo {
+            TriggerSource::MidiNote {
+                note: Some(60),
+                channel: Some(9),
+            }
+        } else {
+            TriggerSource::Free
+        },
         targets: [Some(ModulationTarget::Mix), None, None],
         depths: [1.0, 0.0, 0.0],
         ..TrackModulation::default()
@@ -60,7 +79,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         time_seconds: 1.0,
         ..MsegData::default()
     };
-    factory_shape(FactoryShape::Square).apply(&mut config.msegs[1], false)?;
+    factory_shape(if midi_demo {
+        FactoryShape::Duck
+    } else {
+        FactoryShape::Square
+    })
+    .apply(&mut config.msegs[1], false)?;
     config.smooth_ms[1] = 20.0;
     let mut effect = EffectInstance::new(track.kind);
     effect.set_sample_rate(48000.0);
@@ -108,7 +132,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         );
         state.advance_segment(&config, &track, &mut effect, input.len(), 120.0, 48000.0);
-        for &sample in &input {
+        for (index, &sample) in input.iter().enumerate() {
+            if midi_demo
+                && let Some(&(_, note, channel)) = [
+                    (6240, 60, 9),
+                    (24000, 61, 9),
+                    (29280, 60, 9),
+                    (51360, 60, 9),
+                    (70000, 60, 8),
+                    (87840, 60, 9),
+                    (115680, 60, 9),
+                ]
+                .iter()
+                .find(|(sample, _, _)| *sample == block * block_samples + index)
+                && let Some(event) = MidiNoteOn::new(index as u32, channel, note, 1.0)
+                && config.trigger.accepts_midi(event)
+            {
+                if index > 0 {
+                    state.trigger_midi_in_span();
+                } else {
+                    state.trigger();
+                }
+                audio.prepare_segment(
+                    &shared.waveform,
+                    0,
+                    WaveformTiming {
+                        config: &config,
+                        kind: track.kind,
+                        phase: state.precise_phase(1),
+                        trigger_epoch: state.trigger_epoch(),
+                        bpm: 120.0,
+                        sample_rate: 48000.0,
+                    },
+                );
+                state.advance_segment(
+                    &config,
+                    &track,
+                    &mut effect,
+                    input.len() - index,
+                    120.0,
+                    48000.0,
+                );
+            }
             state.process_smoothing_sample(&config, &mut effect);
             let wet = effect.process_sample(sample, -sample * 0.8);
             let mix = state.next_mix(track.mix);

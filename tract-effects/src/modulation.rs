@@ -135,7 +135,14 @@ pub enum TriggerSource {
         /// Refractory period in milliseconds.
         hold_ms: f32,
     },
+    MidiNote {
+        note: Option<u8>,
+        channel: Option<u8>,
+    },
 }
+
+mod midi;
+pub use midi::{MidiCursor, MidiNoteOn};
 
 /// One track row's modulation: four MSEGs and the three assignable MSEGs'
 /// targets and depths. `msegs[0]` is the amplitude MSEG; `msegs[1..=3]` are
@@ -563,6 +570,14 @@ impl ModulationState {
         self.phases = [0.0; 4];
         self.fired = true;
         self.smooth.trigger();
+    }
+
+    /// MIDI can interrupt an unfinished span; keep Mix at its consumed value.
+    pub fn trigger_midi_in_span(&mut self) {
+        self.trigger();
+        if let Some(ramp) = &mut self.mix {
+            ramp.target = ramp.current;
+        }
     }
 
     /// Analyze the dry input for block-aligned Free Hz or Transient triggers.

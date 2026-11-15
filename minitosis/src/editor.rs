@@ -26,6 +26,7 @@ const TRIGGERS: &[TriggerChoice] = &[
     TriggerChoice::Free,
     TriggerChoice::FreeHz,
     TriggerChoice::Transient,
+    TriggerChoice::MidiNote,
 ];
 type Rect = (f32, f32, f32, f32);
 
@@ -535,11 +536,11 @@ impl baseview::WindowHandler for MinitosisWindow {
                 self.surface.resize(self.width, self.height);
             }
             Event::Window(WindowEvent::Unfocused) => {
+                self.undo.begin_capture(self.snapshot());
                 self.end_effect_gestures();
                 self.end_output_drag();
                 self.commit_output_text();
-                self.handle_effect(&event, true);
-                self.editor.cancel_interaction();
+                self.handle_effect(&event, false);
                 let after = self.snapshot();
                 self.undo.commit_capture(&after);
             }

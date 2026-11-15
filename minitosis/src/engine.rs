@@ -80,6 +80,11 @@ impl Processor {
     }
 
     pub fn begin_block(&mut self, track: &TrackEffect, left: &[f32], right: &[f32], bpm: f64) {
+        self.prepare_block(track, left, right, bpm);
+        self.advance_segment(track, left.len().min(right.len()), bpm);
+    }
+
+    pub fn prepare_block(&mut self, track: &TrackEffect, left: &[f32], right: &[f32], bpm: f64) {
         self.effect.set_bpm(bpm as f32);
         for (i, _) in self.effect.parameters().iter().enumerate() {
             if !(self.modulation.smoothed_parameter(track.kind, i)
@@ -93,6 +98,16 @@ impl Processor {
             .begin_block(&self.modulation, left, right, sample_rate);
         if let Some(telemetry) = &self.waveform_telemetry {
             self.waveform.begin_block(&telemetry.waveform);
+        }
+        self.latency = self.effect.latency_samples();
+    }
+
+    pub fn advance_segment(&mut self, track: &TrackEffect, samples: usize, bpm: f64) {
+        if samples == 0 {
+            return;
+        }
+        let sample_rate = f32::from_bits(self.key.sample_rate_bits) as f64;
+        if let Some(telemetry) = &self.waveform_telemetry {
             let request = self.waveform.request();
             self.waveform.prepare_segment(
                 &telemetry.waveform,
@@ -111,11 +126,25 @@ impl Processor {
             &self.modulation,
             track,
             &mut self.effect,
-            left.len().min(right.len()),
+            samples,
             bpm,
             sample_rate,
         );
         self.latency = self.effect.latency_samples();
+    }
+
+    pub fn midi_note_on(
+        &mut self,
+        event: tract_effects::modulation::MidiNoteOn,
+        within_span: bool,
+    ) {
+        if self.modulation.trigger.accepts_midi(event) {
+            if within_span {
+                self.state.trigger_midi_in_span();
+            } else {
+                self.state.trigger();
+            }
+        }
     }
 
     pub fn process_sample(&mut self, input: [f32; 2], mix: f32, bypass: bool) -> [f32; 2] {

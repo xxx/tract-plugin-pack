@@ -1408,6 +1408,157 @@ mod precision_editing {
     }
 }
 
+mod midi_retrigger {
+    use super::*;
+
+    fn select_source(h: &mut Harness) {
+        h.click(h.geometry.layout.trigger);
+        h.key(Key::End);
+        assert!(h.key(Key::Enter).changed);
+        assert_eq!(
+            h.modulation.trigger,
+            TriggerSource::MidiNote {
+                note: None,
+                channel: None
+            }
+        );
+    }
+
+    #[test]
+    fn midi_filters_are_stepped_saved_and_undoable_without_changing_curves() {
+        let mut h = Harness::new();
+        select_source(&mut h);
+        let curves = h.modulation.msegs;
+        let mut history = crate::undo::UndoHistory::new();
+        let any = h.modulation.clone();
+        h.click(MidiField::Note.rect(&h.geometry.layout, 1.0));
+        assert!(h.editor.dropdown_open());
+        h.key(Key::Character("60".into()));
+        history.begin_capture(h.modulation.clone());
+        assert!(h.key(Key::Enter).changed);
+        let note = h.modulation.clone();
+        history.commit_capture(&note);
+        assert_eq!(
+            note.trigger,
+            TriggerSource::MidiNote {
+                note: Some(60),
+                channel: None
+            }
+        );
+        h.click(MidiField::Channel.rect(&h.geometry.layout, 1.0));
+        h.key(Key::End);
+        history.begin_capture(h.modulation.clone());
+        assert!(h.key(Key::Enter).changed);
+        let channel = h.modulation.clone();
+        history.commit_capture(&channel);
+        assert_eq!(
+            channel.trigger,
+            TriggerSource::MidiNote {
+                note: Some(60),
+                channel: Some(15)
+            }
+        );
+        assert_eq!(h.modulation.msegs, curves);
+        assert_eq!(history.undo(channel.clone()), Some(note.clone()));
+        assert_eq!(history.undo(note), Some(any));
+        let json = serde_json::to_string(&channel).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TrackModulation>(&json).unwrap(),
+            channel
+        );
+        h.click(h.geometry.layout.trigger);
+        h.key(Key::End);
+        h.key(Key::Enter);
+        assert_eq!(
+            h.modulation.trigger, channel.trigger,
+            "selecting MIDI again lost its filters"
+        );
+        for field in [MidiField::Note, MidiField::Channel] {
+            let r = field.rect(&h.geometry.layout, 1.0);
+            h.move_to(r.0 + 10.0, r.1 + 10.0, Modifiers::empty());
+            h.press(MouseButton::Right);
+            assert!(!h.editor.text_edit.is_active());
+        }
+    }
+
+    #[test]
+    fn midi_menus_keep_popup_keyboard_and_wheel_priority_at_each_scale() {
+        for scale in [0.5, 1.0, 2.0] {
+            for field in [MidiField::Note, MidiField::Channel] {
+                let mut h = Harness::new();
+                h.geometry = EditorGeometry {
+                    layout: view::effect_layout((16.0, 16.0, 1304.0, 640.0), scale),
+                    scale,
+                    window_size: (1336.0 * scale, 680.0 * scale),
+                };
+                h.modulation.trigger = TriggerSource::MidiNote {
+                    note: Some(127),
+                    channel: Some(15),
+                };
+                let before = h.modulation.clone();
+                h.click(field.rect(&h.geometry.layout, scale));
+                let items = dropdown_items(&h.editor, &h.effect);
+                let popup = widgets::dropdown::dropdown_popup_layout(
+                    &h.editor.effect_dropdown,
+                    &items,
+                    h.geometry.window_size,
+                )
+                .unwrap();
+                let font = (field.rect(&h.geometry.layout, scale).3 * 0.5).max(10.0);
+                let width = items
+                    .iter()
+                    .map(|label| h.tr.text_width(label, font))
+                    .fold(0.0_f32, f32::max);
+                let row_width = popup
+                    .visible_rows
+                    .iter()
+                    .map(|row| row.rect.2)
+                    .fold(f32::INFINITY, f32::min);
+                assert!(width <= row_width - 12.0 + 0.01);
+                let mut expected = tiny_skia::Pixmap::new(
+                    h.geometry.window_size.0 as u32,
+                    h.geometry.window_size.1 as u32,
+                )
+                .unwrap();
+                h.editor
+                    .draw_popup(&mut expected, &mut h.tr, &h.effect, h.geometry);
+                let mut actual = expected.clone();
+                actual.fill(widgets::color_bg());
+                h.editor.draw(
+                    &mut actual,
+                    &mut h.tr,
+                    &h.effect,
+                    &h.modulation,
+                    [0.0; 4],
+                    h.geometry,
+                );
+                h.editor
+                    .draw_popup(&mut actual, &mut h.tr, &h.effect, h.geometry);
+                for (old, new) in expected.pixels().iter().zip(actual.pixels()) {
+                    if old.alpha() == 255 {
+                        assert_eq!(old, new);
+                    }
+                }
+                assert!(
+                    h.send(Event::Mouse(MouseEvent::WheelScrolled {
+                        delta: baseview::ScrollDelta::Lines { x: 0.0, y: 1.0 },
+                        modifiers: Modifiers::empty()
+                    }))
+                    .captured
+                );
+                assert!(h.key(Key::Escape).captured);
+                assert_eq!(h.modulation, before);
+                h.click(field.rect(&h.geometry.layout, scale));
+                let r = h.geometry.layout.dials[0];
+                h.move_to(r.0 + r.2 * 0.5, r.1 + r.3 * 0.5, Modifiers::empty());
+                assert!(h.press(MouseButton::Right).captured);
+                assert!(!h.editor.text_edit.is_active());
+                assert!(!h.editor.dropdown_open());
+            }
+        }
+    }
+}
+
 mod audio_backdrop {
     use super::*;
     use crate::modulation_telemetry::ModulationTelemetry;
@@ -1476,6 +1627,72 @@ mod audio_backdrop {
         assert!(!h.editor.dropdown_open());
         assert!(!h.editor.text_edit.is_active());
         assert_eq!((h.effect, h.modulation), before);
+    }
+
+    #[test]
+    fn focus_loss_closes_midi_overlay_and_commits_text_without_losing_frozen_history_or_zoom() {
+        let mut h = Harness::new();
+        h.modulation.trigger = TriggerSource::MidiNote {
+            note: None,
+            channel: None,
+        };
+        let shared = Arc::new(ModulationTelemetry::default());
+        h.editor.connect_live(&shared, 0);
+        h.editor.set_audio_view(AudioView::Both);
+        draw(&mut h);
+        capture(&h, &shared, 0.8, 0.3);
+        draw(&mut h);
+        let bins = h.editor.live.as_ref().unwrap().waveform;
+        assert!(bins.iter().any(Option::is_some));
+        h.editor.set_audio_frozen(true);
+        draw(&mut h);
+        let layout = h.editor.mseg_edit.layout(h.geometry.layout.mseg_pane, 1.0);
+        h.move_to(
+            widgets::mseg::phase_to_x(&layout, 0.5),
+            widgets::mseg::value_to_y(&layout, 0.5),
+            Modifiers::empty(),
+        );
+        h.send(Event::Mouse(MouseEvent::WheelScrolled {
+            delta: baseview::ScrollDelta::Lines { x: 0.0, y: 6.0 },
+            modifiers: Modifiers::empty(),
+        }));
+        let zoom = h.editor.mseg_edit.viewport();
+        h.click(MidiField::Note.rect(&h.geometry.layout, 1.0));
+        assert!(h.editor.dropdown_open());
+        assert!(
+            h.send(Event::Window(baseview::WindowEvent::Unfocused))
+                .captured
+        );
+        assert!(!h.editor.dropdown_open() && !h.editor.pointer_gesture_active());
+        assert_eq!(h.editor.mseg_edit.viewport(), zoom);
+        assert!(h.editor.audio_frozen());
+        assert_eq!(h.editor.live.as_ref().unwrap().waveform, bins);
+        let rect = h.geometry.layout.dials[0];
+        h.move_to(rect.0 + 30.0, rect.1 + 30.0, Modifiers::empty());
+        h.press(MouseButton::Right);
+        h.type_replacement("800");
+        assert!(
+            h.send(Event::Window(baseview::WindowEvent::Unfocused))
+                .changed
+        );
+        assert_eq!(h.effect.params[0], 800.0);
+        assert!(!h.editor.text_edit.is_active());
+        assert_eq!(h.editor.live.as_ref().unwrap().waveform, bins);
+        let before = h.modulation.clone();
+        let r = h.geometry.layout.smooth;
+        h.move_to(r.0 + 10.0, r.1 + 10.0, Modifiers::empty());
+        h.press(MouseButton::Right);
+        h.type_replacement("40");
+        let mut history = crate::undo::UndoHistory::new();
+        history.begin_capture(before.clone());
+        assert!(
+            h.send(Event::Window(baseview::WindowEvent::Unfocused))
+                .changed
+        );
+        let after = h.modulation.clone();
+        history.commit_capture(&after);
+        assert_eq!(after.smooth_ms[h.editor.selected_mseg], 40.0);
+        assert_eq!(history.undo(after), Some(before));
     }
 
     #[test]

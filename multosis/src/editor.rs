@@ -857,6 +857,21 @@ impl baseview::WindowHandler for MultosisWindow {
         event: baseview::Event,
     ) -> baseview::EventStatus {
         match &event {
+            baseview::Event::Window(baseview::WindowEvent::Unfocused) => {
+                self.undo.begin_capture(self.snapshot());
+                if let Some(ctrl) = self.toolbar_drag.end_drag() {
+                    self.end_slider(ctrl);
+                }
+                self.left_gesture = None;
+                self.track_drag = None;
+                self.speed_dropdown.close();
+                if self.view == View::Effect {
+                    self.dispatch_effect_event(&event, true);
+                    self.handle_effect_event(&event);
+                }
+                let after = self.snapshot();
+                self.undo.commit_capture(&after);
+            }
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;

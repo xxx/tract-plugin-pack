@@ -204,6 +204,7 @@ impl Plugin for Multosis {
     }];
 
     const SAMPLE_ACCURATE_AUTOMATION: bool = true;
+    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
 
     type SysExMessage = ();
     type BackgroundTask = ();
@@ -354,8 +355,32 @@ impl Plugin for Multosis {
         let left = &mut first[0][..n];
         let right = &mut rest[0][..n];
 
-        self.engine
-            .process(&mut *left, &mut *right, playing, sps, bpm, mix, &self.grid);
+        let events = std::iter::from_fn(|| {
+            loop {
+                if let NoteEvent::NoteOn {
+                    timing,
+                    channel,
+                    note,
+                    velocity,
+                    ..
+                } = context.next_event()?
+                    && let Some(event) =
+                        tract_effects::modulation::MidiNoteOn::new(timing, channel, note, velocity)
+                {
+                    return Some(event);
+                }
+            }
+        });
+        self.engine.process_with_midi(
+            &mut *left,
+            &mut *right,
+            playing,
+            sps,
+            bpm,
+            mix,
+            &self.grid,
+            events,
+        );
 
         // Publish the playhead column for the editor to draw.
         self.playhead_display.publish(self.engine.playhead_column());

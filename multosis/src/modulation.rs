@@ -140,6 +140,33 @@ impl Modulation {
         }
     }
 
+    pub fn midi_mask(&self, event: MidiNoteOn) -> u16 {
+        self.config
+            .iter()
+            .enumerate()
+            .fold(0, |mask, (row, config)| {
+                mask | if config.trigger.accepts_midi(event) {
+                    1 << row
+                } else {
+                    0
+                }
+            })
+    }
+
+    pub fn fire_midi(&mut self, event: MidiNoteOn, within_span: bool) -> u16 {
+        let mask = self.midi_mask(event);
+        for (row, state) in self.states.iter_mut().enumerate() {
+            if mask & (1 << row) != 0 {
+                if within_span {
+                    state.trigger_midi_in_span();
+                } else {
+                    state.trigger();
+                }
+            }
+        }
+        mask
+    }
+
     pub fn advance_segment(
         &mut self,
         seg_len: usize,
@@ -148,16 +175,30 @@ impl Modulation {
         effects: &mut [EffectInstance; ROWS],
         track_effects: &[TrackEffect; ROWS],
     ) {
+        self.advance_rows(seg_len, bpm, sample_rate, effects, track_effects, u16::MAX);
+    }
+
+    pub fn advance_rows(
+        &mut self,
+        seg_len: usize,
+        bpm: f64,
+        sample_rate: f64,
+        effects: &mut [EffectInstance; ROWS],
+        track_effects: &[TrackEffect; ROWS],
+        rows: u16,
+    ) {
         self.smooth_count = 0;
         for row in 0..ROWS {
-            self.states[row].advance_segment(
-                &self.config[row],
-                &track_effects[row],
-                &mut effects[row],
-                seg_len,
-                bpm,
-                sample_rate,
-            );
+            if rows & (1 << row) != 0 {
+                self.states[row].advance_segment(
+                    &self.config[row],
+                    &track_effects[row],
+                    &mut effects[row],
+                    seg_len,
+                    bpm,
+                    sample_rate,
+                );
+            }
             if self.states[row].smoothing_active() {
                 self.smooth_rows[self.smooth_count] = row;
                 self.smooth_count += 1;

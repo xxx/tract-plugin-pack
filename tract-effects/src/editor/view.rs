@@ -222,6 +222,7 @@ pub enum EffectHit {
     TriggerRate,
     /// The trigger aux dial. Hot only when the source is `Transient` (`Hold`).
     TriggerAux,
+    MidiFilter(super::MidiField),
     /// Active-MSEG sync-mode selector segment (0 = Time, 1 = Beat).
     MsegSync(usize),
     /// Active-MSEG length slider (its scale depends on the sync mode).
@@ -263,7 +264,7 @@ pub fn slot_to_segment(slot: usize) -> usize {
 pub fn effect_hit(
     px: f32,
     py: f32,
-    _scale: f32,
+    scale: f32,
     lay: &EffectLayout,
     param_count: usize,
     selected_mseg: usize,
@@ -289,6 +290,13 @@ pub fn effect_hit(
     // Per-track trigger controls — checked before the per-MSEG selector.
     if in_rect(lay.trigger, px, py) {
         return Some(EffectHit::Trigger);
+    }
+    if matches!(trigger, TriggerSource::MidiNote { .. }) {
+        for field in [super::MidiField::Note, super::MidiField::Channel] {
+            if in_rect(field.rect(lay, scale), px, py) {
+                return Some(EffectHit::MidiFilter(field));
+            }
+        }
     }
     let trigger_has_rate = matches!(
         trigger,
@@ -599,13 +607,14 @@ pub fn target_to_item(kind: EffectKind, target: Option<ModulationTarget>) -> usi
 }
 
 /// The trigger-source dropdown items, in `TriggerSource` discriminant order.
-pub fn trigger_items() -> [&'static str; 5] {
+pub fn trigger_items() -> [&'static str; 6] {
     [
         "Free run",
         "Cell light",
         "Cell step",
         "Free Hz",
         "Transient",
+        "MIDI note",
     ]
 }
 
@@ -624,6 +633,10 @@ pub fn trigger_from_item(
         1 => TriggerSource::CellLight,
         2 => TriggerSource::CellStep,
         3 => TriggerSource::FreeHz { hz: carried_hz },
+        5 => TriggerSource::MidiNote {
+            note: None,
+            channel: None,
+        },
         _ => TriggerSource::Transient {
             threshold: carried_threshold,
             hold_ms: carried_hold_ms,
@@ -639,6 +652,7 @@ pub fn trigger_to_item(src: TriggerSource) -> usize {
         TriggerSource::CellStep => 2,
         TriggerSource::FreeHz { .. } => 3,
         TriggerSource::Transient { .. } => 4,
+        TriggerSource::MidiNote { .. } => 5,
     }
 }
 
@@ -831,6 +845,7 @@ pub fn draw_trigger_controls(
         TriggerSource::CellStep => "Cell step",
         TriggerSource::FreeHz { .. } => "Free Hz",
         TriggerSource::Transient { .. } => "Transient",
+        TriggerSource::MidiNote { .. } => "MIDI note",
     };
     widgets::dropdown::draw_dropdown_trigger(pixmap, tr, lay.trigger, label, trigger_dropdown_open);
     match trigger {
@@ -2472,9 +2487,16 @@ mod tests {
                 );
                 assert_eq!(trigger_to_item(TriggerSource::FreeHz { hz }), 3);
                 let transient = TriggerSource::Transient { threshold, hold_ms };
-                for item in [4, 5, usize::MAX] {
+                for item in [4, 6, usize::MAX] {
                     assert_eq!(trigger_from_item(item, hz, threshold, hold_ms), transient);
                 }
+                assert_eq!(
+                    trigger_from_item(5, hz, threshold, hold_ms),
+                    TriggerSource::MidiNote {
+                        note: None,
+                        channel: None
+                    }
+                );
                 assert_eq!(trigger_to_item(transient), 4);
             }
         }
@@ -2633,7 +2655,8 @@ mod tests {
                 "Cell light",
                 "Cell step",
                 "Free Hz",
-                "Transient"
+                "Transient",
+                "MIDI note"
             ]
         );
     }
