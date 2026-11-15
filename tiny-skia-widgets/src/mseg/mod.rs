@@ -8,6 +8,7 @@
 //!
 //! See `docs/superpowers/specs/2026-05-16-mseg-editor-widget-design.md`.
 
+pub mod audio;
 pub mod editor;
 pub mod interpolation;
 pub mod library;
@@ -17,6 +18,7 @@ pub mod shape;
 pub mod tools;
 pub mod viewport;
 
+pub use audio::*;
 pub use editor::*;
 pub use interpolation::{PointWeight, SegmentShape, segment_value};
 pub use randomize::*;

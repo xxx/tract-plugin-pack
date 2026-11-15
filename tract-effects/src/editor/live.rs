@@ -2,6 +2,24 @@ use super::*;
 use crate::modulation_telemetry::{ModulationFrame, ModulationTelemetry, TRACE_CAPACITY};
 use crate::waveform::{WAVEFORM_BINS, WAVEFORM_CAPACITY};
 use std::sync::Arc;
+use widgets::mseg::AudioBin;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AudioGain {
+    Minus12,
+    #[default]
+    Unity,
+    Plus12,
+}
+impl AudioGain {
+    pub fn multiplier(self) -> f32 {
+        match self {
+            Self::Minus12 => 0.25118864,
+            Self::Unity => 1.0,
+            Self::Plus12 => 3.9810717,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AudioView {
@@ -30,12 +48,48 @@ impl AudioView {
         }
     }
 }
-pub(super) fn audio_items(frozen: bool) -> &'static [&'static str] {
-    if frozen {
-        &["Off", "Input", "Output", "Input + Output", "Unfreeze"]
-    } else {
-        &["Off", "Input", "Output", "Input + Output", "Freeze"]
-    }
+pub(super) fn audio_items(state: &EffectEditor) -> Vec<&'static str> {
+    vec![
+        "Off",
+        "Input",
+        "Output",
+        "Input + Output",
+        if state.audio_display == AudioDisplay::Magnitude {
+            "✓ Magnitude"
+        } else {
+            "Magnitude"
+        },
+        if state.audio_display == AudioDisplay::Combined {
+            "✓ Combined"
+        } else {
+            "Combined"
+        },
+        if state.audio_display == AudioDisplay::Stereo {
+            "✓ Stereo"
+        } else {
+            "Stereo"
+        },
+        if state.audio_gain == AudioGain::Minus12 {
+            "✓ Gain: -12 dB"
+        } else {
+            "Gain: -12 dB"
+        },
+        if state.audio_gain == AudioGain::Unity {
+            "✓ Gain: 0 dB"
+        } else {
+            "Gain: 0 dB"
+        },
+        if state.audio_gain == AudioGain::Plus12 {
+            "✓ Gain: +12 dB"
+        } else {
+            "Gain: +12 dB"
+        },
+        if state.audio_frozen {
+            "Unfreeze"
+        } else {
+            "Freeze"
+        },
+    ]
 }
 
 pub(super) struct LiveSource {
@@ -49,7 +103,7 @@ pub(super) struct LiveSource {
     waveform_cursor: u64,
     waveform_generation: u64,
     waveform_key: Option<(EffectKind, usize)>,
-    pub(super) waveform: [Option<(f32, f32)>; WAVEFORM_BINS],
+    pub(super) waveform: [Option<AudioBin>; WAVEFORM_BINS],
 }
 impl Drop for LiveSource {
     fn drop(&mut self) {
@@ -87,8 +141,8 @@ impl LiveSource {
             .waveform_cursor
             .max(head.saturating_sub(WAVEFORM_CAPACITY as u64));
         for index in self.waveform_cursor..head {
-            if let Some(point) = telemetry.point(index, token) {
-                self.waveform[point.bin] = Some((point.input, point.output));
+            if let Some(point) = telemetry.stereo_point(index, token) {
+                self.waveform[point.bin] = Some(point.audio);
             }
         }
         self.waveform_cursor = head;
@@ -183,6 +237,18 @@ impl EffectEditor {
     }
     pub fn audio_frozen(&self) -> bool {
         self.audio_frozen
+    }
+    pub fn set_audio_display(&mut self, display: AudioDisplay) {
+        self.audio_display = display;
+    }
+    pub fn audio_display(&self) -> AudioDisplay {
+        self.audio_display
+    }
+    pub fn set_audio_gain(&mut self, gain: AudioGain) {
+        self.audio_gain = gain;
+    }
+    pub fn audio_gain(&self) -> AudioGain {
+        self.audio_gain
     }
     pub(super) fn refresh_live(&mut self, effect: &TrackEffect, config: &TrackModulation) {
         if let Some(live) = &mut self.live {

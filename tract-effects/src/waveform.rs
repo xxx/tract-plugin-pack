@@ -3,6 +3,7 @@
 use crate::effects::EffectKind;
 use crate::modulation::{TrackModulation, phase_next, phase_step};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use tiny_skia_widgets::mseg::{AudioBin, AudioRange};
 use tiny_skia_widgets::{HoldMode, MsegData, PlayMode};
 
 pub const WAVEFORM_BINS: usize = 512;
@@ -15,12 +16,18 @@ pub struct WaveformPoint {
     pub output: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaveformBin {
+    pub bin: usize,
+    pub audio: AudioBin,
+}
+
 #[derive(Default)]
 struct Cell {
     stamp: AtomicU64,
     token: AtomicU64,
     bin: AtomicU32,
-    peaks: AtomicU64,
+    ranges: [AtomicU64; 4],
 }
 
 pub struct WaveformTelemetry {
@@ -79,6 +86,14 @@ impl WaveformTelemetry {
     }
 
     pub fn point(&self, index: u64, token: u64) -> Option<WaveformPoint> {
+        self.stereo_point(index, token).map(|point| WaveformPoint {
+            bin: point.bin,
+            input: point.audio.input_peak(),
+            output: point.audio.output_peak(),
+        })
+    }
+
+    pub fn stereo_point(&self, index: u64, token: u64) -> Option<WaveformBin> {
         let cell = &self.cells[index as usize % WAVEFORM_CAPACITY];
         let stamp = cell.stamp.load(Ordering::Acquire);
         if token == 0 || stamp != index.wrapping_add(1) {
@@ -86,29 +101,56 @@ impl WaveformTelemetry {
         }
         let actual = cell.token.load(Ordering::Acquire);
         let bin = cell.bin.load(Ordering::Acquire) as usize;
-        let peaks = cell.peaks.load(Ordering::Acquire);
+        let ranges: [AudioRange; 4] = std::array::from_fn(|i| {
+            let bits = cell.ranges[i].load(Ordering::Acquire);
+            AudioRange {
+                min: f32::from_bits(bits as u32),
+                max: f32::from_bits((bits >> 32) as u32),
+            }
+        });
         if cell.stamp.load(Ordering::Acquire) != stamp || actual != token || bin >= WAVEFORM_BINS {
             return None;
         }
-        Some(WaveformPoint {
+        Some(WaveformBin {
             bin,
-            input: f32::from_bits(peaks as u32),
-            output: f32::from_bits((peaks >> 32) as u32),
+            audio: AudioBin {
+                input: [ranges[0], ranges[1]],
+                output: [ranges[2], ranges[3]],
+            },
         })
     }
 
-    fn record(&self, token: u64, point: WaveformPoint) {
+    fn record_stereo(&self, token: u64, point: WaveformBin) {
         let index = self.head.load(Ordering::Relaxed);
         let cell = &self.cells[index as usize % WAVEFORM_CAPACITY];
         cell.stamp.store(0, Ordering::Release);
         cell.token.store(token, Ordering::Release);
         cell.bin.store(point.bin as u32, Ordering::Release);
-        cell.peaks.store(
-            point.input.to_bits() as u64 | ((point.output.to_bits() as u64) << 32),
-            Ordering::Release,
-        );
+        for (dest, range) in cell
+            .ranges
+            .iter()
+            .zip(point.audio.input.iter().chain(&point.audio.output))
+        {
+            dest.store(
+                range.min.to_bits() as u64 | ((range.max.to_bits() as u64) << 32),
+                Ordering::Release,
+            );
+        }
         cell.stamp.store(index.wrapping_add(1), Ordering::Release);
         self.head.store(index.wrapping_add(1), Ordering::Release);
+    }
+
+    #[cfg(test)]
+    fn record(&self, token: u64, point: WaveformPoint) {
+        let mut audio = AudioBin::default();
+        audio.include([point.input; 2], [point.output; 2]);
+        self.record_stereo(
+            token,
+            WaveformBin {
+                bin: point.bin,
+                audio,
+            },
+        );
     }
 }
 
@@ -144,7 +186,7 @@ pub struct WaveformClock {
     trigger_epoch: u64,
     follow_audio_phase: bool,
     active: bool,
-    pending: Option<WaveformPoint>,
+    pending: Option<WaveformBin>,
 }
 
 impl WaveformClock {
@@ -236,25 +278,16 @@ impl WaveformClock {
             self.finish_block(telemetry);
             self.pending = None;
         }
-        let peak = |samples: [f32; 2]| {
-            samples
-                .iter()
-                .filter(|x| x.is_finite())
-                .map(|x| x.abs())
-                .fold(0.0, f32::max)
-        };
-        let point = self.pending.get_or_insert(WaveformPoint {
+        let point = self.pending.get_or_insert(WaveformBin {
             bin,
-            input: 0.0,
-            output: 0.0,
+            audio: AudioBin::default(),
         });
-        point.input = point.input.max(peak(input));
-        point.output = point.output.max(peak(output));
+        point.audio.include(input, output);
     }
 
     pub fn finish_block(&self, telemetry: &WaveformTelemetry) {
         if let Some(point) = self.pending {
-            telemetry.record(self.request.token, point);
+            telemetry.record_stereo(self.request.token, point);
         }
     }
 }
@@ -398,6 +431,142 @@ mod tests {
         assert!(telemetry.point(telemetry.head() - 1, next).is_none());
         telemetry.release(token);
         assert_eq!(telemetry.request(0, 0, EffectKind::Svf), next);
+    }
+
+    #[test]
+    fn signed_ranges_preserve_each_channel_across_partial_bins_and_reset_on_retrigger() {
+        let telemetry = WaveformTelemetry::default();
+        let token = telemetry.request(0, 0, EffectKind::Svf);
+        let config = config();
+        let mut clock = WaveformClock::default();
+        prepare(&mut clock, &telemetry, &config, 0.0, 0);
+        clock.record_sample(&telemetry, [0.8, -0.6], [0.4, -0.2], 0.0);
+        clock.record_sample(&telemetry, [0.3, -0.9], [0.1, -0.5], 0.0);
+        clock.finish_block(&telemetry);
+        let first = telemetry.stereo_point(telemetry.head() - 1, token).unwrap();
+        assert_eq!(
+            first.audio,
+            AudioBin {
+                input: [
+                    AudioRange { min: 0.3, max: 0.8 },
+                    AudioRange {
+                        min: -0.9,
+                        max: -0.6
+                    }
+                ],
+                output: [
+                    AudioRange { min: 0.1, max: 0.4 },
+                    AudioRange {
+                        min: -0.5,
+                        max: -0.2
+                    }
+                ]
+            }
+        );
+        prepare(&mut clock, &telemetry, &config, 2.0 / 48000.0, 0);
+        clock.record_sample(&telemetry, [f32::NAN, -0.4], [f32::INFINITY, -0.7], 0.0);
+        clock.finish_block(&telemetry);
+        let partial = telemetry.stereo_point(telemetry.head() - 1, token).unwrap();
+        assert_eq!(partial.audio.input[0], first.audio.input[0]);
+        assert_eq!(
+            partial.audio.input[1],
+            AudioRange {
+                min: -0.9,
+                max: -0.4
+            }
+        );
+        assert_eq!(
+            partial.audio.output[1],
+            AudioRange {
+                min: -0.7,
+                max: -0.2
+            }
+        );
+        assert_eq!(
+            telemetry.point(telemetry.head() - 1, token),
+            Some(WaveformPoint {
+                bin: 0,
+                input: 0.9,
+                output: 0.7
+            })
+        );
+        prepare(&mut clock, &telemetry, &config, 0.0, 1);
+        clock.record_sample(
+            &telemetry,
+            [f32::NAN, -0.05],
+            [0.02, f32::NEG_INFINITY],
+            0.0,
+        );
+        clock.finish_block(&telemetry);
+        let fresh = telemetry.stereo_point(telemetry.head() - 1, token).unwrap();
+        assert!(fresh.audio.input[0].is_empty());
+        assert_eq!(
+            fresh.audio.input[1],
+            AudioRange {
+                min: -0.05,
+                max: -0.05
+            }
+        );
+        assert_eq!(
+            fresh.audio.output[0],
+            AudioRange {
+                min: 0.02,
+                max: 0.02
+            }
+        );
+        assert!(fresh.audio.output[1].is_empty());
+    }
+
+    #[test]
+    fn concurrent_stereo_snapshots_keep_all_four_ranges_and_bin_coherent() {
+        use std::sync::{Arc, atomic::AtomicBool};
+        fn point(value: f32) -> WaveformBin {
+            WaveformBin {
+                bin: ((value * 1000.0).round() as usize) % WAVEFORM_BINS,
+                audio: AudioBin {
+                    input: [
+                        AudioRange {
+                            min: value,
+                            max: value + 0.1,
+                        },
+                        AudioRange {
+                            min: -value - 0.2,
+                            max: -value - 0.1,
+                        },
+                    ],
+                    output: [
+                        AudioRange {
+                            min: value * 0.5,
+                            max: value * 0.5 + 0.1,
+                        },
+                        AudioRange {
+                            min: -value * 0.7 - 0.2,
+                            max: -value * 0.7,
+                        },
+                    ],
+                },
+            }
+        }
+        let telemetry = Arc::new(WaveformTelemetry::default());
+        let token = telemetry.request(0, 0, EffectKind::Svf);
+        let done = Arc::new(AtomicBool::new(false));
+        let writer = telemetry.clone();
+        let finished = done.clone();
+        let thread = std::thread::spawn(move || {
+            for i in 0..10000 {
+                writer.record_stereo(token, point((i % 1000) as f32 / 1000.0));
+            }
+            finished.store(true, Ordering::Release);
+        });
+        while !done.load(Ordering::Acquire) {
+            let head = telemetry.head();
+            if head > 0
+                && let Some(actual) = telemetry.stereo_point(head - 1, token)
+            {
+                assert_eq!(actual, point(actual.audio.input[0].min));
+            }
+        }
+        thread.join().unwrap();
     }
 
     #[test]

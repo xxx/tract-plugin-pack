@@ -1068,6 +1068,7 @@ fn draw_clipped_line(
 mod tests {
     use super::*;
     use crate::mseg::MsegData;
+    use crate::mseg::{AudioBackdropStyle, AudioBin, draw_mseg_audio};
     use crate::primitives::color_accent;
     use crate::test_font::test_font_data;
     use crate::text::TextRenderer;
@@ -1406,8 +1407,10 @@ mod tests {
         layout.plot = (20.0, 20.0, 120.0, 90.0);
         layout.viewport.time = (0.25, 0.75);
         layout.viewport.value = (0.25, 0.75);
-        let bins = [Some((1.5, 0.9)); 4];
-        draw_mseg_audio(&mut pm, &layout, &bins, true, true, color_accent());
+        let mut bin = AudioBin::default();
+        bin.include([1.5; 2], [0.9; 2]);
+        let bins = [Some(bin); 4];
+        draw_mseg_audio(&mut pm, &layout, &bins, AudioBackdropStyle::default());
         assert!(pm.pixels().iter().any(|p| p.alpha() > 0));
         for (index, pixel) in pm
             .pixels()
@@ -1447,7 +1450,7 @@ mod tests {
             curve_color,
             None,
             |pm, layout| {
-                draw_mseg_audio(pm, layout, &bins, true, true, color_accent());
+                draw_mseg_audio(pm, layout, &bins, AudioBackdropStyle::default());
             },
         );
         let mut compared = 0;
@@ -1511,46 +1514,5 @@ pub fn draw_mseg_trace(
             }
         }
         previous = Some((phase, value));
-    }
-}
-
-/// Paint phase-binned stereo magnitudes, clipped to the visible plot.
-pub fn draw_mseg_audio(
-    pixmap: &mut Pixmap,
-    layout: &MsegLayout,
-    bins: &[Option<(f32, f32)>],
-    input: bool,
-    output: bool,
-    output_color: tiny_skia::Color,
-) {
-    let (px, py, pw, ph) = layout.plot;
-    let mut output_color = output_color;
-    output_color.set_alpha(0.20);
-    for (index, bin) in bins.iter().enumerate() {
-        let Some((input_peak, output_peak)) = *bin else {
-            continue;
-        };
-        let left = phase_to_x(layout, index as f32 / bins.len() as f32).max(px);
-        let right = phase_to_x(layout, (index + 1) as f32 / bins.len() as f32).min(px + pw);
-        if right <= left {
-            continue;
-        }
-        for (show, peak, color) in [
-            (
-                input,
-                input_peak,
-                tiny_skia::Color::from_rgba8(180, 185, 195, 55),
-            ),
-            (output, output_peak, output_color),
-        ] {
-            if !show || !peak.is_finite() {
-                continue;
-            }
-            let top = value_to_y(layout, peak.max(0.0)).max(py);
-            let bottom = value_to_y(layout, 0.0).min(py + ph);
-            if bottom > top {
-                draw_rect(pixmap, left, top, right - left, bottom - top, color);
-            }
-        }
     }
 }

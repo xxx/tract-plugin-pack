@@ -5,7 +5,8 @@ use crate::modulation::{ModulationTarget, TrackModulation, TriggerSource};
 use tiny_skia_widgets as widgets;
 
 mod live;
-pub use live::AudioView;
+pub use live::{AudioGain, AudioView};
+pub use widgets::mseg::AudioDisplay;
 pub mod view;
 use view as effect_editor;
 use view::{EffectHit, EffectLayout};
@@ -84,6 +85,8 @@ pub struct EffectEditor {
     measured_arcs_only: bool,
     audio_view: AudioView,
     audio_frozen: bool,
+    audio_display: AudioDisplay,
+    audio_gain: AudioGain,
 }
 
 impl Default for EffectEditor {
@@ -112,6 +115,8 @@ impl EffectEditor {
             measured_arcs_only: false,
             audio_view: AudioView::Off,
             audio_frozen: false,
+            audio_display: AudioDisplay::Magnitude,
+            audio_gain: AudioGain::Unity,
         }
     }
 
@@ -126,6 +131,8 @@ impl EffectEditor {
         let measured_arcs_only = self.measured_arcs_only;
         let audio_view = self.audio_view;
         let audio_frozen = self.audio_frozen;
+        let audio_display = self.audio_display;
+        let audio_gain = self.audio_gain;
         let live = self.live.take();
         let input_scale = self.effect_dial_drag.input_scale();
         *self = Self::new(self.trigger_choices);
@@ -134,6 +141,8 @@ impl EffectEditor {
         self.measured_arcs_only = measured_arcs_only;
         self.audio_view = audio_view;
         self.audio_frozen = audio_frozen;
+        self.audio_display = audio_display;
+        self.audio_gain = audio_gain;
         self.live = live;
         self.effect_dial_drag.set_input_scale(input_scale);
     }
@@ -338,7 +347,19 @@ impl<'a> Session<'a> {
                             AudioView::Both,
                         ][idx],
                     );
-                } else {
+                } else if idx < 7 {
+                    self.state.set_audio_display(
+                        [
+                            AudioDisplay::Magnitude,
+                            AudioDisplay::Combined,
+                            AudioDisplay::Stereo,
+                        ][idx - 4],
+                    );
+                } else if idx < 10 {
+                    self.state.set_audio_gain(
+                        [AudioGain::Minus12, AudioGain::Unity, AudioGain::Plus12][idx - 7],
+                    );
+                } else if idx == 10 {
                     self.state.set_audio_frozen(!self.state.audio_frozen);
                 }
             }
@@ -886,6 +907,13 @@ impl<'a> Session<'a> {
         // that would otherwise wipe the ghosts. Ghosts are then drawn on top
         // at low alpha (≈ 38%) so they read as faint context, not foreground.
         let audio_view = self.state.audio_view;
+        let audio_style = widgets::mseg::AudioBackdropStyle {
+            input: audio_view.input(),
+            output: audio_view.output(),
+            display: self.state.audio_display,
+            gain: self.state.audio_gain.multiplier(),
+            output_color: mseg_color(sel),
+        };
         let audio_bins = self.state.live.as_ref().map(|live| &live.waveform[..]);
         widgets::mseg::draw_mseg_with_background(
             pixmap,
@@ -898,14 +926,7 @@ impl<'a> Session<'a> {
             tooltip_ref,
             |pm, layout| {
                 if let Some(bins) = audio_bins {
-                    widgets::mseg::draw_mseg_audio(
-                        pm,
-                        layout,
-                        bins,
-                        audio_view.input(),
-                        audio_view.output(),
-                        mseg_color(sel),
-                    );
+                    widgets::mseg::draw_mseg_audio(pm, layout, bins, audio_style);
                 }
             },
         );
@@ -1116,11 +1137,18 @@ impl<'a> Session<'a> {
                 self.state.trace_enabled = !self.state.trace_enabled;
             }
             EffectHit::Audio => {
-                let items = live::audio_items(self.state.audio_frozen);
+                let items = live::audio_items(self.state);
+                let font_size = (lay.audio.3 * 0.5).max(10.0);
+                let width = items
+                    .iter()
+                    .map(|label| self.text_renderer.text_width(label, font_size))
+                    .fold(lay.audio.2, f32::max)
+                    + 14.0;
+                let anchor = (lay.audio.0, lay.audio.1, width, lay.audio.3);
                 self.state.effect_dropdown.open(
                     EffectAction::Audio,
-                    lay.audio,
-                    widgets::dropdown::DropdownList::flat(items),
+                    anchor,
+                    widgets::dropdown::DropdownList::flat(&items),
                     self.state.audio_view as usize,
                     false,
                     (self.physical_width, self.physical_height),
@@ -1583,7 +1611,7 @@ impl<'a> Session<'a> {
 
 fn dropdown_items(state: &EffectEditor, effect: &TrackEffect) -> Vec<&'static str> {
     if state.effect_dropdown.is_open_for(EffectAction::Audio) {
-        live::audio_items(state.audio_frozen).to_vec()
+        live::audio_items(state)
     } else if state.effect_dropdown.is_open_for(EffectAction::Target) {
         view::target_items(effect.kind)
     } else if state.effect_dropdown.is_open_for(EffectAction::Trigger) {

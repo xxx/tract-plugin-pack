@@ -223,6 +223,8 @@ for timing, reset behavior, and numeric controls.
 **Freeze** for editing against the captured sound. It includes that row's Mix
 and Amp, before the wet-bus compressor/master blend. See
 [audio waveform backdrop](../mseg-editor.md#audio-waveform-backdrop).
+The Audio menu also provides Magnitude/Combined/Stereo views and -12/0/+12 dB
+display gain. These work on frozen captures and affect only the display.
 
 The curve canvas is the large area beneath the routing controls.
 

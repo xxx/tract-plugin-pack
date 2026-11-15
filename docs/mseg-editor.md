@@ -166,6 +166,17 @@ absolute channel sets each peak. Full height is magnitude 1; louder signals
 clip visually. The horizontal axis follows the selected envelope's clock,
 including its triggers and loops. Zoom and pan apply to the backdrop too.
 
+The Audio menu's display choices are **Magnitude** (the default), **Combined**,
+and **Stereo**. Combined overlays signed left/right waveforms around one zero
+line. Stereo puts left in the upper half and right in the lower half, each with
+its own zero line. Opposite-polarity channels remain visible; they are never
+averaged. Vertical zoom/pan scales the signal inside each fixed Stereo lane.
+
+**Gain: -12 / 0 / +12 dB** adjusts only the backdrop's display level, useful for
+quiet material. The default is 0 dB. Peaks clip at the display boundaries without
+crossing Stereo lanes. Changing display mode or gain reuses the current capture,
+including a frozen one, and leaves the sound, trace history, and undo unchanged.
+
 Capture examines every audio sample and keeps the largest peak in each phase
 bin, so short transients remain visible. Each pass updates the bins it visits;
 the remaining bins retain their last observed values. **Freeze** stops capture

@@ -53,6 +53,8 @@ for timing, reset behavior, and numeric controls.
 **Audio** adds a phase-aligned input/output magnitude backdrop beneath the
 curve, with **Freeze** for editing against the captured sound. It measures
 before Output gain. See [audio waveform backdrop](../mseg-editor.md#audio-waveform-backdrop).
+The Audio menu also provides Magnitude/Combined/Stereo views and -12/0/+12 dB
+display gain. These work on frozen captures and affect only the display.
 
 **Mix** appears after the effect parameters in the Target menu. It modulates the dry/wet blend around the base Mix setting without changing the dial's base value or writing MSEG movement to host automation. A colored arc on Mix shows the effective blend, and curve-node tooltips show percentages. For a full-range blend following the curve, set Mix to **0%**, choose **Unipolar**, and set Depth to **+100%**. From Mix **100%**, use negative depth to move toward dry. Mix remains within 0–100%, with smooth transitions between modulation updates.
 

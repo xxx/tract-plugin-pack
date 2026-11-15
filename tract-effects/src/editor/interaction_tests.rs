@@ -1479,6 +1479,136 @@ mod audio_backdrop {
     }
 
     #[test]
+    fn stereo_display_and_gain_reuse_live_and_frozen_bins_without_changing_capture() {
+        let mut h = Harness::new();
+        let shared = Arc::new(ModulationTelemetry::default());
+        h.editor.connect_live(&shared, 0);
+        h.editor.set_audio_view(AudioView::Both);
+        draw(&mut h);
+        capture(&h, &shared, 0.8, -0.3);
+        draw(&mut h);
+        let bins = h.editor.live.as_ref().unwrap().waveform;
+        let mut clock = WaveformClock::default();
+        clock.begin_block(&shared.waveform);
+        let token = clock.request().token;
+        let before = (h.effect, h.modulation.clone());
+        for (index, display, gain) in [
+            (5, AudioDisplay::Combined, AudioGain::Unity),
+            (9, AudioDisplay::Combined, AudioGain::Plus12),
+            (6, AudioDisplay::Stereo, AudioGain::Plus12),
+        ] {
+            h.click(h.geometry.layout.audio);
+            h.key(Key::Home);
+            for _ in 0..index {
+                h.key(Key::ArrowDown);
+            }
+            let response = h.key(Key::Enter);
+            assert!(response.captured && !response.changed);
+            draw(&mut h);
+            clock.begin_block(&shared.waveform);
+            assert_eq!(clock.request().token, token);
+            assert_eq!(h.editor.audio_display(), display);
+            assert_eq!(h.editor.audio_gain(), gain);
+            assert_eq!(h.editor.live.as_ref().unwrap().waveform, bins);
+        }
+        h.editor.set_audio_frozen(true);
+        draw(&mut h);
+        for display in [
+            AudioDisplay::Magnitude,
+            AudioDisplay::Combined,
+            AudioDisplay::Stereo,
+        ] {
+            h.editor.set_audio_display(display);
+            h.editor.set_audio_gain(AudioGain::Minus12);
+            draw(&mut h);
+            clock.begin_block(&shared.waveform);
+            assert_eq!(clock.request().token, 0);
+            assert_eq!(h.editor.live.as_ref().unwrap().waveform, bins);
+        }
+        h.editor.cancel_interaction();
+        h.resize(2.0);
+        draw(&mut h);
+        assert_eq!(h.editor.audio_display(), AudioDisplay::Stereo);
+        assert_eq!(h.editor.audio_gain(), AudioGain::Minus12);
+        assert!(h.editor.audio_frozen());
+        assert_eq!(h.editor.live.as_ref().unwrap().waveform, bins);
+        assert_eq!((h.effect, h.modulation), before);
+    }
+
+    #[test]
+    fn expanded_audio_menu_renders_last_and_owns_input_at_each_scale() {
+        for scale in [0.5, 1.0, 2.0] {
+            let mut h = Harness::new();
+            h.geometry = EditorGeometry {
+                layout: view::effect_layout((16.0, 16.0, 1304.0, 640.0), scale),
+                scale,
+                window_size: (1336.0 * scale, 680.0 * scale),
+            };
+            let before = (h.effect, h.modulation.clone());
+            assert!(h.click(h.geometry.layout.audio).captured);
+            let items = dropdown_items(&h.editor, &h.effect);
+            assert_eq!(items.len(), 11);
+            let popup = widgets::dropdown::dropdown_popup_layout(
+                &h.editor.effect_dropdown,
+                &items,
+                h.geometry.window_size,
+            )
+            .unwrap();
+            let font_size = (h.geometry.layout.audio.3 * 0.5).max(10.0);
+            let widest = items
+                .iter()
+                .map(|label| h.tr.text_width(label, font_size))
+                .fold(0.0_f32, f32::max);
+            assert!(
+                widest <= popup.list_viewport.2 - 12.0 + 0.01,
+                "Audio labels truncated at scale {scale}: need {widest}, have {}",
+                popup.list_viewport.2 - 12.0
+            );
+            let mut expected = tiny_skia::Pixmap::new(
+                h.geometry.window_size.0 as u32,
+                h.geometry.window_size.1 as u32,
+            )
+            .unwrap();
+            widgets::dropdown::draw_dropdown_popup(
+                &mut expected,
+                &mut h.tr,
+                &h.editor.effect_dropdown,
+                &items,
+                h.geometry.window_size,
+            );
+            let mut actual = expected.clone();
+            actual.fill(widgets::color_bg());
+            h.editor.draw(
+                &mut actual,
+                &mut h.tr,
+                &h.effect,
+                &h.modulation,
+                [0.0; 4],
+                h.geometry,
+            );
+            h.editor
+                .draw_popup(&mut actual, &mut h.tr, &h.effect, h.geometry);
+            let mut compared = 0;
+            for (expected, actual) in expected.pixels().iter().zip(actual.pixels()) {
+                if expected.alpha() == 255 {
+                    compared += 1;
+                    assert_eq!(actual, expected, "scale {scale}");
+                }
+            }
+            assert!(compared > 100);
+            assert!(h.key(Key::ArrowDown).captured);
+            assert!(h.key(Key::Escape).captured);
+            assert!(!h.editor.dropdown_open());
+            h.click(h.geometry.layout.audio);
+            let r = h.geometry.layout.dials[0];
+            h.move_to(r.0 + r.2 * 0.5, r.1 + r.3 * 0.5, Modifiers::empty());
+            assert!(h.press(MouseButton::Right).captured);
+            assert!(!h.editor.dropdown_open() && !h.editor.text_edit.is_active());
+            assert_eq!((h.effect, h.modulation), before);
+        }
+    }
+
+    #[test]
     fn freeze_survives_focus_and_resize_but_replacements_clear_it() {
         let mut h = Harness::new();
         let shared = Arc::new(ModulationTelemetry::default());

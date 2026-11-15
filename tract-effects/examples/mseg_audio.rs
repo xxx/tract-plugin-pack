@@ -1,9 +1,11 @@
-//! Measured preview: cargo run -p tract-effects --example mseg_audio -- /tmp/mseg-audio.png
+//! Measured preview: cargo run -p tract-effects --example mseg_audio -- /tmp/mseg-audio.png stereo
 
 use std::sync::Arc;
 use tiny_skia_widgets::mseg::{FactoryShape, factory_shape};
 use tiny_skia_widgets::{MsegData, PlayMode, SyncMode, TextRenderer, color_bg, color_text};
-use tract_effects::editor::{AudioView, EditorGeometry, EffectEditor, view::effect_layout};
+use tract_effects::editor::{
+    AudioDisplay, AudioGain, AudioView, EditorGeometry, EffectEditor, view::effect_layout,
+};
 use tract_effects::effects::{
     Effect, EffectInstance, EffectKind, TrackEffect, default_params_for_kind,
 };
@@ -14,9 +16,27 @@ use tract_effects::modulation_telemetry::{ModulationFrame, ModulationTelemetry, 
 use tract_effects::waveform::{WaveformClock, WaveformTiming};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "/tmp/mseg-audio.png".into());
+    let mut args = std::env::args().skip(1);
+    let path = args.next().unwrap_or_else(|| "/tmp/mseg-audio.png".into());
+    let (display, caption) = match args.next().as_deref() {
+        None | Some("magnitude") => (
+            AudioDisplay::Magnitude,
+            "Magnitude: greater absolute channel",
+        ),
+        Some("combined") => (
+            AudioDisplay::Combined,
+            "Combined: signed left/right overlays around zero",
+        ),
+        Some("stereo") => (AudioDisplay::Stereo, "Stereo: left above, right below"),
+        _ => return Err("Display must be magnitude, combined, or stereo".into()),
+    };
+    let (gain, gain_label) = match args.next().as_deref() {
+        None | Some("0") => (AudioGain::Unity, "0 dB"),
+        Some("-12") => (AudioGain::Minus12, "-12 dB"),
+        Some("12") => (AudioGain::Plus12, "+12 dB"),
+        _ => return Err("Display gain must be -12, 0, or 12 dB".into()),
+    };
+    let caption = format!("{caption} — display gain {gain_label}");
     let mut pm = tiny_skia::Pixmap::new(1336, 730).ok_or("Pixmap allocation failed")?;
     let mut text = TextRenderer::new(include_bytes!(
         "../../tiny-skia-widgets/test_data/DejaVuSans.ttf"
@@ -54,6 +74,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut editor = EffectEditor::default();
     editor.connect_live(&shared, 0);
     editor.set_audio_view(AudioView::Both);
+    editor.set_audio_display(display);
+    editor.set_audio_gain(gain);
     let geometry = EditorGeometry {
         layout: effect_layout((16.0, 60.0, 1304.0, 640.0), 1.0),
         scale: 1.0,
@@ -115,19 +137,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &ModulationFrame::capture(track.kind, &config, &state),
         );
         pm.fill(color_bg());
-        text.draw_text(
-            &mut pm,
-            24.0,
-            30.0,
-            "Audio backdrop: align the curve with each transient",
-            20.0,
-            color_text(),
-        );
+        text.draw_text(&mut pm, 24.0, 30.0, &caption, 20.0, color_text());
         text.draw_text(
             &mut pm,
             24.0,
             52.0,
-            "Gray: input magnitude. Amber: processed output. White: smoothed source trace.",
+            "Gray: input. Amber: processed output. White: smoothed source trace.",
             14.0,
             color_text(),
         );
