@@ -284,30 +284,35 @@ impl TrackModulation {
             value: 0.5,
             tension: -0.5,
             stepped: false,
+            ..MsegNode::default()
         };
         sine.nodes[1] = MsegNode {
             time: 0.25,
             value: 1.0,
             tension: 0.5,
             stepped: false,
+            ..MsegNode::default()
         };
         sine.nodes[2] = MsegNode {
             time: 0.5,
             value: 0.5,
             tension: -0.5,
             stepped: false,
+            ..MsegNode::default()
         };
         sine.nodes[3] = MsegNode {
             time: 0.75,
             value: 0.0,
             tension: 0.5,
             stepped: false,
+            ..MsegNode::default()
         };
         sine.nodes[4] = MsegNode {
             time: 1.0,
             value: 0.5,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
 
         TrackModulation {

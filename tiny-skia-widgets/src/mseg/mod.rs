@@ -9,6 +9,7 @@
 //! See `docs/superpowers/specs/2026-05-16-mseg-editor-widget-design.md`.
 
 pub mod editor;
+pub mod interpolation;
 pub mod library;
 pub mod randomize;
 pub mod render;
@@ -17,6 +18,7 @@ pub mod tools;
 pub mod viewport;
 
 pub use editor::*;
+pub use interpolation::{PointWeight, SegmentShape, segment_value};
 pub use randomize::*;
 pub use render::*;
 pub use shape::*;
@@ -71,8 +73,8 @@ pub enum HoldMode {
     },
 }
 
-/// One envelope node. `tension`/`stepped` describe the segment FROM this node
-/// to the next; the last active node's `tension`/`stepped` are unused.
+/// One envelope node. `tension`/`stepped`/`shape` describe its outgoing segment;
+/// those fields are unused at the last point. Weight also affects the incoming segment.
 #[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MsegNode {
     /// 0..1 normalized phase position.
@@ -83,6 +85,12 @@ pub struct MsegNode {
     pub tension: f32,
     /// Segment is an instant jump + flat hold.
     pub stepped: bool,
+    /// Outgoing interpolation; omitted by older project and curve files.
+    #[serde(default, skip_serializing_if = "SegmentShape::is_curve")]
+    pub shape: SegmentShape,
+    /// Ease at this point, affecting adjacent non-stepped Curve segments.
+    #[serde(default, skip_serializing_if = "PointWeight::is_hard")]
+    pub weight: PointWeight,
 }
 
 impl Default for MsegNode {
@@ -92,6 +100,8 @@ impl Default for MsegNode {
             value: 0.0,
             tension: 0.0,
             stepped: false,
+            shape: SegmentShape::Curve,
+            weight: PointWeight::Hard,
         }
     }
 }
@@ -129,12 +139,14 @@ impl Default for MsegData {
             value: 0.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         nodes[1] = MsegNode {
             time: 1.0,
             value: 1.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         Self {
             nodes,
@@ -236,6 +248,7 @@ impl MsegData {
             value,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         self.node_count += 1;
         self.shift_hold_for_insert(k);
@@ -411,18 +424,7 @@ pub fn value_at_phase(data: &MsegData, phase: f32) -> f32 {
             break;
         }
     }
-    let n0 = a[i];
-    let n1 = a[i + 1];
-    if n0.stepped {
-        return n0.value;
-    }
-    let span = n1.time - n0.time;
-    let t = if span > 1e-9 {
-        (phase - n0.time) / span
-    } else {
-        0.0
-    };
-    n0.value + (n1.value - n0.value) * warp(t, n0.tension)
+    segment_value(&a[i], &a[i + 1], phase)
 }
 
 /// Wrap `p` into the half-open range `[lo, hi)`.
@@ -646,18 +648,21 @@ mod tests {
             value: 0.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         d.nodes[1] = MsegNode {
             time: 0.5,
             value: 1.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         d.nodes[2] = MsegNode {
             time: 1.0,
             value: 0.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         assert!((value_at_phase(&d, 0.25) - 0.5).abs() < 1e-6); // up-ramp midpoint
         assert!((value_at_phase(&d, 0.5) - 1.0).abs() < 1e-6); // peak
@@ -693,18 +698,21 @@ mod tests {
             value: 0.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         d.nodes[1] = MsegNode {
             time: 0.5,
             value: 1.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         d.nodes[2] = MsegNode {
             time: 1.0,
             value: 0.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         d.hold = HoldMode::Sustain(1); // node 1 is at time 0.5
         // Held: phase cannot pass the sustain node's time.
@@ -726,18 +734,21 @@ mod tests {
             value: 0.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         d.nodes[1] = MsegNode {
             time: 0.25,
             value: 1.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         d.nodes[2] = MsegNode {
             time: 1.0,
             value: 0.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         d.hold = HoldMode::Loop { start: 0, end: 1 }; // loop [0.0, 0.25]
         // Held: crossing the loop end wraps back toward the loop start.
@@ -951,18 +962,21 @@ mod tests {
             value: 0.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         d.nodes[1] = MsegNode {
             time: 0.5,
             value: 1.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         d.nodes[2] = MsegNode {
             time: 1.0,
             value: 0.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         d.hold = HoldMode::Sustain(1); // sustain at time 0.5
         let (p, finished) = advance(&d, 0.5, 0.1, false);

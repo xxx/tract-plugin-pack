@@ -51,6 +51,12 @@ pub(crate) fn transform_menu_items() -> &'static [&'static str] {
         "Copy selection",
         "Paste replace selection",
         "Paste merge selection",
+        "Curve segments",
+        "S-curve segments",
+        "Stepped segments",
+        "Hard points",
+        "Medium points",
+        "Soft points",
     ]
 }
 
@@ -134,6 +140,7 @@ pub struct MsegEditState {
     show_polarity: bool,
     /// Active drag, if any.
     drag: Option<DragTarget>,
+    tension_start: Option<(f32, f32)>,
     /// Hovered node index, for highlight.
     hover: Option<usize>,
     /// Selected node indices, bit `i` = node `i`. `MAX_NODES` is 128, so a
@@ -172,6 +179,7 @@ impl MsegEditState {
     /// Cancel transient geometry-dependent input while keeping selection and strip preferences.
     pub fn cancel_interaction(&mut self) {
         self.drag = None;
+        self.tension_start = None;
         self.hover = None;
         self.marquee = None;
         self.group_snapshot.clear();
@@ -203,6 +211,7 @@ impl MsegEditState {
             curve_only,
             show_polarity: true,
             drag: None,
+            tension_start: None,
             hover: None,
             selection: 0,
             group_snapshot: Vec::new(),
@@ -451,6 +460,7 @@ impl MsegEditState {
             }
             MsegHit::Tension(i) => {
                 self.drag = Some(DragTarget::Tension(i));
+                self.tension_start = Some((y, data.nodes[i].tension));
                 None
             }
             MsegHit::Canvas if self.stepped_draw_held => {
@@ -612,23 +622,19 @@ impl MsegEditState {
                 Some(MsegEdit::Changed)
             }
             Some(DragTarget::Tension(i)) => {
-                // Drag vertically away from the segment's straight midpoint to
-                // bend it. Map the vertical offset to tension in -1..1.
-                // Copy needed values out of `a` before the mutable write.
                 let (v_lo, v_hi) = if i + 1 < data.node_count {
                     let a = data.active();
                     (a[i].value, a[i + 1].value)
                 } else {
                     return None;
                 };
-                let straight_mid = (v_lo + v_hi) * 0.5;
-                let cur = y_to_value(&layout, y);
+                let (press_y, tension) = self.tension_start?;
+                if layout.plot.3 <= 0.0 {
+                    return None;
+                }
                 let rising = v_hi >= v_lo;
-                // Sign flip by `rising`: dragging the handle the same screen
-                // direction must bow a rising vs. a falling segment
-                // consistently in tension polarity (positive = slow-start).
-                let delta = (cur - straight_mid) * if rising { -2.0 } else { 2.0 };
-                data.nodes[i].tension = delta.clamp(-1.0, 1.0);
+                let delta = (press_y - y) / layout.plot.3 * if rising { -2.0 } else { 2.0 };
+                data.nodes[i].tension = (tension + delta).clamp(-1.0, 1.0);
                 data.debug_assert_valid();
                 Some(MsegEdit::Changed)
             }
@@ -696,9 +702,10 @@ impl MsegEditState {
         }
         self.drag = None;
         self.marquee = None;
+        self.tension_start = None;
         self.group_snapshot.clear();
         self.step_last_cell = None;
-        self.finish_power_gesture();
+        self.finish_power_gesture(data);
         None
     }
 

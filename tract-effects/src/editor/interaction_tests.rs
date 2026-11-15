@@ -1061,6 +1061,69 @@ mod precision_editing {
     }
 
     #[test]
+    fn native_shape_and_weight_commands_persist_as_separate_undo_entries() {
+        use widgets::mseg::{PointWeight, SegmentShape};
+        let mut h = Harness::new();
+        let slot = h.editor.selected_mseg;
+        assert!(
+            h.send(shortcut(Key::Character("a".into()), Modifiers::CONTROL))
+                .captured
+        );
+        let before = h.modulation.clone();
+        let mut undo = crate::undo::UndoHistory::new();
+        let node = h.modulation.msegs[slot].nodes[1];
+        let layout = h
+            .editor
+            .mseg_edit
+            .layout(h.geometry.layout.mseg_pane, h.geometry.scale);
+        for shape in [true, false] {
+            h.move_to(
+                widgets::mseg::phase_to_x(&layout, node.time),
+                widgets::mseg::value_to_y(&layout, node.value),
+                Modifiers::empty(),
+            );
+            h.press(MouseButton::Right);
+            assert!(h.editor.captures_keyboard());
+            if shape {
+                h.key(Key::Home);
+                for _ in 0..22 {
+                    h.key(Key::ArrowDown);
+                }
+            } else {
+                h.key(Key::End);
+            }
+            undo.begin_capture(h.modulation.clone());
+            assert!(h.key(Key::Enter).changed);
+            undo.commit_capture(&h.modulation);
+        }
+        let after = h.modulation.clone();
+        for node in &after.msegs[slot].active()[..after.msegs[slot].node_count - 1] {
+            assert_eq!(node.shape, SegmentShape::SCurve);
+        }
+        assert!(
+            after.msegs[slot]
+                .active()
+                .iter()
+                .all(|node| node.weight == PointWeight::Soft)
+        );
+        let shape_only = undo.undo(after.clone()).unwrap();
+        assert!(
+            shape_only.msegs[slot]
+                .active()
+                .iter()
+                .all(|node| node.weight == PointWeight::Hard)
+        );
+        assert_eq!(undo.undo(shape_only), Some(before));
+        assert_eq!(after.targets, h.modulation.targets);
+        assert_eq!(after.depths, h.modulation.depths);
+        let project = serde_json::to_string(&after).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TrackModulation>(&project).unwrap(),
+            after
+        );
+    }
+
+    #[test]
     fn pan_start_commits_numeric_text_and_escape_cancels_the_pan() {
         for scale in [0.5, 1.0, 2.0] {
             for mix in [false, true] {

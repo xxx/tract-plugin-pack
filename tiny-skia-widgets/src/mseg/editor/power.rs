@@ -109,12 +109,12 @@ impl MsegEditState {
         self.power.next_pen_start = None;
     }
 
-    pub(crate) fn finish_power_gesture(&mut self) {
+    pub(crate) fn finish_power_gesture(&mut self, data: &MsegData) {
         self.power.gesture_start = None;
         self.power.preview = if self.tool() != MsegTool::Pointer {
             self.power
                 .next_pen_start
-                .map(|start| pen_nodes(self.tool(), start, self.pen_end(start)))
+                .map(|start| self.pen_points(data, start, self.pen_end(start), true))
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -284,6 +284,25 @@ impl MsegEditState {
                 }
                 18 => return self.copy_selected_phrase(data),
                 19 | 20 => return self.paste_selected_phrase(data, index == 20),
+                21..=23 => Ok(tools::set_segment_shape(
+                    data,
+                    self.selection,
+                    if index == 22 {
+                        crate::mseg::SegmentShape::SCurve
+                    } else {
+                        crate::mseg::SegmentShape::Curve
+                    },
+                    index == 23,
+                )),
+                24..=26 => Ok(tools::set_point_weight(
+                    data,
+                    self.selection,
+                    [
+                        crate::mseg::PointWeight::Hard,
+                        crate::mseg::PointWeight::Medium,
+                        crate::mseg::PointWeight::Soft,
+                    ][index - 24],
+                )),
                 _ => Ok(false),
             },
             _ => Ok(false),
@@ -613,44 +632,53 @@ impl MsegEditState {
         (end.0, end.1)
     }
 
-    fn stamp_pen(&mut self, data: &mut MsegData, end: (f32, f32)) -> Option<MsegEdit> {
-        let mut candidate = self.power.gesture_start?;
-        let mut points = pen_nodes(self.tool(), self.power.press, end);
-        if (end.0 - self.power.press.0).abs() < 1e-4 {
-            self.power.message = "No room for another pen shape".to_owned();
-            return None;
-        }
-        if self.power.pen_repeating
-            && let Some(boundary) = candidate
-                .active()
-                .iter()
-                .find(|n| n.time == self.power.press.0)
-                .copied()
+    fn pen_points(
+        &self,
+        data: &MsegData,
+        start: (f32, f32),
+        end: (f32, f32),
+        repeating: bool,
+    ) -> Vec<MsegNode> {
+        let mut points = pen_nodes(self.tool(), start, end);
+        if repeating
+            && let Some(boundary) = data.active().iter().find(|n| n.time == start.0).copied()
         {
-            let local_span = if end.0 > self.power.press.0 {
+            let local_span = if end.0 > start.0 {
                 points[1].time - points[0].time
             } else {
                 points[points.len() - 1].time - points[points.len() - 2].time
             };
             let gap = (local_span * 0.25).min(1e-4);
-            if end.0 > self.power.press.0 && boundary.value != points[0].value {
+            if end.0 > start.0 && boundary.value != points[0].value {
                 points[0].time += gap;
                 points.insert(
                     0,
                     MsegNode {
                         tension: 0.0,
                         stepped: false,
+                        shape: crate::mseg::SegmentShape::Curve,
                         ..boundary
                     },
                 );
-            } else if end.0 < self.power.press.0 && boundary.value != points[points.len() - 1].value
-            {
+            } else if end.0 < start.0 && boundary.value != points[points.len() - 1].value {
                 let last = points.len() - 1;
                 points[last].time -= gap;
                 points[last].tension = 0.0;
                 points[last].stepped = false;
+                points[last].shape = crate::mseg::SegmentShape::Curve;
                 points.push(boundary);
             }
+        }
+        tools::reconcile_interval_metadata(data, &mut points);
+        points
+    }
+
+    fn stamp_pen(&mut self, data: &mut MsegData, end: (f32, f32)) -> Option<MsegEdit> {
+        let mut candidate = self.power.gesture_start?;
+        let points = self.pen_points(&candidate, self.power.press, end, self.power.pen_repeating);
+        if (end.0 - self.power.press.0).abs() < 1e-4 {
+            self.power.message = "No room for another pen shape".to_owned();
+            return None;
         }
         match tools::replace_interval(&mut candidate, &points) {
             Ok((_, selection)) => {
@@ -722,7 +750,12 @@ impl MsegEditState {
             let start = self.power.next_pen_start.unwrap_or(pointer);
             self.power.preview = if self.tool() != MsegTool::Pointer && in_rect(layout.canvas, x, y)
             {
-                pen_nodes(self.tool(), start, self.pen_end(start))
+                self.pen_points(
+                    data,
+                    start,
+                    self.pen_end(start),
+                    self.power.next_pen_start.is_some(),
+                )
             } else {
                 Vec::new()
             };
@@ -901,6 +934,49 @@ mod tests {
     }
 
     #[test]
+    fn hover_drag_and_remembered_pen_previews_match_preserved_boundary_weights() {
+        fn preview_at(points: &[MsegNode], phase: f32) -> f32 {
+            for pair in points.windows(2) {
+                if phase < pair[1].time {
+                    return crate::mseg::segment_value(&pair[0], &pair[1], phase);
+                }
+            }
+            points.last().unwrap().value
+        }
+        let mut data = MsegData {
+            snap: false,
+            ..MsegData::default()
+        };
+        factory_shape(FactoryShape::Triangle)
+            .apply(&mut data, false)
+            .unwrap();
+        data.nodes[1].weight = crate::mseg::PointWeight::Soft;
+        let mut state = MsegEditState::new();
+        state.set_tool(MsegTool::Line);
+        state.power.pen_size = (0.5, 1.0);
+        let layout = mseg_layout(RECT, false, 1.0);
+        let start = (phase_to_x(&layout, 0.0), value_to_y(&layout, 0.0));
+        let end = (phase_to_x(&layout, 0.5), value_to_y(&layout, 1.0));
+        state.on_mouse_move(start.0, start.1, &mut data, RECT, 1.0, false);
+        assert_eq!(preview_at(state.pen_preview(), 0.25), 0.625);
+        state.on_mouse_down(start.0, start.1, &mut data, RECT, 1.0, false);
+        state.on_mouse_move(end.0, end.1, &mut data, RECT, 1.0, false);
+        assert_eq!(
+            preview_at(state.pen_preview(), 0.25),
+            crate::mseg::value_at_phase(&data, 0.25)
+        );
+        state.on_mouse_up(&mut data, RECT, 1.0);
+        let remembered = state.pen_preview().to_vec();
+        state.on_mouse_down(end.0, end.1, &mut data, RECT, 1.0, false);
+        for phase in [0.50005, 0.75] {
+            assert_eq!(
+                preview_at(&remembered, phase),
+                crate::mseg::value_at_phase(&data, phase)
+            );
+        }
+    }
+
+    #[test]
     fn pen_overflow_preserves_curve_and_selection() {
         let mut data = MsegData {
             node_count: 128,
@@ -914,6 +990,7 @@ mod tests {
         let mut state = MsegEditState::new();
         state.selection = 0b110;
         state.set_tool(MsegTool::SCurve);
+        state.power.pen_size = (0.001, 0.5);
         let layout = mseg_layout(RECT, false, 1.0);
         assert_eq!(
             state.on_mouse_down(

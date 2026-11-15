@@ -178,6 +178,43 @@ mod tests {
     }
 
     #[test]
+    fn native_and_weighted_msegs_sample_and_process_without_allocating() {
+        use tiny_skia_widgets::mseg::{MsegData, PointWeight, SegmentShape, value_at_phase};
+        let (mut processor, track) = processor(EffectKind::Bitcrush);
+        let input = [0.1; 32];
+        for shape in [SegmentShape::Curve, SegmentShape::SCurve] {
+            for weight in [PointWeight::Hard, PointWeight::Medium, PointWeight::Soft] {
+                let mut curve = MsegData::default();
+                curve.nodes[0].shape = shape;
+                curve.nodes[0].tension = -0.6;
+                curve.nodes[0].weight = weight;
+                curve.nodes[1].weight = PointWeight::Soft;
+                processor.modulation.msegs[0] = curve;
+                processor.modulation.msegs[1] = curve;
+                processor.modulation.targets[0] = Some(ModulationTarget::Mix);
+                processor.modulation.depths[0] = 0.5;
+                assert_no_alloc::assert_no_alloc(|| {
+                    for sample in 0..4096 {
+                        let value = value_at_phase(&curve, sample as f32 / 4096.0);
+                        assert!((0.0..=1.0).contains(&value));
+                    }
+                    for _ in 0..64 {
+                        processor.begin_block(&track, &input, &input, 120.0);
+                        for _ in 0..input.len() {
+                            assert!(
+                                processor
+                                    .process_sample([0.1; 2], track.mix, false)
+                                    .iter()
+                                    .all(|value| value.is_finite())
+                            );
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    #[test]
     fn none_is_passthrough_even_with_a_silent_amp_curve() {
         let (mut p, track) = processor(EffectKind::None);
         for node in &mut p.modulation.msegs[0].nodes {

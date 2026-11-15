@@ -1,6 +1,6 @@
 //! GUI-side reusable curves, independent of playback and routing.
 
-use super::{HoldMode, MAX_NODES, MsegData, MsegNode};
+use super::{HoldMode, MAX_NODES, MsegData, MsegNode, SegmentShape};
 
 pub const MAX_SHAPE_BYTES: usize = 65_536;
 
@@ -32,7 +32,13 @@ impl CurveShape {
             return Err(ShapeError::Invalid);
         }
         let file: ShapeFile = serde_json::from_str(text).map_err(|_| ShapeError::Invalid)?;
-        if file.version != 1 {
+        if !matches!(file.version, 1 | 2)
+            || (file.version == 1
+                && file
+                    .nodes
+                    .iter()
+                    .any(|n| !n.shape.is_curve() || !n.weight.is_hard()))
+        {
             return Err(ShapeError::Invalid);
         }
         validate_nodes(&file.nodes)?;
@@ -41,7 +47,15 @@ impl CurveShape {
 
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(&ShapeFile {
-            version: 1,
+            version: if self
+                .nodes
+                .iter()
+                .all(|n| n.shape.is_curve() && n.weight.is_hard())
+            {
+                1
+            } else {
+                2
+            },
             nodes: self.nodes.clone(),
         })
     }
@@ -166,6 +180,7 @@ pub(crate) fn node(time: f32, value: f32) -> MsegNode {
         value,
         tension: 0.0,
         stepped: false,
+        ..MsegNode::default()
     }
 }
 
@@ -192,21 +207,10 @@ pub(crate) fn pen_nodes(tool: MsegTool, start: (f32, f32), end: (f32, f32)) -> V
     } else {
         (end, start)
     };
-    let segments = if tool == MsegTool::SCurve { 16 } else { 1 };
-    let mut nodes: Vec<_> = (0..=segments)
-        .map(|i| {
-            let t = i as f32 / segments as f32;
-            let level = if tool == MsegTool::SCurve {
-                t * t * (3.0 - 2.0 * t)
-            } else {
-                t
-            };
-            node(
-                left.0 + (right.0 - left.0) * t,
-                left.1 + (right.1 - left.1) * level,
-            )
-        })
-        .collect();
+    let mut nodes = vec![node(left.0, left.1), node(right.0, right.1)];
+    if tool == MsegTool::SCurve {
+        nodes[0].shape = SegmentShape::SCurve;
+    }
     if tool == MsegTool::Arc {
         nodes[0].tension = if start.0 <= end.0 { -0.65 } else { 0.65 };
     }
@@ -237,7 +241,46 @@ impl std::error::Error for ShapeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mseg::{HoldMode, PlayMode, Polarity, SyncMode};
+    use crate::mseg::{HoldMode, PlayMode, PointWeight, Polarity, SyncMode};
+
+    #[test]
+    fn legacy_files_stay_version_one_and_native_metadata_roundtrips_in_version_two() {
+        let mut data = MsegData::default();
+        let legacy = CurveShape::capture(&data).to_json().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(json["version"], 1);
+        assert_eq!(json["nodes"][0].as_object().unwrap().len(), 4);
+        let old_project = serde_json::to_string(&data).unwrap();
+        assert!(!old_project.contains("shape") && !old_project.contains("weight"));
+        assert_eq!(
+            serde_json::from_str::<MsegData>(&old_project).unwrap(),
+            data
+        );
+        data.nodes[0].shape = SegmentShape::SCurve;
+        data.nodes[0].weight = PointWeight::Medium;
+        data.nodes[1].weight = PointWeight::Soft;
+        let shape = CurveShape::capture(&data);
+        let native = shape.to_json().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&native).unwrap();
+        assert_eq!(json["version"], 2);
+        assert_eq!(CurveShape::from_json(&native).unwrap(), shape);
+        assert!(
+            CurveShape::from_json(&native.replace("\"version\": 2", "\"version\": 1")).is_err()
+        );
+        assert!(
+            CurveShape::from_json(&native.replace("\"version\": 2", "\"version\": 3")).is_err()
+        );
+        let project = serde_json::to_string(&data).unwrap();
+        assert_eq!(serde_json::from_str::<MsegData>(&project).unwrap(), data);
+    }
+
+    #[test]
+    fn s_curve_pen_uses_one_native_segment() {
+        let nodes = pen_nodes(MsegTool::SCurve, (0.2, 0.1), (0.8, 0.9));
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].shape, SegmentShape::SCurve);
+        assert_eq!((nodes[0].time, nodes[1].time), (0.2, 0.8));
+    }
 
     #[test]
     fn applying_a_shape_preserves_the_destinations_settings() {

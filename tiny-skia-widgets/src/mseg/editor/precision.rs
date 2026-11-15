@@ -1,6 +1,6 @@
 use super::{DragTarget, MsegEdit, MsegEditState};
 use crate::mseg::render::{MsegLayout, in_rect, mseg_layout};
-use crate::mseg::{MsegData, MsegViewport, Polarity, SyncMode, tools};
+use crate::mseg::{MsegData, MsegViewport, PointWeight, Polarity, SegmentShape, SyncMode, tools};
 use keyboard_types::{Key, KeyState, KeyboardEvent, Modifiers};
 
 pub(crate) const VIEW_ITEMS: &[&str] = &["Fit all", "Fit selection"];
@@ -36,6 +36,10 @@ struct PointInspector {
     time_scale: f32,
     time_unit: &'static str,
     bipolar: bool,
+    shape: SegmentShape,
+    stepped: bool,
+    weight: PointWeight,
+    has_segment: bool,
 }
 
 impl PointInspector {
@@ -63,6 +67,10 @@ impl PointInspector {
             time_scale,
             time_unit,
             bipolar: data.polarity == Polarity::Bipolar,
+            shape: SegmentShape::Curve,
+            stepped: false,
+            weight: PointWeight::Hard,
+            has_segment: node + 1 < data.node_count,
         };
         inspector.refresh(data);
         inspector
@@ -70,6 +78,18 @@ impl PointInspector {
 
     fn refresh(&mut self, data: &MsegData) {
         let n = data.nodes[self.node];
+        self.has_segment = self.node + 1 < data.node_count;
+        self.editable = [
+            self.node > 0 && self.has_segment,
+            true,
+            self.has_segment && !n.stepped,
+        ];
+        if !self.editable[self.active] {
+            self.active = 1;
+        }
+        self.shape = n.shape;
+        self.stepped = n.stepped;
+        self.weight = n.weight;
         self.fields = [
             (n.time * self.time_scale).to_string(),
             (if self.bipolar {
@@ -321,6 +341,28 @@ impl MsegEditState {
         let scale = self.precision.scale;
         let panel = inspector_rect(rect, scale);
         let inspector = self.precision.inspector.as_mut()?;
+        if let Some(style) = (3..5).find(|&i| in_rect(field_rect(panel, i, scale), x, y)) {
+            if style == 3 && !inspector.has_segment {
+                return None;
+            }
+            let pending = inspector.commit(data);
+            if !inspector.error.is_empty() {
+                return pending;
+            }
+            let node = &mut data.nodes[inspector.node];
+            if style == 4 {
+                node.weight = node.weight.next();
+            } else if node.stepped {
+                node.stepped = false;
+                node.shape = SegmentShape::Curve;
+            } else if node.shape == SegmentShape::Curve {
+                node.shape = SegmentShape::SCurve;
+            } else {
+                node.stepped = true;
+            }
+            inspector.refresh(data);
+            return Some(MsegEdit::Changed);
+        }
         let field = (0..3).find(|&i| in_rect(field_rect(panel, i, scale), x, y));
         if let Some(field) = field {
             if !inspector.editable[field] || inspector.active == field {
@@ -537,6 +579,37 @@ impl MsegEditState {
                 );
             }
         }
+        for (i, label, value, enabled) in [
+            (
+                3,
+                "Shape",
+                if !inspector.has_segment {
+                    "-"
+                } else if inspector.stepped {
+                    "Step"
+                } else if inspector.shape == SegmentShape::SCurve {
+                    "S-curve"
+                } else {
+                    "Curve"
+                },
+                inspector.has_segment,
+            ),
+            (4, "Weight", inspector.weight.label(), true),
+        ] {
+            let field = field_rect(panel, i, scale);
+            let color = if enabled { color_text() } else { color_muted() };
+            tr.draw_text(
+                pixmap,
+                panel.0 + 10.0 * scale,
+                field.1 + 18.0 * scale,
+                label,
+                12.0 * scale,
+                color,
+            );
+            crate::controls::draw_button(
+                pixmap, tr, field.0, field.1, field.2, field.3, value, false, false,
+            );
+        }
         let text = if inspector.error.is_empty() {
             self.precision.readout.as_str()
         } else {
@@ -554,7 +627,7 @@ impl MsegEditState {
         tr.draw_text(
             pixmap,
             panel.0 + 10.0 * scale,
-            panel.1 + 142.0 * scale,
+            panel.1 + 198.0 * scale,
             &shown,
             11.0 * scale,
             color_text(),
@@ -562,7 +635,7 @@ impl MsegEditState {
         tr.draw_text(
             pixmap,
             panel.0 + 10.0 * scale,
-            panel.1 + 161.0 * scale,
+            panel.1 + 217.0 * scale,
             "Enter: apply  Tab: next  Esc: close",
             10.0 * scale,
             color_muted(),
@@ -610,9 +683,9 @@ fn inspector_rect(rect: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32
     let width = (340.0 * scale).min((rect.2 - 12.0 * scale).max(0.0));
     (
         rect.0 + rect.2 - width - 6.0 * scale,
-        (rect.1 + rect.3 - 74.0 * scale - 168.0 * scale).max(rect.1),
+        (rect.1 + rect.3 - 74.0 * scale - 224.0 * scale).max(rect.1),
         width,
-        168.0 * scale,
+        224.0 * scale,
     )
 }
 fn field_rect(panel: (f32, f32, f32, f32), field: usize, scale: f32) -> (f32, f32, f32, f32) {
@@ -682,6 +755,96 @@ mod tests {
                 state.on_key(&key(Key::Enter), &mut data, RECT, 1.0),
                 (true, None)
             );
+        }
+    }
+
+    #[test]
+    fn inspector_cycles_native_shape_and_weight_and_commits_pending_numeric_input() {
+        let (mut state, mut data) = fixture(false);
+        data.nodes[1].tension = 0.4;
+        state.open_point_inspector(&data);
+        type_text(&mut state, &mut data, "250");
+        let panel = inspector_rect(RECT, 1.0);
+        let shape = field_rect(panel, 3, 1.0);
+        let weight = field_rect(panel, 4, 1.0);
+        assert_eq!(
+            state.on_mouse_down(shape.0 + 5.0, shape.1 + 5.0, &mut data, RECT, 1.0, false),
+            Some(MsegEdit::Changed)
+        );
+        assert_eq!(data.nodes[1].time, 0.25);
+        assert_eq!(data.nodes[1].shape, SegmentShape::SCurve);
+        assert_eq!(data.nodes[1].tension, 0.4);
+        for expected in [PointWeight::Medium, PointWeight::Soft, PointWeight::Hard] {
+            assert_eq!(
+                state.on_mouse_down(weight.0 + 5.0, weight.1 + 5.0, &mut data, RECT, 1.0, false),
+                Some(MsegEdit::Changed)
+            );
+            assert_eq!(data.nodes[1].weight, expected);
+            assert_eq!(data.nodes[0].weight, PointWeight::Hard);
+        }
+        state.on_mouse_down(shape.0 + 5.0, shape.1 + 5.0, &mut data, RECT, 1.0, false);
+        assert!(data.nodes[1].stepped);
+        assert!(!state.precision.inspector.as_ref().unwrap().editable[2]);
+        state.on_mouse_down(shape.0 + 5.0, shape.1 + 5.0, &mut data, RECT, 1.0, false);
+        assert!(!data.nodes[1].stepped);
+        assert_eq!(data.nodes[1].shape, SegmentShape::Curve);
+        assert_eq!(data.nodes[1].tension, 0.4);
+    }
+
+    #[test]
+    fn invalid_numeric_input_blocks_style_changes_and_last_weight_remains_editable() {
+        let (mut state, mut data) = fixture(false);
+        let before = data;
+        state.open_point_inspector(&data);
+        type_text(&mut state, &mut data, "NaN");
+        let panel = inspector_rect(RECT, 1.0);
+        let weight = field_rect(panel, 4, 1.0);
+        assert_eq!(
+            state.on_mouse_down(weight.0 + 5.0, weight.1 + 5.0, &mut data, RECT, 1.0, false),
+            None
+        );
+        assert_eq!(data, before);
+        state.dismiss_inspector();
+        data = MsegData::default();
+        state.selection = 1 << 1;
+        state.open_point_inspector(&data);
+        let old = crate::mseg::value_at_phase(&data, 0.5);
+        let shape = field_rect(panel, 3, 1.0);
+        assert_eq!(
+            state.on_mouse_down(shape.0 + 5.0, shape.1 + 5.0, &mut data, RECT, 1.0, false),
+            None
+        );
+        assert_eq!(
+            state.on_mouse_down(weight.0 + 5.0, weight.1 + 5.0, &mut data, RECT, 1.0, false),
+            Some(MsegEdit::Changed)
+        );
+        assert_eq!(data.nodes[1].weight, PointWeight::Medium);
+        assert_ne!(crate::mseg::value_at_phase(&data, 0.5), old);
+    }
+
+    #[test]
+    fn bending_a_weighted_or_native_segment_has_no_initial_jump_and_returns_to_its_start() {
+        for scale in [0.5, 1.0, 2.0] {
+            for shape in [SegmentShape::Curve, SegmentShape::SCurve] {
+                let mut data = MsegData::default();
+                data.nodes[0].shape = shape;
+                data.nodes[0].weight = PointWeight::Soft;
+                data.nodes[0].tension = 0.4;
+                let before = data;
+                let mut state = MsegEditState::new();
+                let rect = (0.0, 0.0, 1100.0 * scale, 330.0 * scale);
+                let layout = state.layout(rect, scale);
+                let x = phase_to_x(&layout, 0.5);
+                let y = value_to_y(&layout, crate::mseg::value_at_phase(&data, 0.5));
+                state.on_mouse_down(x, y, &mut data, rect, scale, false);
+                state.on_mouse_move(x, y, &mut data, rect, scale, false);
+                assert_eq!(data, before);
+                state.on_mouse_move(x, y - layout.plot.3 * 0.1, &mut data, rect, scale, false);
+                assert!((data.nodes[0].tension - 0.2).abs() < 1e-6);
+                state.on_mouse_move(x, y, &mut data, rect, scale, false);
+                assert_eq!(data, before);
+                state.on_mouse_up(&mut data, rect, scale);
+            }
         }
     }
     #[test]

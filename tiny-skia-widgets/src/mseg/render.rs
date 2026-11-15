@@ -513,7 +513,23 @@ fn draw_nodes(
         } else {
             value_color
         };
-        draw_dot(pixmap, nx, ny, r, color);
+        if n.weight == crate::mseg::PointWeight::Hard {
+            draw_dot(pixmap, nx, ny, r, color);
+        } else {
+            draw_dot(pixmap, nx, ny, r, color_control_bg());
+            draw_rect_outline(
+                pixmap,
+                nx - r,
+                ny - r,
+                2.0 * r,
+                2.0 * r,
+                color,
+                scale.max(1.0),
+            );
+            if n.weight == crate::mseg::PointWeight::Medium {
+                draw_dot(pixmap, nx, ny, scale, color);
+            }
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 //! Transactional GUI-side point operations.
 
 use super::shape::validate_nodes;
-use super::{HoldMode, MsegData, MsegNode, ShapeError};
+use super::{HoldMode, MsegData, MsegNode, PointWeight, SegmentShape, ShapeError};
 
 pub(crate) fn all_nodes(count: usize) -> u128 {
     if count >= 128 {
@@ -38,6 +38,25 @@ fn commit(data: &mut MsegData, nodes: &[MsegNode]) -> Result<bool, ShapeError> {
     Ok(changed)
 }
 
+pub(crate) fn reconcile_interval_metadata(data: &MsegData, points: &mut [MsegNode]) {
+    if let Some(first) = points.first_mut()
+        && first.time > 0.0
+        && let Some(boundary) = data.active().iter().find(|n| n.time == first.time)
+    {
+        first.weight = boundary.weight;
+    }
+    if let Some(last) = points.last_mut()
+        && let Some(boundary) = data.active().iter().find(|n| n.time == last.time)
+    {
+        last.tension = boundary.tension;
+        last.stepped = boundary.stepped;
+        last.shape = boundary.shape;
+        if last.time < 1.0 {
+            last.weight = boundary.weight;
+        }
+    }
+}
+
 pub(crate) fn replace_interval(
     data: &mut MsegData,
     points: &[MsegNode],
@@ -53,11 +72,7 @@ pub(crate) fn replace_interval(
         .collect();
     let offset = nodes.len();
     nodes.extend_from_slice(points);
-    if let Some(boundary) = data.active().iter().find(|n| n.time == last.time) {
-        let end = &mut nodes[offset + points.len() - 1];
-        end.tension = boundary.tension;
-        end.stepped = boundary.stepped;
-    }
+    reconcile_interval_metadata(data, &mut nodes[offset..offset + points.len()]);
     nodes.extend(data.active().iter().filter(|n| n.time > last.time).copied());
     let changed = commit(data, &nodes)?;
     Ok((changed, all_nodes(points.len()) << offset))
@@ -71,6 +86,40 @@ pub(crate) fn flip_values(data: &mut MsegData, selection: u128) -> bool {
             changed |= n.value != 0.5;
             n.value = 1.0 - n.value;
         }
+    }
+    changed
+}
+
+pub(crate) fn set_segment_shape(
+    data: &mut MsegData,
+    selection: u128,
+    shape: SegmentShape,
+    stepped: bool,
+) -> bool {
+    let selected = effective_selection(data, selection);
+    let mut changed = false;
+    for (i, node) in data.nodes[..data.node_count - 1].iter_mut().enumerate() {
+        if selected & (1 << i) == 0 {
+            continue;
+        }
+        changed |= node.stepped != stepped || (!stepped && node.shape != shape);
+        node.stepped = stepped;
+        if !stepped {
+            node.shape = shape;
+        }
+    }
+    changed
+}
+
+pub(crate) fn set_point_weight(data: &mut MsegData, selection: u128, weight: PointWeight) -> bool {
+    let selected = effective_selection(data, selection);
+    let mut changed = false;
+    for (i, node) in data.nodes[..data.node_count].iter_mut().enumerate() {
+        if selected & (1 << i) == 0 {
+            continue;
+        }
+        changed |= node.weight != weight;
+        node.weight = weight;
     }
     changed
 }
@@ -152,14 +201,17 @@ pub(crate) fn reverse(data: &mut MsegData, selection: u128) -> Result<(bool, u12
         let index = points.len() - 1;
         points[index].tension = -pair[0].tension;
         points[index].stepped = false;
+        points[index].shape = pair[0].shape;
         if pair[0].stepped && pair[0].value != pair[1].value {
             let gap = ((pair[1].time - pair[0].time) * 0.25).min(1e-4);
             points[index].tension = 0.0;
+            points[index].shape = SegmentShape::Curve;
             points.push(MsegNode {
                 time: points[index].time + gap,
                 value: pair[0].value,
                 tension: 0.0,
                 stepped: false,
+                ..MsegNode::default()
             });
         }
         points.push(MsegNode {
@@ -196,7 +248,7 @@ pub(crate) fn repeat(
                     .get(points.len().saturating_sub(2))
                     .map_or(lo, |n| n.time);
                 if let Some(previous) = points.last_mut() {
-                    if previous.value == next.value {
+                    if previous.value == next.value && previous.weight == next.weight {
                         *previous = next;
                         continue;
                     }
@@ -204,6 +256,7 @@ pub(crate) fn repeat(
                     previous.time -= gap;
                     previous.tension = 0.0;
                     previous.stepped = false;
+                    previous.shape = SegmentShape::Curve;
                 }
             }
             points.push(next);
@@ -304,6 +357,93 @@ mod tests {
         let mut data = MsegData::default();
         factory_shape(kind).apply(&mut data, false).unwrap();
         data
+    }
+
+    #[test]
+    fn weighted_native_reversal_matches_the_reflected_sampled_shape() {
+        let mut data = shape(FactoryShape::Triangle);
+        data.insert_node(0.25, 0.3).unwrap();
+        data.nodes[0].shape = SegmentShape::SCurve;
+        data.nodes[1].tension = -0.5;
+        data.nodes[1].weight = PointWeight::Medium;
+        data.nodes[2].weight = PointWeight::Soft;
+        data.nodes[3].weight = PointWeight::Medium;
+        let before = data;
+        reverse(&mut data, 0).unwrap();
+        for i in 1..1000 {
+            let t = i as f32 / 1000.0;
+            assert!(
+                (value_at_phase(&data, t) - value_at_phase(&before, 1.0 - t)).abs() < 2e-5,
+                "{t}"
+            );
+        }
+        for i in 0..data.node_count {
+            assert_eq!(
+                data.nodes[i].weight,
+                before.nodes[before.node_count - 1 - i].weight
+            );
+        }
+    }
+
+    #[test]
+    fn repeat_retains_different_weights_at_equal_level_seams() {
+        let mut data = shape(FactoryShape::Triangle);
+        data.nodes[1].weight = PointWeight::Medium;
+        data.nodes[2].weight = PointWeight::Soft;
+        let before = data;
+        repeat(&mut data, 0, 2).unwrap();
+        let seam = data.active().iter().position(|n| n.time == 0.5).unwrap();
+        assert_eq!(data.nodes[seam].weight, PointWeight::Hard);
+        assert_eq!(data.nodes[seam - 1].weight, PointWeight::Soft);
+        for i in 1..1000 {
+            if i == 500 {
+                continue;
+            }
+            let t = i as f32 / 1000.0;
+            assert!(
+                (value_at_phase(&data, t) - value_at_phase(&before, (t * 2.0).fract())).abs()
+                    < 0.002,
+                "{t}"
+            );
+        }
+    }
+
+    #[test]
+    fn interval_paste_preserves_outside_weighted_segments_and_copies_interior_metadata() {
+        let mut data = MsegData::default();
+        for (t, v) in [(0.25, 0.2), (0.5, 0.4), (0.75, 0.8)] {
+            data.insert_node(t, v).unwrap();
+        }
+        data.nodes[0].tension = 0.4;
+        data.nodes[0].weight = PointWeight::Medium;
+        data.nodes[1].weight = PointWeight::Soft;
+        data.nodes[3].weight = PointWeight::Medium;
+        data.nodes[3].tension = -0.3;
+        data.nodes[4].weight = PointWeight::Soft;
+        let before = data;
+        let mut source = shape(FactoryShape::Triangle);
+        source.nodes[0].value = 0.2;
+        source.nodes[2].value = 0.8;
+        source.nodes[0].shape = SegmentShape::SCurve;
+        source.nodes[1].weight = PointWeight::Soft;
+        paste_selection(
+            &mut data,
+            &super::super::CurveShape::capture(&source),
+            0b1110,
+            false,
+        )
+        .unwrap();
+        assert_eq!(data.nodes[1].shape, SegmentShape::SCurve);
+        assert_eq!(data.nodes[1].weight, PointWeight::Soft);
+        assert_eq!(data.nodes[2].weight, PointWeight::Soft);
+        assert_eq!(data.nodes[3].weight, PointWeight::Medium);
+        for i in (1..250).chain(751..1000) {
+            let t = i as f32 / 1000.0;
+            assert_eq!(
+                value_at_phase(&data, t).to_bits(),
+                value_at_phase(&before, t).to_bits()
+            );
+        }
     }
 
     #[test]
@@ -448,12 +588,14 @@ mod tests {
                 value: 0.3,
                 tension: 0.0,
                 stepped: false,
+                ..MsegNode::default()
             },
             MsegNode {
                 time: 0.5,
                 value: 1.0,
                 tension: 0.0,
                 stepped: false,
+                ..MsegNode::default()
             },
         ];
         replace_interval(&mut data, &points).unwrap();

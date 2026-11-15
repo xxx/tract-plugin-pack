@@ -15,9 +15,36 @@ pointer chooses a new starting position. Leftward dragging makes repetition
 proceed leftward. Repetition stops at the edge of the canvas.
 
 Pens replace points within their span and preserve points outside it. S-curves
-use 16 short linear segments; arc pens use the existing tension interpolation.
-Sharp seams between repeated shapes use a very short linear transition.
+use one native segment with two endpoints; arc pens use tension interpolation.
+Sharp seams between repeated shapes use a very short transition. Previews use
+the same boundary weights as the committed shape.
 **Escape** cancels the current gesture and returns to Pointer.
+
+### Native shapes and point weights
+
+The Point inspector's **Shape** button cycles **Curve → S-curve → Step**. Curve
+uses the existing linear/exponential tension law. S-curve provides flat endpoint
+tangents without adding intermediate points; Tension bends its progression.
+Step holds its starting level until the following point. The last point's
+unused Shape control is disabled.
+
+**Weight** cycles **Hard → Medium → Soft**. Hard keeps the original behavior;
+Medium halves the endpoint slope; Soft eases to a flat tangent at that point.
+Times and levels remain exact. A Soft point in a rising curve creates a brief
+pause; it does not move the point or average its level with its neighbors.
+Hard points are filled, Medium points have a center dot, and Soft points are hollow.
+
+Native S-curves already have flat endpoints, so weights do not alter them.
+Steps retain their hard jumps. A point's weight may still affect the other
+adjacent Curve segment, including the incoming segment at the final point.
+All new interpolation stays between its endpoints and uses the same sampler
+for drawing, live modulation, Miff tap baking, and Nap sequence generation.
+
+Edit offers **Curve/S-curve/Stepped segments** and **Hard/Medium/Soft points**.
+These act on the selected points, or all points when nothing is selected.
+Segment commands skip the last point. Inspector style clicks first apply valid
+pending numeric input; invalid text blocks the click. Each click/command is
+one undo step in Multosis/Minitosis.
 
 ## Selecting and transforming
 
@@ -48,22 +75,30 @@ curve. **Paste fitted to height** scales the incoming values to the current
 curve's minimum/maximum; a flat incoming curve maps to that range's midpoint.
 
 **Import shape...** and **Export curve...** open native file dialogs for versioned
-JSON files. Library operations transfer only point positions, levels, tension,
-and steps. They preserve the destination's length, clock, play mode, grid,
+JSON files. Library operations transfer point positions, levels, tension,
+steps, native shapes, and weights. They preserve the destination's length, clock, play mode, grid,
 polarity, routing, and modulation depth. Replacing a complete shape clears its
 sustain/loop markers. Missing favorites, unavailable storage, invalid files, and
 capacity errors appear beside the menus without replacing the curve.
+
+Old projects and version-1 curve files load with Curve/Hard defaults and retain
+their original sound. Legacy-only exports stay version 1. Native shapes or
+non-Hard weights use version 2, which older builds reject. Use current plugin
+builds for projects containing new node metadata; older project readers ignore
+the added attributes and cannot reproduce those shapes.
 
 ### Copying and pasting a phrase
 
 Select at least two adjacent points, then choose **Copy selection** from Edit.
 The clipboard stores that phrase with its time normalized to 0..1. Levels,
-tension, and steps retain their original shape.
+tension, steps, native shapes, and interior point weights retain their shape.
 
 Select an interval in the destination and choose **Paste replace selection** to
 fit the phrase into that interval. **Paste merge selection** retains existing
 interior points; pasted points win when their times coincide. Points outside
 the interval and the outgoing segment after its last point are preserved.
+Existing boundary points keep their outside-facing weights so adjoining
+segments retain their styles. Full-curve replacement transfers every weight.
 Both modes select the resulting interval and reject the entire operation if
 it would exceed 128 points or create overlapping times.
 

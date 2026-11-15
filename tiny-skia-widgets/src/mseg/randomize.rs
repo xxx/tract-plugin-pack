@@ -209,6 +209,7 @@ pub fn randomize(data: &mut MsegData, style: RandomStyle, seed: u32) {
             value,
             tension,
             stepped,
+            ..MsegNode::default()
         };
     }
     data.node_count = count;
