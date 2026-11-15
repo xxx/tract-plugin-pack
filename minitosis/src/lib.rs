@@ -21,6 +21,7 @@ pub struct Shared {
     pub reset_modulation: AtomicBool,
     pub modulation_dirty: AtomicBool,
     pub phases: [AtomicU32; 4],
+    pub telemetry: Arc<tract_effects::modulation_telemetry::ModulationTelemetry>,
 }
 
 impl Default for Shared {
@@ -33,6 +34,9 @@ impl Default for Shared {
             reset_modulation: AtomicBool::new(false),
             modulation_dirty: AtomicBool::new(true),
             phases: std::array::from_fn(|_| AtomicU32::new(0)),
+            telemetry: Arc::new(
+                tract_effects::modulation_telemetry::ModulationTelemetry::default(),
+            ),
         }
     }
 }
@@ -82,6 +86,7 @@ pub struct Minitosis {
     retry_samples: usize,
     was_playing: bool,
     reported_latency: u32,
+    trace_clock: tract_effects::modulation_telemetry::TraceClock,
 }
 
 impl Default for Minitosis {
@@ -102,6 +107,7 @@ impl Default for Minitosis {
             retry_samples: 0,
             was_playing: false,
             reported_latency: 0,
+            trace_clock: tract_effects::modulation_telemetry::TraceClock::default(),
         }
     }
 }
@@ -119,6 +125,7 @@ impl Minitosis {
         let key = prepare_key(&self.params, &self.shared);
         if self.processor.key != key {
             if self.shared.handoff.try_install(key, &mut self.processor) {
+                self.shared.telemetry.invalidate();
                 self.shared
                     .active_generation
                     .store(key.generation, Ordering::Release);
@@ -145,16 +152,22 @@ impl Minitosis {
                 self.shared.modulation_dirty.store(true, Ordering::Release);
             }
         }
-        if self.shared.reset_modulation.swap(false, Ordering::AcqRel)
-            || (playing && !self.was_playing && self.params.retrig_on_play.value())
-        {
+        if self.shared.reset_modulation.swap(false, Ordering::AcqRel) {
             self.processor.reset_modulation();
+        } else if playing && !self.was_playing && self.params.retrig_on_play.value() {
+            self.processor.retrigger_modulation();
         }
         self.was_playing = playing;
         let track = self
             .params
             .controls_for(kind)
             .track(self.params.mix.value(), false);
+        let request = self.trace_clock.begin_block(
+            &self.shared.telemetry,
+            f32::from_bits(self.processor.key.sample_rate_bits) as f64,
+        );
+        self.processor
+            .set_telemetry_enabled(request.matches(0, self.processor.key.kind));
         self.processor.begin_block(&track, left, right, bpm);
         let latency = self.processor.latency() as u32;
         if latency != self.reported_latency {
@@ -169,11 +182,23 @@ impl Minitosis {
                 self.params.mix.value(),
                 bypass || pending,
             );
+            if self.trace_clock.tick() {
+                self.trace_clock.record(
+                    &self.shared.telemetry,
+                    0,
+                    &self.processor.modulation_frame(),
+                );
+            }
             let gain = self.params.output.smoothed.next();
             let gain = if bypass { 1.0 } else { gain };
             left[i] = wet[0] * gain;
             right[i] = wet[1] * gain;
         }
+        self.trace_clock.publish(
+            &self.shared.telemetry,
+            0,
+            &self.processor.modulation_frame(),
+        );
         for (k, phase) in self.shared.phases.iter().enumerate() {
             phase.store(self.processor.phase(k).to_bits(), Ordering::Relaxed);
         }
@@ -237,6 +262,7 @@ impl Plugin for Minitosis {
                 .track(self.params.mix.value(), false),
             modulation,
         );
+        self.shared.telemetry.invalidate();
         self.shared
             .active_generation
             .store(key.generation, Ordering::Release);

@@ -221,6 +221,7 @@ impl Plugin for Multosis {
             self.reset_request.clone(),
             self.active_rows.clone(),
             self.mseg_phases.clone(),
+            self.engine.telemetry.clone(),
             self.config_dirty.clone(),
             self.pending_track_swap.clone(),
         )
@@ -232,6 +233,7 @@ impl Plugin for Multosis {
         buffer_config: &BufferConfig,
         context: &mut impl InitContext<Self>,
     ) -> bool {
+        self.engine.telemetry.invalidate();
         self.sample_rate = buffer_config.sample_rate;
         self.engine.set_sample_rate(self.sample_rate);
         // Bridge the persisted grid (possibly just restored from project
@@ -282,7 +284,7 @@ impl Plugin for Multosis {
 
         // Reset the sequence on the transport stopped→playing edge.
         if playing && !self.was_playing {
-            self.engine.reset();
+            self.engine.restart_transport();
         }
         self.was_playing = playing;
 
@@ -307,8 +309,8 @@ impl Plugin for Multosis {
                 self.params.track_modulation.try_lock(),
             )
         {
-            self.engine.set_effects(&eff);
             self.engine.set_modulation(&modu);
+            self.engine.set_effects(&eff);
             self.config_dirty
                 .store(false, std::sync::atomic::Ordering::Relaxed);
         }

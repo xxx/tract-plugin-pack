@@ -777,7 +777,8 @@ fn draw_strip(
         state.inspector_node().is_some(),
         false,
     );
-    let available = (sx + sw - toolbar.message_x - 6.0 * scale).max(0.0);
+    let available =
+        (sx + sw - state.status_reserve() * scale - toolbar.message_x - 6.0 * scale).max(0.0);
     let viewport = state.viewport();
     let (lo, hi) = viewport.time_range();
     let (mut bottom, mut top) = viewport.value_range();
@@ -970,18 +971,6 @@ pub fn mseg_hit_test_with_selection(
     }
 }
 
-/// Draw a 1px line by sampling points along it (sufficient for the curve;
-/// stepped segments produce near-vertical jumps which this still renders).
-fn draw_line(pixmap: &mut Pixmap, x0: f32, y0: f32, x1: f32, y1: f32, color: tiny_skia::Color) {
-    let dx = x1 - x0;
-    let dy = y1 - y0;
-    let steps = dx.abs().max(dy.abs()).ceil().max(1.0) as usize;
-    for s in 0..=steps {
-        let t = s as f32 / steps as f32;
-        draw_rect(pixmap, x0 + dx * t, y0 + dy * t, 1.0, 1.0, color);
-    }
-}
-
 pub(crate) fn draw_plot_line(
     pixmap: &mut Pixmap,
     layout: &MsegLayout,
@@ -1031,14 +1020,20 @@ fn draw_clipped_line(
             }
         }
     }
-    draw_line(
-        pixmap,
-        x0 + dx * begin,
-        y0 + dy * begin,
-        x0 + dx * end,
-        y0 + dy * end,
-        color,
-    );
+    let (x, y) = (x0 + dx * begin, y0 + dy * begin);
+    let (dx, dy) = (dx * (end - begin), dy * (end - begin));
+    let steps = dx.abs().max(dy.abs()).ceil().max(1.0) as usize;
+    for s in 0..=steps {
+        let t = s as f32 / steps as f32;
+        let (left, top) = ((x + dx * t).max(clip.0), (y + dy * t).max(clip.1));
+        let (right, bottom) = (
+            (x + dx * t + 1.0).min(clip.0 + clip.2),
+            (y + dy * t + 1.0).min(clip.1 + clip.3),
+        );
+        if right > left && bottom > top {
+            draw_rect(pixmap, left, top, right - left, bottom - top, color);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1337,5 +1332,83 @@ mod tests {
         // The ghost curve strokes a polyline — some pixels are non-transparent.
         let any_drawn = pm.pixels().iter().any(|p| p.alpha() != 0);
         assert!(any_drawn, "the ghost curve should draw some pixels");
+    }
+
+    #[test]
+    fn measured_trace_points_at_zoom_boundaries_stay_inside_the_plot() {
+        for scale in [0.5, 1.0, 2.0] {
+            let mut pm = Pixmap::new(180, 120).unwrap();
+            let mut layout = mseg_layout((0.0, 0.0, 180.0, 120.0), true, scale);
+            layout.plot = (20.0, 20.0, 120.0, 70.0);
+            layout.viewport.time = (0.25, 0.75);
+            layout.viewport.value = (0.25, 0.75);
+            draw_mseg_trace(
+                &mut pm,
+                &layout,
+                &[
+                    Some((0.25, 0.75)),
+                    Some((0.5, 0.5)),
+                    Some((0.70, 0.30)),
+                    Some((0.75, 0.25)),
+                ],
+                scale,
+                color_text(),
+            );
+            assert!(pm.pixels().iter().any(|pixel| pixel.alpha() > 0));
+            for (index, pixel) in pm
+                .pixels()
+                .iter()
+                .enumerate()
+                .filter(|(_, pixel)| pixel.alpha() > 0)
+            {
+                let (x, y) = (index % 180, index / 180);
+                assert!(
+                    (20..140).contains(&x) && (20..90).contains(&y),
+                    "trace escaped at ({x}, {y}), scale {scale}, alpha {}",
+                    pixel.alpha()
+                );
+            }
+        }
+    }
+}
+
+/// Overlay measured normalized output, leaving large unmeasured phase gaps disconnected.
+pub fn draw_mseg_trace(
+    pixmap: &mut Pixmap,
+    layout: &MsegLayout,
+    points: &[Option<(f32, f32)>],
+    scale: f32,
+    color: tiny_skia::Color,
+) {
+    let mut previous: Option<(f32, f32)> = None;
+    for &(phase, value) in points.iter().flatten() {
+        if !phase.is_finite() || !value.is_finite() {
+            continue;
+        }
+        let x = phase_to_x(layout, phase);
+        let y = value_to_y(layout, value);
+        if let Some((p, v)) = previous
+            && (0.0..=0.125).contains(&(phase - p))
+        {
+            draw_plot_line(
+                pixmap,
+                layout,
+                phase_to_x(layout, p),
+                value_to_y(layout, v),
+                x,
+                y,
+                color,
+            );
+        }
+        if layout.viewport.contains(phase, value) {
+            let radius = scale.max(1.0) * 0.75;
+            let (px, py, pw, ph) = layout.plot;
+            let (left, top) = ((x - radius).max(px), (y - radius).max(py));
+            let (right, bottom) = ((x + radius).min(px + pw), (y + radius).min(py + ph));
+            if right > left && bottom > top {
+                draw_rect(pixmap, left, top, right - left, bottom - top, color);
+            }
+        }
+        previous = Some((phase, value));
     }
 }

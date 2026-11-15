@@ -58,6 +58,8 @@ pub struct EffectLayout {
     pub mseg_sync: (f32, f32, f32, f32),
     /// Active-MSEG length slider (beats or seconds, depending on sync mode).
     pub mseg_length: (f32, f32, f32, f32),
+    pub smooth: (f32, f32, f32, f32),
+    pub trace: (f32, f32, f32, f32),
 }
 
 /// Compute the effect-editor layout at `scale`.
@@ -114,6 +116,18 @@ pub fn effect_layout(bounds: (f32, f32, f32, f32), scale: f32) -> EffectLayout {
     let mseg_sync = l(ox + 814.0, oy + 200.0, 110.0, 34.0);
     let mseg_length = l(ox + 934.0, oy + 200.0, 140.0, 34.0);
     let mseg_pane = l(ox, oy + 240.0, mw - inset, 390.0);
+    let smooth = (
+        mseg_pane.0 + mseg_pane.2 - 234.0 * scale,
+        mseg_pane.1 + mseg_pane.3 - 30.0 * scale,
+        150.0 * scale,
+        26.0 * scale,
+    );
+    let trace = (
+        mseg_pane.0 + mseg_pane.2 - 78.0 * scale,
+        smooth.1,
+        72.0 * scale,
+        26.0 * scale,
+    );
     EffectLayout {
         back,
         effect_header,
@@ -131,6 +145,8 @@ pub fn effect_layout(bounds: (f32, f32, f32, f32), scale: f32) -> EffectLayout {
         trigger_aux,
         mseg_sync,
         mseg_length,
+        smooth,
+        trace,
     }
 }
 
@@ -204,6 +220,8 @@ pub enum EffectHit {
     MsegLength,
     /// The per-track Mix dial.
     Mix,
+    Smooth(usize),
+    Trace,
 }
 
 /// The MSEG-selector tab order shown to the user. The three assignable MSEGs
@@ -299,6 +317,12 @@ pub fn effect_hit(
         if in_rect(lay.depth, px, py) {
             return Some(EffectHit::Depth);
         }
+    }
+    if in_rect(lay.smooth, px, py) {
+        return Some(EffectHit::Smooth(selected_mseg.min(3)));
+    }
+    if in_rect(lay.trace, px, py) {
+        return Some(EffectHit::Trace);
     }
     if in_rect(lay.mseg_pane, px, py) {
         return Some(EffectHit::MsegPane);

@@ -9,6 +9,8 @@ use crate::grid::ROWS;
 pub struct Modulation {
     config: [TrackModulation; ROWS],
     states: [ModulationState; ROWS],
+    smooth_rows: [usize; ROWS],
+    smooth_count: usize,
 }
 
 impl Modulation {
@@ -16,6 +18,8 @@ impl Modulation {
         Self {
             config: std::array::from_fn(TrackModulation::default_for_row),
             states: std::array::from_fn(|_| ModulationState::default()),
+            smooth_rows: [0; ROWS],
+            smooth_count: 0,
         }
     }
 
@@ -37,6 +41,32 @@ impl Modulation {
             state.reset();
         }
     }
+    pub fn reset_smoothing(&mut self) {
+        for s in &mut self.states {
+            s.reset_smoothing();
+        }
+        self.smooth_count = 0;
+    }
+    pub fn restart_clock(&mut self) {
+        for s in &mut self.states {
+            s.restart_clock();
+        }
+    }
+    pub fn smoothed_parameter(
+        &self,
+        row: usize,
+        kind: crate::effects::EffectKind,
+        index: usize,
+    ) -> bool {
+        self.config[row].smoothed_parameter(kind, index)
+            && self.states[row].holds_smoothed_parameter(kind, index)
+    }
+    pub fn process_smoothing_sample(&mut self, effects: &mut [EffectInstance; ROWS]) {
+        for i in 0..self.smooth_count {
+            let r = self.smooth_rows[i];
+            self.states[r].process_smoothing_sample(&self.config[r], &mut effects[r]);
+        }
+    }
 
     pub fn amplitude(&self, row: usize) -> f32 {
         self.states[row].amplitude()
@@ -53,6 +83,26 @@ impl Modulation {
     pub fn phase(&self, row: usize, slot: usize) -> f32 {
         self.states[row].phase(slot)
     }
+    pub fn set_telemetry_request(
+        &mut self,
+        request: tract_effects::modulation_telemetry::TraceRequest,
+        tracks: &[TrackEffect; ROWS],
+    ) {
+        for (r, state) in self.states.iter_mut().enumerate() {
+            state.set_telemetry_enabled(request.matches(r, tracks[r].kind));
+        }
+    }
+    pub fn frame(
+        &self,
+        row: usize,
+        kind: crate::effects::EffectKind,
+    ) -> tract_effects::modulation_telemetry::ModulationFrame {
+        tract_effects::modulation_telemetry::ModulationFrame::capture(
+            kind,
+            &self.config[row],
+            &self.states[row],
+        )
+    }
 
     pub fn begin_block(&mut self, left: &[f32], right: &[f32], sample_rate: f64) {
         for (state, config) in self.states.iter_mut().zip(&self.config) {
@@ -68,6 +118,7 @@ impl Modulation {
         effects: &mut [EffectInstance; ROWS],
         track_effects: &[TrackEffect; ROWS],
     ) {
+        self.smooth_count = 0;
         for row in 0..ROWS {
             self.states[row].advance_segment(
                 &self.config[row],
@@ -77,6 +128,10 @@ impl Modulation {
                 bpm,
                 sample_rate,
             );
+            if self.states[row].smoothing_active() {
+                self.smooth_rows[self.smooth_count] = row;
+                self.smooth_count += 1;
+            }
         }
     }
 

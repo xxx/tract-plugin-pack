@@ -9,6 +9,8 @@ use crate::effects::{Effect, EffectInstance, TrackEffect};
 use crate::grid::{Grid, ROWS};
 use crate::modulation::{Modulation, TrackModulation};
 use crate::propagation::{Playhead, active_rows};
+use std::sync::Arc;
+use tract_effects::modulation_telemetry::{ModulationTelemetry, TraceClock, TraceRequest};
 
 /// Upper bound on step boundaries handled within one process block. At any
 /// realistic tempo/speed/sample-rate, `samples_per_step` is at least a few
@@ -39,6 +41,9 @@ pub struct AudioEngine {
     /// the peak without the user having to ride a master gain.
     compressor: Compressor,
     sample_rate: f32,
+    pub telemetry: Arc<ModulationTelemetry>,
+    trace_clock: TraceClock,
+    trace_request: TraceRequest,
 }
 
 impl AudioEngine {
@@ -61,6 +66,9 @@ impl AudioEngine {
             last_active: 0,
             compressor: Compressor::new(),
             sample_rate: 48_000.0,
+            telemetry: Arc::new(ModulationTelemetry::default()),
+            trace_clock: TraceClock::default(),
+            trace_request: TraceRequest::default(),
         }
     }
 
@@ -98,7 +106,9 @@ impl AudioEngine {
                 .iter()
                 .enumerate()
             {
-                self.effects[r].set_param(i, param);
+                if !self.modulation.smoothed_parameter(r, cfg.kind, i) {
+                    self.effects[r].set_param(i, param);
+                }
             }
         }
         self.track_effects = *config;
@@ -123,6 +133,7 @@ impl AudioEngine {
         self.effects.swap(a, b);
         self.track_effects.swap(a, b);
         self.modulation.swap_rows(a, b);
+        self.telemetry.invalidate();
     }
 
     /// Recompute sample-rate-dependent effect coefficients.
@@ -156,19 +167,25 @@ impl AudioEngine {
         self.last_active = 0;
     }
 
-    /// Flush DSP buffer state — every per-row effect and the wet-bus
-    /// compressor. Sequence and modulation timing (playhead, step counter,
-    /// clock, MSEG phases, last-active mirror) are deliberately preserved.
-    /// This is the audio-thread target of `Plugin::reset`: Bitwig (and
-    /// other hosts) call `Plugin::reset` mid-playback on PDC realignment,
-    /// and clearing MSEG state there is audible as every MSEG on every
-    /// track restarting in lockstep. The transport stopped→playing edge in
-    /// `process` still drives the full sequence restart via [`reset`].
-    pub fn flush_dsp(&mut self) {
-        for e in &mut self.effects {
-            e.reset();
+    fn flush_effects(&mut self) {
+        for effect in &mut self.effects {
+            effect.reset();
         }
         self.compressor.reset();
+    }
+    /// Clear audio history and smoothing seeds while preserving modulation clocks.
+    pub fn flush_dsp(&mut self) {
+        self.flush_effects();
+        self.modulation.reset_smoothing();
+    }
+    /// Restart sequence/modulation clocks while retaining smoothed source levels.
+    pub fn restart_transport(&mut self) {
+        self.playhead.reset();
+        self.step = 0;
+        self.clock.reset();
+        self.flush_effects();
+        self.modulation.restart_clock();
+        self.last_active = 0;
     }
 
     /// Steps since the last reset — exposed for the editor's status readout.
@@ -214,6 +231,7 @@ impl AudioEngine {
         dry_r: f32,
         active: u16,
     ) -> (f32, f32) {
+        self.modulation.process_smoothing_sample(&mut self.effects);
         let mut cur_l = dry_l;
         let mut cur_r = dry_r;
         for r in 0..ROWS {
@@ -234,6 +252,16 @@ impl AudioEngine {
             let amp = self.modulation.amplitude(r);
             cur_l = amp * lane_l;
             cur_r = amp * lane_r;
+        }
+        if self.trace_clock.tick()
+            && self.trace_request.matches(
+                self.trace_request.row,
+                self.track_effects[self.trace_request.row].kind,
+            )
+        {
+            let row = self.trace_request.row;
+            let frame = self.modulation.frame(row, self.track_effects[row].kind);
+            self.trace_clock.record(&self.telemetry, row, &frame);
         }
         (cur_l, cur_r)
     }
@@ -279,6 +307,9 @@ impl AudioEngine {
     ) {
         let n = left.len().min(right.len());
         let sr = self.sample_rate as f64;
+        self.trace_request = self.trace_clock.begin_block(&self.telemetry, sr);
+        self.modulation
+            .set_telemetry_request(self.trace_request, &self.track_effects);
 
         // Block-rate modulation setup: FreeHz + Transient fires, zero the
         // fire mask. The transient detector reads the dry input before the
@@ -380,6 +411,11 @@ impl AudioEngine {
         // last_active is the audible mask — what the user sees in the track
         // listing's "sounding" dot. Muted/non-soloed rows stay dark even when
         // their grid cell is on.
+        if self.trace_request.token != 0 {
+            let row = self.trace_request.row;
+            let frame = self.modulation.frame(row, self.track_effects[row].kind);
+            self.trace_clock.publish(&self.telemetry, row, &frame);
+        }
         self.last_active = active & !mute_mask;
     }
 
@@ -1277,6 +1313,107 @@ mod tests {
             "the blend should ramp from the preceding endpoint"
         );
         assert!((left[3] - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn smooth_clocks_advance_on_inactive_muted_and_none_rows_without_allocating() {
+        use crate::effects::{EffectKind, default_params_for_kind};
+        use crate::modulation::TriggerSource;
+        use tiny_skia_widgets::{MsegData, PlayMode};
+        let mut engine = AudioEngine::new();
+        engine.set_sample_rate(48000.0);
+        let mut tracks = [TrackEffect::default(); ROWS];
+        for track in &mut tracks[..3] {
+            track.kind = EffectKind::Bitcrush;
+            track.params = default_params_for_kind(track.kind);
+        }
+        tracks[2].muted = true;
+        let mut config = std::array::from_fn(TrackModulation::default_for_row);
+        for row in &mut config[..4] {
+            row.trigger = TriggerSource::Free;
+            row.smooth_ms[0] = 25.0;
+            row.msegs[0] = MsegData {
+                play_mode: PlayMode::Cyclic,
+                time_seconds: 0.1,
+                ..MsegData::default()
+            };
+        }
+        engine.set_modulation(&config);
+        engine.set_effects(&tracks);
+        engine.telemetry.request(0, 0, EffectKind::Bitcrush, true);
+        let mut grid = Grid::default();
+        grid.cell_mut(1, 0).enabled = false;
+        let (mut left, mut right) = ([0.1; 64], [0.1; 64]);
+        assert_no_alloc::assert_no_alloc(|| {
+            for _ in 0..100 {
+                engine.process(&mut left, &mut right, false, 1000.0, 120.0, 1.0, &grid);
+            }
+        });
+        assert!(engine.modulation_phase(0, 0) > 0.0);
+        let expected = engine.modulation.frame(0, tracks[0].kind);
+        for (row, track) in tracks.iter().enumerate().take(4).skip(1) {
+            let frame = engine.modulation.frame(row, track.kind);
+            assert_eq!(frame.phases[0], expected.phases[0], "row {row}");
+            assert_eq!(frame.outputs[0], expected.outputs[0], "row {row}");
+        }
+        engine.restart_transport();
+        let restarted = engine.modulation.frame(0, tracks[0].kind);
+        assert_eq!(restarted.phases[0], 0.0);
+        assert_eq!(restarted.outputs[0], expected.outputs[0]);
+    }
+
+    #[test]
+    fn removing_a_smooth_route_after_flush_restores_its_base_in_either_bridge_order() {
+        use crate::effects::{EffectKind, default_params_for_kind};
+        use crate::modulation::ModulationTarget;
+        for modulation_first in [false, true] {
+            let mut engine = AudioEngine::new();
+            engine.set_sample_rate(48000.0);
+            let mut tracks = [TrackEffect::default(); ROWS];
+            tracks[0].kind = EffectKind::Bitcrush;
+            tracks[0].params = default_params_for_kind(tracks[0].kind);
+            let mut config = std::array::from_fn(TrackModulation::default_for_row);
+            config[0].targets[0] = Some(ModulationTarget::EffectParameter(0));
+            config[0].depths[0] = -1.0;
+            config[0].smooth_ms[1] = 20.0;
+            for node in &mut config[0].msegs[1].nodes {
+                node.value = 1.0;
+            }
+            engine.set_modulation(&config);
+            engine.set_effects(&tracks);
+            let grid = Grid::default();
+            let (mut left, mut right) = ([0.6; 64], [0.6; 64]);
+            engine.process(&mut left, &mut right, false, 1000.0, 120.0, 1.0, &grid);
+            assert!(left[63] > 0.9);
+            engine.flush_dsp();
+            config[0].targets[0] = None;
+            if modulation_first {
+                engine.set_modulation(&config);
+            }
+            engine.set_effects(&tracks);
+            if !modulation_first {
+                engine.set_modulation(&config);
+            }
+            left.fill(0.6);
+            right.fill(0.6);
+            engine.process(&mut left, &mut right, false, 1000.0, 120.0, 1.0, &grid);
+            let mut reference = AudioEngine::new();
+            reference.set_sample_rate(48000.0);
+            reference.set_modulation(&config);
+            reference.set_effects(&tracks);
+            let (mut expected_left, mut expected_right) = ([0.6; 64], [0.6; 64]);
+            reference.process(
+                &mut expected_left,
+                &mut expected_right,
+                false,
+                1000.0,
+                120.0,
+                1.0,
+                &grid,
+            );
+            assert_eq!(left, expected_left);
+            assert_eq!(right, expected_right);
+        }
     }
 
     #[test]

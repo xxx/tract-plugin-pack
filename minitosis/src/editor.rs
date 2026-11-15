@@ -125,6 +125,14 @@ pub fn draw_frame(
         widgets::color_control_bg(),
     );
     let kind = frame.kind.unwrap_or_else(|| params.selected_kind());
+    let preparing = kind != params.selected_kind()
+        || shared.active_generation.load(Ordering::Acquire)
+            != params.selection_generation.load(Ordering::Acquire);
+    if preparing {
+        editor.disconnect_live();
+    } else {
+        editor.connect_live(&shared.telemetry, 0);
+    }
     let track = params
         .controls_for(kind)
         .track(params.mix.unmodulated_normalized_value(), true);
@@ -694,6 +702,7 @@ impl baseview::WindowHandler for MinitosisWindow {
 
 impl Drop for MinitosisWindow {
     fn drop(&mut self) {
+        self.editor.disconnect_live();
         self.end_effect_gestures();
         self.end_output_drag();
     }

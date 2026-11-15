@@ -1407,3 +1407,192 @@ mod precision_editing {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+mod smoothing_controls {
+    use super::*;
+
+    #[test]
+    fn smooth_drag_supports_fine_adjustment_reset_and_one_undo_entry() {
+        fn drag(modifiers: Modifiers) -> Harness {
+            let mut h = Harness::new();
+            h.modulation.smooth_ms[h.editor.selected_mseg] = 25.0;
+            let rect = h.geometry.layout.smooth;
+            h.move_to(rect.0 + 20.0, rect.1 + 20.0, Modifiers::empty());
+            h.press(MouseButton::Left);
+            h.move_to(rect.0 + 20.0, rect.1 + 10.0, modifiers);
+            assert!(h.move_to(rect.0 + 20.0, rect.1 - 20.0, modifiers).changed);
+            h.release();
+            h
+        }
+        let mut coarse = drag(Modifiers::empty());
+        let fine = drag(Modifiers::SHIFT);
+        let slot = coarse.editor.selected_mseg;
+        assert!(25.0 < fine.modulation.smooth_ms[slot]);
+        assert!(fine.modulation.smooth_ms[slot] < coarse.modulation.smooth_ms[slot]);
+        let mut before = coarse.modulation.clone();
+        before.smooth_ms[slot] = 25.0;
+        let after = coarse.modulation.clone();
+        let mut undo = crate::undo::UndoHistory::new();
+        undo.begin_capture(before.clone());
+        undo.commit_capture(&after);
+        assert_eq!(undo.undo(after.clone()), Some(before.clone()));
+        assert!(undo.undo(before.clone()).is_none());
+        assert_eq!(undo.redo(before), Some(after));
+        assert!(coarse.click(coarse.geometry.layout.smooth).changed);
+        assert_eq!(coarse.modulation.smooth_ms[slot], 0.0);
+    }
+
+    #[test]
+    fn smooth_numeric_entry_is_saved_per_slot_and_trace_toggle_is_view_only() {
+        let mut h = Harness::new();
+        let before = h.modulation.clone();
+        let slot = h.editor.selected_mseg;
+        let smooth = h.geometry.layout.smooth;
+        h.move_to(smooth.0 + 10.0, smooth.1 + 10.0, Modifiers::empty());
+        h.press(MouseButton::Right);
+        h.type_replacement("25");
+        assert!(h.key(Key::Enter).changed);
+        assert_eq!(h.modulation.smooth_ms[slot], 25.0);
+        assert_eq!(h.modulation.msegs, before.msegs);
+        let saved = serde_json::to_string(&h.modulation).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TrackModulation>(&saved).unwrap(),
+            h.modulation
+        );
+        let config = h.modulation.clone();
+        let trace = h.geometry.layout.trace;
+        let response = h.click(trace);
+        assert!(response.captured && !response.changed);
+        assert!(!h.editor.trace_enabled());
+        assert_eq!(h.modulation, config);
+        h.editor.cancel_interaction();
+        assert!(!h.editor.trace_enabled());
+    }
+
+    #[test]
+    fn smooth_numeric_entry_commits_before_pan_and_escape_restores_the_view() {
+        let mut h = Harness::new();
+        let smooth = h.geometry.layout.smooth;
+        h.move_to(smooth.0 + 10.0, smooth.1 + 10.0, Modifiers::empty());
+        h.press(MouseButton::Right);
+        h.type_replacement("40 ms");
+        let layout = h.editor.mseg_edit.layout(h.geometry.layout.mseg_pane, 1.0);
+        let view = h.editor.mseg_edit.viewport();
+        let (x, y) = (
+            widgets::mseg::phase_to_x(&layout, 0.5),
+            widgets::mseg::value_to_y(&layout, 0.5),
+        );
+        h.move_to(x, y, Modifiers::empty());
+        assert!(h.press(MouseButton::Middle).changed);
+        assert!(!h.editor.text_edit.is_active());
+        assert!(h.editor.mseg_edit.is_panning());
+        assert_eq!(h.modulation.smooth_ms[h.editor.selected_mseg], 40.0);
+        h.move_to(x + 30.0, y + 20.0, Modifiers::empty());
+        assert!(h.key(Key::Escape).captured);
+        assert!(!h.editor.mseg_edit.is_panning());
+        assert_eq!(h.editor.mseg_edit.viewport(), view);
+        assert_eq!(h.modulation.smooth_ms[h.editor.selected_mseg], 40.0);
+    }
+    #[test]
+    fn selector_target_disables_smooth_edits_without_losing_its_saved_setting() {
+        let mut h = Harness::new();
+        let slot = h.editor.selected_mseg;
+        h.modulation.smooth_ms[slot] = 30.0;
+        let index = effects::parameter_specs(h.effect.kind)
+            .iter()
+            .position(|s| matches!(s.format, effects::ParamFormat::Enum { .. }))
+            .unwrap();
+        h.modulation.targets[slot - 1] = Some(ModulationTarget::EffectParameter(index));
+        let before = h.modulation.clone();
+        let rect = h.geometry.layout.smooth;
+        h.move_to(rect.0 + 10.0, rect.1 + 10.0, Modifiers::empty());
+        h.press(MouseButton::Right);
+        assert!(!h.editor.text_edit.is_active());
+        assert!(!h.click(rect).changed);
+        h.release();
+        assert_eq!(h.modulation, before);
+    }
+    #[test]
+    fn live_arcs_use_published_values_and_selection_changes_invalidate_history() {
+        use crate::modulation_telemetry::{ModulationFrame, ModulationTelemetry, TraceClock};
+        let mut h = Harness::new();
+        let shared = std::sync::Arc::new(ModulationTelemetry::default());
+        h.editor.connect_live(&shared, 0);
+        let mut pm = tiny_skia::Pixmap::new(1336, 680).unwrap();
+        h.editor.draw(
+            &mut pm,
+            &mut h.tr,
+            &h.effect,
+            &h.modulation,
+            [0.75; 4],
+            h.geometry,
+        );
+        {
+            let session = Session::new(
+                &mut h.editor,
+                EditorContext {
+                    pointer_position: h.pointer,
+                    effect: &mut h.effect,
+                    modulation: &mut h.modulation,
+                    text_renderer: &mut h.tr,
+                    geometry: h.geometry,
+                },
+            );
+            assert_eq!(
+                session.compute_modulated_norms().parameters,
+                [None; MAX_EFFECT_PARAMS]
+            );
+        }
+        let mut clock = TraceClock::default();
+        let request = clock.begin_block(&shared, 48000.0);
+        let mut frame = ModulationFrame {
+            kind: h.effect.kind,
+            targets: h.modulation.targets,
+            phases: [0.2; 4],
+            outputs: [0.3; 4],
+            parameters: [None; MAX_EFFECT_PARAMS],
+            mix: None,
+        };
+        frame.parameters[0] = Some((0.123, 1));
+        clock.publish(&shared, 0, &frame);
+        clock.record(&shared, 0, &frame);
+        h.editor.draw(
+            &mut pm,
+            &mut h.tr,
+            &h.effect,
+            &h.modulation,
+            [0.75; 4],
+            h.geometry,
+        );
+        assert_eq!(h.editor.live.as_ref().unwrap().frame, Some(frame));
+        {
+            let session = Session::new(
+                &mut h.editor,
+                EditorContext {
+                    pointer_position: h.pointer,
+                    effect: &mut h.effect,
+                    modulation: &mut h.modulation,
+                    text_renderer: &mut h.tr,
+                    geometry: h.geometry,
+                },
+            );
+            assert_eq!(
+                session.compute_modulated_norms().parameters[0],
+                Some((0.123, 1))
+            );
+        }
+        assert!(shared.frame(request.token).is_some());
+        h.editor.invalidate_trace();
+        assert!(h.editor.live.as_ref().unwrap().frame.is_none());
+        h.editor.draw(
+            &mut pm,
+            &mut h.tr,
+            &h.effect,
+            &h.modulation,
+            [0.75; 4],
+            h.geometry,
+        );
+        assert!(h.editor.live.as_ref().unwrap().frame.is_none());
+        h.editor.disconnect_live();
+    }
+}

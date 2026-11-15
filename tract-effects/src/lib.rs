@@ -4,6 +4,7 @@ pub mod compressor;
 pub mod editor;
 pub mod effects;
 pub mod modulation;
+pub mod modulation_telemetry;
 pub mod randomize;
 pub mod undo;
 

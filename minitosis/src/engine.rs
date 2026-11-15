@@ -70,7 +70,11 @@ impl Processor {
     pub fn begin_block(&mut self, track: &TrackEffect, left: &[f32], right: &[f32], bpm: f64) {
         self.effect.set_bpm(bpm as f32);
         for (i, _) in self.effect.parameters().iter().enumerate() {
-            self.effect.set_param(i, track.params[i]);
+            if !(self.modulation.smoothed_parameter(track.kind, i)
+                && self.state.holds_smoothed_parameter(track.kind, i))
+            {
+                self.effect.set_param(i, track.params[i]);
+            }
         }
         let sample_rate = f32::from_bits(self.key.sample_rate_bits) as f64;
         self.state
@@ -87,6 +91,8 @@ impl Processor {
     }
 
     pub fn process_sample(&mut self, input: [f32; 2], mix: f32, bypass: bool) -> [f32; 2] {
+        self.state
+            .process_smoothing_sample(&self.modulation, &mut self.effect);
         let dry = self.dry.next(input, self.latency);
         if self.key.kind == EffectKind::None {
             return dry;
@@ -106,6 +112,9 @@ impl Processor {
     pub fn reset_modulation(&mut self) {
         self.state.reset();
     }
+    pub fn retrigger_modulation(&mut self) {
+        self.state.restart_clock();
+    }
     pub fn reset(&mut self) {
         self.flush_dsp();
         self.state.reset();
@@ -113,12 +122,23 @@ impl Processor {
     pub fn flush_dsp(&mut self) {
         self.effect.reset();
         self.dry.reset();
+        self.state.reset_smoothing();
     }
     pub fn latency(&self) -> usize {
         self.latency
     }
     pub fn phase(&self, slot: usize) -> f32 {
         self.state.phase(slot)
+    }
+    pub fn set_telemetry_enabled(&mut self, enabled: bool) {
+        self.state.set_telemetry_enabled(enabled);
+    }
+    pub fn modulation_frame(&self) -> tract_effects::modulation_telemetry::ModulationFrame {
+        tract_effects::modulation_telemetry::ModulationFrame::capture(
+            self.key.kind,
+            &self.modulation,
+            &self.state,
+        )
     }
 }
 
@@ -212,6 +232,50 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[test]
+    fn smoothing_and_requested_measurements_allocate_nothing_and_continue_during_bypass() {
+        use tract_effects::modulation_telemetry::{ModulationTelemetry, TraceClock};
+        let (mut processor, track) = processor(EffectKind::Bitcrush);
+        for doc in &mut processor.modulation.msegs {
+            *doc = tiny_skia_widgets::MsegData {
+                play_mode: tiny_skia_widgets::PlayMode::Cyclic,
+                time_seconds: 0.1,
+                ..tiny_skia_widgets::MsegData::default()
+            };
+        }
+        processor.modulation.smooth_ms = [20.0; 4];
+        processor.modulation.targets = [
+            Some(ModulationTarget::EffectParameter(0)),
+            Some(ModulationTarget::Mix),
+            None,
+        ];
+        processor.modulation.depths = [0.4, 0.5, 0.0];
+        let telemetry = ModulationTelemetry::default();
+        telemetry.request(0, 1, track.kind, true);
+        let mut clock = TraceClock::default();
+        let input = [0.1; 64];
+        assert_no_alloc::assert_no_alloc(|| {
+            for _ in 0..100 {
+                clock.begin_block(&telemetry, 48000.0);
+                processor.begin_block(&track, &input, &input, 120.0);
+                for _ in 0..64 {
+                    assert_eq!(
+                        processor.process_sample([0.1; 2], track.mix, true),
+                        [0.1; 2]
+                    );
+                    if clock.tick() {
+                        clock.record(&telemetry, 0, &processor.modulation_frame());
+                    }
+                }
+                clock.publish(&telemetry, 0, &processor.modulation_frame());
+            }
+        });
+        assert!(processor.phase(0) > 0.0);
+        let phase = processor.phase(0);
+        processor.flush_dsp();
+        assert_eq!(processor.phase(0), phase);
     }
 
     #[test]

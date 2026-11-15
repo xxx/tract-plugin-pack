@@ -129,6 +129,34 @@ Navigation does not alter the saved curve or create undo/bake work. Viewports
 are retained across resizing in the current editor session. Nap's panes have
 independent views, and its pulse field follows the Decay pane's view.
 
+## Live smoothing and trace
+
+Multosis/Minitosis provide **Smooth** and **Trace** at the lower right of the
+curve pane. Smooth applies a lag to the selected envelope's output before
+Depth and Target mapping. It works on Amp, Mix, continuous effect targets, and
+unrouted envelopes. Selector targets show **n/a** and bypass smoothing while
+retaining the saved time.
+
+Smooth ranges from **Off** to **1000 ms**. Drag to adjust, Shift-drag for fine
+adjustment, double-click to reset to Off, or right-click to enter milliseconds.
+The time is the lag's time constant: after a step, roughly 63% of the change is
+reached in that time. Settings are saved per envelope and are undoable. Shape
+clipboard/files transfer geometry and leave Smooth unchanged. Old projects
+default to Off, preserving their existing modulation behavior.
+
+Positive Smooth keeps running during bypass and on inactive rows. Retriggers,
+loop wraps, and transport restart retain the lag so they do not reset its level.
+Explicit Reset clears it; a DSP flush clears it while preserving phase. Amp and
+Mix update each sample; continuous effect targets update on a 1 kHz control
+clock. Existing Free Hz and Transient triggers still align to processing blocks.
+
+Trace toggles the white measured source history. It shows actual envelope
+output before Depth/Target mapping; colored dial arcs show values delivered to
+their destinations, including Mix transitions. Trace follows zoom/pan and
+clears when switching envelopes, rows, or effects. It fills as audio is processed
+and hides while Minitosis prepares a newly selected effect. Toggling Trace does
+not change the sound or project state.
+
 ## Edit commands
 
 - **Compress/Expand values/times** retain their existing behavior and require a

@@ -4,6 +4,7 @@ use crate::effects::{self, EffectKind, MAX_EFFECT_PARAMS, ParamSpec, TrackEffect
 use crate::modulation::{ModulationTarget, TrackModulation, TriggerSource};
 use tiny_skia_widgets as widgets;
 
+mod live;
 pub mod view;
 use view as effect_editor;
 use view::{EffectHit, EffectLayout};
@@ -77,6 +78,9 @@ pub struct EffectEditor {
     effect_click: ClickTracker<EffectHit>,
     mouse_pos: (f32, f32),
     trigger_choices: &'static [TriggerChoice],
+    live: Option<live::LiveSource>,
+    trace_enabled: bool,
+    measured_arcs_only: bool,
 }
 
 impl Default for EffectEditor {
@@ -87,17 +91,22 @@ impl Default for EffectEditor {
 
 impl EffectEditor {
     pub fn new(trigger_choices: &'static [TriggerChoice]) -> Self {
+        let mut mseg_edit = widgets::mseg::MsegEditState::new();
+        mseg_edit.set_status_reserve(240.0);
         Self {
             selected_mseg: 1,
             effect_dropdown: widgets::dropdown::DropdownState::new(),
             effect_dial_drag: widgets::DragState::new(),
             text_edit: widgets::TextEditState::new(),
-            mseg_edit: widgets::mseg::MsegEditState::new(),
+            mseg_edit,
             mseg_last_click_time: std::time::Instant::now(),
             mseg_last_click_pos: (-999.0, -999.0),
             effect_click: ClickTracker::new(),
             mouse_pos: (0.0, 0.0),
             trigger_choices,
+            live: None,
+            trace_enabled: true,
+            measured_arcs_only: false,
         }
     }
 
@@ -108,9 +117,13 @@ impl EffectEditor {
     /// Cancel gestures tied to configuration that the host has replaced.
     pub fn cancel_interaction(&mut self) {
         let selected_mseg = self.selected_mseg;
+        let trace_enabled = self.trace_enabled;
+        let measured_arcs_only = self.measured_arcs_only;
         let input_scale = self.effect_dial_drag.input_scale();
         *self = Self::new(self.trigger_choices);
         self.selected_mseg = selected_mseg;
+        self.trace_enabled = trace_enabled;
+        self.measured_arcs_only = measured_arcs_only;
         self.effect_dial_drag.set_input_scale(input_scale);
     }
 
@@ -180,6 +193,13 @@ impl EffectEditor {
         phases: [f32; 4],
         geometry: EditorGeometry,
     ) {
+        self.refresh_live(effect, modulation);
+        let phases = self
+            .live
+            .as_ref()
+            .and_then(|s| s.frame)
+            .filter(|f| f.matches(effect.kind, modulation))
+            .map_or(phases, |f| f.phases);
         let mut effect = *effect;
         let mut modulation = modulation.clone();
         let pointer_position = self.mouse_pos;
@@ -533,11 +553,7 @@ impl<'a> Session<'a> {
                     }
                     Key::Backspace => self.state.text_edit.backspace(),
                     Key::Escape => self.state.text_edit.cancel(),
-                    Key::Enter => match self.state.text_edit.commit() {
-                        Some((EffectHit::Dial(i), text)) => self.commit_dial_text_edit(i, &text),
-                        Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
-                        _ => {}
-                    },
+                    Key::Enter => self.commit_pending_text(),
                     _ => self.response.captured = false,
                 }
             }
@@ -593,6 +609,9 @@ impl<'a> Session<'a> {
             },
             EffectHit::MsegLength => self.active_mseg_length_norm(),
             EffectHit::Mix => self.effect.mix,
+            EffectHit::Smooth(slot) => {
+                crate::modulation::smooth_to_norm(self.modulation.smooth_ms[slot])
+            }
             _ => 0.5,
         }
     }
@@ -605,11 +624,29 @@ impl<'a> Session<'a> {
             EffectHit::TriggerAux => self.apply_trigger_aux_drag(norm),
             EffectHit::MsegLength => self.apply_mseg_length_drag(norm),
             EffectHit::Mix => self.apply_mix(norm),
+            EffectHit::Smooth(slot) => {
+                self.apply_smooth(slot, crate::modulation::smooth_from_norm(norm))
+            }
             _ => {}
         }
     }
 
     fn compute_modulated_norms(&self) -> view::ModulationDisplay {
+        if let Some(frame) = self
+            .state
+            .live
+            .as_ref()
+            .and_then(|s| s.frame)
+            .filter(|f| f.matches(self.effect.kind, self.modulation))
+        {
+            return view::ModulationDisplay {
+                parameters: frame.parameters,
+                mix: frame.mix,
+            };
+        }
+        if self.state.measured_arcs_only || self.modulation.smoothing_mask(self.effect.kind) != 0 {
+            return view::ModulationDisplay::default();
+        }
         let mut result = view::ModulationDisplay::default();
         for k in 1..4 {
             let Some(target) = self.modulation.targets[k - 1] else {
@@ -670,6 +707,16 @@ impl<'a> Session<'a> {
             self.state.selected_mseg,
             trigger,
         );
+        if let Some(EffectHit::Smooth(slot)) = hit {
+            if self.smooth_allowed(slot) {
+                self.commit_pending_text();
+                self.state.text_edit.begin(
+                    EffectHit::Smooth(slot),
+                    &self.modulation.smooth_ms[slot].to_string(),
+                );
+            }
+            return baseview::EventStatus::Captured;
+        }
         if let Some(EffectHit::Dial(i)) = hit {
             // Enum params are dropdowns, not editable text fields — let the
             // right-click fall through (left-click opens the dropdown).
@@ -680,11 +727,7 @@ impl<'a> Session<'a> {
             // being edited would silently discard the prior edit if we
             // jumped straight to `begin` (which clears the buffer).
             // Commit-and-apply the prior edit first.
-            match self.state.text_edit.commit() {
-                Some((EffectHit::Dial(prev), text)) => self.commit_dial_text_edit(prev, &text),
-                Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
-                _ => {}
-            }
+            self.commit_pending_text();
             if let Some(spec) = self.param_spec(i) {
                 let value = self.effect_config().params[i];
                 self.state.text_edit.begin(
@@ -696,11 +739,7 @@ impl<'a> Session<'a> {
         }
         if let Some(EffectHit::Mix) = hit {
             // Commit any prior edit before seeding a new one.
-            match self.state.text_edit.commit() {
-                Some((EffectHit::Dial(prev), text)) => self.commit_dial_text_edit(prev, &text),
-                Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
-                _ => {}
-            }
+            self.commit_pending_text();
             let pct = (self.effect_config().mix * 100.0).round() as i32;
             self.state
                 .text_edit
@@ -857,6 +896,8 @@ impl<'a> Session<'a> {
             phase,
             self.scale_factor,
         );
+        self.state
+            .draw_live_trace(pixmap, lay.mseg_pane, self.scale_factor);
         // Selector + target + depth (when on an assignable MSEG).
         let (target, depth) = if sel == 0 {
             (None, 0.0)
@@ -896,6 +937,7 @@ impl<'a> Session<'a> {
             self.scale_factor,
             &self.layout,
         );
+        self.draw_live_controls(pixmap);
     }
 
     fn on_effect_press(&mut self, px: f32, py: f32, ctrl: bool) -> bool {
@@ -1008,6 +1050,27 @@ impl<'a> Session<'a> {
                     false,
                     win,
                 );
+            }
+            EffectHit::Smooth(slot) => {
+                if !self.smooth_allowed(slot) {
+                    return true;
+                }
+                if self
+                    .state
+                    .effect_click
+                    .check_and_update(EffectHit::Smooth(slot))
+                {
+                    self.apply_smooth(slot, 0.0);
+                } else {
+                    self.state.effect_dial_drag.begin_drag(
+                        EffectHit::Smooth(slot),
+                        crate::modulation::smooth_to_norm(self.modulation.smooth_ms[slot]),
+                        false,
+                    );
+                }
+            }
+            EffectHit::Trace => {
+                self.state.trace_enabled = !self.state.trace_enabled;
             }
             EffectHit::Depth => {
                 if self.state.selected_mseg != 0 {
@@ -1268,13 +1331,7 @@ impl<'a> Session<'a> {
             // then starts a drag.
             self.state.text_edit.cancel();
         } else {
-            match self.state.text_edit.commit() {
-                Some((EffectHit::Dial(i), text)) => self.commit_dial_text_edit(i, &text),
-                Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
-                // None: no edit was active — cancel() is a no-op. A new text-editable
-                // EffectHit variant needs its own Some(...) arm above, not this.
-                _ => self.state.text_edit.cancel(),
-            }
+            self.commit_pending_text();
         }
     }
 
@@ -1849,7 +1906,12 @@ mod tests {
                     assert_region(
                         &actual,
                         &expected,
-                        session.layout.mseg_pane,
+                        (
+                            session.layout.mseg_pane.0,
+                            session.layout.mseg_pane.1,
+                            session.layout.mseg_pane.2,
+                            session.layout.mseg_pane.3 - 30.0 * session.scale_factor,
+                        ),
                         &format!("selected slot {selection}"),
                     );
                     assert_eq!(*session.effect, effect);
@@ -1906,7 +1968,12 @@ mod tests {
                     assert_region(
                         &actual,
                         &expected,
-                        session.layout.mseg_pane,
+                        (
+                            session.layout.mseg_pane.0,
+                            session.layout.mseg_pane.1,
+                            session.layout.mseg_pane.2,
+                            session.layout.mseg_pane.3 - 30.0 * session.scale_factor,
+                        ),
                         &format!("tooltip slot {slot}"),
                     );
                 }

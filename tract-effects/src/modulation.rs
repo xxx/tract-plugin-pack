@@ -8,6 +8,9 @@ use tiny_skia_widgets::{
     MsegData, MsegNode, PlayMode, Polarity, SyncMode, advance, value_at_phase,
 };
 
+mod smoothing;
+pub use smoothing::{MAX_SMOOTH_MS, normalized_smooth_ms, smooth_from_norm, smooth_to_norm};
+
 /// Default threshold for a fresh `TriggerSource::Transient` (≈ +3.5 dB on the
 /// fast/slow envelope ratio — fires on clear percussive onsets without
 /// over-triggering on sustained material).
@@ -149,6 +152,8 @@ pub struct TrackModulation {
     pub targets: [Option<ModulationTarget>; 3],
     /// Bipolar modulation depth (−1..1) for each assignable MSEG.
     pub depths: [f32; 3],
+    #[serde(default, skip_serializing_if = "smoothing::all_off")]
+    pub smooth_ms: [f32; 4],
     /// The event that resets all four of this row's MSEG phases.
     #[serde(default)]
     pub trigger: TriggerSource,
@@ -319,6 +324,7 @@ impl TrackModulation {
             msegs: [amplitude, sweep, spare, sine],
             targets: [Some(ModulationTarget::EffectParameter(0)), None, None],
             depths: [0.4, 0.0, 0.0],
+            smooth_ms: [0.0; 4],
             trigger: TriggerSource::Free,
         }
     }
@@ -359,6 +365,8 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             targets: Vec<Option<ModulationTarget>>,
             depths: Vec<f32>,
             #[serde(default)]
+            smooth_ms: Vec<f32>,
+            #[serde(default)]
             trigger: TriggerSource,
         }
         let h = Helper::deserialize(deserializer)?;
@@ -392,6 +400,12 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             targets,
             depths,
             trigger: h.trigger,
+            smooth_ms: std::array::from_fn(|i| {
+                h.smooth_ms
+                    .get(i)
+                    .copied()
+                    .map_or(0.0, normalized_smooth_ms)
+            }),
         })
     }
 }
@@ -489,6 +503,14 @@ pub struct ModulationState {
     transient: TransientDetector,
     fired: bool,
     mix: Option<MixRamp>,
+    smooth: smoothing::SmoothRuntime,
+    outputs: [f32; 4],
+    output_valid: [bool; 4],
+    parameter_norms: [Option<(f32, u8)>; crate::effects::MAX_EFFECT_PARAMS],
+    mix_slot: Option<u8>,
+    delivered_mix: Option<(f32, u8)>,
+    telemetry_enabled: bool,
+    output_kind: Option<EffectKind>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -509,6 +531,14 @@ impl Default for ModulationState {
             transient: TransientDetector::default(),
             fired: false,
             mix: None,
+            smooth: smoothing::SmoothRuntime::default(),
+            outputs: [1.0, 0.0, 0.0, 0.0],
+            output_valid: [false; 4],
+            parameter_norms: [None; crate::effects::MAX_EFFECT_PARAMS],
+            mix_slot: None,
+            delivered_mix: None,
+            telemetry_enabled: true,
+            output_kind: None,
         }
     }
 }
@@ -520,12 +550,14 @@ impl ModulationState {
         self.hz_phase = 0.0;
         self.transient.reset();
         self.fired = false;
+        self.reset_smoothing();
     }
 
     /// Restart all four envelopes and mark this block as triggered.
     pub fn trigger(&mut self) {
         self.phases = [0.0; 4];
         self.fired = true;
+        self.smooth.trigger();
     }
 
     /// Analyze the dry input for block-aligned Free Hz or Transient triggers.
@@ -574,6 +606,18 @@ impl ModulationState {
         if seg_len == 0 {
             return;
         }
+        if self.output_kind != Some(track.kind) {
+            self.delivered_mix = None;
+            self.output_kind = Some(track.kind);
+        }
+        self.restore_released_targets(config, track, effect);
+        if config.smoothing_mask(track.kind) != 0 && sample_rate.is_finite() && sample_rate > 0.0 {
+            self.prepare_smoothing(config, track, effect, seg_len, bpm, sample_rate);
+            return;
+        }
+        self.smooth.deactivate();
+        self.parameter_norms.fill(None);
+        self.mix_slot = None;
         let mut mix = None;
         for k in 0..4 {
             let mseg = &config.msegs[k];
@@ -581,6 +625,8 @@ impl ModulationState {
             let (next, _) = advance(mseg, self.phases[k], dt, false);
             self.phases[k] = next;
             let value = value_at_phase(mseg, next);
+            self.outputs[k] = value;
+            self.output_valid[k] = true;
             if k == 0 {
                 self.amplitude = value;
             } else if let Some(target) = config.targets[k - 1] {
@@ -601,8 +647,21 @@ impl ModulationState {
                     mseg.polarity,
                 );
                 match target {
-                    ModulationTarget::EffectParameter(index) => effect.set_param(index, effective),
-                    ModulationTarget::Mix => mix = Some(effective * 0.01),
+                    ModulationTarget::EffectParameter(index) => {
+                        effect.set_param(index, effective);
+                        if self.telemetry_enabled
+                            && let Some(norm) = self.parameter_norms.get_mut(index)
+                        {
+                            *norm = Some((
+                                value_to_norm(effective, spec.min, spec.max, spec.scaling),
+                                k as u8,
+                            ));
+                        }
+                    }
+                    ModulationTarget::Mix => {
+                        mix = Some(effective * 0.01);
+                        self.mix_slot = Some(k as u8);
+                    }
                 }
             }
         }
@@ -626,7 +685,12 @@ impl ModulationState {
 
     /// Resolve one sample's blend without changing the base Mix control.
     pub fn next_mix(&mut self, base: f32) -> f32 {
+        if let Some(value) = self.smooth.mix_value {
+            self.delivered_mix = self.mix_slot.map(|slot| (value, slot));
+            return value;
+        }
         let Some(ramp) = self.mix.as_mut() else {
+            self.delivered_mix = None;
             return base;
         };
         if ramp.remaining > 0 {
@@ -638,6 +702,7 @@ impl ModulationState {
             };
         }
         let value = ramp.current.clamp(0.0, 1.0);
+        self.delivered_mix = self.mix_slot.map(|slot| (value, slot));
         if ramp.release && ramp.remaining == 0 {
             self.mix = None;
         }
@@ -645,7 +710,7 @@ impl ModulationState {
     }
 
     pub fn mix_is_active(&self) -> bool {
-        self.mix.is_some()
+        self.mix.is_some() || self.smooth.mix_value.is_some()
     }
 
     pub fn phase(&self, slot: usize) -> f32 {

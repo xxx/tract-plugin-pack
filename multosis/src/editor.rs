@@ -104,6 +104,7 @@ struct MultosisWindow {
     /// Slot `row*4 + k`. The editor's playhead overlay reads the active one
     /// each frame.
     mseg_phases: Arc<[AtomicU32; 64]>,
+    telemetry: Arc<tract_effects::modulation_telemetry::ModulationTelemetry>,
     /// Latest cursor position in physical pixels, updated on CursorMoved.
     mouse_pos: (f32, f32),
     text_renderer: widgets::TextRenderer,
@@ -156,6 +157,7 @@ impl MultosisWindow {
         reset_request: Arc<AtomicBool>,
         active_rows: Arc<AtomicU16>,
         mseg_phases: Arc<[AtomicU32; 64]>,
+        telemetry: Arc<tract_effects::modulation_telemetry::ModulationTelemetry>,
         config_dirty: Arc<AtomicBool>,
         pending_track_swap: Arc<AtomicU32>,
         scale_factor: f32,
@@ -175,6 +177,7 @@ impl MultosisWindow {
             grid_handoff,
             active_rows,
             mseg_phases,
+            telemetry,
             toolbar_click: ClickTracker::new(),
             mouse_pos: (0.0, 0.0),
             text_renderer,
@@ -520,6 +523,7 @@ impl MultosisWindow {
         if from == to || from >= crate::grid::ROWS || to >= crate::grid::ROWS {
             return;
         }
+        self.effect_editor.invalidate_trace();
         let snap = self.snapshot();
         let opened = self.undo.begin_capture(snap);
         if let (Ok(mut grid), Ok(mut effects), Ok(mut modu)) = (
@@ -561,6 +565,7 @@ impl MultosisWindow {
         if let Some(snap) = self.undo.undo(current) {
             snap.restore(&self.params);
             self.effect_editor.clear_selection();
+            self.effect_editor.invalidate_trace();
             self.mark_config_dirty();
         }
     }
@@ -576,6 +581,7 @@ impl MultosisWindow {
         if let Some(snap) = self.undo.redo(current) {
             snap.restore(&self.params);
             self.effect_editor.clear_selection();
+            self.effect_editor.invalidate_trace();
             self.mark_config_dirty();
         }
     }
@@ -641,6 +647,7 @@ impl MultosisWindow {
             self.randomize_selected_track_effect();
         }
         if response.back {
+            self.effect_editor.disconnect_live();
             self.view = View::Grid;
         }
         response.captured
@@ -659,6 +666,8 @@ impl MultosisWindow {
             self.selected_track,
             self.scale_factor,
         );
+        self.effect_editor
+            .connect_live(&self.telemetry, self.selected_track);
         self.effect_editor.draw(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
@@ -707,6 +716,7 @@ impl MultosisWindow {
     fn draw(&mut self) {
         match self.view {
             View::Grid => {
+                self.effect_editor.disconnect_live();
                 let grid = self.params.grid.lock().map(|g| *g).unwrap_or_default();
                 self.grid_cache.update(&grid, self.scale_factor);
                 self.surface
@@ -1169,6 +1179,12 @@ impl baseview::WindowHandler for MultosisWindow {
     }
 }
 
+impl Drop for MultosisWindow {
+    fn drop(&mut self) {
+        self.effect_editor.disconnect_live();
+    }
+}
+
 /// The nih-plug `Editor` — spawns the window.
 struct MultosisEditor {
     params: Arc<MultosisParams>,
@@ -1178,6 +1194,7 @@ struct MultosisEditor {
     reset_request: Arc<AtomicBool>,
     active_rows: Arc<AtomicU16>,
     mseg_phases: Arc<[AtomicU32; 64]>,
+    telemetry: Arc<tract_effects::modulation_telemetry::ModulationTelemetry>,
     config_dirty: Arc<AtomicBool>,
     /// Editor → audio handoff for the GUI's drag-and-drop track-swap gesture.
     /// Encoded `((from + 1) << 8) | (to + 1)`; see `Multosis::pending_track_swap`.
@@ -1195,6 +1212,7 @@ pub fn create(
     reset_request: Arc<AtomicBool>,
     active_rows: Arc<AtomicU16>,
     mseg_phases: Arc<[AtomicU32; 64]>,
+    telemetry: Arc<tract_effects::modulation_telemetry::ModulationTelemetry>,
     config_dirty: Arc<AtomicBool>,
     pending_track_swap: Arc<AtomicU32>,
 ) -> Option<Box<dyn Editor>> {
@@ -1206,6 +1224,7 @@ pub fn create(
         reset_request,
         active_rows,
         mseg_phases,
+        telemetry,
         config_dirty,
         pending_track_swap,
         pending_resize: Arc::new(AtomicU64::new(0)),
@@ -1230,6 +1249,7 @@ impl Editor for MultosisEditor {
         let reset_request = Arc::clone(&self.reset_request);
         let active_rows = Arc::clone(&self.active_rows);
         let mseg_phases = Arc::clone(&self.mseg_phases);
+        let telemetry = Arc::clone(&self.telemetry);
         let config_dirty = Arc::clone(&self.config_dirty);
         let pending_track_swap = Arc::clone(&self.pending_track_swap);
 
@@ -1254,6 +1274,7 @@ impl Editor for MultosisEditor {
                     reset_request,
                     active_rows,
                     mseg_phases,
+                    telemetry,
                     config_dirty,
                     pending_track_swap,
                     sf,

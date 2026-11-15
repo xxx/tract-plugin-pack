@@ -173,6 +173,7 @@ pub struct MsegEditState {
     grid_options: Vec<(u32, u32)>,
     /// Display labels for `grid_options`, kept in sync by `set_grid_options`.
     grid_labels: Vec<String>,
+    status_reserve: f32,
 }
 
 impl MsegEditState {
@@ -224,6 +225,7 @@ impl MsegEditState {
             seed: 0,
             grid_options,
             grid_labels,
+            status_reserve: 0.0,
         }
     }
 
@@ -252,6 +254,16 @@ impl MsegEditState {
     /// The current grid presets `(time_divisions, value_steps)`.
     pub fn grid_options(&self) -> &[(u32, u32)] {
         &self.grid_options
+    }
+    pub fn set_status_reserve(&mut self, width: f32) {
+        self.status_reserve = if width.is_finite() {
+            width.max(0.0)
+        } else {
+            0.0
+        };
+    }
+    pub fn status_reserve(&self) -> f32 {
+        self.status_reserve
     }
 
     /// Build a `Vec<&str>` of grid label references for passing to dropdown

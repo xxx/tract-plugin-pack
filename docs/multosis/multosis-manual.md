@@ -214,6 +214,11 @@ They are available from the **Tool**, **Shapes**, and **Edit** menus below the
 existing controls. Triplet grids `6 / 8`, `12 / 8`, and `24 / 16` supplement the
 four straight grid presets described above.
 
+**Smooth** adds a saved per-envelope lag (Off–1000 ms) before Depth/Target
+mapping. **Trace** displays measured source output, while dial arcs show the
+delivered target values. See [live smoothing and trace](../mseg-editor.md#live-smoothing-and-trace)
+for timing, reset behavior, and numeric controls.
+
 The curve canvas is the large area beneath the routing controls.
 
 - **Double-click empty canvas** — inserts a node at the clicked time and value (snapped to the Time Grid).
