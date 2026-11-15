@@ -1167,17 +1167,17 @@ mod tests {
             for (scale, line_w) in [(0.5, 1.0), (1.0, 1.0), (2.0, 2.0)] {
                 let pane = (20.0 * scale, 30.0 * scale, 180.0 * scale, 160.0 * scale);
                 for (phase, x) in [
-                    (-2.0, 25.5 * scale),
-                    (0.0, 25.5 * scale),
-                    (0.25, 67.75 * scale),
+                    (-2.0, 34.0 * scale),
+                    (0.0, 34.0 * scale),
+                    (0.25, 72.0 * scale),
                     (0.5, 110.0 * scale),
-                    (1.0, 194.5 * scale - line_w),
-                    (3.0, 194.5 * scale - line_w),
+                    (1.0, 186.0 * scale - line_w),
+                    (3.0, 186.0 * scale - line_w),
                 ] {
                     let mut actual = canvas();
                     draw_mseg_playhead(&mut actual, pane, phase, scale);
                     let mut expected = canvas();
-                    widgets::draw_rect(&mut expected, x, 51.5 * scale, line_w, 91.0 * scale, color);
+                    widgets::draw_rect(&mut expected, x, 60.0 * scale, line_w, 42.0 * scale, color);
                     assert_pixels(
                         &actual,
                         &expected,

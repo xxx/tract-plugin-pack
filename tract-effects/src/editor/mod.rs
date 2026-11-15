@@ -134,11 +134,13 @@ impl EffectEditor {
     }
 
     pub fn captures_keyboard(&self) -> bool {
-        self.effect_dropdown.is_open() || self.text_edit.is_active()
+        self.effect_dropdown.is_open()
+            || self.text_edit.is_active()
+            || self.mseg_edit.has_open_menu()
     }
 
     pub fn dropdown_open(&self) -> bool {
-        self.effect_dropdown.is_open()
+        self.effect_dropdown.is_open() || self.mseg_edit.has_open_menu()
     }
 
     pub fn handle_event(
@@ -178,6 +180,7 @@ impl EffectEditor {
         session.draw_effect_view(pixmap);
     }
 
+    /// Draw open menus after editor controls and host overlays.
     pub fn draw_popup(
         &self,
         pixmap: &mut tiny_skia::Pixmap,
@@ -193,6 +196,14 @@ impl EffectEditor {
                 &self.effect_dropdown,
                 &items,
                 geometry.window_size,
+            );
+        }
+        if self.mseg_edit.has_open_menu() {
+            widgets::mseg::draw_mseg_dropdown(
+                pixmap,
+                tr,
+                &self.mseg_edit,
+                geometry.layout.mseg_pane,
             );
         }
     }
@@ -286,6 +297,13 @@ impl<'a> Session<'a> {
                 self.state.mouse_pos = (x, y);
                 self.state.effect_dial_drag.set_mouse(x, y);
                 let shift = modifiers.contains(Modifiers::SHIFT);
+                self.state.mseg_edit.set_transform_modifiers(
+                    modifiers.contains(Modifiers::ALT),
+                    modifiers.contains(Modifiers::CONTROL),
+                );
+                self.state
+                    .mseg_edit
+                    .set_stepped_draw(modifiers.contains(Modifiers::ALT));
                 if let Some(hit) = self.state.effect_dial_drag.active_action().copied() {
                     let current = self.normalized_for_hit(hit);
                     if let Some(norm) = self.state.effect_dial_drag.update_drag(shift, current) {
@@ -315,7 +333,25 @@ impl<'a> Session<'a> {
             }) => {
                 let (x, y) = self.mouse_pos;
                 self.finalize_dial_edit_for_press(x, y);
-                if self.state.effect_dropdown.is_open() {
+                self.state.mseg_edit.set_transform_modifiers(
+                    modifiers.contains(Modifiers::ALT),
+                    modifiers.contains(Modifiers::CONTROL),
+                );
+                self.state
+                    .mseg_edit
+                    .set_stepped_draw(modifiers.contains(Modifiers::ALT));
+                if self.state.mseg_edit.has_open_menu() {
+                    let sel = self.state.selected_mseg.min(3);
+                    self.response.changed |= self.state.mseg_edit.on_mouse_down(
+                        x,
+                        y,
+                        &mut self.modulation.msegs[sel],
+                        self.layout.mseg_pane,
+                        self.scale_factor,
+                        modifiers.contains(Modifiers::CONTROL),
+                    ) == Some(widgets::MsegEdit::Changed);
+                    self.response.captured = true;
+                } else if self.state.effect_dropdown.is_open() {
                     let items = self.dropdown_items();
                     if let Some(widgets::dropdown::DropdownEvent::Selected(action, idx)) =
                         self.state.effect_dropdown.on_mouse_down(x, y, &items, win)
@@ -350,6 +386,18 @@ impl<'a> Session<'a> {
                 {
                     self.response.changed = true;
                 }
+            }
+            Event::Mouse(MouseEvent::WheelScrolled { delta, .. })
+                if self.state.mseg_edit.has_open_menu() =>
+            {
+                let dy = match delta {
+                    baseview::ScrollDelta::Lines { y, .. } => *y,
+                    baseview::ScrollDelta::Pixels { y, .. } => *y * 0.05,
+                };
+                self.response.captured = self.state.mseg_edit.on_wheel(
+                    dy * self.state.effect_dial_drag.input_scale(),
+                    self.layout.mseg_pane,
+                );
             }
             Event::Mouse(MouseEvent::WheelScrolled { delta, .. })
                 if self.state.effect_dropdown.is_open() =>
@@ -423,19 +471,16 @@ impl<'a> Session<'a> {
                     _ => self.response.captured = false,
                 }
             }
-            Event::Keyboard(ev)
-                if ev.state == KeyState::Down && matches!(ev.key, Key::Delete | Key::Backspace) =>
-            {
+            Event::Keyboard(ev) => {
                 let sel = self.state.selected_mseg.min(3);
-                if self
-                    .state
-                    .mseg_edit
-                    .delete_selection(&mut self.modulation.msegs[sel])
-                    == Some(widgets::mseg::MsegEdit::Changed)
-                {
-                    self.response.changed = true;
-                    self.response.captured = true;
-                }
+                let (captured, edit) = self.state.mseg_edit.on_key(
+                    ev,
+                    &mut self.modulation.msegs[sel],
+                    self.layout.mseg_pane,
+                    self.scale_factor,
+                );
+                self.response.captured = captured;
+                self.response.changed |= edit == Some(widgets::MsegEdit::Changed);
             }
             _ => {}
         }
@@ -525,6 +570,17 @@ impl<'a> Session<'a> {
     }
     fn on_right_press(&mut self) -> baseview::EventStatus {
         let (px, py) = self.mouse_pos;
+        if self.state.mseg_edit.has_open_menu() {
+            let sel = self.state.selected_mseg.min(3);
+            self.response.changed |= self.state.mseg_edit.on_right_click(
+                px,
+                py,
+                &mut self.modulation.msegs[sel],
+                self.layout.mseg_pane,
+                self.scale_factor,
+            ) == Some(widgets::MsegEdit::Changed);
+            return baseview::EventStatus::Captured;
+        }
         if self.state.effect_dial_drag.active_action().is_some() {
             return baseview::EventStatus::Captured;
         }
@@ -715,16 +771,6 @@ impl<'a> Session<'a> {
         // phase, drawn over the active curve + ghosts.
         let phase = self.phases[sel];
         effect_editor::draw_mseg_playhead(pixmap, lay.mseg_pane, phase, self.scale_factor);
-        // Open MSEG dropdown (Grid / Style / right-click Transform menu) goes
-        // last so it sits above every preceding layer — `draw_mseg` no longer
-        // paints it inline because the ghost loop above would otherwise bury
-        // it.
-        widgets::mseg::draw_mseg_dropdown(
-            pixmap,
-            self.text_renderer,
-            &self.state.mseg_edit,
-            lay.mseg_pane,
-        );
         // Selector + target + depth (when on an assignable MSEG).
         let (target, depth) = if sel == 0 {
             (None, 0.0)

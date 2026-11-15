@@ -81,6 +81,11 @@ by **segments**.
 
 ### Drawing and editing
 
+The shared [curve tools](../mseg-editor.md) add shape pens, selection handles,
+reusable curves/favorites, cross-plugin copy/paste, mutation, transforms, and
+triplet grids through the **Tool**, **Shapes**, and **Edit** menus. All curve
+edits update the baked kernel.
+
 - **Double-click empty canvas** — add a node at the pointer. (A single click-and-drag on empty canvas draws a selection marquee instead of adding a node.)
 - **Drag a node** — move it. Interior nodes stay between their neighbours; the
   first and last nodes are pinned to the left and right edges (their value can

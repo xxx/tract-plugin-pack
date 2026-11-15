@@ -117,6 +117,219 @@ impl Harness {
     }
 }
 
+mod mseg_popup_regressions {
+    use super::*;
+
+    fn open_overlapping_edit_menu(scale: f32) -> Harness {
+        let mut h = Harness::new();
+        h.geometry = EditorGeometry {
+            layout: view::effect_layout((16.0, 16.0, 1304.0, 640.0), scale),
+            scale,
+            window_size: (1336.0 * scale, 680.0 * scale),
+        };
+        let curve = &mut h.modulation.msegs[h.editor.selected_mseg];
+        widgets::mseg::factory_shape(widgets::mseg::FactoryShape::Triangle)
+            .apply(curve, false)
+            .unwrap();
+        curve.snap = false;
+        curve.nodes[1].time = 0.25;
+        curve.nodes[1].value = 0.5;
+        let layout = widgets::mseg::mseg_layout(h.geometry.layout.mseg_pane, false, scale);
+        h.move_to(
+            widgets::mseg::phase_to_x(&layout, 0.25),
+            widgets::mseg::value_to_y(&layout, 0.5),
+            Modifiers::empty(),
+        );
+        h.press(MouseButton::Left);
+        h.release();
+        h.press(MouseButton::Right);
+        assert!(h.editor.mseg_edit.has_open_menu());
+        h
+    }
+
+    fn popup_only(h: &mut Harness) -> tiny_skia::Pixmap {
+        let (width, height) = h.geometry.window_size;
+        let mut pm = tiny_skia::Pixmap::new(width as u32, height as u32).unwrap();
+        widgets::mseg::draw_mseg_dropdown(
+            &mut pm,
+            &mut h.tr,
+            &h.editor.mseg_edit,
+            h.geometry.layout.mseg_pane,
+        );
+        pm
+    }
+
+    #[test]
+    fn expanded_mseg_popup_renders_above_modulation_controls() {
+        for scale in [0.5, 1.0, 2.0] {
+            let mut h = open_overlapping_edit_menu(scale);
+            let mut actual = popup_only(&mut h);
+            actual.fill(widgets::color_bg());
+            h.editor.draw(
+                &mut actual,
+                &mut h.tr,
+                &h.effect,
+                &h.modulation,
+                [0.0; 4],
+                h.geometry,
+            );
+            h.editor
+                .draw_popup(&mut actual, &mut h.tr, &h.effect, h.geometry);
+            let expected = popup_only(&mut h);
+            let (x, y, w, height) = h.geometry.layout.mseg_selector;
+            let mut compared = 0;
+            for row in y.ceil() as usize..(y + height).floor() as usize {
+                for col in x.ceil() as usize..(x + w).floor() as usize {
+                    let offset = (row * actual.width() as usize + col) * 4;
+                    if expected.data()[offset + 3] == 255 {
+                        compared += 1;
+                        assert_eq!(
+                            &actual.data()[offset..offset + 4],
+                            &expected.data()[offset..offset + 4],
+                            "menu obscured at ({col}, {row}), scale {scale}"
+                        );
+                    }
+                }
+            }
+            assert!(
+                compared > 0,
+                "menu must overlap the selector at scale {scale}"
+            );
+        }
+    }
+
+    #[test]
+    fn right_click_on_mseg_popup_dismisses_it_without_editing_the_underlying_dial() {
+        for scale in [0.5, 1.0, 2.0] {
+            let mut h = open_overlapping_edit_menu(scale);
+            let popup = popup_only(&mut h);
+            let dial = h.geometry.layout.dials[1];
+            let (x, y) = (dial.0 + dial.2 * 0.5, dial.1 + dial.3 - 8.0 * scale);
+            let offset = (y as usize * popup.width() as usize + x as usize) * 4;
+            assert_eq!(popup.data()[offset + 3], 255, "menu must cover the dial");
+            let effect = h.effect;
+            let modulation = h.modulation.clone();
+            h.move_to(x, y, Modifiers::empty());
+            let response = h.press(MouseButton::Right);
+            assert!(response.captured);
+            assert!(!response.changed);
+            assert!(!h.editor.mseg_edit.has_open_menu());
+            assert!(!h.editor.text_edit.is_active());
+            assert!(!h.key(Key::Character("999".into())).captured);
+            assert!(!h.key(Key::Enter).captured);
+            assert_eq!(h.effect, effect);
+            assert_eq!(h.modulation, modulation);
+        }
+    }
+}
+
+#[test]
+fn mseg_menu_captures_keyboard_wheel_and_clicks_outside_the_curve_pane() {
+    let mut h = Harness::new();
+    let slot = h.editor.selected_mseg;
+    h.modulation.msegs[slot].snap = false;
+    let before = h.modulation.clone();
+    let command = Event::Keyboard(KeyboardEvent {
+        key: Key::Character("a".into()),
+        state: KeyState::Down,
+        modifiers: Modifiers::CONTROL,
+        ..KeyboardEvent::default()
+    });
+    assert!(h.send(command).captured);
+    let layout = widgets::mseg::mseg_layout(h.geometry.layout.mseg_pane, false, 1.0);
+    let node = h.modulation.msegs[slot].nodes[1];
+    h.move_to(
+        widgets::mseg::phase_to_x(&layout, node.time),
+        widgets::mseg::value_to_y(&layout, node.value),
+        Modifiers::empty(),
+    );
+    h.press(MouseButton::Right);
+    assert!(h.editor.captures_keyboard());
+    assert!(
+        h.send(Event::Mouse(MouseEvent::WheelScrolled {
+            delta: baseview::ScrollDelta::Lines { x: 0.0, y: -2.0 },
+            modifiers: Modifiers::empty()
+        }))
+        .captured
+    );
+    h.key(Key::Home);
+    for _ in 0..7 {
+        h.key(Key::ArrowDown);
+    }
+    assert!(h.key(Key::Enter).changed);
+    assert!(!h.editor.captures_keyboard());
+    for (old, new) in before.msegs[slot]
+        .active()
+        .iter()
+        .zip(h.modulation.msegs[slot].active())
+    {
+        assert_eq!(new.value, 1.0 - old.value);
+    }
+    let node = h.modulation.msegs[slot].nodes[1];
+    h.move_to(
+        widgets::mseg::phase_to_x(&layout, node.time),
+        widgets::mseg::value_to_y(&layout, node.value),
+        Modifiers::empty(),
+    );
+    h.press(MouseButton::Right);
+    assert!(h.editor.captures_keyboard());
+    let dial = h.geometry.layout.dials[0];
+    h.click(dial);
+    assert!(!h.editor.captures_keyboard());
+    assert!(h.editor.effect_dial_drag.active_action().is_none());
+}
+
+#[test]
+fn curve_shortcuts_share_shapes_across_editors_and_paste_is_one_undo_entry() {
+    let root = std::env::temp_dir().join(format!("tract-effect-copy-{}", std::process::id()));
+    let mut source = Harness::new();
+    let mut destination = Harness::new();
+    source
+        .editor
+        .mseg_edit
+        .set_curve_library_directory(root.clone());
+    destination
+        .editor
+        .mseg_edit
+        .set_curve_library_directory(root.clone());
+    let slot = destination.editor.selected_mseg;
+    widgets::mseg::factory_shape(widgets::mseg::FactoryShape::RampDown)
+        .apply(&mut destination.modulation.msegs[slot], false)
+        .unwrap();
+    destination.modulation.msegs[slot].beats = 13.0;
+    destination.modulation.msegs[slot].time_divisions = 12;
+    let before = destination.modulation.clone();
+    let shortcut = |key: &str| {
+        Event::Keyboard(KeyboardEvent {
+            key: Key::Character(key.into()),
+            state: KeyState::Down,
+            modifiers: Modifiers::CONTROL,
+            ..KeyboardEvent::default()
+        })
+    };
+    assert!(source.send(shortcut("c")).captured);
+    let mut undo = crate::undo::UndoHistory::new();
+    undo.begin_capture(before.clone());
+    let response = destination.send(shortcut("v"));
+    assert!(response.captured && response.changed);
+    let after = destination.modulation.clone();
+    undo.commit_capture(&after);
+    assert_eq!(
+        after.msegs[slot].active(),
+        source.modulation.msegs[source.editor.selected_mseg].active()
+    );
+    assert_eq!(
+        (after.msegs[slot].beats, after.msegs[slot].time_divisions),
+        (13.0, 12)
+    );
+    assert_eq!(after.depths, before.depths);
+    assert_eq!(after.targets, before.targets);
+    assert_eq!(undo.undo(after.clone()), Some(before.clone()));
+    assert!(undo.undo(before.clone()).is_none());
+    assert_eq!(undo.redo(before), Some(after));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn continuous_dial_drag_changes_value_and_release_ends_gesture() {
     let mut h = Harness::new();
@@ -680,7 +893,6 @@ mod event_dispatch {
             (Key::Backspace, KeyState::Up),
             (Key::Enter, KeyState::Down),
             (Key::Character("x".into()), KeyState::Down),
-            (Key::ArrowLeft, KeyState::Down),
         ] {
             let response = key_event(&mut h, key, state);
             assert!(!response.captured);

@@ -4,7 +4,7 @@
 
 use crate::dropdown::draw_dropdown_popup;
 use crate::dropdown::draw_dropdown_trigger;
-use crate::mseg::editor::{MsegEditState, StripId, style_items};
+use crate::mseg::editor::{MsegEditState, StripId};
 use crate::mseg::{HoldMode, MsegData, value_at_phase};
 use crate::primitives::{
     color_bg, color_border, color_control_bg, color_muted, color_text, draw_rect, draw_rect_outline,
@@ -15,7 +15,7 @@ use tiny_skia::Pixmap;
 /// Marker-lane height in unscaled px (full editor only).
 const MARKER_LANE_H: f32 = 16.0;
 /// Control-strip height in unscaled px.
-const STRIP_H: f32 = 42.0;
+const STRIP_H: f32 = 74.0;
 
 /// Sub-rectangles of the MSEG widget, each `(x, y, w, h)`. `marker_lane` has
 /// height 0 in curve-only mode.
@@ -46,7 +46,7 @@ pub fn mseg_layout(rect: (f32, f32, f32, f32), curve_only: bool, scale: f32) -> 
     let canvas = (x, y + lane_h, w, canvas_h);
     // Inset the plot by the largest node-dot radius (a hovered node is the
     // biggest) so node dots at the 0/1 extremes stay fully within `canvas`.
-    let m = (NODE_R + HOVER_BUMP) * scale;
+    let m = 14.0 * scale;
     let plot = (
         canvas.0 + m,
         canvas.1 + m,
@@ -145,33 +145,15 @@ pub fn draw_mseg_dropdown(
     rect: (f32, f32, f32, f32),
 ) {
     let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-    if state.dropdown_is_open_for(StripId::TimeGrid) {
-        let grid_refs = state.grid_label_refs();
-        draw_dropdown_popup(
-            pixmap,
-            text_renderer,
-            state.dropdown_state(),
-            &grid_refs,
-            window_size,
-        );
-    } else if state.dropdown_is_open_for(StripId::Transform) {
-        draw_dropdown_popup(
-            pixmap,
-            text_renderer,
-            state.dropdown_state(),
-            crate::mseg::editor::transform_menu_items(),
-            window_size,
-        );
-    } else {
-        // Either the style dropdown is open or nothing is; closed is a no-op.
-        draw_dropdown_popup(
-            pixmap,
-            text_renderer,
-            state.dropdown_state(),
-            style_items(),
-            window_size,
-        );
-    }
+    let labels = state.dropdown_labels();
+    let refs: Vec<_> = labels.iter().map(String::as_str).collect();
+    draw_dropdown_popup(
+        pixmap,
+        text_renderer,
+        state.dropdown_state(),
+        &refs,
+        window_size,
+    );
 }
 
 /// Draw the hold marker(s) in the marker lane. No-op in curve-only mode or
@@ -273,6 +255,42 @@ fn draw_canvas(
     }
 
     draw_nodes(pixmap, layout, data, state, scale, value_color);
+
+    let handles = state.selection_handles(data, layout, scale);
+    if let (Some((_, (x0, y0))), Some((_, (x1, y1)))) = (handles.first(), handles.get(4)) {
+        draw_rect_outline(pixmap, *x0, *y0, x1 - x0, y1 - y0, value_color, 1.0);
+        for (_, (x, y)) in handles {
+            draw_rect(
+                pixmap,
+                x - 3.0 * scale,
+                y - 3.0 * scale,
+                6.0 * scale,
+                6.0 * scale,
+                color_text(),
+            );
+        }
+    }
+    let preview = state.pen_preview();
+    if preview.len() >= 2 {
+        let mut document = *data;
+        document.nodes[..preview.len()].copy_from_slice(preview);
+        document.node_count = preview.len();
+        let start = preview[0].time;
+        let end = preview[preview.len() - 1].time;
+        let columns = ((end - start) * layout.plot.2).max(1.0) as usize;
+        let mut previous = None;
+        for column in 0..=columns {
+            let t = start + (end - start) * column as f32 / columns as f32;
+            let point = (
+                phase_to_x(layout, t),
+                value_to_y(layout, value_at_phase(&document, t)),
+            );
+            if let Some((px, py)) = previous {
+                draw_line(pixmap, px, py, point.0, point.1, color_text());
+            }
+            previous = Some(point);
+        }
+    }
 
     // Marquee selection rectangle (drawn over the curve and nodes).
     if let Some((mx, my, mw, mh)) = state.marquee_rect()
@@ -494,7 +512,7 @@ pub(crate) fn strip_buttons_ex(
     let gap = 4.0 * scale;
     let group_gap = 16.0 * scale;
     let by = sy + 3.0 * scale;
-    let bh = (sh - 6.0 * scale).max(0.0);
+    let bh = (sh.min(42.0 * scale) - 6.0 * scale).max(0.0);
 
     // Per-button widths (pre-scale). Short toggles get narrow rects; dropdown
     // triggers wider ones to fit their value text plus a chevron.
@@ -654,6 +672,66 @@ fn draw_strip(
         false,
         false,
     );
+
+    let toolbar = power_buttons(layout.strip, scale);
+    for (rect, label, id) in [
+        (toolbar.tool, state.tool().label(), StripId::Tool),
+        (toolbar.shapes, "Shapes", StripId::Shapes),
+        (toolbar.edit, "Edit", StripId::Transform),
+    ] {
+        draw_dropdown_trigger(
+            pixmap,
+            text_renderer,
+            rect,
+            label,
+            state.dropdown_is_open_for(id),
+        );
+    }
+    let available = (sx + sw - toolbar.message_x - 6.0 * scale).max(0.0);
+    let message = if state.status_message().is_empty() {
+        match state.tool() {
+            crate::mseg::MsegTool::Pointer => "Select points to stretch; Alt: centered; Ctrl: skew",
+            _ => "Drag endpoints; click again to repeat; Esc: pointer",
+        }
+    } else {
+        state.status_message()
+    };
+    let mut visible = String::new();
+    for ch in message.chars() {
+        visible.push(ch);
+        if text_renderer.text_width(&visible, 11.0 * scale) > available {
+            visible.pop();
+            break;
+        }
+    }
+    text_renderer.draw_text(
+        pixmap,
+        toolbar.message_x,
+        toolbar.tool.1 + 20.0 * scale,
+        &visible,
+        11.0 * scale,
+        color_muted(),
+    );
+}
+
+pub(crate) struct PowerButtons {
+    pub tool: (f32, f32, f32, f32),
+    pub shapes: (f32, f32, f32, f32),
+    pub edit: (f32, f32, f32, f32),
+    pub message_x: f32,
+}
+
+pub(crate) fn power_buttons(strip: (f32, f32, f32, f32), scale: f32) -> PowerButtons {
+    let width = (strip.2 - 20.0 * scale).max(0.0).min(440.0 * scale) / 3.0;
+    let height = 26.0 * scale;
+    let y = strip.1 + 44.0 * scale;
+    let x = strip.0 + 6.0 * scale;
+    PowerButtons {
+        tool: (x, y, width, height),
+        shapes: (x + width + 4.0 * scale, y, width, height),
+        edit: (x + 2.0 * (width + 4.0 * scale), y, width, height),
+        message_x: x + 3.0 * (width + 4.0 * scale) + 8.0 * scale,
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -192,7 +192,7 @@ To make a unipolar curve control the full dry/wet range, select **Mix**, set the
 A strip of mode controls runs along the bottom of the MSEG editor, beneath the curve canvas. Left to right:
 
 - **Snap On / Snap Off** button — toggles node snapping to the Time Grid. When Snap is on, dragging or inserting a node snaps its time to the nearest grid column and its value to the nearest grid row; with Snap off, nodes land on whatever continuous (time, value) coordinate the cursor was at. **Hold Shift while dragging to temporarily bypass Snap and place the node at the exact cursor position** — useful for nudging a snapped node off-grid without flipping the global Snap state.
-- **Grid `T/V`** dropdown — sets the snap grid, shown as `Grid T/V` where `T` is the number of time columns and `V` is the number of value rows. Multosis ships four presets, listed in the dropdown as `4 / 4`, `8 / 8`, `16 / 8`, `32 / 16`. Finer grids let you place nodes more precisely and feed the Randomizer more cells to fill.
+- **Grid `T/V`** dropdown — sets the snap grid, shown as `Grid T/V` where `T` is the number of time columns and `V` is the number of value rows. The four straight-grid presets are listed in the dropdown as `4 / 4`, `8 / 8`, `16 / 8`, `32 / 16`. Finer grids let you place nodes more precisely and feed the Randomizer more cells to fill.
 - **Unipolar / Bipolar** button (Polarity) — chooses where the MSEG's no-modulation reference sits, which determines how the curve drives the target parameter. The canvas draws to match: **Unipolar** shows the curve as 0..1 with the bottom as the zero reference; **Bipolar** shows it as -1..+1 with a midline marker at value 0.5.
     - In **Unipolar** mode, value 0 leaves the target parameter at its base setting and the curve pushes the parameter in one direction (determined by the sign of the MSEG's Depth). At value 1 the parameter sits at `base + depth × range`. Useful when you want the dial to be your starting point and the MSEG to add to or subtract from it.
     - In **Bipolar** mode, the midline (value 0.5) leaves the target parameter at its base and the curve sweeps the parameter symmetrically above and below it — value 1 hits `base + depth × range`, value 0 hits `base − depth × range`. Useful when you want the dial to be the centre of a swing.
@@ -207,6 +207,12 @@ A strip of mode controls runs along the bottom of the MSEG editor, beneath the c
 - **Randomize** button — re-rolls every node's time, value, tension, and stepped flag using the current Style and Time Grid. The current Time Grid drives the **node count**: denser grids generate more nodes (Stepped and Spiky styles fill the grid exactly, one node per cell; Smooth and Chaos take 60-100 % of the grid count; Ramps stays a little sparser at 35-60 %). Re-clicking with the same settings produces a different curve each time (seeded fresh). The curve's play mode, sync mode, length, hold mode, and grid settings are left alone — only the node shape changes.
 
 ### Drawing and editing curves
+
+The shared [curve tools](../mseg-editor.md) add shape pens, selection handles,
+factory curves and favorites, cross-plugin copy/paste, mutation, and transforms.
+They are available from the **Tool**, **Shapes**, and **Edit** menus below the
+existing controls. Triplet grids `6 / 8`, `12 / 8`, and `24 / 16` supplement the
+four straight grid presets described above.
 
 The curve canvas is the large area beneath the routing controls.
 

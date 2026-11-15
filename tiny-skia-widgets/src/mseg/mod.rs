@@ -9,12 +9,16 @@
 //! See `docs/superpowers/specs/2026-05-16-mseg-editor-widget-design.md`.
 
 pub mod editor;
+pub mod library;
 pub mod randomize;
 pub mod render;
+pub mod shape;
+pub mod tools;
 
 pub use editor::*;
 pub use randomize::*;
 pub use render::*;
+pub use shape::*;
 
 /// Maximum number of envelope nodes.
 pub const MAX_NODES: usize = 128;
@@ -267,9 +271,15 @@ impl MsegData {
         self.nodes[idx].value = value.clamp(0.0, 1.0);
         let is_endpoint = idx == 0 || idx + 1 == self.node_count;
         if !is_endpoint {
-            let lo = self.nodes[idx - 1].time + Self::MIN_NODE_GAP;
-            let hi = self.nodes[idx + 1].time - Self::MIN_NODE_GAP;
-            self.nodes[idx].time = time.clamp(lo.min(hi), lo.max(hi));
+            let left = self.nodes[idx - 1].time;
+            let right = self.nodes[idx + 1].time;
+            let lo = left + Self::MIN_NODE_GAP;
+            let hi = right - Self::MIN_NODE_GAP;
+            self.nodes[idx].time = if lo <= hi {
+                time.clamp(lo, hi)
+            } else {
+                time.clamp(left.next_up(), right.next_down())
+            };
         }
         self.debug_assert_valid();
     }

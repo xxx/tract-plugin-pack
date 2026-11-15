@@ -11,8 +11,12 @@ use crate::mseg::MsegData;
 use crate::mseg::randomize::RandomStyle;
 use crate::text_edit::TextEditState;
 
+mod power;
+pub use power::SelectionHandle;
+
 /// Default grid option pairs used when no custom list is supplied.
-const DEFAULT_GRID_OPTIONS: [(u32, u32); 4] = [(4, 4), (8, 8), (16, 8), (32, 16)];
+const DEFAULT_GRID_OPTIONS: [(u32, u32); 7] =
+    [(4, 4), (8, 8), (16, 8), (32, 16), (6, 8), (12, 8), (24, 16)];
 
 /// Style display labels, matching `RandomStyle::ALL` order.
 pub const STYLE_LABELS: [&str; 5] = ["Smooth", "Ramps", "Stepped", "Spiky", "Chaos"];
@@ -30,6 +34,19 @@ pub(crate) fn transform_menu_items() -> &'static [&'static str] {
         "Expand values",
         "Compress times",
         "Expand times",
+        "Copy curve",
+        "Paste curve",
+        "Paste fitted to height",
+        "Flip values",
+        "Reverse time",
+        "Nudge points left",
+        "Nudge points right",
+        "Quantize points",
+        "Repeat 2x",
+        "Repeat 3x",
+        "Mutate values",
+        "Mutate shape",
+        "Select all",
     ]
 }
 
@@ -65,6 +82,8 @@ pub enum StripId {
     ValueGrid,
     /// The right-click-on-selected-node transform menu.
     Transform,
+    Tool,
+    Shapes,
 }
 
 /// What the pointer is currently dragging.
@@ -79,9 +98,13 @@ pub enum DragTarget {
     /// Painting stepped nodes (Alt held).
     StepDraw,
     /// Moving the whole selection; `anchor` is the node under the cursor.
-    Group { anchor: usize },
+    Group {
+        anchor: usize,
+    },
     /// Dragging a selection marquee from the press anchor.
     Marquee,
+    Transform(SelectionHandle),
+    Pen,
 }
 
 /// Which hold marker is being dragged.
@@ -94,6 +117,7 @@ pub enum MarkerHandle {
 
 /// Transient editor state — not persisted.
 pub struct MsegEditState {
+    power: power::PowerState,
     /// When true, playback/timing controls and the marker lane are hidden.
     curve_only: bool,
     /// When false, the strip's Unipolar/Bipolar polarity toggle is hidden (and
@@ -151,6 +175,9 @@ impl MsegEditState {
         self.step_last_cell = None;
         self.dropdown.close();
         self.text_edit.cancel();
+        self.power.gesture_start = None;
+        self.power.preview.clear();
+        self.reset_pen_repeat();
     }
 
     /// A full editor (playback controls + marker lane shown).
@@ -168,6 +195,7 @@ impl MsegEditState {
         let grid_options: Vec<(u32, u32)> = DEFAULT_GRID_OPTIONS.to_vec();
         let grid_labels = Self::build_labels(&grid_options);
         Self {
+            power: power::PowerState::default(),
             curve_only,
             show_polarity: true,
             drag: None,
@@ -219,6 +247,7 @@ impl MsegEditState {
     /// — a GUI-thread allocation, fine. The stable-items invariant (same
     /// length/order while the dropdown is open) is satisfied because
     /// `set_grid_options` must not be called while the dropdown is open.
+    #[cfg(test)]
     pub(crate) fn grid_label_refs(&self) -> Vec<&str> {
         self.grid_labels.iter().map(String::as_str).collect()
     }
@@ -361,39 +390,11 @@ impl MsegEditState {
         let mut closed_a_dropdown = false;
         if self.dropdown.is_open() {
             let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-            let ev = if self.dropdown.is_open_for(StripId::TimeGrid) {
-                // Clone the labels so the borrow of self.grid_labels ends
-                // before the mutable self.dropdown call.
-                let owned: Vec<String> = self.grid_labels.clone();
-                let grid_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-                self.dropdown.on_mouse_down(x, y, &grid_refs, window_size)
-            } else if self.dropdown.is_open_for(StripId::Transform) {
-                self.dropdown
-                    .on_mouse_down(x, y, transform_menu_items(), window_size)
-            } else {
-                self.dropdown
-                    .on_mouse_down(x, y, style_items(), window_size)
-            };
+            let labels = self.dropdown_labels();
+            let refs: Vec<_> = labels.iter().map(String::as_str).collect();
+            let ev = self.dropdown.on_mouse_down(x, y, &refs, window_size);
             match ev {
-                Some(DropdownEvent::Selected(StripId::TimeGrid, idx)) => {
-                    let (t, v) = self.grid_options[idx];
-                    data.time_divisions = t;
-                    data.value_steps = v;
-                    return Some(MsegEdit::Changed);
-                }
-                Some(DropdownEvent::Selected(StripId::Style, idx)) => {
-                    self.set_style(RandomStyle::from_index(idx));
-                    return None;
-                }
-                Some(DropdownEvent::Selected(StripId::Transform, idx)) => {
-                    let edit = match idx {
-                        0 => self.compress_values(data),
-                        1 => self.expand_values(data),
-                        2 => self.compress_times(data),
-                        _ => self.expand_times(data),
-                    };
-                    return edit;
-                }
+                Some(DropdownEvent::Selected(id, idx)) => return self.apply_menu(id, idx, data),
                 Some(DropdownEvent::Closed(_)) => {
                     // The click landed outside the popup, closing the dropdown.
                     // Fall through so the SAME click still acts on whatever it
@@ -406,6 +407,13 @@ impl MsegEditState {
             }
         }
 
+        if !closed_a_dropdown && let Some(edit) = self.begin_power_drag(x, y, data, &layout, scale)
+        {
+            return edit;
+        }
+        if crate::mseg::render::in_rect(layout.canvas, x, y) {
+            self.power.gesture_start = Some(*data);
+        }
         match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
             MsegHit::Node(i) | MsegHit::SelectedNode(i) => {
                 // Click selects: Ctrl toggles membership; a plain click on an
@@ -464,8 +472,21 @@ impl MsegEditState {
                 // a click in a gap between buttons is a no-op.
                 use crate::mseg::render::{in_rect, strip_buttons_ex};
                 let b = strip_buttons_ex(layout.strip, scale, !self.curve_only, self.show_polarity);
+                let power = crate::mseg::render::power_buttons(layout.strip, scale);
                 let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-                if in_rect(b.snap, x, y) {
+                if let Some((id, anchor)) = [
+                    (StripId::Tool, power.tool),
+                    (StripId::Shapes, power.shapes),
+                    (StripId::Transform, power.edit),
+                ]
+                .into_iter()
+                .find(|(_, anchor)| in_rect(*anchor, x, y))
+                {
+                    if !closed_a_dropdown {
+                        self.open_power_menu(id, anchor, window_size);
+                    }
+                    None
+                } else if in_rect(b.snap, x, y) {
                     data.snap = !data.snap;
                     Some(MsegEdit::Changed)
                 } else if self.show_polarity && in_rect(b.polarity, x, y) {
@@ -545,19 +566,9 @@ impl MsegEditState {
         // Route moves to the open dropdown for hover-highlight updates.
         if self.dropdown.is_open() {
             let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-            if self.dropdown.is_open_for(StripId::TimeGrid) {
-                // Clone labels so the borrow of self.grid_labels ends before
-                // the mutable self.dropdown call.
-                let owned: Vec<String> = self.grid_labels.clone();
-                let grid_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-                self.dropdown.on_mouse_move(x, y, &grid_refs, window_size);
-            } else if self.dropdown.is_open_for(StripId::Transform) {
-                self.dropdown
-                    .on_mouse_move(x, y, transform_menu_items(), window_size);
-            } else {
-                self.dropdown
-                    .on_mouse_move(x, y, style_items(), window_size);
-            }
+            let labels = self.dropdown_labels();
+            let refs: Vec<_> = labels.iter().map(String::as_str).collect();
+            self.dropdown.on_mouse_move(x, y, &refs, window_size);
             return None;
         }
         // Hover highlight (only when not dragging).
@@ -566,6 +577,10 @@ impl MsegEditState {
                 MsegHit::Node(i) | MsegHit::SelectedNode(i) => Some(i),
                 _ => None,
             };
+        }
+        let power_edit = self.move_power_drag(x, y, data, &layout, fine);
+        if matches!(self.drag, Some(DragTarget::Pen | DragTarget::Transform(_))) {
+            return power_edit;
         }
         match self.drag {
             Some(DragTarget::Node(i)) => {
@@ -655,6 +670,7 @@ impl MsegEditState {
         self.marquee = None;
         self.group_snapshot.clear();
         self.step_last_cell = None;
+        self.finish_power_gesture();
         None
     }
 
@@ -669,6 +685,9 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
+        if self.tool() != crate::mseg::MsegTool::Pointer {
+            return self.on_mouse_down(x, y, data, rect, scale, false);
+        }
         use crate::mseg::render::{MsegHit, mseg_hit_test, mseg_layout, x_to_phase, y_to_value};
         let layout = mseg_layout(rect, self.curve_only, scale);
         match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
@@ -702,6 +721,13 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
+        if self.is_dragging() {
+            return None;
+        }
+        if self.has_open_menu() {
+            self.dropdown.close();
+            return None;
+        }
         use crate::mseg::render::{MsegHit, mseg_hit_test_with_selection, mseg_layout, x_to_phase};
         let layout = mseg_layout(rect, self.curve_only, scale);
         let hit = mseg_hit_test_with_selection(&layout, data, self.curve_only, scale, x, y, self);
@@ -716,7 +742,7 @@ impl MsegEditState {
             // anchor's height absorbed above so the first item opens *at*
             // the cursor rather than below it.
             let item_h = 22.0 * scale;
-            let popup_w = 170.0 * scale;
+            let popup_w = 240.0 * scale;
             self.dropdown.open(
                 StripId::Transform,
                 (x, (y - item_h).max(rect.1), popup_w, item_h),
@@ -836,15 +862,19 @@ impl MsegEditState {
 
         // Write each selected node = snapshot + delta. Endpoints keep their
         // pinned time; every value is clamped to 0..1 per-node.
+        let mut candidate = *data;
         for i in 0..n {
             if !self.is_node_selected(i) {
                 continue;
             }
             let (t0, v0) = self.group_snapshot[i];
             if i != 0 && i + 1 != n {
-                data.nodes[i].time = t0 + d_phase;
+                candidate.nodes[i].time = t0 + d_phase;
             }
-            data.nodes[i].value = (v0 + d_value).clamp(0.0, 1.0);
+            candidate.nodes[i].value = (v0 + d_value).clamp(0.0, 1.0);
+        }
+        if candidate.is_valid() {
+            *data = candidate;
         }
         data.debug_assert_valid();
     }
@@ -976,15 +1006,12 @@ impl MsegEditState {
         }
         let mean: f32 =
             movable.iter().map(|&i| data.nodes[i].time).sum::<f32>() / movable.len() as f32;
-        let gap = MsegData::MIN_NODE_GAP;
         // Apply per-node in ascending index order so each step sees the
         // just-written previous neighbour for its lower bound.
         for &i in &movable {
             let t = data.nodes[i].time;
             let nt_raw = mean + (t - mean) * k;
-            let lo = data.nodes[i - 1].time + gap;
-            let hi = data.nodes[i + 1].time - gap;
-            data.nodes[i].time = nt_raw.clamp(lo, hi);
+            data.move_node(i, nt_raw, data.nodes[i].value);
         }
         data.debug_assert_valid();
         Some(MsegEdit::Changed)

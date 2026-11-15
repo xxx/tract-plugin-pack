@@ -219,7 +219,7 @@ impl MiffWindow {
             // miff owns this grid list — adjust here to change available presets.
             mseg_state: {
                 let mut s = MsegEditState::new_curve_only();
-                s.set_grid_options(&[(4, 4), (8, 8), (16, 8), (32, 16)]);
+                s.set_grid_options(&[(4, 4), (8, 8), (16, 8), (32, 16), (6, 8), (12, 8), (24, 16)]);
                 s
             },
             input_spectrum,
@@ -317,6 +317,10 @@ impl MiffWindow {
             self.alt_held = new_alt;
             self.mseg_state.set_stepped_draw(new_alt);
         }
+        self.mseg_state.set_transform_modifiers(
+            new_alt,
+            modifiers.contains(keyboard_types::Modifiers::CONTROL),
+        );
         self.shift_held = new_shift;
     }
 
@@ -598,7 +602,11 @@ impl baseview::WindowHandler for MiffWindow {
                 self.drag.set_mouse(x, y);
                 self.update_modifiers(modifiers);
 
-                match event_target(mseg_rect, x, y) {
+                match if self.mseg_state.has_open_menu() {
+                    EventTarget::Mseg
+                } else {
+                    event_target(mseg_rect, x, y)
+                } {
                     EventTarget::Mseg => {
                         // MSEG drag-move (if a drag is active the MSEG tracks it
                         // even outside the rect, which matches the node-drag
@@ -699,7 +707,11 @@ impl baseview::WindowHandler for MiffWindow {
                 let (x, y) = self.drag.mouse_pos();
                 self.update_modifiers(modifiers);
 
-                match event_target(mseg_rect, x, y) {
+                match if self.mseg_state.has_open_menu() {
+                    EventTarget::Mseg
+                } else {
+                    event_target(mseg_rect, x, y)
+                } {
                     EventTarget::Mseg => {
                         // Commit any open text-edit before a new click.
                         self.commit_text_edit();
@@ -715,7 +727,9 @@ impl baseview::WindowHandler for MiffWindow {
                             && x < strip.0 + strip.2
                             && y >= strip.1
                             && y < strip.1 + strip.3;
-                        let is_double = !on_strip && self.mseg_double_click_check(x, y);
+                        let is_double = !on_strip
+                            && !self.mseg_state.has_open_menu()
+                            && self.mseg_double_click_check(x, y);
                         if is_double {
                             let changed = {
                                 match self.params.curve.lock() {
@@ -910,7 +924,11 @@ impl baseview::WindowHandler for MiffWindow {
                     return baseview::EventStatus::Captured;
                 }
 
-                match event_target(mseg_rect, x, y) {
+                match if self.mseg_state.has_open_menu() {
+                    EventTarget::Mseg
+                } else {
+                    event_target(mseg_rect, x, y)
+                } {
                     EventTarget::Mseg => {
                         // Right-click in MSEG: toggle segment stepped flag.
                         let changed = {
@@ -945,6 +963,17 @@ impl baseview::WindowHandler for MiffWindow {
                 }
             }
 
+            baseview::Event::Mouse(baseview::MouseEvent::WheelScrolled { delta, .. })
+                if self.mseg_state.has_open_menu() =>
+            {
+                let dy = match delta {
+                    baseview::ScrollDelta::Lines { y, .. } => *y,
+                    baseview::ScrollDelta::Pixels { y, .. } => *y * 0.05,
+                };
+                self.mseg_state
+                    .on_wheel(dy * self.drag.input_scale(), mseg_rect);
+            }
+
             // ── Keyboard ────────────────────────────────────────────────────
             baseview::Event::Keyboard(ev) if self.text_edit.is_active() => {
                 // Key-up events are swallowed while editing so host shortcuts
@@ -968,23 +997,18 @@ impl baseview::WindowHandler for MiffWindow {
                 return baseview::EventStatus::Captured;
             }
             baseview::Event::Keyboard(ev) => {
-                if ev.state != keyboard_types::KeyState::Down {
-                    return baseview::EventStatus::Ignored;
+                let (captured, changed) = match self.params.curve.lock() {
+                    Ok(mut curve) => self.mseg_state.on_key(ev, &mut curve, mseg_rect, s),
+                    _ => (false, None),
+                };
+                if changed == Some(MsegEdit::Changed) {
+                    self.rebake();
                 }
-                match &ev.key {
-                    keyboard_types::Key::Delete | keyboard_types::Key::Backspace => {
-                        let changed = match self.params.curve.lock() {
-                            Ok(mut curve) => self.mseg_state.delete_selection(&mut curve),
-                            _ => None,
-                        };
-                        if changed == Some(MsegEdit::Changed) {
-                            self.rebake();
-                            return baseview::EventStatus::Captured;
-                        }
-                        return baseview::EventStatus::Ignored;
-                    }
-                    _ => return baseview::EventStatus::Ignored,
-                }
+                return if captured {
+                    baseview::EventStatus::Captured
+                } else {
+                    baseview::EventStatus::Ignored
+                };
             }
 
             _ => {}

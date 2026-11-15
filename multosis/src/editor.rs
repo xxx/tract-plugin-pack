@@ -1101,7 +1101,9 @@ impl baseview::WindowHandler for MultosisWindow {
                 // Undo / redo — handled before any capture so the keystroke
                 // itself is never recorded as an editing gesture. Active in
                 // both views.
-                if ev.modifiers.contains(keyboard_types::Modifiers::CONTROL) {
+                if ev.modifiers.intersects(
+                    keyboard_types::Modifiers::CONTROL | keyboard_types::Modifiers::META,
+                ) {
                     let is_z = matches!(
                         &ev.key,
                         keyboard_types::Key::Character(s) if s.eq_ignore_ascii_case("z")

@@ -619,7 +619,9 @@ impl baseview::WindowHandler for MinitosisWindow {
             Event::Keyboard(ev)
                 if !self.editor.captures_keyboard()
                     && ev.state == KeyState::Down
-                    && ev.modifiers.contains(Modifiers::CONTROL) =>
+                    && ev
+                        .modifiers
+                        .intersects(Modifiers::CONTROL | Modifiers::META) =>
             {
                 let is_z = matches!(&ev.key, Key::Character(s) if s.eq_ignore_ascii_case("z"));
                 let is_y = matches!(&ev.key, Key::Character(s) if s.eq_ignore_ascii_case("y"));
@@ -634,7 +636,15 @@ impl baseview::WindowHandler for MinitosisWindow {
                         self.restore(snapshot);
                     }
                 } else if !is_z && !is_y {
-                    return EventStatus::Ignored;
+                    let opened = self.undo.begin_capture(self.snapshot());
+                    let captured = self.handle_effect(&event, false);
+                    if opened {
+                        let after = self.snapshot();
+                        self.undo.commit_capture(&after);
+                    }
+                    if !captured {
+                        return EventStatus::Ignored;
+                    }
                 }
             }
             Event::Keyboard(_) => {
