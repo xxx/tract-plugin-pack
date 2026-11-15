@@ -112,6 +112,13 @@ impl Drop for LiveSource {
     }
 }
 impl LiveSource {
+    pub(super) fn binding_key(&self) -> (usize, usize, u64) {
+        (
+            Arc::as_ptr(&self.telemetry) as usize,
+            self.row,
+            self.telemetry.waveform.generation(),
+        )
+    }
     fn refresh_waveform(&mut self, kind: EffectKind, slot: usize, view: AudioView, frozen: bool) {
         let telemetry = &self.telemetry.waveform;
         let generation = telemetry.generation();
@@ -189,6 +196,9 @@ impl EffectEditor {
         {
             return;
         }
+        if self.live.is_some() {
+            self.cancel_detector();
+        }
         self.disconnect_live();
         self.live = Some(LiveSource {
             telemetry: telemetry.clone(),
@@ -209,6 +219,7 @@ impl EffectEditor {
         self.live = None;
     }
     pub fn invalidate_trace(&mut self) {
+        self.cancel_detector();
         if let Some(live) = &mut self.live {
             live.telemetry.release(live.token);
             live.token = 0;
@@ -313,6 +324,7 @@ impl Session<'_> {
             Some((EffectHit::Dial(i), text)) => self.commit_dial_text_edit(i, &text),
             Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
             Some((EffectHit::Smooth(slot), text)) => self.commit_smooth_text(slot, &text),
+            Some((EffectHit::Detector(field), text)) => self.commit_detector_text(field, &text),
             _ => {}
         }
     }

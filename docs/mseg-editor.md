@@ -238,6 +238,32 @@ restart clear the private trigger clock; a DSP flush preserves it. Sample-rate
 changes retain progress/refractory time, including same-effect Minitosis
 reinitialization. Mode/rate/Sens/Hold settings save per row/effect and are undoable.
 
+### Audio detector setup
+
+With **Transient (sample)** selected, click **Detect...** above the trigger menu.
+The panel provides **Threshold**, **High-pass**, and **Low-pass**, all Off by
+default. Older projects and the other trigger modes keep their existing behavior.
+
+Threshold is Off or -60..0 dB, measured on the fast detector envelope after
+filtering. Sens still controls the fast/slow ratio and Hold still sets the
+refractory time. Quiet rejected candidates do not start Hold, so a louder hit
+can still retrigger immediately when its envelope qualifies.
+
+The filters are causal one-pole (6 dB/octave) stages, each independently Off or
+20..20000 Hz. Use High-pass to reduce bass-triggered restarts or Low-pass to
+reduce high-frequency triggers. Both may be enabled, including crossed cutoffs.
+They affect detection only. The live meter shows the actual filtered detector
+envelope, with a threshold marker; Input/Output backdrops keep their normal
+signal views. Missing processor measurements show **Waiting for audio**.
+
+Drag to adjust, Shift-drag for fine control, double-click for Off, or right-click
+to enter a value such as `Off`, `-24 dB`, `200 Hz`, or `5 kHz`. Numeric input is
+committed before another slider drag or outside click. Escape first cancels an
+active field, then closes the panel. **Reset** restores all three Off in one undo
+step. Settings save per row/effect, but shape clipboard/files do not transfer them.
+Focus loss, resize, and native window close finalize edits; binding replacements
+discard old numeric buffers so they cannot apply to another row/effect.
+
 ## Edit commands
 
 - **Compress/Expand values/times** retain their existing behavior and require a

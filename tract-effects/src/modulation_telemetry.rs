@@ -1,5 +1,6 @@
 //! Request-aware, bounded audio-to-editor modulation measurements.
 use crate::effects::{EffectKind, MAX_EFFECT_PARAMS};
+use crate::modulation::{AudioTriggerSettings, DetectorReading};
 use crate::modulation::{ModulationState, ModulationTarget, TrackModulation};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -12,6 +13,7 @@ pub struct ModulationFrame {
     pub outputs: [f32; 4],
     pub parameters: [Option<(f32, u8)>; MAX_EFFECT_PARAMS],
     pub mix: Option<(f32, u8)>,
+    pub detector: Option<DetectorReading>,
 }
 impl ModulationFrame {
     pub fn capture(kind: EffectKind, config: &TrackModulation, state: &ModulationState) -> Self {
@@ -22,6 +24,7 @@ impl ModulationFrame {
             outputs: std::array::from_fn(|i| state.output(i)),
             parameters: state.parameter_norms(),
             mix: state.delivered_mix(),
+            detector: state.detector_reading(),
         }
     }
     pub fn matches(&self, kind: EffectKind, config: &TrackModulation) -> bool {
@@ -72,6 +75,13 @@ fn untarget(bits: u32) -> Option<ModulationTarget> {
     }
 }
 
+fn optional_float(value: Option<f32>) -> u64 {
+    value.map_or(0, |value| value.to_bits() as u64 | (1 << 32))
+}
+fn read_optional_float(bits: u64) -> Option<f32> {
+    (bits >> 32 != 0).then_some(f32::from_bits(bits as u32))
+}
+
 struct AtomicFrame {
     stamp: AtomicU64,
     token: AtomicU64,
@@ -80,6 +90,7 @@ struct AtomicFrame {
     sources: [AtomicU64; 4],
     parameters: [AtomicU64; MAX_EFFECT_PARAMS],
     mix: AtomicU64,
+    detector: [AtomicU64; 4],
 }
 impl Default for AtomicFrame {
     fn default() -> Self {
@@ -91,6 +102,7 @@ impl Default for AtomicFrame {
             sources: std::array::from_fn(|_| AtomicU64::new(0)),
             parameters: std::array::from_fn(|_| AtomicU64::new(0)),
             mix: AtomicU64::new(0),
+            detector: std::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
 }
@@ -110,6 +122,17 @@ impl AtomicFrame {
             self.parameters[i].store(norm(frame.parameters[i]), Ordering::Release);
         }
         self.mix.store(norm(frame.mix), Ordering::Release);
+        let settings = frame
+            .detector
+            .map_or(AudioTriggerSettings::default(), |reading| reading.settings);
+        for (dest, value) in self.detector.iter().zip([
+            frame.detector.map(|reading| reading.level),
+            settings.level_db,
+            settings.highpass_hz,
+            settings.lowpass_hz,
+        ]) {
+            dest.store(optional_float(value), Ordering::Release);
+        }
         self.stamp.store(stamp, Ordering::Release);
     }
     fn load(&self, token: u64) -> Option<ModulationFrame> {
@@ -125,6 +148,8 @@ impl AtomicFrame {
         let parameters =
             std::array::from_fn(|i| unnorm(self.parameters[i].load(Ordering::Acquire)));
         let mix = unnorm(self.mix.load(Ordering::Acquire));
+        let detector: [Option<f32>; 4] =
+            std::array::from_fn(|i| read_optional_float(self.detector[i].load(Ordering::Acquire)));
         if self.stamp.load(Ordering::Acquire) != stamp || actual_token != token {
             return None;
         }
@@ -139,6 +164,14 @@ impl AtomicFrame {
             outputs: sources.map(|p| p.1),
             parameters,
             mix,
+            detector: detector[0].map(|level| DetectorReading {
+                level,
+                settings: AudioTriggerSettings {
+                    level_db: detector[1],
+                    highpass_hz: detector[2],
+                    lowpass_hz: detector[3],
+                },
+            }),
         })
     }
 }
@@ -322,6 +355,7 @@ mod tests {
             outputs: [0.75; 4],
             parameters: [None; MAX_EFFECT_PARAMS],
             mix: Some((0.4, 2)),
+            detector: None,
         }
     }
     #[test]
@@ -353,6 +387,26 @@ mod tests {
         assert_ne!(replaced, next);
         assert!(telemetry.frame(replaced).is_none());
         assert!(telemetry.point(0, replaced).is_none());
+    }
+
+    #[test]
+    fn measured_zero_level_is_distinct_from_an_unavailable_detector() {
+        let shared = ModulationTelemetry::default();
+        let token = shared.request(0, 0, EffectKind::Svf, false);
+        let mut clock = TraceClock::default();
+        clock.begin_block(&shared, 48000.0);
+        let mut value = frame();
+        clock.publish(&shared, 0, &value);
+        assert_eq!(shared.frame(token).unwrap().detector, None);
+        value.detector = Some(DetectorReading {
+            level: 0.0,
+            settings: AudioTriggerSettings {
+                level_db: Some(0.0),
+                ..AudioTriggerSettings::default()
+            },
+        });
+        clock.publish(&shared, 0, &value);
+        assert_eq!(shared.frame(token).unwrap().detector, value.detector);
     }
     #[test]
     fn overwrite_is_bounded_and_snapshots_reject_incomplete_writes() {
@@ -395,6 +449,14 @@ mod tests {
                 frame.outputs.fill(value);
                 frame.phases.fill(1.0 - value);
                 frame.mix = Some((value, 1));
+                frame.detector = Some(DetectorReading {
+                    level: value,
+                    settings: AudioTriggerSettings {
+                        level_db: Some(-60.0 * value),
+                        highpass_hz: Some(20.0 + 1000.0 * value),
+                        lowpass_hz: None,
+                    },
+                });
                 writer.latest.store(token, &frame);
             }
             finished.store(true, Ordering::Release);
@@ -405,6 +467,17 @@ mod tests {
                 assert!(frame.outputs.iter().all(|v| *v == value));
                 assert!(frame.phases.iter().all(|v| *v == 1.0 - value));
                 assert_eq!(frame.mix, Some((value, 1)));
+                assert_eq!(
+                    frame.detector,
+                    Some(DetectorReading {
+                        level: value,
+                        settings: AudioTriggerSettings {
+                            level_db: Some(-60.0 * value),
+                            highpass_hz: Some(20.0 + 1000.0 * value),
+                            lowpass_hz: None
+                        }
+                    })
+                );
             }
         }
         thread.join().unwrap();

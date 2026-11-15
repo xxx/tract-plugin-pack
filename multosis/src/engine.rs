@@ -701,6 +701,51 @@ mod tests {
     }
 
     #[test]
+    fn detector_level_gate_accepts_loud_hit_after_rejected_quiet_hit_without_allocating() {
+        use crate::modulation::{AudioTriggerSettings, TriggerSource};
+        let mut engine = midi_engine(0.0);
+        let mut config = std::array::from_fn(|row| engine.modulation.config_for_test(row).clone());
+        config[0].trigger = TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        };
+        config[0].audio_trigger = AudioTriggerSettings {
+            level_db: Some(-6.0),
+            ..AudioTriggerSettings::default()
+        };
+        engine.set_modulation(&config);
+        let mut input = [0.0; 512];
+        input[..128].fill(0.1);
+        input[128..192].fill(1.0);
+        let mut left = input;
+        let mut right = input;
+        assert_no_alloc::assert_no_alloc(|| {
+            engine.process(
+                &mut left,
+                &mut right,
+                false,
+                1000.0,
+                120.0,
+                1.0,
+                &Grid::default(),
+            )
+        });
+        assert!(left[128] > 0.9);
+        assert_eq!(left[180], 0.0);
+        let fired = 512 - (engine.modulation_phase(0, 0) * 48000.0).round() as usize;
+        assert!((129..170).contains(&fired));
+        assert_eq!(
+            engine
+                .modulation
+                .frame(0, crate::effects::EffectKind::Bitcrush)
+                .detector
+                .unwrap()
+                .settings,
+            config[0].audio_trigger
+        );
+    }
+
+    #[test]
     fn precise_timing_moves_with_rows_survives_flush_and_resets_on_restart() {
         use crate::modulation::TriggerSource;
         for action in 0..4 {

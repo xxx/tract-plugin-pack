@@ -61,6 +61,7 @@ pub struct EffectLayout {
     pub smooth: (f32, f32, f32, f32),
     pub trace: (f32, f32, f32, f32),
     pub audio: (f32, f32, f32, f32),
+    pub detector_setup: (f32, f32, f32, f32),
 }
 
 /// Compute the effect-editor layout at `scale`.
@@ -135,6 +136,7 @@ pub fn effect_layout(bounds: (f32, f32, f32, f32), scale: f32) -> EffectLayout {
         114.0 * scale,
         26.0 * scale,
     );
+    let detector_setup = (trigger.0, trigger.1 - 30.0 * scale, trigger.2, 26.0 * scale);
     EffectLayout {
         back,
         effect_header,
@@ -155,6 +157,7 @@ pub fn effect_layout(bounds: (f32, f32, f32, f32), scale: f32) -> EffectLayout {
         smooth,
         trace,
         audio,
+        detector_setup,
     }
 }
 
@@ -232,6 +235,8 @@ pub enum EffectHit {
     Smooth(usize),
     Trace,
     Audio,
+    DetectorSetup,
+    Detector(super::DetectorField),
 }
 
 /// The MSEG-selector tab order shown to the user. The three assignable MSEGs
@@ -290,6 +295,11 @@ pub fn effect_hit(
     // Per-track trigger controls — checked before the per-MSEG selector.
     if in_rect(lay.trigger, px, py) {
         return Some(EffectHit::Trigger);
+    }
+    if matches!(trigger, TriggerSource::TransientSample { .. })
+        && in_rect(lay.detector_setup, px, py)
+    {
+        return Some(EffectHit::DetectorSetup);
     }
     if matches!(trigger, TriggerSource::MidiNote { .. }) {
         for field in [super::MidiField::Note, super::MidiField::Channel] {

@@ -66,6 +66,9 @@ Trigger choices apply to all four envelopes:
 - **Free Hz (sample) / Transient (sample):** opt-in sample-timed variants with
   the same Rate or Sens/Hold controls. Existing modes remain block-aligned; see
   [sample-timed triggers](../mseg-editor.md#sample-timed-hz-and-audio-triggers).
+  Transient (sample) also exposes **Detect...** for an absolute level threshold,
+  detector-only High-pass/Low-pass, and a measured level meter. These settings
+  default to Off and save per effect; see [audio detector setup](../mseg-editor.md#audio-detector-setup).
 - **MIDI note:** restarts at matching note-on offsets, with Note (Any/0–127) and
   Ch. (Any/1–16) filters. Route MIDI to the plugin's note input. Note-off does not
   gate or release the envelopes; see [MIDI retriggering](../mseg-editor.md#midi-retriggering).

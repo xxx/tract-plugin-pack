@@ -212,6 +212,9 @@ A strip of mode controls runs along the bottom of the MSEG editor, beneath the c
 without changing other rows' modulation cadence. They reuse Rate or Sens/Hold;
 existing Free Hz/Transient settings keep their block-aligned behavior. See
 [sample-timed triggers](../mseg-editor.md#sample-timed-hz-and-audio-triggers).
+Transient (sample) also exposes **Detect...** for an absolute level threshold,
+detector-only High-pass/Low-pass, and a measured level meter. Settings default
+to Off and save per row; see [audio detector setup](../mseg-editor.md#audio-detector-setup).
 
 Rows can also use **Trigger → MIDI note**, with Note (Any/0–127) and Ch.
 (Any/1–16) filters. Route MIDI to the plugin's note input; each matching note-on

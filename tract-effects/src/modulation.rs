@@ -8,7 +8,11 @@ use tiny_skia_widgets::{
     MsegData, MsegNode, PlayMode, Polarity, SyncMode, advance, value_at_phase,
 };
 
+mod audio_trigger;
 mod precise;
+pub use audio_trigger::{
+    AudioTriggerSettings, DetectorReading, FILTER_MAX_HZ, FILTER_MIN_HZ, LEVEL_MAX_DB, LEVEL_MIN_DB,
+};
 mod smoothing;
 pub use smoothing::{MAX_SMOOTH_MS, normalized_smooth_ms, smooth_from_norm, smooth_to_norm};
 pub(crate) use smoothing::{phase_next, phase_step};
@@ -68,6 +72,7 @@ impl TransientDetector {
             hold_ms,
             sample_rate,
             precise::DetectorCoefficients::new(sample_rate),
+            0.0,
         )
     }
 
@@ -78,6 +83,7 @@ impl TransientDetector {
         hold_ms: f32,
         sample_rate: f32,
         coefficients: precise::DetectorCoefficients,
+        level_floor: f32,
     ) -> bool {
         let target = input.abs();
         let precise::DetectorCoefficients {
@@ -105,7 +111,7 @@ impl TransientDetector {
         if self.slow_env < TRANSIENT_NOISE_FLOOR {
             return false;
         }
-        if self.fast_env > self.slow_env * threshold {
+        if self.fast_env > self.slow_env * threshold && self.fast_env >= level_floor {
             let hold = (hold_ms.max(0.0) * 0.001 * sample_rate) as u32;
             self.refractory = hold.max(1);
             return true;
@@ -189,6 +195,8 @@ pub struct TrackModulation {
     pub depths: [f32; 3],
     #[serde(default, skip_serializing_if = "smoothing::all_off")]
     pub smooth_ms: [f32; 4],
+    #[serde(default, skip_serializing_if = "AudioTriggerSettings::is_default")]
+    pub audio_trigger: AudioTriggerSettings,
     /// The event that resets all four of this row's MSEG phases.
     #[serde(default)]
     pub trigger: TriggerSource,
@@ -360,6 +368,7 @@ impl TrackModulation {
             targets: [Some(ModulationTarget::EffectParameter(0)), None, None],
             depths: [0.4, 0.0, 0.0],
             smooth_ms: [0.0; 4],
+            audio_trigger: AudioTriggerSettings::default(),
             trigger: TriggerSource::Free,
         }
     }
@@ -402,6 +411,8 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             #[serde(default)]
             smooth_ms: Vec<f32>,
             #[serde(default)]
+            audio_trigger: AudioTriggerSettings,
+            #[serde(default)]
             trigger: TriggerSource,
         }
         let h = Helper::deserialize(deserializer)?;
@@ -435,6 +446,7 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             targets,
             depths,
             trigger: h.trigger,
+            audio_trigger: h.audio_trigger.normalized(),
             smooth_ms: std::array::from_fn(|i| {
                 h.smooth_ms
                     .get(i)
@@ -626,6 +638,7 @@ impl ModulationState {
     ) {
         self.fired = false;
         self.precise.prepare(config.trigger, sample_rate);
+        self.precise.configure_audio(config.audio_trigger);
         let block_len = left.len().min(right.len());
         let sr = sample_rate as f32;
         match config.trigger {
@@ -653,6 +666,9 @@ impl ModulationState {
     }
     pub fn next_precise_trigger(&mut self, input: [f32; 2]) -> bool {
         self.precise.next_sample(input)
+    }
+    pub fn detector_reading(&self) -> Option<DetectorReading> {
+        self.precise.reading()
     }
 
     /// Advance before evaluating, then apply Amp followed by slots 1–3.

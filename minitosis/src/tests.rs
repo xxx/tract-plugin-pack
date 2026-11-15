@@ -250,6 +250,127 @@ fn same_effect_sample_rate_reinitialize_preserves_precise_hz_progress() {
 }
 
 #[test]
+fn detector_filters_leave_audible_signal_unchanged_when_threshold_rejects_restarts() {
+    use tract_effects::modulation::{AudioTriggerSettings, TriggerSource};
+    let (mut actual, mut context) = midi_plugin(EffectKind::Bitcrush, 0.0, false);
+    let (mut reference, mut reference_context) = midi_plugin(EffectKind::Bitcrush, 0.0, false);
+    actual.processor.modulation.audio_trigger = AudioTriggerSettings {
+        level_db: Some(0.0),
+        highpass_hz: Some(1000.0),
+        lowpass_hz: Some(4000.0),
+    };
+    reference.processor.modulation.audio_trigger = AudioTriggerSettings {
+        level_db: Some(0.0),
+        ..AudioTriggerSettings::default()
+    };
+    for p in [&mut actual, &mut reference] {
+        precise_source(
+            p,
+            TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 50.0,
+            },
+        );
+    }
+    for block in 0..32 {
+        let input: [f32; 512] = std::array::from_fn(|i| {
+            let t = (block * 512 + i) as f32 / 48000.0;
+            ((std::f32::consts::TAU * 100.0 * t).sin() + (std::f32::consts::TAU * 8000.0 * t).sin())
+                * 0.3
+        });
+        let (mut left, mut right, mut expected_left, mut expected_right) =
+            (input, input, input, input);
+        assert_no_alloc::assert_no_alloc(|| {
+            actual.render(&mut left, &mut right, false, 120.0, &mut context);
+            reference.render(
+                &mut expected_left,
+                &mut expected_right,
+                false,
+                120.0,
+                &mut reference_context,
+            );
+        });
+        assert_eq!(left, expected_left);
+        assert_eq!(right, expected_right);
+    }
+    let a = actual.processor.modulation_frame().detector.unwrap();
+    let r = reference.processor.modulation_frame().detector.unwrap();
+    assert!(
+        (a.level - r.level).abs() > 1e-3,
+        "the detector filters must actually process the signal"
+    );
+    assert_eq!(a.settings, actual.processor.modulation.audio_trigger);
+}
+
+#[test]
+fn detector_rejected_quiet_hit_does_not_block_louder_hit_in_the_same_buffer() {
+    use tract_effects::modulation::{AudioTriggerSettings, TriggerSource};
+    let (mut plugin, mut context) = midi_plugin(EffectKind::Bitcrush, 0.0, false);
+    plugin.processor.modulation.audio_trigger = AudioTriggerSettings {
+        level_db: Some(-6.0),
+        ..AudioTriggerSettings::default()
+    };
+    precise_source(
+        &mut plugin,
+        TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        },
+    );
+    let mut input = [0.0; 512];
+    input[..128].fill(0.1);
+    input[128..192].fill(1.0);
+    let mut left = input;
+    let mut right = input;
+    assert_no_alloc::assert_no_alloc(|| {
+        plugin.render(&mut left, &mut right, false, 120.0, &mut context)
+    });
+    assert!(left[128] > 0.9);
+    assert_eq!(left[180], 0.0);
+    let fired = 512 - (plugin.processor.phase(0) * 48000.0).round() as usize;
+    assert!((129..170).contains(&fired), "fired at {fired}");
+}
+
+#[test]
+fn detector_filter_history_survives_same_effect_sample_rate_reinitialize() {
+    use tract_effects::modulation::{AudioTriggerSettings, TriggerSource};
+    let (mut plugin, mut context) = midi_plugin(EffectKind::Bitcrush, 0.0, false);
+    plugin.processor.modulation.audio_trigger = AudioTriggerSettings {
+        highpass_hz: Some(500.0),
+        lowpass_hz: Some(4000.0),
+        ..AudioTriggerSettings::default()
+    };
+    precise_source(
+        &mut plugin,
+        TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        },
+    );
+    plugin.render(
+        &mut [0.7; 4800],
+        &mut [0.7; 4800],
+        false,
+        120.0,
+        &mut context,
+    );
+    assert!(plugin.processor.modulation_frame().detector.unwrap().level < 1e-5);
+    let config = BufferConfig {
+        sample_rate: 96000.0,
+        min_buffer_size: Some(1),
+        max_buffer_size: 4096,
+        process_mode: ProcessMode::Realtime,
+    };
+    assert!(plugin.initialize(&Minitosis::AUDIO_IO_LAYOUTS[0], &config, &mut context));
+    plugin.reset();
+    assert_no_alloc::assert_no_alloc(|| {
+        plugin.render(&mut [0.7; 512], &mut [0.7; 512], false, 120.0, &mut context)
+    });
+    assert!((plugin.processor.phase(0) - 512.0 / 96000.0).abs() < 1e-7);
+    assert!(plugin.processor.modulation_frame().detector.unwrap().level < 1e-5);
+}
+
+#[test]
 fn same_effect_sample_rate_reinitialize_preserves_transient_refractory_time() {
     use tract_effects::modulation::TriggerSource;
     let (mut plugin, mut context) = midi_plugin(EffectKind::Bitcrush, 0.0, false);

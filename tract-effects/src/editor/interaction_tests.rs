@@ -1408,6 +1408,316 @@ mod precision_editing {
     }
 }
 
+mod detector_controls {
+    use super::*;
+    use crate::modulation::{AudioTriggerSettings, DetectorReading};
+    use crate::modulation_telemetry::{ModulationFrame, ModulationTelemetry, TraceClock};
+    use std::sync::Arc;
+
+    fn layout(h: &Harness) -> detector::DetectorLayout {
+        detector::detector_layout(h.geometry)
+    }
+    fn open(h: &mut Harness) {
+        h.modulation.trigger = TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        };
+        h.click(h.geometry.layout.detector_setup);
+        assert!(h.editor.detector_panel_open());
+    }
+    fn draw(h: &mut Harness) {
+        let mut pm = tiny_skia::Pixmap::new(
+            h.geometry.window_size.0 as u32,
+            h.geometry.window_size.1 as u32,
+        )
+        .unwrap();
+        h.editor.draw(
+            &mut pm,
+            &mut h.tr,
+            &h.effect,
+            &h.modulation,
+            [0.0; 4],
+            h.geometry,
+        );
+        h.editor
+            .draw_popup(&mut pm, &mut h.tr, &h.effect, h.geometry);
+    }
+    fn type_value(h: &mut Harness, field: DetectorField, text: &str) {
+        let r = layout(h).fields[field as usize];
+        h.move_to(r.0 + r.2 * 0.5, r.1 + r.3 * 0.5, Modifiers::empty());
+        h.press(MouseButton::Right);
+        assert!(h.editor.text_edit.is_active());
+        h.type_replacement(text);
+    }
+    fn numeric(h: &mut Harness, field: DetectorField, text: &str) -> EditorResponse {
+        type_value(h, field, text);
+        h.key(Key::Enter)
+    }
+
+    #[test]
+    fn detector_numeric_settings_save_and_reset_as_one_undo_without_changing_geometry() {
+        let mut h = Harness::new();
+        let geometry = h.modulation.msegs;
+        assert!(
+            !serde_json::to_string(&h.modulation)
+                .unwrap()
+                .contains("audio_trigger")
+        );
+        open(&mut h);
+        assert!(numeric(&mut h, DetectorField::Level, "-24 dB").changed);
+        assert!(numeric(&mut h, DetectorField::Highpass, "200 Hz").changed);
+        assert!(numeric(&mut h, DetectorField::Lowpass, "5 kHz").changed);
+        assert_eq!(
+            h.modulation.audio_trigger,
+            AudioTriggerSettings {
+                level_db: Some(-24.0),
+                highpass_hz: Some(200.0),
+                lowpass_hz: Some(5000.0)
+            }
+        );
+        assert_eq!(h.modulation.msegs, geometry);
+        let saved = serde_json::to_string(&h.modulation).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TrackModulation>(&saved).unwrap(),
+            h.modulation
+        );
+        let before = h.modulation.clone();
+        let mut undo = crate::undo::UndoHistory::new();
+        undo.begin_capture(before.clone());
+        assert!(h.click(layout(&h).reset).changed);
+        let after = h.modulation.clone();
+        undo.commit_capture(&after);
+        assert_eq!(after.audio_trigger, AudioTriggerSettings::default());
+        assert_eq!(undo.undo(after), Some(before));
+    }
+
+    #[test]
+    fn detector_minima_survive_zero_move_and_typed_value_commits_before_same_slider_drag() {
+        let mut h = Harness::new();
+        open(&mut h);
+        for (field, text) in [
+            (DetectorField::Level, "-60"),
+            (DetectorField::Highpass, "20"),
+            (DetectorField::Lowpass, "20"),
+        ] {
+            numeric(&mut h, field, text);
+            let before = h.modulation.audio_trigger;
+            h.editor.effect_click = ClickTracker::new();
+            let r = layout(&h).fields[field as usize];
+            h.move_to(r.0 + 20.0, r.1 + 16.0, Modifiers::empty());
+            h.press(MouseButton::Left);
+            h.move_to(r.0 + 20.0, r.1 + 16.0, Modifiers::empty());
+            h.move_to(r.0 + 20.0, r.1 + 16.0, Modifiers::SHIFT);
+            h.release();
+            assert_eq!(h.modulation.audio_trigger, before, "field {field:?}");
+        }
+        type_value(&mut h, DetectorField::Highpass, "200");
+        let r = layout(&h).fields[1];
+        assert!(h.press(MouseButton::Left).changed);
+        assert_eq!(h.modulation.audio_trigger.highpass_hz, Some(200.0));
+        h.move_to(h.pointer.0, h.pointer.1 - 30.0, Modifiers::empty());
+        h.release();
+        assert!(h.modulation.audio_trigger.highpass_hz.unwrap() > 200.0);
+        assert!(r.2 > 0.0);
+        let before = h.modulation.audio_trigger;
+        type_value(&mut h, DetectorField::Lowpass, "1000");
+        h.key(Key::Escape);
+        assert!(h.editor.detector_panel_open() && !h.editor.text_edit.is_active());
+        assert_eq!(h.modulation.audio_trigger, before);
+        h.key(Key::Escape);
+        assert!(!h.editor.detector_panel_open());
+    }
+
+    #[test]
+    fn detector_modal_draws_last_and_swallows_underlying_inputs_at_each_scale() {
+        for scale in [0.5, 1.0, 2.0] {
+            let mut h = Harness::new();
+            h.geometry = EditorGeometry {
+                layout: view::effect_layout((16.0, 16.0, 1304.0, 640.0), scale),
+                scale,
+                window_size: (1336.0 * scale, 680.0 * scale),
+            };
+            open(&mut h);
+            let rect = layout(&h).rect;
+            assert!(
+                rect.0 >= 0.0
+                    && rect.1 >= 0.0
+                    && rect.0 + rect.2 <= h.geometry.window_size.0
+                    && rect.1 + rect.3 <= h.geometry.window_size.1
+            );
+            let before = (h.effect, h.modulation.clone());
+            let viewport = h.editor.mseg_edit.viewport();
+            let mut expected = tiny_skia::Pixmap::new(
+                h.geometry.window_size.0 as u32,
+                h.geometry.window_size.1 as u32,
+            )
+            .unwrap();
+            h.editor
+                .draw_popup(&mut expected, &mut h.tr, &h.effect, h.geometry);
+            let mut actual = expected.clone();
+            actual.fill(widgets::color_bg());
+            h.editor.draw(
+                &mut actual,
+                &mut h.tr,
+                &h.effect,
+                &h.modulation,
+                [0.0; 4],
+                h.geometry,
+            );
+            h.editor
+                .draw_popup(&mut actual, &mut h.tr, &h.effect, h.geometry);
+            let mut count = 0;
+            for (a, b) in expected.pixels().iter().zip(actual.pixels()) {
+                if a.alpha() == 255 {
+                    count += 1;
+                    assert_eq!(a, b);
+                }
+            }
+            assert!(count > 100);
+            assert!(
+                h.send(Event::Mouse(MouseEvent::WheelScrolled {
+                    delta: baseview::ScrollDelta::Lines { x: 0.0, y: 4.0 },
+                    modifiers: Modifiers::empty()
+                }))
+                .captured
+            );
+            assert_eq!(h.editor.mseg_edit.viewport(), viewport);
+            let dial = h.geometry.layout.dials[0];
+            h.move_to(
+                dial.0 + dial.2 * 0.5,
+                dial.1 + dial.3 * 0.5,
+                Modifiers::empty(),
+            );
+            assert!(h.press(MouseButton::Right).captured);
+            assert!(!h.editor.text_edit.is_active() && !h.editor.detector_panel_open());
+            assert_eq!((h.effect, h.modulation), before);
+        }
+    }
+
+    #[test]
+    fn detector_meter_uses_matching_dsp_settings_and_binding_changes_discard_pending_text() {
+        let mut h = Harness::new();
+        h.modulation.trigger = TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        };
+        let shared = Arc::new(ModulationTelemetry::default());
+        h.editor.connect_live(&shared, 0);
+        draw(&mut h);
+        open(&mut h);
+        assert_eq!(h.editor.detector_level(), None);
+        let mut clock = TraceClock::default();
+        clock.begin_block(&shared, 48000.0);
+        let mut frame = ModulationFrame {
+            kind: h.effect.kind,
+            targets: h.modulation.targets,
+            phases: [0.0; 4],
+            outputs: [0.0; 4],
+            parameters: [None; MAX_EFFECT_PARAMS],
+            mix: None,
+            detector: Some(DetectorReading {
+                level: 0.0,
+                settings: AudioTriggerSettings::default(),
+            }),
+        };
+        clock.publish(&shared, 0, &frame);
+        draw(&mut h);
+        assert_eq!(h.editor.detector_level(), Some(0.0));
+        numeric(&mut h, DetectorField::Highpass, "200");
+        draw(&mut h);
+        assert_eq!(h.editor.detector_level(), None);
+        frame.detector = Some(DetectorReading {
+            level: 0.4,
+            settings: h.modulation.audio_trigger,
+        });
+        clock.publish(&shared, 0, &frame);
+        draw(&mut h);
+        assert_eq!(h.editor.detector_level(), Some(0.4));
+        type_value(&mut h, DetectorField::Lowpass, "3000");
+        h.editor.connect_live(&shared, 1);
+        draw(&mut h);
+        assert!(!h.editor.detector_panel_open() && !h.editor.text_edit.is_active());
+        assert_eq!(h.modulation.audio_trigger.lowpass_hz, None);
+        open(&mut h);
+        type_value(&mut h, DetectorField::Lowpass, "4000");
+        shared.invalidate();
+        draw(&mut h);
+        assert!(!h.editor.detector_panel_open() && !h.editor.text_edit.is_active());
+        assert_eq!(h.modulation.audio_trigger.lowpass_hz, None);
+    }
+
+    #[test]
+    fn detector_focus_commit_closes_panel_and_keeps_frozen_view_preferences() {
+        let mut h = Harness::new();
+        h.editor.set_audio_view(AudioView::Both);
+        h.editor.set_audio_frozen(true);
+        open(&mut h);
+        type_value(&mut h, DetectorField::Level, "-12");
+        let before = h.modulation.clone();
+        let mut history = crate::undo::UndoHistory::new();
+        history.begin_capture(before.clone());
+        let response = h.send(Event::Window(baseview::WindowEvent::Unfocused));
+        assert!(response.changed && response.captured);
+        assert!(!h.editor.detector_panel_open() && !h.editor.text_edit.is_active());
+        assert!(h.editor.audio_frozen());
+        let after = h.modulation.clone();
+        history.commit_capture(&after);
+        assert_eq!(after.audio_trigger.level_db, Some(-12.0));
+        assert_eq!(history.undo(after), Some(before));
+        open(&mut h);
+        h.resize(2.0);
+        assert!(!h.editor.detector_panel_open());
+        assert!(h.editor.audio_frozen());
+    }
+
+    #[test]
+    fn detector_long_valid_unit_input_scrolls_inside_the_modal_without_truncating_its_value() {
+        for scale in [0.5, 1.0, 2.0] {
+            let mut h = Harness::new();
+            h.geometry = EditorGeometry {
+                layout: view::effect_layout((16.0, 16.0, 1304.0, 640.0), scale),
+                scale,
+                window_size: (1336.0 * scale, 680.0 * scale),
+            };
+            open(&mut h);
+            type_value(&mut h, DetectorField::Highpass, "20000.0000000 Hz");
+            assert_eq!(
+                h.editor
+                    .text_edit
+                    .active_for(&EffectHit::Detector(DetectorField::Highpass)),
+                Some("20000.0000000 Hz")
+            );
+            let mut pm = tiny_skia::Pixmap::new(
+                h.geometry.window_size.0 as u32,
+                h.geometry.window_size.1 as u32,
+            )
+            .unwrap();
+            h.editor
+                .draw_popup(&mut pm, &mut h.tr, &h.effect, h.geometry);
+            let r = layout(&h).rect;
+            let width = pm.width() as usize;
+            for (index, pixel) in pm
+                .pixels()
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.alpha() > 0)
+            {
+                let (x, y) = ((index % width) as f32, (index / width) as f32);
+                assert!(
+                    x >= r.0 - 1.0
+                        && x <= r.0 + r.2 + 1.0
+                        && y >= r.1 - 1.0
+                        && y <= r.1 + r.3 + 1.0,
+                    "modal pixels escaped at {x},{y}, scale {scale}"
+                );
+                assert!(pixel.alpha() > 0);
+            }
+            assert!(h.key(Key::Enter).changed);
+            assert_eq!(h.modulation.audio_trigger.highpass_hz, Some(20000.0));
+        }
+    }
+}
+
 mod precise_triggers {
     use super::*;
     fn choose(h: &mut Harness, index: usize) {
@@ -2174,6 +2484,7 @@ mod smoothing_controls {
             outputs: [0.3; 4],
             parameters: [None; MAX_EFFECT_PARAMS],
             mix: None,
+            detector: None,
         };
         frame.parameters[0] = Some((0.123, 1));
         clock.publish(&shared, 0, &frame);

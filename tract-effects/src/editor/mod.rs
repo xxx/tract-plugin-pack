@@ -4,8 +4,10 @@ use crate::effects::{self, EffectKind, MAX_EFFECT_PARAMS, ParamSpec, TrackEffect
 use crate::modulation::{ModulationTarget, TrackModulation, TriggerSource};
 use tiny_skia_widgets as widgets;
 
+mod detector;
 mod live;
 mod midi;
+pub use detector::DetectorField;
 pub use live::{AudioGain, AudioView};
 pub use midi::MidiField;
 pub use widgets::mseg::AudioDisplay;
@@ -98,6 +100,8 @@ pub struct EffectEditor {
     audio_frozen: bool,
     audio_display: AudioDisplay,
     audio_gain: AudioGain,
+    detector_open: bool,
+    detector_owner: Option<detector::DetectorBinding>,
 }
 
 impl Default for EffectEditor {
@@ -128,6 +132,8 @@ impl EffectEditor {
             audio_frozen: false,
             audio_display: AudioDisplay::Magnitude,
             audio_gain: AudioGain::Unity,
+            detector_open: false,
+            detector_owner: None,
         }
     }
 
@@ -160,6 +166,7 @@ impl EffectEditor {
 
     /// End input tied to old window geometry without discarding editor preferences.
     pub fn prepare_resize(&mut self, backing_scale: f32) {
+        self.cancel_detector();
         self.effect_dial_drag.end_drag();
         self.effect_dial_drag.clear_double_click();
         self.effect_dial_drag.set_input_scale(backing_scale);
@@ -172,19 +179,26 @@ impl EffectEditor {
 
     /// Commit a typed value before focus moves to a host-owned control.
     pub fn finish_text_edit(&mut self, context: EditorContext<'_>) -> EditorResponse {
+        if self.check_detector_binding(context.effect.kind, context.modulation) {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
+        }
         let mut session = Session::new(self, context);
         session.finalize_dial_edit_for_press(f32::NEG_INFINITY, f32::NEG_INFINITY);
         session.response
     }
 
     pub fn captures_keyboard(&self) -> bool {
-        self.effect_dropdown.is_open()
+        self.detector_open
+            || self.effect_dropdown.is_open()
             || self.text_edit.is_active()
             || self.mseg_edit.has_open_menu()
     }
 
     pub fn dropdown_open(&self) -> bool {
-        self.effect_dropdown.is_open() || self.mseg_edit.has_open_menu()
+        self.detector_open || self.effect_dropdown.is_open() || self.mseg_edit.has_open_menu()
     }
 
     /// Whether shared controls own an in-progress pointer gesture.
@@ -194,7 +208,8 @@ impl EffectEditor {
 
     /// Allows hosts to finalize their numeric fields before the shared editor starts panning.
     pub fn can_start_pan(&self, pointer: (f32, f32), geometry: EditorGeometry) -> bool {
-        !self.effect_dropdown.is_open()
+        !self.detector_open
+            && !self.effect_dropdown.is_open()
             && self.effect_dial_drag.active_action().is_none()
             && self.mseg_edit.can_start_pan(
                 pointer.0,
@@ -209,6 +224,12 @@ impl EffectEditor {
         event: &baseview::Event,
         context: EditorContext<'_>,
     ) -> EditorResponse {
+        if self.check_detector_binding(context.effect.kind, context.modulation) {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
+        }
         let mut session = Session::new(self, context);
         session.handle_event(event);
         session.response
@@ -224,6 +245,7 @@ impl EffectEditor {
         phases: [f32; 4],
         geometry: EditorGeometry,
     ) {
+        self.check_detector_binding(effect.kind, modulation);
         self.refresh_live(effect, modulation);
         let phases = self
             .live
@@ -274,6 +296,7 @@ impl EffectEditor {
                 geometry.layout.mseg_pane,
             );
         }
+        self.draw_detector(pixmap, tr, effect, geometry);
     }
 }
 
@@ -381,6 +404,9 @@ impl<'a> Session<'a> {
     fn handle_event(&mut self, event: &baseview::Event) {
         use baseview::{Event, MouseButton, MouseEvent};
         use keyboard_types::{Key, KeyState, Modifiers};
+        if self.handle_detector_event(event) {
+            return;
+        }
         let win = (self.physical_width, self.physical_height);
         match event {
             Event::Window(baseview::WindowEvent::Unfocused) => {
@@ -686,6 +712,7 @@ impl<'a> Session<'a> {
             EffectHit::Smooth(slot) => {
                 crate::modulation::smooth_to_norm(self.modulation.smooth_ms[slot])
             }
+            EffectHit::Detector(field) => self.detector_norm(field),
             _ => 0.5,
         }
     }
@@ -701,6 +728,7 @@ impl<'a> Session<'a> {
             EffectHit::Smooth(slot) => {
                 self.apply_smooth(slot, crate::modulation::smooth_from_norm(norm))
             }
+            EffectHit::Detector(field) => self.apply_detector_norm(field, norm),
             _ => {}
         }
     }
@@ -1021,6 +1049,23 @@ impl<'a> Session<'a> {
             &self.layout,
         );
         self.draw_midi_controls(pixmap);
+        if matches!(
+            self.modulation.trigger,
+            TriggerSource::TransientSample { .. }
+        ) {
+            let r = self.layout.detector_setup;
+            widgets::controls::draw_button(
+                pixmap,
+                self.text_renderer,
+                r.0,
+                r.1,
+                r.2,
+                r.3,
+                "Detect...",
+                self.state.detector_open,
+                false,
+            );
+        }
         // Active MSEG's sync/length controls (sit on the modulation row to
         // the right of the depth dial).
         effect_editor::draw_mseg_controls(
@@ -1166,6 +1211,8 @@ impl<'a> Session<'a> {
                 self.state.trace_enabled = !self.state.trace_enabled;
             }
             EffectHit::MidiFilter(field) => self.open_midi_filter(field),
+            EffectHit::DetectorSetup => self.open_detector(),
+            EffectHit::Detector(_) => return true,
             EffectHit::Audio => {
                 let items = live::audio_items(self.state);
                 let font_size = (lay.audio.3 * 0.5).max(10.0);

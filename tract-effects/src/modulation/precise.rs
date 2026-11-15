@@ -29,6 +29,7 @@ pub(super) struct PreciseTrigger {
     detector: TransientDetector,
     coefficients: DetectorCoefficients,
     coefficient_rate: f32,
+    filter: super::audio_trigger::AudioFilter,
 }
 impl PreciseTrigger {
     pub(super) fn active(&self) -> bool {
@@ -38,6 +39,7 @@ impl PreciseTrigger {
         self.phase = 0.0;
         self.pending = false;
         self.detector.reset();
+        self.filter.reset();
     }
     pub(super) fn prepare(&mut self, source: TriggerSource, sr: f64) {
         let family = match source {
@@ -50,6 +52,7 @@ impl PreciseTrigger {
             self.phase = 0.0;
             self.pending = false;
             self.detector.reset();
+            self.filter.reset();
         }
         self.source = source;
         self.active = sr.is_finite()
@@ -102,16 +105,31 @@ impl PreciseTrigger {
             }
             TriggerSource::TransientSample { threshold, hold_ms } => {
                 let mono = (input[0] + input[1]) * 0.5;
+                let filtered = self
+                    .filter
+                    .process(if mono.is_finite() { mono } else { 0.0 });
                 self.detector.process_cached(
-                    if mono.is_finite() { mono } else { 0.0 },
+                    if filtered.is_finite() { filtered } else { 0.0 },
                     threshold,
                     hold_ms,
                     self.sample_rate as f32,
                     self.coefficients,
+                    self.filter.level_floor,
                 )
             }
             _ => false,
         }
+    }
+    pub(super) fn configure_audio(&mut self, settings: AudioTriggerSettings) {
+        if self.active && self.family == 2 {
+            self.filter.configure(settings, self.sample_rate);
+        }
+    }
+    pub(super) fn reading(&self) -> Option<DetectorReading> {
+        (self.active && self.family == 2).then_some(DetectorReading {
+            level: self.detector.fast_env,
+            settings: self.filter.settings,
+        })
     }
 }
 
@@ -124,6 +142,36 @@ impl ModulationState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_rejections_do_not_arm_hold_and_quiet_audio_still_expires_hold() {
+        let mut runtime = PreciseTrigger::default();
+        runtime.prepare(
+            TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 50.0,
+            },
+            48000.0,
+        );
+        runtime.configure_audio(AudioTriggerSettings {
+            level_db: Some(-6.0),
+            ..AudioTriggerSettings::default()
+        });
+        for _ in 0..128 {
+            assert!(!runtime.next_sample([0.1; 2]));
+        }
+        assert_eq!(runtime.detector.refractory, 0);
+        assert!(runtime.detector.fast_env > 0.09);
+        let loud: Vec<_> = (0..64).filter(|_| runtime.next_sample([1.0; 2])).collect();
+        assert_eq!(loud.len(), 1);
+        assert!(loud[0] < 40);
+        assert!(runtime.detector.refractory > 0);
+        for _ in 0..3000 {
+            runtime.next_sample([0.0; 2]);
+        }
+        assert_eq!(runtime.detector.refractory, 0);
+        assert!((0..64).any(|_| runtime.next_sample([1.0; 2])));
+    }
 
     fn hz_events(parts: &[usize], sr: f64, hz: f32) -> Vec<usize> {
         let mut runtime = PreciseTrigger::default();

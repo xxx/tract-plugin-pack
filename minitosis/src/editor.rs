@@ -298,6 +298,16 @@ impl MinitosisWindow {
         }
     }
 
+    fn finish_input(&mut self) {
+        self.undo.begin_capture(self.snapshot());
+        self.end_effect_gestures();
+        self.end_output_drag();
+        self.commit_output_text();
+        self.handle_effect(&Event::Window(WindowEvent::Unfocused), false);
+        let after = self.snapshot();
+        self.undo.commit_capture(&after);
+    }
+
     fn end_effect_gestures(&mut self) {
         let setter = ParamSetter::new(self.gui_context.as_ref());
         for (active, param) in self
@@ -538,13 +548,7 @@ impl baseview::WindowHandler for MinitosisWindow {
                 self.surface.resize(self.width, self.height);
             }
             Event::Window(WindowEvent::Unfocused) => {
-                self.undo.begin_capture(self.snapshot());
-                self.end_effect_gestures();
-                self.end_output_drag();
-                self.commit_output_text();
-                self.handle_effect(&event, false);
-                let after = self.snapshot();
-                self.undo.commit_capture(&after);
+                self.finish_input();
             }
             Event::Mouse(
                 MouseEvent::WheelScrolled { .. }
@@ -706,9 +710,8 @@ impl baseview::WindowHandler for MinitosisWindow {
 
 impl Drop for MinitosisWindow {
     fn drop(&mut self) {
+        self.finish_input();
         self.editor.disconnect_live();
-        self.end_effect_gestures();
-        self.end_output_drag();
     }
 }
 

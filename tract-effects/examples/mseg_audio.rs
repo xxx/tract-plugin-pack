@@ -44,6 +44,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err("Final argument must be midi, audio, or hz".into()),
     };
     let midi_demo = demo == 1;
+    let detector_demo = match args.next().as_deref() {
+        None => false,
+        Some("detector") if demo == 2 => true,
+        _ => return Err("Detector panel demo requires audio detector".into()),
+    };
     let caption = format!(
         "{caption} — display gain {gain_label}{}",
         match demo {
@@ -81,6 +86,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         depths: [1.0, 0.0, 0.0],
         ..TrackModulation::default()
     };
+    if detector_demo {
+        config.audio_trigger = tract_effects::modulation::AudioTriggerSettings {
+            level_db: Some(-36.0),
+            highpass_hz: Some(120.0),
+            lowpass_hz: Some(6000.0),
+        };
+    }
     config.msegs[1] = MsegData {
         play_mode: PlayMode::Cyclic,
         sync_mode: SyncMode::Time,
@@ -116,7 +128,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     editor.draw(&mut pm, &mut text, &track, &config, [0.0; 4], geometry);
     let mut input = [0.0; 960];
     let block_samples = input.len();
-    for block in 0..145 {
+    for block in 0..if detector_demo { 138 } else { 145 } {
         for (index, sample) in input.iter_mut().enumerate() {
             let time = (block * block_samples + index) as f32 / 48000.0;
             let envelope = (-((time * 4.0).fract()) * 18.0).exp();
@@ -229,7 +241,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         editor.draw(&mut pm, &mut text, &track, &config, [0.0; 4], geometry);
     }
     editor.set_audio_frozen(true);
+    if detector_demo {
+        let r = geometry.layout.detector_setup;
+        let point = (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
+        for event in [
+            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved {
+                position: baseview::Point::new(point.0 as f64, point.1 as f64),
+                modifiers: keyboard_types::Modifiers::empty(),
+            }),
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Left,
+                modifiers: keyboard_types::Modifiers::empty(),
+            }),
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                modifiers: keyboard_types::Modifiers::empty(),
+            }),
+        ] {
+            editor.handle_event(
+                &event,
+                tract_effects::editor::EditorContext {
+                    pointer_position: point,
+                    effect: &mut track,
+                    modulation: &mut config,
+                    text_renderer: &mut text,
+                    geometry,
+                },
+            );
+        }
+    }
     editor.draw(&mut pm, &mut text, &track, &config, [0.0; 4], geometry);
+    editor.draw_popup(&mut pm, &mut text, &track, geometry);
     pm.save_png(&path)?;
     println!("{path}");
     Ok(())
