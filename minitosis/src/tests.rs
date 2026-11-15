@@ -135,6 +135,157 @@ fn midi_note(timing: u32, channel: u8, note: u8, velocity: f32) -> PluginNoteEve
     }
 }
 
+fn precise_source(plugin: &mut Minitosis, source: tract_effects::modulation::TriggerSource) {
+    plugin.processor.modulation.trigger = source;
+    plugin.params.modulation.lock().unwrap().set(
+        plugin.processor.key.kind,
+        plugin.processor.modulation.clone(),
+    );
+}
+
+#[test]
+fn sample_hz_restarts_after_the_full_period_at_a_buffer_interior() {
+    use tract_effects::modulation::TriggerSource;
+    let (mut plugin, mut context) = midi_plugin(EffectKind::Bitcrush, 0.0, false);
+    precise_source(&mut plugin, TriggerSource::FreeHzSample { hz: 20.0 });
+    for _ in 0..4 {
+        let (left, _) = render(&mut plugin, &mut context, false);
+        assert!(left.iter().all(|value| *value > 0.24));
+    }
+    let (left, _) = render(&mut plugin, &mut context, false);
+    assert!(left[..352].iter().all(|value| *value > 0.24));
+    assert!(left[352..].iter().all(|value| *value == 0.0));
+    assert!((plugin.processor.phase(0) - 160.0 / 48000.0).abs() < 1e-7);
+}
+
+#[test]
+fn sample_audio_uses_actual_detection_offsets_through_bypass_none_and_smoothing() {
+    use tract_effects::modulation::TriggerSource;
+    for (kind, bypass, smooth) in [
+        (EffectKind::Bitcrush, false, 0.0),
+        (EffectKind::Bitcrush, false, 20.0),
+        (EffectKind::Bitcrush, true, 0.0),
+        (EffectKind::None, false, 0.0),
+    ] {
+        let (mut plugin, mut context) = midi_plugin(kind, smooth, bypass);
+        precise_source(
+            &mut plugin,
+            TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 5.0,
+            },
+        );
+        let mut input = [0.0; 1024];
+        input[128..192].fill(1.0);
+        let mut detector = tract_effects::modulation::TransientDetector::default();
+        let events: Vec<_> = input
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &value)| {
+                detector
+                    .process_sample(value, 1.5, 5.0, 48000.0)
+                    .then_some(i)
+            })
+            .collect();
+        assert_eq!(events[0], 129);
+        assert!(events.len() > 1);
+        let mut left = input;
+        let mut right = input;
+        assert_no_alloc::assert_no_alloc(|| {
+            plugin.render(&mut left, &mut right, false, 120.0, &mut context)
+        });
+        if kind == EffectKind::Bitcrush && !bypass {
+            assert!(left[128] > 0.9);
+            if smooth == 0.0 {
+                assert_eq!(left[129], 0.0);
+            } else {
+                assert!(left[129] > 0.9);
+                assert!(left[191] < left[129]);
+            }
+        } else {
+            assert_eq!(left, input);
+            assert_eq!(right, input);
+        }
+        let last = *events.last().unwrap();
+        assert!(
+            (plugin.processor.phase(0) - (1024 - last) as f32 / 48000.0).abs() < 1e-6,
+            "detected {events:?}, phase {}",
+            plugin.processor.phase(0)
+        );
+    }
+}
+
+#[test]
+fn same_effect_sample_rate_reinitialize_preserves_precise_hz_progress() {
+    use tract_effects::modulation::TriggerSource;
+    let (mut plugin, mut context) = midi_plugin(EffectKind::Bitcrush, 0.0, false);
+    precise_source(&mut plugin, TriggerSource::FreeHzSample { hz: 20.0 });
+    plugin.render(
+        &mut [0.0; 1200],
+        &mut [0.0; 1200],
+        false,
+        120.0,
+        &mut context,
+    );
+    let config = BufferConfig {
+        sample_rate: 96000.0,
+        min_buffer_size: Some(1),
+        max_buffer_size: 4096,
+        process_mode: ProcessMode::Realtime,
+    };
+    assert!(plugin.initialize(&Minitosis::AUDIO_IO_LAYOUTS[0], &config, &mut context));
+    plugin.reset();
+    assert_no_alloc::assert_no_alloc(|| {
+        plugin.render(
+            &mut [0.0; 2400],
+            &mut [0.0; 2400],
+            false,
+            120.0,
+            &mut context,
+        )
+    });
+    assert!((plugin.processor.phase(0) - 0.025).abs() < 1e-7);
+    plugin.render(&mut [0.0], &mut [0.0], false, 120.0, &mut context);
+    assert!((plugin.processor.phase(0) - 1.0 / 96000.0).abs() < 1e-7);
+}
+
+#[test]
+fn same_effect_sample_rate_reinitialize_preserves_transient_refractory_time() {
+    use tract_effects::modulation::TriggerSource;
+    let (mut plugin, mut context) = midi_plugin(EffectKind::Bitcrush, 0.0, false);
+    precise_source(
+        &mut plugin,
+        TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        },
+    );
+    let mut input = [0.0; 1024];
+    input[128..192].fill(1.0);
+    let mut left = input;
+    let mut right = input;
+    plugin.render(&mut left, &mut right, false, 120.0, &mut context);
+    assert!((plugin.processor.phase(0) - 895.0 / 48000.0).abs() < 1e-7);
+    let config = BufferConfig {
+        sample_rate: 96000.0,
+        min_buffer_size: Some(1),
+        max_buffer_size: 4096,
+        process_mode: ProcessMode::Realtime,
+    };
+    assert!(plugin.initialize(&Minitosis::AUDIO_IO_LAYOUTS[0], &config, &mut context));
+    plugin.reset();
+    assert_no_alloc::assert_no_alloc(|| {
+        plugin.render(
+            &mut [2.0; 4096],
+            &mut [2.0; 4096],
+            false,
+            120.0,
+            &mut context,
+        )
+    });
+    assert!((plugin.processor.phase(0) - 1084.0 / 96000.0).abs() < 1e-6);
+}
+
 #[test]
 fn midi_offsets_filters_and_last_sample_retrigger_preserve_bypass_and_none() {
     assert_eq!(Minitosis::MIDI_INPUT, MidiConfig::Basic);

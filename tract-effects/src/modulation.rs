@@ -8,6 +8,7 @@ use tiny_skia_widgets::{
     MsegData, MsegNode, PlayMode, Polarity, SyncMode, advance, value_at_phase,
 };
 
+mod precise;
 mod smoothing;
 pub use smoothing::{MAX_SMOOTH_MS, normalized_smooth_ms, smooth_from_norm, smooth_to_norm};
 pub(crate) use smoothing::{phase_next, phase_step};
@@ -61,11 +62,30 @@ impl TransientDetector {
         hold_ms: f32,
         sample_rate: f32,
     ) -> bool {
+        self.process_cached(
+            input,
+            threshold,
+            hold_ms,
+            sample_rate,
+            precise::DetectorCoefficients::new(sample_rate),
+        )
+    }
+
+    fn process_cached(
+        &mut self,
+        input: f32,
+        threshold: f32,
+        hold_ms: f32,
+        sample_rate: f32,
+        coefficients: precise::DetectorCoefficients,
+    ) -> bool {
         let target = input.abs();
-        let fast_a = one_pole_coef(TRANSIENT_FAST_ATTACK_MS, sample_rate);
-        let fast_r = one_pole_coef(TRANSIENT_FAST_RELEASE_MS, sample_rate);
-        let slow_a = one_pole_coef(TRANSIENT_SLOW_ATTACK_MS, sample_rate);
-        let slow_r = one_pole_coef(TRANSIENT_SLOW_RELEASE_MS, sample_rate);
+        let precise::DetectorCoefficients {
+            fast_a,
+            fast_r,
+            slow_a,
+            slow_r,
+        } = coefficients;
         let fast_coef = if target > self.fast_env {
             fast_a
         } else {
@@ -138,6 +158,13 @@ pub enum TriggerSource {
     MidiNote {
         note: Option<u8>,
         channel: Option<u8>,
+    },
+    FreeHzSample {
+        hz: f32,
+    },
+    TransientSample {
+        threshold: f32,
+        hold_ms: f32,
     },
 }
 
@@ -510,6 +537,7 @@ pub struct ModulationState {
     amplitude: f32,
     hz_phase: f32,
     transient: TransientDetector,
+    precise: precise::PreciseTrigger,
     fired: bool,
     mix: Option<MixRamp>,
     smooth: smoothing::SmoothRuntime,
@@ -539,6 +567,7 @@ impl Default for ModulationState {
             amplitude: 1.0,
             hz_phase: 0.0,
             transient: TransientDetector::default(),
+            precise: precise::PreciseTrigger::default(),
             fired: false,
             mix: None,
             smooth: smoothing::SmoothRuntime::default(),
@@ -560,6 +589,7 @@ impl ModulationState {
         self.phases = [0.0; 4];
         self.hz_phase = 0.0;
         self.transient.reset();
+        self.precise.reset();
         self.fired = false;
         self.reset_smoothing();
     }
@@ -574,6 +604,11 @@ impl ModulationState {
 
     /// MIDI can interrupt an unfinished span; keep Mix at its consumed value.
     pub fn trigger_midi_in_span(&mut self) {
+        self.trigger_in_span();
+    }
+
+    /// Keep an interrupted Mix ramp at its consumed value when restarting.
+    pub fn trigger_in_span(&mut self) {
         self.trigger();
         if let Some(ramp) = &mut self.mix {
             ramp.target = ramp.current;
@@ -590,6 +625,7 @@ impl ModulationState {
         sample_rate: f64,
     ) {
         self.fired = false;
+        self.precise.prepare(config.trigger, sample_rate);
         let block_len = left.len().min(right.len());
         let sr = sample_rate as f32;
         match config.trigger {
@@ -610,6 +646,13 @@ impl ModulationState {
             }
             _ => {}
         }
+    }
+
+    pub fn precise_trigger_active(&self) -> bool {
+        self.precise.active()
+    }
+    pub fn next_precise_trigger(&mut self, input: [f32; 2]) -> bool {
+        self.precise.next_sample(input)
     }
 
     /// Advance before evaluating, then apply Amp followed by slots 1–3.

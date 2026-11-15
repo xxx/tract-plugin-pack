@@ -11,6 +11,8 @@ pub struct Modulation {
     states: [ModulationState; ROWS],
     smooth_rows: [usize; ROWS],
     smooth_count: usize,
+    precise_rows: [usize; ROWS],
+    precise_count: usize,
 }
 
 impl Modulation {
@@ -20,6 +22,8 @@ impl Modulation {
             states: std::array::from_fn(|_| ModulationState::default()),
             smooth_rows: [0; ROWS],
             smooth_count: 0,
+            precise_rows: [0; ROWS],
+            precise_count: 0,
         }
     }
 
@@ -135,8 +139,35 @@ impl Modulation {
     }
 
     pub fn begin_block(&mut self, left: &[f32], right: &[f32], sample_rate: f64) {
-        for (state, config) in self.states.iter_mut().zip(&self.config) {
+        self.precise_count = 0;
+        for (row, (state, config)) in self.states.iter_mut().zip(&self.config).enumerate() {
             state.begin_block(config, left, right, sample_rate);
+            if state.precise_trigger_active() {
+                self.precise_rows[self.precise_count] = row;
+                self.precise_count += 1;
+            }
+        }
+    }
+
+    pub fn precise_triggers(&mut self, input: [f32; 2]) -> u16 {
+        let mut mask = 0;
+        for i in 0..self.precise_count {
+            let row = self.precise_rows[i];
+            if self.states[row].next_precise_trigger(input) {
+                mask |= 1 << row;
+            }
+        }
+        mask
+    }
+    pub fn fire_precise(&mut self, rows: u16, within_span: bool) {
+        for (row, state) in self.states.iter_mut().enumerate() {
+            if rows & (1 << row) != 0 {
+                if within_span {
+                    state.trigger_in_span();
+                } else {
+                    state.trigger();
+                }
+            }
         }
     }
 

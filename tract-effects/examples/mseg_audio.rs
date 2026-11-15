@@ -36,17 +36,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("12") => (AudioGain::Plus12, "+12 dB"),
         _ => return Err("Display gain must be -12, 0, or 12 dB".into()),
     };
-    let midi_demo = match args.next().as_deref() {
-        None => false,
-        Some("midi") => true,
-        _ => return Err("Final argument must be midi".into()),
+    let demo = match args.next().as_deref() {
+        None => 0,
+        Some("midi") => 1,
+        Some("audio") => 2,
+        Some("hz") => 3,
+        _ => return Err("Final argument must be midi, audio, or hz".into()),
     };
+    let midi_demo = demo == 1;
     let caption = format!(
         "{caption} — display gain {gain_label}{}",
-        if midi_demo {
-            " — MIDI note 60 / Ch. 10"
-        } else {
-            ""
+        match demo {
+            1 => " — MIDI note 60 / Ch. 10",
+            2 => " — sample-timed audio",
+            3 => " — sample-timed 4 Hz",
+            _ => "",
         }
     );
     let mut pm = tiny_skia::Pixmap::new(1336, 730).ok_or("Pixmap allocation failed")?;
@@ -61,13 +65,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     track.params[0] = 250.0;
     let mut config = TrackModulation {
-        trigger: if midi_demo {
-            TriggerSource::MidiNote {
+        trigger: match demo {
+            1 => TriggerSource::MidiNote {
                 note: Some(60),
                 channel: Some(9),
-            }
-        } else {
-            TriggerSource::Free
+            },
+            2 => TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 50.0,
+            },
+            3 => TriggerSource::FreeHzSample { hz: 4.0 },
+            _ => TriggerSource::Free,
         },
         targets: [Some(ModulationTarget::Mix), None, None],
         depths: [1.0, 0.0, 0.0],
@@ -79,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         time_seconds: 1.0,
         ..MsegData::default()
     };
-    factory_shape(if midi_demo {
+    factory_shape(if demo != 0 {
         FactoryShape::Duck
     } else {
         FactoryShape::Square
@@ -119,6 +127,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         trace.begin_block(&shared, 48000.0);
         audio.begin_block(&shared.waveform);
         state.begin_block(&config, &input, &input, 48000.0);
+        if state.next_precise_trigger([input[0], -input[0] * 0.8]) {
+            state.trigger();
+        }
         audio.prepare_segment(
             &shared.waveform,
             0,
@@ -133,8 +144,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         state.advance_segment(&config, &track, &mut effect, input.len(), 120.0, 48000.0);
         for (index, &sample) in input.iter().enumerate() {
-            if midi_demo
-                && let Some(&(_, note, channel)) = [
+            let midi_event = if midi_demo {
+                [
                     (6240, 60, 9),
                     (24000, 61, 9),
                     (29280, 60, 9),
@@ -145,11 +156,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ]
                 .iter()
                 .find(|(sample, _, _)| *sample == block * block_samples + index)
-                && let Some(event) = MidiNoteOn::new(index as u32, channel, note, 1.0)
-                && config.trigger.accepts_midi(event)
-            {
+                .and_then(|&(_, note, channel)| MidiNoteOn::new(index as u32, channel, note, 1.0))
+            } else {
+                None
+            };
+            let midi_fire = midi_event.is_some_and(|event| config.trigger.accepts_midi(event));
+            let precise_fire = index > 0 && state.next_precise_trigger([sample, -sample * 0.8]);
+            if midi_fire || precise_fire {
                 if index > 0 {
-                    state.trigger_midi_in_span();
+                    state.trigger_in_span();
                 } else {
                     state.trigger();
                 }

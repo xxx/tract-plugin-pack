@@ -63,6 +63,9 @@ Trigger choices apply to all four envelopes:
 - **Free run:** no periodic phase reset; Cyclic envelopes loop at their own length.
 - **Free Hz:** periodically restarts envelopes at the Rate setting.
 - **Transient:** restarts on input onsets, with Sens and Hold controls.
+- **Free Hz (sample) / Transient (sample):** opt-in sample-timed variants with
+  the same Rate or Sens/Hold controls. Existing modes remain block-aligned; see
+  [sample-timed triggers](../mseg-editor.md#sample-timed-hz-and-audio-triggers).
 - **MIDI note:** restarts at matching note-on offsets, with Note (Any/0–127) and
   Ch. (Any/1–16) filters. Route MIDI to the plugin's note input. Note-off does not
   gate or release the envelopes; see [MIDI retriggering](../mseg-editor.md#midi-retriggering).

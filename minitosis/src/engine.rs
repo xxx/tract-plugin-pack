@@ -51,6 +51,11 @@ pub struct Processor {
     latency: usize,
     waveform: WaveformClock,
     waveform_telemetry: Option<Arc<ModulationTelemetry>>,
+    span_remaining: usize,
+    span_processed: usize,
+    skip_precise_sample: bool,
+    span_track: TrackEffect,
+    span_bpm: f64,
 }
 
 impl Processor {
@@ -71,12 +76,24 @@ impl Processor {
             latency,
             waveform: WaveformClock::default(),
             waveform_telemetry: None,
+            span_remaining: 0,
+            span_processed: 0,
+            skip_precise_sample: false,
+            span_track: *track,
+            span_bpm: 120.0,
         }
     }
 
     /// Attach measurements during processor preparation, before audio-thread handoff.
     pub fn connect_waveform(&mut self, telemetry: &Arc<ModulationTelemetry>) {
         self.waveform_telemetry = Some(telemetry.clone());
+    }
+    pub fn inherit_precise_timing(&mut self, previous: &Self) {
+        if self.key.kind == previous.key.kind
+            && self.key.sample_rate_bits != previous.key.sample_rate_bits
+        {
+            self.state.inherit_precise_timing(&previous.state);
+        }
     }
 
     pub fn begin_block(&mut self, track: &TrackEffect, left: &[f32], right: &[f32], bpm: f64) {
@@ -96,6 +113,15 @@ impl Processor {
         let sample_rate = f32::from_bits(self.key.sample_rate_bits) as f64;
         self.state
             .begin_block(&self.modulation, left, right, sample_rate);
+        self.skip_precise_sample = false;
+        if self.state.precise_trigger_active()
+            && let Some((&l, &r)) = left.first().zip(right.first())
+        {
+            if self.state.next_precise_trigger([l, r]) {
+                self.state.trigger();
+            }
+            self.skip_precise_sample = true;
+        }
         if let Some(telemetry) = &self.waveform_telemetry {
             self.waveform.begin_block(&telemetry.waveform);
         }
@@ -106,6 +132,10 @@ impl Processor {
         if samples == 0 {
             return;
         }
+        self.span_track = *track;
+        self.span_bpm = bpm;
+        self.span_remaining = samples;
+        self.span_processed = 0;
         let sample_rate = f32::from_bits(self.key.sample_rate_bits) as f64;
         if let Some(telemetry) = &self.waveform_telemetry {
             let request = self.waveform.request();
@@ -148,6 +178,17 @@ impl Processor {
     }
 
     pub fn process_sample(&mut self, input: [f32; 2], mix: f32, bypass: bool) -> [f32; 2] {
+        if self.skip_precise_sample {
+            self.skip_precise_sample = false;
+        } else if self.span_remaining > 0 && self.state.next_precise_trigger(input) {
+            if self.span_processed > 0 {
+                self.state.trigger_in_span();
+            } else {
+                self.state.trigger();
+            }
+            let track = self.span_track;
+            self.advance_segment(&track, self.span_remaining, self.span_bpm);
+        }
         self.state
             .process_smoothing_sample(&self.modulation, &mut self.effect);
         let dry = self.dry.next(input, self.latency);
@@ -176,6 +217,8 @@ impl Processor {
                 self.state.precise_phase(self.waveform.request().slot),
             );
         }
+        self.span_remaining = self.span_remaining.saturating_sub(1);
+        self.span_processed += 1;
         output
     }
 
@@ -186,12 +229,15 @@ impl Processor {
     }
 
     pub fn reset_modulation(&mut self) {
+        self.skip_precise_sample = false;
         self.state.reset();
     }
     pub fn retrigger_modulation(&mut self) {
+        self.skip_precise_sample = false;
         self.state.restart_clock();
     }
     pub fn reset(&mut self) {
+        self.skip_precise_sample = false;
         self.flush_dsp();
         self.state.reset();
     }
@@ -242,6 +288,73 @@ mod tests {
             neutral_modulation(),
         );
         (p, track)
+    }
+
+    #[test]
+    fn first_sample_audio_trigger_does_not_apply_the_old_future_fft_endpoint() {
+        let (mut p, mut track) = processor(EffectKind::SpectralShift);
+        let fft = p
+            .effect
+            .parameters()
+            .iter()
+            .position(|spec| spec.name == "FFT")
+            .unwrap();
+        track.params[fft] = 0.0;
+        let mut curve = tiny_skia_widgets::MsegData {
+            play_mode: tiny_skia_widgets::PlayMode::OneShot,
+            sync_mode: SyncMode::Time,
+            time_seconds: 1.0,
+            ..tiny_skia_widgets::MsegData::default()
+        };
+        curve.insert_node(0.5, 1.0).unwrap();
+        curve.nodes[0].stepped = true;
+        p.modulation.msegs[1] = curve;
+        p.modulation.targets[0] = Some(ModulationTarget::EffectParameter(fft));
+        p.modulation.depths[0] = 1.0;
+        let input = vec![0.0; 36000];
+        p.begin_block(&track, &input, &input, 120.0);
+        assert_eq!(p.latency(), 4096);
+        p.effect.set_param(fft, 0.0);
+        for _ in 0..8192 {
+            p.effect.process_sample(0.1, 0.1);
+        }
+        assert!(
+            p.effect.process_sample(0.1, 0.1).0 > 0.05,
+            "FFT history must be audible for this regression"
+        );
+        p.modulation.trigger = tract_effects::modulation::TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        };
+        let mut output = [0.0; 2];
+        assert_no_alloc::assert_no_alloc(|| {
+            p.begin_block(&track, &[2.0; 64], &[2.0; 64], 120.0);
+            output = p.process_sample([2.0; 2], 1.0, false);
+        });
+        assert_eq!(p.latency(), 512);
+        assert!(
+            output[0] > 0.05,
+            "a surplus old-endpoint FFT setter erased the warmed history"
+        );
+        p.modulation.trigger = tract_effects::modulation::TriggerSource::Free;
+        p.begin_block(&track, &input, &input, 120.0);
+        p.modulation.trigger = tract_effects::modulation::TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        };
+        p.begin_block(&track, &[0.0; 64], &[0.0; 64], 120.0);
+        assert_eq!(p.latency(), 4096);
+        p.process_sample([0.0; 2], 0.0, true);
+        for (i, sample) in p.dry.samples.iter_mut().enumerate() {
+            *sample = [i as f32; 2];
+        }
+        p.dry.position = 0;
+        assert_no_alloc::assert_no_alloc(|| output = p.process_sample([2.0; 2], 0.0, true));
+        assert_eq!(p.latency(), 512);
+        assert_eq!(
+            output, [3585.0; 2],
+            "dry lookup used the pre-trigger latency"
+        );
     }
 
     #[test]

@@ -208,6 +208,11 @@ A strip of mode controls runs along the bottom of the MSEG editor, beneath the c
 
 ### Drawing and editing curves
 
+**Free Hz (sample)** and **Transient (sample)** add opt-in sample-timed restarts
+without changing other rows' modulation cadence. They reuse Rate or Sens/Hold;
+existing Free Hz/Transient settings keep their block-aligned behavior. See
+[sample-timed triggers](../mseg-editor.md#sample-timed-hz-and-audio-triggers).
+
 Rows can also use **Trigger → MIDI note**, with Note (Any/0–127) and Ch.
 (Any/1–16) filters. Route MIDI to the plugin's note input; each matching note-on
 restarts that row's four envelopes at its host offset, including inactive/muted

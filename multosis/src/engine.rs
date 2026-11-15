@@ -47,6 +47,8 @@ pub struct AudioEngine {
     trace_clock: TraceClock,
     trace_request: TraceRequest,
     waveform: WaveformClock,
+    span_bpm: f64,
+    skip_precise_sample: bool,
 }
 
 impl AudioEngine {
@@ -73,6 +75,8 @@ impl AudioEngine {
             trace_clock: TraceClock::default(),
             trace_request: TraceRequest::default(),
             waveform: WaveformClock::default(),
+            span_bpm: 120.0,
+            skip_precise_sample: false,
         }
     }
 
@@ -163,6 +167,7 @@ impl AudioEngine {
     /// host; that calls the narrower `flush_dsp` so a mid-playback PDC
     /// realignment in Bitwig does not retrigger every MSEG.
     pub fn reset(&mut self) {
+        self.skip_precise_sample = false;
         self.playhead.reset();
         self.step = 0;
         self.clock.reset();
@@ -184,6 +189,7 @@ impl AudioEngine {
     }
     /// Restart sequence/modulation clocks while retaining smoothed source levels.
     pub fn restart_transport(&mut self) {
+        self.skip_precise_sample = false;
         self.playhead.reset();
         self.step = 0;
         self.clock.reset();
@@ -234,7 +240,34 @@ impl AudioEngine {
         dry_l: f32,
         dry_r: f32,
         active: u16,
+        span_remaining: usize,
+        within_span: bool,
     ) -> (f32, f32) {
+        if self.skip_precise_sample {
+            self.skip_precise_sample = false;
+        } else {
+            let rows = self.modulation.precise_triggers([dry_l, dry_r]);
+            if rows != 0 {
+                self.modulation.fire_precise(rows, within_span);
+                if rows & (1 << self.waveform.request().row) != 0 {
+                    self.modulation.prepare_waveform_segment(
+                        &mut self.waveform,
+                        &self.telemetry.waveform,
+                        &self.track_effects,
+                        self.span_bpm,
+                        self.sample_rate as f64,
+                    );
+                }
+                self.modulation.advance_rows(
+                    span_remaining,
+                    self.span_bpm,
+                    self.sample_rate as f64,
+                    &mut self.effects,
+                    &self.track_effects,
+                    rows,
+                );
+            }
+        }
         self.modulation.process_smoothing_sample(&mut self.effects);
         let mut cur_l = dry_l;
         let mut cur_r = dry_r;
@@ -284,10 +317,18 @@ impl AudioEngine {
         right: &mut [f32],
         active: u16,
         mix: f32,
+        span_remaining: usize,
+        within_span: bool,
     ) {
-        for (left, right) in left.iter_mut().zip(right) {
+        for (i, (left, right)) in left.iter_mut().zip(right).enumerate() {
             let (dry_l, dry_r) = (*left, *right);
-            let (wet_l, wet_r) = self.process_sample::<MODULATE_MIX>(dry_l, dry_r, active);
+            let (wet_l, wet_r) = self.process_sample::<MODULATE_MIX>(
+                dry_l,
+                dry_r,
+                active,
+                span_remaining - i,
+                within_span || i > 0,
+            );
             let (cw_l, cw_r) = self.compressor.process_sample(wet_l, wet_r);
             *left = dry_l + (cw_l - dry_l) * mix;
             *right = dry_r + (cw_r - dry_r) * mix;
@@ -342,6 +383,8 @@ impl AudioEngine {
         mut events: impl Iterator<Item = MidiNoteOn>,
     ) {
         let n = left.len().min(right.len());
+        self.span_bpm = bpm;
+        self.skip_precise_sample = false;
         let sr = self.sample_rate as f64;
         self.waveform.begin_block(&self.telemetry.waveform);
         self.trace_request = self.trace_clock.begin_block(&self.telemetry, sr);
@@ -397,6 +440,7 @@ impl AudioEngine {
             self.modulation.midi_mask(event) != 0
         });
         let mut grid_prepared = false;
+        let mut grid_start = 0;
         while cursor < n {
             let mut midi_rows = 0;
             while let Some(event) = note.filter(|event| event.timing == cursor) {
@@ -413,6 +457,15 @@ impl AudioEngine {
             let seg_end = grid_end.min(note.map_or(n, |event| event.timing));
             let advance_rows = if grid_prepared { midi_rows } else { u16::MAX };
             if grid_end > cursor && advance_rows != 0 {
+                if !grid_prepared {
+                    let rows = self
+                        .modulation
+                        .precise_triggers([left[cursor], right[cursor]]);
+                    if rows != 0 {
+                        self.modulation.fire_precise(rows, false);
+                    }
+                    self.skip_precise_sample = true;
+                }
                 if advance_rows & (1 << self.waveform.request().row) != 0 {
                     self.modulation.prepare_waveform_segment(
                         &mut self.waveform,
@@ -439,6 +492,8 @@ impl AudioEngine {
                     &mut right[cursor..seg_end],
                     active_audio,
                     mix,
+                    grid_end - cursor,
+                    cursor > grid_start,
                 );
             } else {
                 self.process_segment::<false>(
@@ -446,6 +501,8 @@ impl AudioEngine {
                     &mut right[cursor..seg_end],
                     active_audio,
                     mix,
+                    grid_end - cursor,
+                    cursor > grid_start,
                 );
             }
             cursor = seg_end;
@@ -471,6 +528,7 @@ impl AudioEngine {
                 active = after;
                 bi += 1;
                 grid_prepared = false;
+                grid_start = cursor;
             }
         }
         // last_active is the audible mask — what the user sees in the track
@@ -599,6 +657,177 @@ mod tests {
         engine.set_modulation(&config);
         engine.set_effects(&tracks);
         engine
+    }
+
+    #[test]
+    fn sample_audio_fires_on_the_detected_sample_even_for_inactive_muted_and_none_rows() {
+        use crate::modulation::TriggerSource;
+        for mode in 0..4 {
+            let mut engine = midi_engine(0.0);
+            let mut config =
+                std::array::from_fn(|row| engine.modulation.config_for_test(row).clone());
+            config[0].trigger = TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 50.0,
+            };
+            engine.set_modulation(&config);
+            let mut tracks = engine.track_effects_for_test();
+            if mode == 2 {
+                tracks[0].muted = true;
+            } else if mode == 3 {
+                tracks[0].kind = crate::effects::EffectKind::None;
+            }
+            engine.set_effects(&tracks);
+            let mut grid = Grid::default();
+            if mode == 1 {
+                grid.cell_mut(0, 0).enabled = false;
+            }
+            let mut input = [0.0; 1024];
+            input[128..192].fill(1.0);
+            let mut left = input;
+            let mut right = input;
+            assert_no_alloc::assert_no_alloc(|| {
+                engine.process(&mut left, &mut right, false, 1000.0, 120.0, 1.0, &grid)
+            });
+            if mode == 0 {
+                assert!(left[128] > 0.9);
+                assert_eq!(left[129], 0.0);
+            } else {
+                assert_eq!(left, input);
+                assert_eq!(right, input);
+            }
+            assert!((engine.modulation_phase(0, 0) - 895.0 / 48000.0).abs() < 1e-7);
+        }
+    }
+
+    #[test]
+    fn precise_timing_moves_with_rows_survives_flush_and_resets_on_restart() {
+        use crate::modulation::TriggerSource;
+        for action in 0..4 {
+            let mut engine = midi_engine(0.0);
+            let mut config =
+                std::array::from_fn(|row| engine.modulation.config_for_test(row).clone());
+            config[1].msegs = config[0].msegs;
+            config[1].trigger = TriggerSource::FreeHzSample { hz: 20.0 };
+            engine.set_modulation(&config);
+            engine.process(
+                &mut [0.0; 1200],
+                &mut [0.0; 1200],
+                false,
+                1000.0,
+                120.0,
+                1.0,
+                &Grid::default(),
+            );
+            let row = if action == 0 {
+                engine.swap_tracks(1, 3);
+                3
+            } else {
+                1
+            };
+            match action {
+                1 => engine.flush_dsp(),
+                2 => engine.reset(),
+                3 => engine.restart_transport(),
+                _ => {}
+            }
+            assert_no_alloc::assert_no_alloc(|| {
+                engine.process(
+                    &mut [0.0; 1201],
+                    &mut [0.0; 1201],
+                    false,
+                    1000.0,
+                    120.0,
+                    1.0,
+                    &Grid::default(),
+                )
+            });
+            let expected = if action >= 2 {
+                1201.0 / 48000.0
+            } else {
+                1.0 / 48000.0
+            };
+            assert!(
+                (engine.modulation_phase(row, 0) - expected).abs() < 1e-7,
+                "action {action}"
+            );
+        }
+    }
+
+    #[test]
+    fn precise_clock_crosses_grid_and_peer_midi_boundaries_without_touching_other_rows() {
+        use crate::effects::{EffectKind, default_params_for_kind};
+        use crate::modulation::TriggerSource;
+        use tiny_skia_widgets::{MsegData, SyncMode};
+        let mut tracks = [TrackEffect::default(); ROWS];
+        tracks[0].kind = EffectKind::Bitcrush;
+        tracks[0].params = default_params_for_kind(tracks[0].kind);
+        let mut config = std::array::from_fn(TrackModulation::default_for_row);
+        for row in &mut config {
+            row.targets = [None; 3];
+        }
+        config[0].msegs[0] = MsegData {
+            sync_mode: SyncMode::Time,
+            time_seconds: 1.0,
+            ..MsegData::default()
+        };
+        config[1].msegs = [config[0].msegs[0]; 4];
+        config[1].trigger = TriggerSource::FreeHzSample { hz: 20.0 };
+        config[2].trigger = TriggerSource::MidiNote {
+            note: None,
+            channel: None,
+        };
+        let mut actual = AudioEngine::new();
+        let mut reference = AudioEngine::new();
+        for e in [&mut actual, &mut reference] {
+            e.set_sample_rate(48000.0);
+            e.set_modulation(&config);
+            e.set_effects(&tracks);
+            e.telemetry.waveform.request(0, 0, EffectKind::Bitcrush);
+        }
+        let (mut left, mut right, mut expected_left, mut expected_right) =
+            ([0.6; 4096], [0.6; 4096], [0.6; 4096], [0.6; 4096]);
+        assert_no_alloc::assert_no_alloc(|| {
+            actual.process_with_midi(
+                &mut left,
+                &mut right,
+                true,
+                600.0,
+                120.0,
+                1.0,
+                &Grid::default(),
+                [MidiNoteOn {
+                    timing: 17,
+                    channel: 0,
+                    note: 60,
+                }]
+                .into_iter(),
+            );
+            reference.process(
+                &mut expected_left,
+                &mut expected_right,
+                true,
+                600.0,
+                120.0,
+                1.0,
+                &Grid::default(),
+            );
+        });
+        assert_eq!(left, expected_left);
+        assert_eq!(right, expected_right);
+        assert!((actual.modulation_phase(1, 0) - 1696.0 / 48000.0).abs() < 1e-6);
+        assert_eq!(
+            actual.modulation_phase(1, 0),
+            reference.modulation_phase(1, 0)
+        );
+        let a = &actual.telemetry.waveform;
+        let r = &reference.telemetry.waveform;
+        let at = a.request(0, 0, EffectKind::Bitcrush);
+        let rt = r.request(0, 0, EffectKind::Bitcrush);
+        assert_eq!(a.head(), r.head());
+        for i in 0..a.head() {
+            assert_eq!(a.stereo_point(i, at), r.stereo_point(i, rt));
+        }
     }
 
     #[test]
@@ -1975,9 +2204,9 @@ mod tests {
         let mut e_wet = build(1.0);
 
         // Active mask = row 0 only.
-        let dry = e_dry.process_sample::<false>(0.6, 0.6, 1 << 0).0;
-        let half = e_half.process_sample::<false>(0.6, 0.6, 1 << 0).0;
-        let wet = e_wet.process_sample::<false>(0.6, 0.6, 1 << 0).0;
+        let dry = e_dry.process_sample::<false>(0.6, 0.6, 1 << 0, 1, false).0;
+        let half = e_half.process_sample::<false>(0.6, 0.6, 1 << 0, 1, false).0;
+        let wet = e_wet.process_sample::<false>(0.6, 0.6, 1 << 0, 1, false).0;
 
         // mix 0 → the lane is the dry input.
         assert!((dry - 0.6).abs() < 1e-6, "mix 0.0 should be dry: dry={dry}");

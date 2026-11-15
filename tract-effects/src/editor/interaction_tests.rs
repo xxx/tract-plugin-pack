@@ -1408,12 +1408,143 @@ mod precision_editing {
     }
 }
 
+mod precise_triggers {
+    use super::*;
+    fn choose(h: &mut Harness, index: usize) {
+        h.click(h.geometry.layout.trigger);
+        h.key(Key::Home);
+        for _ in 0..index {
+            h.key(Key::ArrowDown);
+        }
+        assert!(h.key(Key::Enter).changed);
+    }
+    #[test]
+    fn precise_choices_carry_rate_and_sensitivity_controls_with_local_undo() {
+        let mut h = Harness::new();
+        let curves = h.modulation.msegs;
+        h.modulation.trigger = TriggerSource::FreeHz { hz: 3.7 };
+        choose(&mut h, 6);
+        assert_eq!(
+            h.modulation.trigger,
+            TriggerSource::FreeHzSample { hz: 3.7 }
+        );
+        let before = h.modulation.clone();
+        let mut undo = crate::undo::UndoHistory::new();
+        undo.begin_capture(before.clone());
+        let r = h.geometry.layout.trigger_rate;
+        h.move_to(r.0 + 32.0, r.1 + 48.0, Modifiers::empty());
+        h.press(MouseButton::Left);
+        h.move_to(r.0 + 32.0, r.1 + 18.0, Modifiers::empty());
+        h.release();
+        let after = h.modulation.clone();
+        undo.commit_capture(&after);
+        assert!(matches!(after.trigger,TriggerSource::FreeHzSample {hz} if hz>3.7));
+        assert_eq!(undo.undo(after), Some(before));
+        h.modulation.trigger = TriggerSource::Transient {
+            threshold: 3.0,
+            hold_ms: 80.0,
+        };
+        choose(&mut h, 7);
+        assert_eq!(
+            h.modulation.trigger,
+            TriggerSource::TransientSample {
+                threshold: 3.0,
+                hold_ms: 80.0
+            }
+        );
+        h.editor.effect_click = ClickTracker::new();
+        h.move_to(r.0 + 32.0, r.1 + 48.0, Modifiers::empty());
+        h.press(MouseButton::Left);
+        h.move_to(r.0 + 32.0, r.1 + 18.0, Modifiers::empty());
+        h.release();
+        assert!(
+            matches!(h.modulation.trigger,TriggerSource::TransientSample {threshold,hold_ms:80.0} if threshold<3.0)
+        );
+        let r = h.geometry.layout.trigger_aux;
+        h.move_to(r.0 + 32.0, r.1 + 48.0, Modifiers::empty());
+        h.press(MouseButton::Left);
+        h.move_to(r.0 + 32.0, r.1 + 18.0, Modifiers::empty());
+        h.release();
+        assert!(
+            matches!(h.modulation.trigger,TriggerSource::TransientSample {hold_ms,..} if hold_ms>80.0)
+        );
+        assert_eq!(h.modulation.msegs, curves);
+        let json = serde_json::to_string(&h.modulation).unwrap();
+        assert_eq!(
+            serde_json::from_str::<TrackModulation>(&json).unwrap(),
+            h.modulation
+        );
+    }
+    #[test]
+    fn precise_trigger_menu_fits_and_keeps_popup_input_priority_at_each_scale() {
+        for scale in [0.5, 1.0, 2.0] {
+            let mut h = Harness::new();
+            h.geometry = EditorGeometry {
+                layout: view::effect_layout((16.0, 16.0, 1304.0, 640.0), scale),
+                scale,
+                window_size: (1336.0 * scale, 680.0 * scale),
+            };
+            h.click(h.geometry.layout.trigger);
+            let items = dropdown_items(&h.editor, &h.effect);
+            assert_eq!(items.len(), 8);
+            let popup = widgets::dropdown::dropdown_popup_layout(
+                &h.editor.effect_dropdown,
+                &items,
+                h.geometry.window_size,
+            )
+            .unwrap();
+            let font = (h.geometry.layout.trigger.3 * 0.5).max(10.0);
+            let widest = items
+                .iter()
+                .map(|label| h.tr.text_width(label, font))
+                .fold(0.0_f32, f32::max);
+            assert!(widest + 12.0 <= popup.visible_rows[0].rect.2 + 0.01);
+            let mut expected = tiny_skia::Pixmap::new(
+                h.geometry.window_size.0 as u32,
+                h.geometry.window_size.1 as u32,
+            )
+            .unwrap();
+            h.editor
+                .draw_popup(&mut expected, &mut h.tr, &h.effect, h.geometry);
+            let mut actual = expected.clone();
+            actual.fill(widgets::color_bg());
+            h.editor.draw(
+                &mut actual,
+                &mut h.tr,
+                &h.effect,
+                &h.modulation,
+                [0.0; 4],
+                h.geometry,
+            );
+            h.editor
+                .draw_popup(&mut actual, &mut h.tr, &h.effect, h.geometry);
+            for (a, b) in expected.pixels().iter().zip(actual.pixels()) {
+                if a.alpha() == 255 {
+                    assert_eq!(a, b);
+                }
+            }
+            let r = h.geometry.layout.dials[0];
+            h.move_to(r.0 + r.2 * 0.5, r.1 + r.3 * 0.5, Modifiers::empty());
+            assert!(h.press(MouseButton::Right).captured);
+            assert!(!h.editor.text_edit.is_active());
+            choose(&mut h, 7);
+            assert!(matches!(
+                h.modulation.trigger,
+                TriggerSource::TransientSample { .. }
+            ));
+        }
+    }
+}
+
 mod midi_retrigger {
     use super::*;
 
     fn select_source(h: &mut Harness) {
         h.click(h.geometry.layout.trigger);
-        h.key(Key::End);
+        h.key(Key::Home);
+        for _ in 0..5 {
+            h.key(Key::ArrowDown);
+        }
         assert!(h.key(Key::Enter).changed);
         assert_eq!(
             h.modulation.trigger,
@@ -1467,7 +1598,10 @@ mod midi_retrigger {
             channel
         );
         h.click(h.geometry.layout.trigger);
-        h.key(Key::End);
+        h.key(Key::Home);
+        for _ in 0..5 {
+            h.key(Key::ArrowDown);
+        }
         h.key(Key::Enter);
         assert_eq!(
             h.modulation.trigger, channel.trigger,

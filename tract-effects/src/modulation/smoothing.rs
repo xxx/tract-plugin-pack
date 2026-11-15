@@ -188,6 +188,7 @@ impl ModulationState {
         self.phases = [0.0; 4];
         self.hz_phase = 0.0;
         self.transient.reset();
+        self.precise.reset();
         self.fired = false;
         self.smooth.trigger();
     }

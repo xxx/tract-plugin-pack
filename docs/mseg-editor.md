@@ -216,6 +216,28 @@ rules. Zero-velocity note-ons, note-offs, and other MIDI messages do not retrigg
 Muted/inactive/None rows and Minitosis bypass still receive matching triggers.
 Minitosis uses each effect's recalled filters as prepared processors are adopted.
 
+## Sample-timed Hz and audio triggers
+
+Multosis/Minitosis offer **Free Hz (sample)** and **Transient (sample)** in the
+Trigger menu. These are opt-in; existing Free Hz/Transient settings retain their
+block-aligned timing and old projects keep their sound. The closed controls show
+**Hz exact** or **Audio**, with the existing Rate or Sens/Hold dials.
+
+Free Hz (sample) keeps a continuous clock across host buffers, grid steps, and
+other rows' MIDI notes. Its first restart follows one full period. Rate edits
+retain clock progress. Transient (sample) uses the same dual-envelope detection
+and Hold rules as Transient, but restarts on each qualifying sample, including
+multiple detections in one buffer. It listens to the plugin's original dry
+stereo-average input, before any row's effects. Detector attack/release and the
+noise floor still apply; no lookahead or extra latency is added.
+
+Only the triggered row restarts. Other rows keep their held values and clocks.
+Smooth retains its level through the restart; Off keeps endpoint evaluation.
+Inactive/muted/None rows and bypass continue detecting. Reset and transport
+restart clear the private trigger clock; a DSP flush preserves it. Sample-rate
+changes retain progress/refractory time, including same-effect Minitosis
+reinitialization. Mode/rate/Sens/Hold settings save per row/effect and are undoable.
+
 ## Edit commands
 
 - **Compress/Expand values/times** retain their existing behavior and require a

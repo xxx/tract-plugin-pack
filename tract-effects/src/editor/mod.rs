@@ -22,6 +22,8 @@ pub enum TriggerChoice {
     FreeHz,
     Transient,
     MidiNote,
+    FreeHzSample,
+    TransientSample,
 }
 
 impl TriggerChoice {
@@ -32,6 +34,8 @@ impl TriggerChoice {
         Self::FreeHz,
         Self::Transient,
         Self::MidiNote,
+        Self::FreeHzSample,
+        Self::TransientSample,
     ];
 
     fn item(self) -> usize {
@@ -42,6 +46,8 @@ impl TriggerChoice {
             Self::FreeHz => 3,
             Self::Transient => 4,
             Self::MidiNote => 5,
+            Self::FreeHzSample => 6,
+            Self::TransientSample => 7,
         }
     }
 }
@@ -646,13 +652,16 @@ impl<'a> Session<'a> {
                 ((self.modulation.depths[self.state.selected_mseg - 1] + 1.0) / 2.0).clamp(0.0, 1.0)
             }
             EffectHit::TriggerRate => match self.modulation.trigger {
-                TriggerSource::FreeHz { hz } => effects::value_to_norm(
-                    hz,
-                    view::TRIGGER_RATE_MIN_HZ,
-                    view::TRIGGER_RATE_MAX_HZ,
-                    effects::ParamScaling::Log,
-                ),
-                TriggerSource::Transient { threshold, .. } => {
+                TriggerSource::FreeHz { hz } | TriggerSource::FreeHzSample { hz } => {
+                    effects::value_to_norm(
+                        hz,
+                        view::TRIGGER_RATE_MIN_HZ,
+                        view::TRIGGER_RATE_MAX_HZ,
+                        effects::ParamScaling::Log,
+                    )
+                }
+                TriggerSource::Transient { threshold, .. }
+                | TriggerSource::TransientSample { threshold, .. } => {
                     1.0 - effects::value_to_norm(
                         threshold,
                         crate::modulation::TRANSIENT_THRESHOLD_MIN,
@@ -663,7 +672,8 @@ impl<'a> Session<'a> {
                 _ => 0.5,
             },
             EffectHit::TriggerAux => match self.modulation.trigger {
-                TriggerSource::Transient { hold_ms, .. } => effects::value_to_norm(
+                TriggerSource::Transient { hold_ms, .. }
+                | TriggerSource::TransientSample { hold_ms, .. } => effects::value_to_norm(
                     hold_ms,
                     crate::modulation::TRANSIENT_HOLD_MS_MIN,
                     crate::modulation::TRANSIENT_HOLD_MS_MAX,
@@ -1218,9 +1228,16 @@ impl<'a> Session<'a> {
                 let current = self.trigger_index(trigger);
                 let items = self.trigger_items();
                 let win = (self.physical_width, self.physical_height);
+                let font = (lay.trigger.3 * 0.5).max(10.0);
+                let width = (items
+                    .iter()
+                    .map(|label| self.text_renderer.text_width(label, font))
+                    .fold(0.0_f32, f32::max)
+                    + 14.0)
+                    .max(lay.trigger.2);
                 self.state.effect_dropdown.open(
                     EffectAction::Trigger,
-                    lay.trigger,
+                    (lay.trigger.0, lay.trigger.1, width, lay.trigger.3),
                     widgets::dropdown::DropdownList::flat(&items),
                     current,
                     false,
@@ -1230,13 +1247,16 @@ impl<'a> Session<'a> {
             EffectHit::TriggerRate => {
                 let trigger = self.modulation_config().trigger;
                 let current_norm = match trigger {
-                    TriggerSource::FreeHz { hz } => effects::value_to_norm(
-                        hz,
-                        effect_editor::TRIGGER_RATE_MIN_HZ,
-                        effect_editor::TRIGGER_RATE_MAX_HZ,
-                        effects::ParamScaling::Log,
-                    ),
-                    TriggerSource::Transient { threshold, .. } => {
+                    TriggerSource::FreeHz { hz } | TriggerSource::FreeHzSample { hz } => {
+                        effects::value_to_norm(
+                            hz,
+                            effect_editor::TRIGGER_RATE_MIN_HZ,
+                            effect_editor::TRIGGER_RATE_MAX_HZ,
+                            effects::ParamScaling::Log,
+                        )
+                    }
+                    TriggerSource::Transient { threshold, .. }
+                    | TriggerSource::TransientSample { threshold, .. } => {
                         // Sensitivity = 1 − normalised threshold.
                         1.0 - effects::value_to_norm(
                             threshold,
@@ -1263,7 +1283,9 @@ impl<'a> Session<'a> {
             }
             EffectHit::TriggerAux => {
                 let trigger = self.modulation_config().trigger;
-                let TriggerSource::Transient { hold_ms, .. } = trigger else {
+                let (TriggerSource::Transient { hold_ms, .. }
+                | TriggerSource::TransientSample { hold_ms, .. }) = trigger
+                else {
                     return false;
                 };
                 if self
@@ -1546,8 +1568,9 @@ impl<'a> Session<'a> {
 
     fn reset_trigger_rate_to_default(&mut self) {
         match &mut self.modulation.trigger {
-            TriggerSource::FreeHz { hz } => *hz = 1.0,
-            TriggerSource::Transient { threshold, .. } => {
+            TriggerSource::FreeHz { hz } | TriggerSource::FreeHzSample { hz } => *hz = 1.0,
+            TriggerSource::Transient { threshold, .. }
+            | TriggerSource::TransientSample { threshold, .. } => {
                 *threshold = crate::modulation::TRANSIENT_THRESHOLD_DEFAULT;
             }
             _ => return,
@@ -1557,7 +1580,7 @@ impl<'a> Session<'a> {
 
     fn apply_trigger_rate_drag(&mut self, norm: f32) {
         match &mut self.modulation.trigger {
-            TriggerSource::FreeHz { hz } => {
+            TriggerSource::FreeHz { hz } | TriggerSource::FreeHzSample { hz } => {
                 *hz = effects::norm_to_value(
                     norm,
                     effect_editor::TRIGGER_RATE_MIN_HZ,
@@ -1565,7 +1588,8 @@ impl<'a> Session<'a> {
                     effects::ParamScaling::Log,
                 );
             }
-            TriggerSource::Transient { threshold, .. } => {
+            TriggerSource::Transient { threshold, .. }
+            | TriggerSource::TransientSample { threshold, .. } => {
                 *threshold = effects::norm_to_value(
                     1.0 - norm,
                     crate::modulation::TRANSIENT_THRESHOLD_MIN,
@@ -1579,7 +1603,9 @@ impl<'a> Session<'a> {
     }
 
     fn reset_trigger_aux_to_default(&mut self) {
-        if let TriggerSource::Transient { hold_ms, .. } = &mut self.modulation.trigger {
+        if let TriggerSource::Transient { hold_ms, .. }
+        | TriggerSource::TransientSample { hold_ms, .. } = &mut self.modulation.trigger
+        {
             *hold_ms = crate::modulation::TRANSIENT_HOLD_MS_DEFAULT;
             self.response.changed = true;
         }
@@ -1592,27 +1618,32 @@ impl<'a> Session<'a> {
             crate::modulation::TRANSIENT_HOLD_MS_MAX,
             effects::ParamScaling::Log,
         );
-        if let TriggerSource::Transient { hold_ms, .. } = &mut self.modulation.trigger {
+        if let TriggerSource::Transient { hold_ms, .. }
+        | TriggerSource::TransientSample { hold_ms, .. } = &mut self.modulation.trigger
+        {
             *hold_ms = new_hold_ms;
             self.response.changed = true;
         }
     }
 
     fn apply_trigger_selection(&mut self, idx: usize) {
-        let (carried_hz, carried_threshold, carried_hold_ms) =
-            match self.modulation_config().trigger {
-                TriggerSource::FreeHz { hz } => (
-                    hz,
-                    crate::modulation::TRANSIENT_THRESHOLD_DEFAULT,
-                    crate::modulation::TRANSIENT_HOLD_MS_DEFAULT,
-                ),
-                TriggerSource::Transient { threshold, hold_ms } => (1.0, threshold, hold_ms),
-                _ => (
-                    1.0,
-                    crate::modulation::TRANSIENT_THRESHOLD_DEFAULT,
-                    crate::modulation::TRANSIENT_HOLD_MS_DEFAULT,
-                ),
-            };
+        let (carried_hz, carried_threshold, carried_hold_ms) = match self
+            .modulation_config()
+            .trigger
+        {
+            TriggerSource::FreeHz { hz } | TriggerSource::FreeHzSample { hz } => (
+                hz,
+                crate::modulation::TRANSIENT_THRESHOLD_DEFAULT,
+                crate::modulation::TRANSIENT_HOLD_MS_DEFAULT,
+            ),
+            TriggerSource::Transient { threshold, hold_ms }
+            | TriggerSource::TransientSample { threshold, hold_ms } => (1.0, threshold, hold_ms),
+            _ => (
+                1.0,
+                crate::modulation::TRANSIENT_THRESHOLD_DEFAULT,
+                crate::modulation::TRANSIENT_HOLD_MS_DEFAULT,
+            ),
+        };
         let new_trigger = effect_editor::trigger_from_item(
             self.state
                 .trigger_choices
@@ -2291,6 +2322,8 @@ mod tests {
                         "Free Hz",
                         "Transient",
                         "MIDI note",
+                        "Free Hz (sample)",
+                        "Transient (sample)",
                     ],
                     [0, 1, 2, 3, 4],
                 ),

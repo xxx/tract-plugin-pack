@@ -300,9 +300,15 @@ pub fn effect_hit(
     }
     let trigger_has_rate = matches!(
         trigger,
-        TriggerSource::FreeHz { .. } | TriggerSource::Transient { .. }
+        TriggerSource::FreeHz { .. }
+            | TriggerSource::Transient { .. }
+            | TriggerSource::FreeHzSample { .. }
+            | TriggerSource::TransientSample { .. }
     );
-    let trigger_has_aux = matches!(trigger, TriggerSource::Transient { .. });
+    let trigger_has_aux = matches!(
+        trigger,
+        TriggerSource::Transient { .. } | TriggerSource::TransientSample { .. }
+    );
     if trigger_has_rate && in_rect(lay.trigger_rate, px, py) {
         return Some(EffectHit::TriggerRate);
     }
@@ -607,7 +613,7 @@ pub fn target_to_item(kind: EffectKind, target: Option<ModulationTarget>) -> usi
 }
 
 /// The trigger-source dropdown items, in `TriggerSource` discriminant order.
-pub fn trigger_items() -> [&'static str; 6] {
+pub fn trigger_items() -> [&'static str; 8] {
     [
         "Free run",
         "Cell light",
@@ -615,6 +621,8 @@ pub fn trigger_items() -> [&'static str; 6] {
         "Free Hz",
         "Transient",
         "MIDI note",
+        "Free Hz (sample)",
+        "Transient (sample)",
     ]
 }
 
@@ -637,6 +645,11 @@ pub fn trigger_from_item(
             note: None,
             channel: None,
         },
+        6 => TriggerSource::FreeHzSample { hz: carried_hz },
+        7 => TriggerSource::TransientSample {
+            threshold: carried_threshold,
+            hold_ms: carried_hold_ms,
+        },
         _ => TriggerSource::Transient {
             threshold: carried_threshold,
             hold_ms: carried_hold_ms,
@@ -653,6 +666,8 @@ pub fn trigger_to_item(src: TriggerSource) -> usize {
         TriggerSource::FreeHz { .. } => 3,
         TriggerSource::Transient { .. } => 4,
         TriggerSource::MidiNote { .. } => 5,
+        TriggerSource::FreeHzSample { .. } => 6,
+        TriggerSource::TransientSample { .. } => 7,
     }
 }
 
@@ -846,10 +861,12 @@ pub fn draw_trigger_controls(
         TriggerSource::FreeHz { .. } => "Free Hz",
         TriggerSource::Transient { .. } => "Transient",
         TriggerSource::MidiNote { .. } => "MIDI note",
+        TriggerSource::FreeHzSample { .. } => "Hz exact",
+        TriggerSource::TransientSample { .. } => "Audio",
     };
     widgets::dropdown::draw_dropdown_trigger(pixmap, tr, lay.trigger, label, trigger_dropdown_open);
     match trigger {
-        TriggerSource::FreeHz { hz } => {
+        TriggerSource::FreeHz { hz } | TriggerSource::FreeHzSample { hz } => {
             let (rx, ry, rw, rh) = lay.trigger_rate;
             widgets::param_dial::draw_dial(
                 pixmap,
@@ -867,7 +884,8 @@ pub fn draw_trigger_controls(
                 ),
             );
         }
-        TriggerSource::Transient { threshold, hold_ms } => {
+        TriggerSource::Transient { threshold, hold_ms }
+        | TriggerSource::TransientSample { threshold, hold_ms } => {
             let (rx, ry, rw, rh) = lay.trigger_rate;
             // Sensitivity is the inverse of the stored threshold ratio, so
             // the dial sweep reads as "more triggers" → right.
@@ -2487,7 +2505,7 @@ mod tests {
                 );
                 assert_eq!(trigger_to_item(TriggerSource::FreeHz { hz }), 3);
                 let transient = TriggerSource::Transient { threshold, hold_ms };
-                for item in [4, 6, usize::MAX] {
+                for item in [4, 8, usize::MAX] {
                     assert_eq!(trigger_from_item(item, hz, threshold, hold_ms), transient);
                 }
                 assert_eq!(
@@ -2656,7 +2674,9 @@ mod tests {
                 "Cell step",
                 "Free Hz",
                 "Transient",
-                "MIDI note"
+                "MIDI note",
+                "Free Hz (sample)",
+                "Transient (sample)"
             ]
         );
     }

@@ -227,6 +227,11 @@ impl Minitosis {
                     self.params.mix.value(),
                     bypass || pending,
                 );
+                let latency = self.processor.latency() as u32;
+                if latency != self.reported_latency {
+                    context.set_latency_samples(latency);
+                    self.reported_latency = latency;
+                }
                 if self.trace_clock.tick() {
                     self.trace_clock.record(
                         &self.shared.telemetry,
@@ -308,7 +313,7 @@ impl Plugin for Minitosis {
             .lock()
             .map(|bank| bank.get(key.kind).clone())
             .unwrap_or_else(|_| state::neutral_modulation());
-        *self.processor = Processor::new(
+        let mut processor = Processor::new(
             key,
             &self
                 .params
@@ -316,6 +321,8 @@ impl Plugin for Minitosis {
                 .track(self.params.mix.value(), false),
             modulation,
         );
+        processor.inherit_precise_timing(&self.processor);
+        *self.processor = processor;
         self.processor.connect_waveform(&self.shared.telemetry);
         self.shared.telemetry.invalidate();
         self.shared
