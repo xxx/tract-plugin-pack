@@ -1408,6 +1408,142 @@ mod precision_editing {
     }
 }
 
+mod audio_backdrop {
+    use super::*;
+    use crate::modulation_telemetry::ModulationTelemetry;
+    use crate::waveform::{WaveformClock, WaveformTiming};
+    use std::sync::Arc;
+
+    fn draw(h: &mut Harness) {
+        let mut pm = tiny_skia::Pixmap::new(
+            h.geometry.window_size.0 as u32,
+            h.geometry.window_size.1 as u32,
+        )
+        .unwrap();
+        h.editor.draw(
+            &mut pm,
+            &mut h.tr,
+            &h.effect,
+            &h.modulation,
+            [0.0; 4],
+            h.geometry,
+        );
+    }
+
+    fn capture(h: &Harness, shared: &ModulationTelemetry, input: f32, output: f32) {
+        let mut clock = WaveformClock::default();
+        clock.begin_block(&shared.waveform);
+        clock.prepare_segment(
+            &shared.waveform,
+            0,
+            WaveformTiming {
+                config: &h.modulation,
+                kind: h.effect.kind,
+                phase: 0.0,
+                trigger_epoch: 0,
+                bpm: 120.0,
+                sample_rate: 48000.0,
+            },
+        );
+        clock.record_sample(&shared.waveform, [input; 2], [output; 2], 0.0);
+        clock.finish_block(&shared.waveform);
+    }
+
+    #[test]
+    fn audio_menu_and_freeze_are_view_only_and_capture_input_priority() {
+        let mut h = Harness::new();
+        let before = (h.effect, h.modulation.clone());
+        assert!(h.click(h.geometry.layout.audio).captured);
+        assert!(h.editor.dropdown_open());
+        h.key(Key::Home);
+        for _ in 0..3 {
+            h.key(Key::ArrowDown);
+        }
+        let response = h.key(Key::Enter);
+        assert!(response.captured && !response.changed);
+        assert_eq!(h.editor.audio_view(), AudioView::Both);
+        h.click(h.geometry.layout.audio);
+        h.key(Key::End);
+        assert!(!h.key(Key::Enter).changed);
+        assert!(h.editor.audio_frozen());
+        h.click(h.geometry.layout.audio);
+        h.move_to(
+            h.geometry.layout.dials[0].0 + 30.0,
+            h.geometry.layout.dials[0].1 + 30.0,
+            Modifiers::empty(),
+        );
+        assert!(h.press(MouseButton::Right).captured);
+        assert!(!h.editor.dropdown_open());
+        assert!(!h.editor.text_edit.is_active());
+        assert_eq!((h.effect, h.modulation), before);
+    }
+
+    #[test]
+    fn freeze_survives_focus_and_resize_but_replacements_clear_it() {
+        let mut h = Harness::new();
+        let shared = Arc::new(ModulationTelemetry::default());
+        h.editor.connect_live(&shared, 0);
+        h.editor.set_audio_view(AudioView::Both);
+        draw(&mut h);
+        capture(&h, &shared, 0.8, 0.3);
+        draw(&mut h);
+        let bins = h.editor.live.as_ref().unwrap().waveform;
+        assert!(bins.iter().any(Option::is_some));
+        h.editor.set_audio_frozen(true);
+        draw(&mut h);
+        let mut clock = WaveformClock::default();
+        clock.begin_block(&shared.waveform);
+        assert_eq!(clock.request().token, 0);
+        h.editor.cancel_interaction();
+        h.resize(2.0);
+        h.editor.set_audio_view(AudioView::Output);
+        draw(&mut h);
+        assert_eq!(h.editor.live.as_ref().unwrap().waveform, bins);
+        assert!(h.editor.audio_frozen());
+        shared.invalidate();
+        draw(&mut h);
+        assert!(
+            h.editor
+                .live
+                .as_ref()
+                .unwrap()
+                .waveform
+                .iter()
+                .all(Option::is_none)
+        );
+        h.editor.set_audio_frozen(false);
+        draw(&mut h);
+        capture(&h, &shared, 0.4, 0.2);
+        draw(&mut h);
+        assert!(
+            h.editor
+                .live
+                .as_ref()
+                .unwrap()
+                .waveform
+                .iter()
+                .any(Option::is_some)
+        );
+        h.editor.set_audio_frozen(true);
+        h.editor.selected_mseg = 2;
+        draw(&mut h);
+        assert!(
+            h.editor
+                .live
+                .as_ref()
+                .unwrap()
+                .waveform
+                .iter()
+                .all(Option::is_none)
+        );
+        h.editor.set_audio_view(AudioView::Off);
+        draw(&mut h);
+        assert!(!h.editor.audio_frozen());
+        clock.begin_block(&shared.waveform);
+        assert_eq!(clock.request().token, 0);
+    }
+}
+
 mod smoothing_controls {
     use super::*;
 
@@ -1438,7 +1574,12 @@ mod smoothing_controls {
         assert_eq!(undo.undo(after.clone()), Some(before.clone()));
         assert!(undo.undo(before.clone()).is_none());
         assert_eq!(undo.redo(before), Some(after));
-        assert!(coarse.click(coarse.geometry.layout.smooth).changed);
+        let rect = coarse.geometry.layout.smooth;
+        coarse.move_to(rect.0 + 20.0, rect.1 + 10.0, Modifiers::empty());
+        coarse.editor.effect_click.last_action = Some(EffectHit::Smooth(slot));
+        coarse.editor.effect_click.last_time = std::time::Instant::now();
+        assert!(coarse.press(MouseButton::Left).changed);
+        coarse.release();
         assert_eq!(coarse.modulation.smooth_ms[slot], 0.0);
     }
 

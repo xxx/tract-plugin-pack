@@ -10,6 +10,7 @@ use tiny_skia_widgets::{
 
 mod smoothing;
 pub use smoothing::{MAX_SMOOTH_MS, normalized_smooth_ms, smooth_from_norm, smooth_to_norm};
+pub(crate) use smoothing::{phase_next, phase_step};
 
 /// Default threshold for a fresh `TriggerSource::Transient` (≈ +3.5 dB on the
 /// fast/slow envelope ratio — fires on clear percussive onsets without
@@ -497,6 +498,7 @@ pub fn switch_effect_kind(
 /// borrowed on each update, so editing it preserves the running phases.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModulationState {
+    trigger_epoch: u64,
     phases: [f32; 4],
     amplitude: f32,
     hz_phase: f32,
@@ -525,6 +527,7 @@ struct MixRamp {
 impl Default for ModulationState {
     fn default() -> Self {
         Self {
+            trigger_epoch: 0,
             phases: [0.0; 4],
             amplitude: 1.0,
             hz_phase: 0.0,
@@ -546,6 +549,7 @@ impl Default for ModulationState {
 impl ModulationState {
     /// Clear clocks and trigger history, preserving the last evaluated gain.
     pub fn reset(&mut self) {
+        self.trigger_epoch = self.trigger_epoch.wrapping_add(1);
         self.phases = [0.0; 4];
         self.hz_phase = 0.0;
         self.transient.reset();
@@ -555,6 +559,7 @@ impl ModulationState {
 
     /// Restart all four envelopes and mark this block as triggered.
     pub fn trigger(&mut self) {
+        self.trigger_epoch = self.trigger_epoch.wrapping_add(1);
         self.phases = [0.0; 4];
         self.fired = true;
         self.smooth.trigger();

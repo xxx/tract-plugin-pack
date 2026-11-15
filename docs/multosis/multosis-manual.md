@@ -219,6 +219,11 @@ mapping. **Trace** displays measured source output, while dial arcs show the
 delivered target values. See [live smoothing and trace](../mseg-editor.md#live-smoothing-and-trace)
 for timing, reset behavior, and numeric controls.
 
+**Audio** adds an input/output magnitude backdrop for the selected row, with
+**Freeze** for editing against the captured sound. It includes that row's Mix
+and Amp, before the wet-bus compressor/master blend. See
+[audio waveform backdrop](../mseg-editor.md#audio-waveform-backdrop).
+
 The curve canvas is the large area beneath the routing controls.
 
 - **Double-click empty canvas** — inserts a node at the clicked time and value (snapped to the Time Grid).

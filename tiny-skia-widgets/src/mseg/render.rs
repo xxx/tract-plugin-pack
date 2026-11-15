@@ -130,10 +130,36 @@ pub fn draw_mseg(
     value_color: tiny_skia::Color,
     node_tooltip: Option<(usize, &str)>,
 ) {
+    draw_mseg_with_background(
+        pixmap,
+        text_renderer,
+        rect,
+        data,
+        state,
+        scale,
+        value_color,
+        node_tooltip,
+        |_, _| {},
+    );
+}
+
+/// Draw a host-provided background beneath the grid, curve, and interaction marks.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_mseg_with_background(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    rect: (f32, f32, f32, f32),
+    data: &MsegData,
+    state: &MsegEditState,
+    scale: f32,
+    value_color: tiny_skia::Color,
+    node_tooltip: Option<(usize, &str)>,
+    background: impl FnOnce(&mut Pixmap, &MsegLayout),
+) {
     let layout = state.layout(rect, scale);
     // The three sub-rects (marker lane / canvas / strip) are non-overlapping,
     // so draw order is immaterial — each paints only its own region.
-    draw_canvas(pixmap, &layout, data, state, scale, value_color);
+    draw_canvas(pixmap, &layout, data, state, scale, value_color, background);
     draw_marker_lane(pixmap, &layout, data, state, scale, value_color);
     draw_strip(pixmap, text_renderer, &layout, data, state, scale);
 
@@ -221,12 +247,14 @@ fn draw_canvas(
     state: &MsegEditState,
     scale: f32,
     value_color: tiny_skia::Color,
+    background: impl FnOnce(&mut Pixmap, &MsegLayout),
 ) {
     let (cx, cy, cw, ch) = layout.canvas;
     if cw <= 0.0 || ch <= 0.0 {
         return;
     }
     draw_rect(pixmap, cx, cy, cw, ch, color_control_bg());
+    background(pixmap, layout);
 
     // Grid lines, the curve, and nodes all live in the inset `plot` area so
     // edge nodes don't clip. Drawn via the plot-based coordinate mapping.
@@ -1370,6 +1398,79 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn audio_backdrop_clips_both_axes_and_leaves_grid_and_curve_in_front() {
+        let mut pm = Pixmap::new(180, 140).unwrap();
+        let mut layout = mseg_layout((0.0, 0.0, 180.0, 140.0), true, 1.0);
+        layout.plot = (20.0, 20.0, 120.0, 90.0);
+        layout.viewport.time = (0.25, 0.75);
+        layout.viewport.value = (0.25, 0.75);
+        let bins = [Some((1.5, 0.9)); 4];
+        draw_mseg_audio(&mut pm, &layout, &bins, true, true, color_accent());
+        assert!(pm.pixels().iter().any(|p| p.alpha() > 0));
+        for (index, pixel) in pm
+            .pixels()
+            .iter()
+            .enumerate()
+            .filter(|(_, pixel)| pixel.alpha() > 0)
+        {
+            let (x, y) = (index % 180, index / 180);
+            assert!(
+                (20..140).contains(&x) && (20..110).contains(&y),
+                "backdrop escaped at ({x},{y}): {pixel:?}"
+            );
+        }
+        let data = MsegData::default();
+        let state = MsegEditState::new();
+        let mut text = TextRenderer::new(&test_font_data());
+        let mut plain = Pixmap::new(400, 300).unwrap();
+        let mut audio = Pixmap::new(400, 300).unwrap();
+        let curve_color = tiny_skia::Color::from_rgba8(245, 160, 80, 255);
+        draw_mseg(
+            &mut plain,
+            &mut text,
+            RECT,
+            &data,
+            &state,
+            1.0,
+            curve_color,
+            None,
+        );
+        draw_mseg_with_background(
+            &mut audio,
+            &mut text,
+            RECT,
+            &data,
+            &state,
+            1.0,
+            curve_color,
+            None,
+            |pm, layout| {
+                draw_mseg_audio(pm, layout, &bins, true, true, color_accent());
+            },
+        );
+        let mut compared = 0;
+        for (expected, actual) in plain.pixels().iter().zip(audio.pixels()) {
+            if (
+                expected.red(),
+                expected.green(),
+                expected.blue(),
+                expected.alpha(),
+            ) == (245, 160, 80, 255)
+                || (
+                    expected.red(),
+                    expected.green(),
+                    expected.blue(),
+                    expected.alpha(),
+                ) == (68, 71, 78, 255)
+            {
+                compared += 1;
+                assert_eq!(actual, expected);
+            }
+        }
+        assert!(compared > 100);
+    }
 }
 
 /// Overlay measured normalized output, leaving large unmeasured phase gaps disconnected.
@@ -1410,5 +1511,46 @@ pub fn draw_mseg_trace(
             }
         }
         previous = Some((phase, value));
+    }
+}
+
+/// Paint phase-binned stereo magnitudes, clipped to the visible plot.
+pub fn draw_mseg_audio(
+    pixmap: &mut Pixmap,
+    layout: &MsegLayout,
+    bins: &[Option<(f32, f32)>],
+    input: bool,
+    output: bool,
+    output_color: tiny_skia::Color,
+) {
+    let (px, py, pw, ph) = layout.plot;
+    let mut output_color = output_color;
+    output_color.set_alpha(0.20);
+    for (index, bin) in bins.iter().enumerate() {
+        let Some((input_peak, output_peak)) = *bin else {
+            continue;
+        };
+        let left = phase_to_x(layout, index as f32 / bins.len() as f32).max(px);
+        let right = phase_to_x(layout, (index + 1) as f32 / bins.len() as f32).min(px + pw);
+        if right <= left {
+            continue;
+        }
+        for (show, peak, color) in [
+            (
+                input,
+                input_peak,
+                tiny_skia::Color::from_rgba8(180, 185, 195, 55),
+            ),
+            (output, output_peak, output_color),
+        ] {
+            if !show || !peak.is_finite() {
+                continue;
+            }
+            let top = value_to_y(layout, peak.max(0.0)).max(py);
+            let bottom = value_to_y(layout, 0.0).min(py + ph);
+            if bottom > top {
+                draw_rect(pixmap, left, top, right - left, bottom - top, color);
+            }
+        }
     }
 }

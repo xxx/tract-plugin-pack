@@ -66,7 +66,8 @@ pub fn prepare_processor(params: &MinitosisParams, shared: &Shared, key: Prepare
         .lock()
         .map(|bank| bank.get(key.kind).clone())
         .unwrap_or_else(|_| state::neutral_modulation());
-    let processor = Box::new(Processor::new(key, &track, modulation));
+    let mut processor = Box::new(Processor::new(key, &track, modulation));
+    processor.connect_waveform(&shared.telemetry);
     if prepare_key(params, shared) == key
         && shared.active_generation.load(Ordering::Acquire) != key.generation
     {
@@ -94,11 +95,12 @@ impl Default for Minitosis {
         let params = Arc::new(MinitosisParams::default());
         let shared = Arc::new(Shared::default());
         let key = prepare_key(&params, &shared);
-        let processor = Box::new(Processor::new(
+        let mut processor = Box::new(Processor::new(
             key,
             &params.selected_track(),
             state::neutral_modulation(),
         ));
+        processor.connect_waveform(&shared.telemetry);
         Self {
             params,
             shared,
@@ -194,6 +196,7 @@ impl Minitosis {
             left[i] = wet[0] * gain;
             right[i] = wet[1] * gain;
         }
+        self.processor.finish_waveform_block();
         self.trace_clock.publish(
             &self.shared.telemetry,
             0,
@@ -262,6 +265,7 @@ impl Plugin for Minitosis {
                 .track(self.params.mix.value(), false),
             modulation,
         );
+        self.processor.connect_waveform(&self.shared.telemetry);
         self.shared.telemetry.invalidate();
         self.shared
             .active_generation

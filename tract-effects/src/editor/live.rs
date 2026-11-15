@@ -1,6 +1,42 @@
 use super::*;
 use crate::modulation_telemetry::{ModulationFrame, ModulationTelemetry, TRACE_CAPACITY};
+use crate::waveform::{WAVEFORM_BINS, WAVEFORM_CAPACITY};
 use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AudioView {
+    #[default]
+    Off,
+    Input,
+    Output,
+    Both,
+}
+impl AudioView {
+    pub(super) fn input(self) -> bool {
+        matches!(self, Self::Input | Self::Both)
+    }
+    pub(super) fn output(self) -> bool {
+        matches!(self, Self::Output | Self::Both)
+    }
+    fn label(self, frozen: bool) -> &'static str {
+        match (self, frozen) {
+            (Self::Off, _) => "Audio: Off",
+            (Self::Input, false) => "Audio: In",
+            (Self::Output, false) => "Audio: Out",
+            (Self::Both, false) => "Audio: Both",
+            (Self::Input, true) => "Frozen: In",
+            (Self::Output, true) => "Frozen: Out",
+            (Self::Both, true) => "Frozen: Both",
+        }
+    }
+}
+pub(super) fn audio_items(frozen: bool) -> &'static [&'static str] {
+    if frozen {
+        &["Off", "Input", "Output", "Input + Output", "Unfreeze"]
+    } else {
+        &["Off", "Input", "Output", "Input + Output", "Freeze"]
+    }
+}
 
 pub(super) struct LiveSource {
     telemetry: Arc<ModulationTelemetry>,
@@ -9,13 +45,54 @@ pub(super) struct LiveSource {
     cursor: u64,
     pub(super) frame: Option<ModulationFrame>,
     bins: [Option<(f32, f32)>; TRACE_CAPACITY],
+    waveform_token: u64,
+    waveform_cursor: u64,
+    waveform_generation: u64,
+    waveform_key: Option<(EffectKind, usize)>,
+    pub(super) waveform: [Option<(f32, f32)>; WAVEFORM_BINS],
 }
 impl Drop for LiveSource {
     fn drop(&mut self) {
         self.telemetry.release(self.token);
+        self.telemetry.waveform.release(self.waveform_token);
     }
 }
 impl LiveSource {
+    fn refresh_waveform(&mut self, kind: EffectKind, slot: usize, view: AudioView, frozen: bool) {
+        let telemetry = &self.telemetry.waveform;
+        let generation = telemetry.generation();
+        if self.waveform_key != Some((kind, slot)) || self.waveform_generation != generation {
+            telemetry.release(self.waveform_token);
+            self.waveform_token = 0;
+            self.waveform.fill(None);
+            self.waveform_generation = generation;
+            self.waveform_key = Some((kind, slot));
+        }
+        if view == AudioView::Off || frozen {
+            telemetry.release(self.waveform_token);
+            self.waveform_token = 0;
+            if view == AudioView::Off {
+                self.waveform.fill(None);
+            }
+            return;
+        }
+        let token = telemetry.request(self.row, slot, kind);
+        if token != self.waveform_token {
+            self.waveform_token = token;
+            self.waveform.fill(None);
+            self.waveform_cursor = telemetry.head();
+        }
+        let head = telemetry.head();
+        self.waveform_cursor = self
+            .waveform_cursor
+            .max(head.saturating_sub(WAVEFORM_CAPACITY as u64));
+        for index in self.waveform_cursor..head {
+            if let Some(point) = telemetry.point(index, token) {
+                self.waveform[point.bin] = Some((point.input, point.output));
+            }
+        }
+        self.waveform_cursor = head;
+    }
     fn refresh(&mut self, kind: EffectKind, config: &TrackModulation, slot: usize, trace: bool) {
         let token = self.telemetry.request(self.row, slot, kind, trace);
         if token != self.token {
@@ -66,6 +143,11 @@ impl EffectEditor {
             cursor: telemetry.head(),
             frame: None,
             bins: [None; TRACE_CAPACITY],
+            waveform_token: 0,
+            waveform_cursor: telemetry.waveform.head(),
+            waveform_generation: telemetry.waveform.generation(),
+            waveform_key: None,
+            waveform: [None; WAVEFORM_BINS],
         });
     }
     pub fn disconnect_live(&mut self) {
@@ -79,13 +161,37 @@ impl EffectEditor {
             live.frame = None;
             live.bins.fill(None);
             live.cursor = live.telemetry.head();
+            live.telemetry.waveform.release(live.waveform_token);
+            live.waveform_token = 0;
+            live.waveform.fill(None);
         }
     }
     pub fn trace_enabled(&self) -> bool {
         self.trace_enabled
     }
+    pub fn set_audio_view(&mut self, view: AudioView) {
+        self.audio_view = view;
+        if view == AudioView::Off {
+            self.audio_frozen = false;
+        }
+    }
+    pub fn audio_view(&self) -> AudioView {
+        self.audio_view
+    }
+    pub fn set_audio_frozen(&mut self, frozen: bool) {
+        self.audio_frozen = frozen && self.audio_view != AudioView::Off;
+    }
+    pub fn audio_frozen(&self) -> bool {
+        self.audio_frozen
+    }
     pub(super) fn refresh_live(&mut self, effect: &TrackEffect, config: &TrackModulation) {
         if let Some(live) = &mut self.live {
+            live.refresh_waveform(
+                effect.kind,
+                self.selected_mseg.min(3),
+                self.audio_view,
+                self.audio_frozen,
+            );
             live.refresh(
                 effect.kind,
                 config,
@@ -145,6 +251,14 @@ impl Session<'_> {
         }
     }
     pub(super) fn draw_live_controls(&mut self, pm: &mut tiny_skia::Pixmap) {
+        let r = self.layout.audio;
+        widgets::dropdown::draw_dropdown_trigger(
+            pm,
+            self.text_renderer,
+            r,
+            self.state.audio_view.label(self.state.audio_frozen),
+            self.state.effect_dropdown.is_open_for(EffectAction::Audio),
+        );
         let slot = self.state.selected_mseg.min(3);
         let allowed = self.smooth_allowed(slot);
         let ms = crate::modulation::normalized_smooth_ms(self.modulation.smooth_ms[slot]);

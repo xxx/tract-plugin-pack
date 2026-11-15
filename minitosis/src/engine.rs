@@ -1,7 +1,10 @@
 //! One effect, shared modulation, and latency-aligned dry audio.
 
+use std::sync::Arc;
 use tract_effects::effects::{Effect, EffectInstance, EffectKind, TrackEffect};
 use tract_effects::modulation::{ModulationState, TrackModulation};
+use tract_effects::modulation_telemetry::ModulationTelemetry;
+use tract_effects::waveform::{WaveformClock, WaveformTiming};
 
 pub const MAX_LATENCY: usize = 4096;
 
@@ -46,6 +49,8 @@ pub struct Processor {
     state: ModulationState,
     dry: DryDelay,
     latency: usize,
+    waveform: WaveformClock,
+    waveform_telemetry: Option<Arc<ModulationTelemetry>>,
 }
 
 impl Processor {
@@ -64,7 +69,14 @@ impl Processor {
             state: ModulationState::default(),
             dry: DryDelay::new(),
             latency,
+            waveform: WaveformClock::default(),
+            waveform_telemetry: None,
         }
+    }
+
+    /// Attach measurements during processor preparation, before audio-thread handoff.
+    pub fn connect_waveform(&mut self, telemetry: &Arc<ModulationTelemetry>) {
+        self.waveform_telemetry = Some(telemetry.clone());
     }
 
     pub fn begin_block(&mut self, track: &TrackEffect, left: &[f32], right: &[f32], bpm: f64) {
@@ -79,6 +91,22 @@ impl Processor {
         let sample_rate = f32::from_bits(self.key.sample_rate_bits) as f64;
         self.state
             .begin_block(&self.modulation, left, right, sample_rate);
+        if let Some(telemetry) = &self.waveform_telemetry {
+            self.waveform.begin_block(&telemetry.waveform);
+            let request = self.waveform.request();
+            self.waveform.prepare_segment(
+                &telemetry.waveform,
+                0,
+                WaveformTiming {
+                    config: &self.modulation,
+                    kind: self.key.kind,
+                    phase: self.state.precise_phase(request.slot),
+                    trigger_epoch: self.state.trigger_epoch(),
+                    bpm,
+                    sample_rate,
+                },
+            );
+        }
         self.state.advance_segment(
             &self.modulation,
             track,
@@ -94,19 +122,38 @@ impl Processor {
         self.state
             .process_smoothing_sample(&self.modulation, &mut self.effect);
         let dry = self.dry.next(input, self.latency);
-        if self.key.kind == EffectKind::None {
-            return dry;
+        let output = if self.key.kind == EffectKind::None {
+            dry
+        } else {
+            let wet = self.effect.process_sample(input[0], input[1]);
+            let mix = self.state.next_mix(mix).clamp(0.0, 1.0);
+            if bypass {
+                dry
+            } else {
+                let amp = self.state.amplitude();
+                [
+                    dry[0] * (1.0 - mix) + wet.0 * amp * mix,
+                    dry[1] * (1.0 - mix) + wet.1 * amp * mix,
+                ]
+            }
+        };
+        if self.waveform.active()
+            && let Some(telemetry) = &self.waveform_telemetry
+        {
+            self.waveform.record_sample(
+                &telemetry.waveform,
+                input,
+                output,
+                self.state.precise_phase(self.waveform.request().slot),
+            );
         }
-        let wet = self.effect.process_sample(input[0], input[1]);
-        let mix = self.state.next_mix(mix).clamp(0.0, 1.0);
-        if bypass {
-            return dry;
+        output
+    }
+
+    pub fn finish_waveform_block(&self) {
+        if let Some(telemetry) = &self.waveform_telemetry {
+            self.waveform.finish_block(&telemetry.waveform);
         }
-        let amp = self.state.amplitude();
-        [
-            dry[0] * (1.0 - mix) + wet.0 * amp * mix,
-            dry[1] * (1.0 - mix) + wet.1 * amp * mix,
-        ]
     }
 
     pub fn reset_modulation(&mut self) {
@@ -286,6 +333,61 @@ mod tests {
         }
         p.begin_block(&track, &[0.25; 32], &[-0.5; 32], 120.0);
         assert_eq!(p.process_sample([0.25, -0.5], 1.0, false), [0.25, -0.5]);
+    }
+
+    #[test]
+    fn waveform_capture_preserves_audio_and_records_all_samples_without_allocating() {
+        for kind in [EffectKind::Bitcrush, EffectKind::None] {
+            for bypass in [false, true] {
+                for smooth in [0.0, 20.0] {
+                    let (mut p, track) = processor(kind);
+                    let (mut reference, _) = processor(kind);
+                    p.modulation.smooth_ms[1] = smooth;
+                    reference.modulation = p.modulation.clone();
+                    let shared = Arc::new(ModulationTelemetry::default());
+                    p.connect_waveform(&shared);
+                    let token = shared.waveform.request(0, 1, kind);
+                    let input = [0.1; 64];
+                    let mut expected_peak = 0.0_f32;
+                    assert_no_alloc::assert_no_alloc(|| {
+                        for _ in 0..4 {
+                            p.begin_block(&track, &input, &input, 120.0);
+                            reference.begin_block(&track, &input, &input, 120.0);
+                            for sample in 0..64 {
+                                let value = if sample == 17 {
+                                    [0.9, -0.2]
+                                } else {
+                                    [0.1, -0.3]
+                                };
+                                let expected = reference.process_sample(value, track.mix, bypass);
+                                assert_eq!(p.process_sample(value, track.mix, bypass), expected);
+                                expected_peak =
+                                    expected_peak.max(expected[0].abs()).max(expected[1].abs());
+                            }
+                            p.finish_waveform_block();
+                        }
+                    });
+                    let points: Vec<_> = (0..shared.waveform.head())
+                        .filter_map(|index| shared.waveform.point(index, token))
+                        .collect();
+                    assert!(points.len() > 1);
+                    assert_eq!(
+                        points.iter().map(|point| point.input).fold(0.0, f32::max),
+                        0.9
+                    );
+                    assert_eq!(
+                        points.iter().map(|point| point.output).fold(0.0, f32::max),
+                        expected_peak
+                    );
+                    shared.waveform.release(token);
+                    let head = shared.waveform.head();
+                    p.begin_block(&track, &input, &input, 120.0);
+                    p.process_sample([1.0; 2], track.mix, bypass);
+                    p.finish_waveform_block();
+                    assert_eq!(shared.waveform.head(), head);
+                }
+            }
+        }
     }
 
     #[test]

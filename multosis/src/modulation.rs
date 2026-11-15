@@ -83,6 +83,9 @@ impl Modulation {
     pub fn phase(&self, row: usize, slot: usize) -> f32 {
         self.states[row].phase(slot)
     }
+    pub fn precise_phase(&self, row: usize, slot: usize) -> f64 {
+        self.states[row].precise_phase(slot)
+    }
     pub fn set_telemetry_request(
         &mut self,
         request: tract_effects::modulation_telemetry::TraceRequest,
@@ -102,6 +105,33 @@ impl Modulation {
             &self.config[row],
             &self.states[row],
         )
+    }
+
+    pub fn prepare_waveform_segment(
+        &self,
+        clock: &mut tract_effects::waveform::WaveformClock,
+        telemetry: &tract_effects::waveform::WaveformTelemetry,
+        tracks: &[TrackEffect; ROWS],
+        bpm: f64,
+        sample_rate: f64,
+    ) {
+        let request = clock.request();
+        if request.token == 0 {
+            return;
+        }
+        let row = request.row;
+        clock.prepare_segment(
+            telemetry,
+            row,
+            tract_effects::waveform::WaveformTiming {
+                config: &self.config[row],
+                kind: tracks[row].kind,
+                phase: self.states[row].precise_phase(request.slot),
+                trigger_epoch: self.states[row].trigger_epoch(),
+                bpm,
+                sample_rate,
+            },
+        );
     }
 
     pub fn begin_block(&mut self, left: &[f32], right: &[f32], sample_rate: f64) {

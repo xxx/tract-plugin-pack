@@ -5,6 +5,7 @@ use crate::modulation::{ModulationTarget, TrackModulation, TriggerSource};
 use tiny_skia_widgets as widgets;
 
 mod live;
+pub use live::AudioView;
 pub mod view;
 use view as effect_editor;
 use view::{EffectHit, EffectLayout};
@@ -81,6 +82,8 @@ pub struct EffectEditor {
     live: Option<live::LiveSource>,
     trace_enabled: bool,
     measured_arcs_only: bool,
+    audio_view: AudioView,
+    audio_frozen: bool,
 }
 
 impl Default for EffectEditor {
@@ -92,7 +95,7 @@ impl Default for EffectEditor {
 impl EffectEditor {
     pub fn new(trigger_choices: &'static [TriggerChoice]) -> Self {
         let mut mseg_edit = widgets::mseg::MsegEditState::new();
-        mseg_edit.set_status_reserve(240.0);
+        mseg_edit.set_status_reserve(360.0);
         Self {
             selected_mseg: 1,
             effect_dropdown: widgets::dropdown::DropdownState::new(),
@@ -107,6 +110,8 @@ impl EffectEditor {
             live: None,
             trace_enabled: true,
             measured_arcs_only: false,
+            audio_view: AudioView::Off,
+            audio_frozen: false,
         }
     }
 
@@ -114,16 +119,22 @@ impl EffectEditor {
         self.mseg_edit.clear_selection();
     }
 
-    /// Cancel gestures tied to configuration that the host has replaced.
+    /// Cancel gestures while retaining display preferences and measured history.
     pub fn cancel_interaction(&mut self) {
         let selected_mseg = self.selected_mseg;
         let trace_enabled = self.trace_enabled;
         let measured_arcs_only = self.measured_arcs_only;
+        let audio_view = self.audio_view;
+        let audio_frozen = self.audio_frozen;
+        let live = self.live.take();
         let input_scale = self.effect_dial_drag.input_scale();
         *self = Self::new(self.trigger_choices);
         self.selected_mseg = selected_mseg;
         self.trace_enabled = trace_enabled;
         self.measured_arcs_only = measured_arcs_only;
+        self.audio_view = audio_view;
+        self.audio_frozen = audio_frozen;
+        self.live = live;
         self.effect_dial_drag.set_input_scale(input_scale);
     }
 
@@ -317,6 +328,20 @@ impl<'a> Session<'a> {
             EffectAction::Target => self.apply_target_selection(idx),
             EffectAction::Trigger => self.apply_trigger_selection(idx),
             EffectAction::ParamDropdown(i) => self.apply_param_dropdown_selection(i, idx),
+            EffectAction::Audio => {
+                if idx < 4 {
+                    self.state.set_audio_view(
+                        [
+                            AudioView::Off,
+                            AudioView::Input,
+                            AudioView::Output,
+                            AudioView::Both,
+                        ][idx],
+                    );
+                } else {
+                    self.state.set_audio_frozen(!self.state.audio_frozen);
+                }
+            }
         }
     }
 
@@ -677,6 +702,10 @@ impl<'a> Session<'a> {
     }
     fn on_right_press(&mut self) -> baseview::EventStatus {
         let (px, py) = self.mouse_pos;
+        if self.state.effect_dropdown.is_open() {
+            self.state.effect_dropdown.close();
+            return baseview::EventStatus::Captured;
+        }
         if self.state.mseg_edit.has_open_menu() {
             let sel = self.state.selected_mseg.min(3);
             self.response.changed |= self.state.mseg_edit.on_right_click(
@@ -856,7 +885,9 @@ impl<'a> Session<'a> {
         // Active MSEG first — `draw_mseg` opens with an opaque canvas fill
         // that would otherwise wipe the ghosts. Ghosts are then drawn on top
         // at low alpha (≈ 38%) so they read as faint context, not foreground.
-        widgets::mseg::draw_mseg(
+        let audio_view = self.state.audio_view;
+        let audio_bins = self.state.live.as_ref().map(|live| &live.waveform[..]);
+        widgets::mseg::draw_mseg_with_background(
             pixmap,
             self.text_renderer,
             lay.mseg_pane,
@@ -865,6 +896,18 @@ impl<'a> Session<'a> {
             self.scale_factor,
             mseg_color(sel),
             tooltip_ref,
+            |pm, layout| {
+                if let Some(bins) = audio_bins {
+                    widgets::mseg::draw_mseg_audio(
+                        pm,
+                        layout,
+                        bins,
+                        audio_view.input(),
+                        audio_view.output(),
+                        mseg_color(sel),
+                    );
+                }
+            },
         );
         for (m, mseg) in modu.msegs.iter().enumerate() {
             if m != sel {
@@ -1071,6 +1114,17 @@ impl<'a> Session<'a> {
             }
             EffectHit::Trace => {
                 self.state.trace_enabled = !self.state.trace_enabled;
+            }
+            EffectHit::Audio => {
+                let items = live::audio_items(self.state.audio_frozen);
+                self.state.effect_dropdown.open(
+                    EffectAction::Audio,
+                    lay.audio,
+                    widgets::dropdown::DropdownList::flat(items),
+                    self.state.audio_view as usize,
+                    false,
+                    (self.physical_width, self.physical_height),
+                );
             }
             EffectHit::Depth => {
                 if self.state.selected_mseg != 0 {
@@ -1528,7 +1582,9 @@ impl<'a> Session<'a> {
 }
 
 fn dropdown_items(state: &EffectEditor, effect: &TrackEffect) -> Vec<&'static str> {
-    if state.effect_dropdown.is_open_for(EffectAction::Target) {
+    if state.effect_dropdown.is_open_for(EffectAction::Audio) {
+        live::audio_items(state.audio_frozen).to_vec()
+    } else if state.effect_dropdown.is_open_for(EffectAction::Target) {
         view::target_items(effect.kind)
     } else if state.effect_dropdown.is_open_for(EffectAction::Trigger) {
         let all = view::trigger_items();
@@ -1608,6 +1664,7 @@ enum EffectAction {
     Target,
     Trigger,
     ParamDropdown(usize),
+    Audio,
 }
 
 /// Format a node's position and its amplitude or routed parameter value.

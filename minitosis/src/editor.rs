@@ -280,6 +280,7 @@ impl MinitosisWindow {
         self.shared.modulation_dirty.store(true, Ordering::Release);
         self.select_kind(snapshot.kind);
         self.editor.cancel_interaction();
+        self.editor.invalidate_trace();
     }
 
     fn select_kind(&mut self, kind: EffectKind) {

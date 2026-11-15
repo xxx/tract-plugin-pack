@@ -158,6 +158,7 @@ impl Default for TraceCell {
 }
 
 pub struct ModulationTelemetry {
+    pub waveform: crate::waveform::WaveformTelemetry,
     request: AtomicU64,
     epoch: AtomicU32,
     head: AtomicU64,
@@ -167,6 +168,7 @@ pub struct ModulationTelemetry {
 impl Default for ModulationTelemetry {
     fn default() -> Self {
         Self {
+            waveform: crate::waveform::WaveformTelemetry::default(),
             request: AtomicU64::new(0),
             epoch: AtomicU32::new(0),
             head: AtomicU64::new(0),
@@ -196,6 +198,7 @@ impl ModulationTelemetry {
     }
     /// End history across processor/state replacement, including same-kind reloads.
     pub fn invalidate(&self) {
+        self.waveform.invalidate();
         self.request.store(0, Ordering::Release);
     }
     pub fn release(&self, token: u64) {

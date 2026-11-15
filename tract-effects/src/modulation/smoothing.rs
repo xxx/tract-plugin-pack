@@ -121,7 +121,7 @@ impl SmoothRuntime {
     }
 }
 
-fn phase_step(data: &MsegData, bpm: f64, sr: f64) -> f64 {
+pub(crate) fn phase_step(data: &MsegData, bpm: f64, sr: f64) -> f64 {
     let length = match data.sync_mode {
         SyncMode::Time => data.time_seconds as f64 * sr,
         SyncMode::Beat if bpm > 0.0 => data.beats as f64 * 60.0 / bpm * sr,
@@ -134,7 +134,7 @@ fn phase_step(data: &MsegData, bpm: f64, sr: f64) -> f64 {
     }
 }
 
-fn phase_next(data: &MsegData, phase: f64, step: f64) -> f64 {
+pub(crate) fn phase_next(data: &MsegData, phase: f64, step: f64) -> f64 {
     let nodes = data.active();
     let next = phase + step;
     let wrap = |lo: f64, hi: f64| lo + (next - lo).rem_euclid((hi - lo).max(1e-9));
@@ -184,6 +184,7 @@ impl ModulationState {
         self.output_valid = [false; 4];
     }
     pub fn restart_clock(&mut self) {
+        self.trigger_epoch = self.trigger_epoch.wrapping_add(1);
         self.phases = [0.0; 4];
         self.hz_phase = 0.0;
         self.transient.reset();
@@ -192,6 +193,16 @@ impl ModulationState {
     }
     pub fn smoothing_active(&self) -> bool {
         self.smooth.mask != 0
+    }
+    pub fn trigger_epoch(&self) -> u64 {
+        self.trigger_epoch
+    }
+    pub fn precise_phase(&self, slot: usize) -> f64 {
+        if self.smooth.slots[slot].active {
+            self.smooth.slots[slot].phase
+        } else {
+            self.phases[slot] as f64
+        }
     }
     pub fn holds_smoothed_parameter(&self, kind: EffectKind, index: usize) -> bool {
         self.smooth.slots.iter().any(|slot| {

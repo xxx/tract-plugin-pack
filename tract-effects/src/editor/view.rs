@@ -60,6 +60,7 @@ pub struct EffectLayout {
     pub mseg_length: (f32, f32, f32, f32),
     pub smooth: (f32, f32, f32, f32),
     pub trace: (f32, f32, f32, f32),
+    pub audio: (f32, f32, f32, f32),
 }
 
 /// Compute the effect-editor layout at `scale`.
@@ -128,6 +129,12 @@ pub fn effect_layout(bounds: (f32, f32, f32, f32), scale: f32) -> EffectLayout {
         72.0 * scale,
         26.0 * scale,
     );
+    let audio = (
+        smooth.0 - 120.0 * scale,
+        smooth.1,
+        114.0 * scale,
+        26.0 * scale,
+    );
     EffectLayout {
         back,
         effect_header,
@@ -147,6 +154,7 @@ pub fn effect_layout(bounds: (f32, f32, f32, f32), scale: f32) -> EffectLayout {
         mseg_length,
         smooth,
         trace,
+        audio,
     }
 }
 
@@ -222,6 +230,7 @@ pub enum EffectHit {
     Mix,
     Smooth(usize),
     Trace,
+    Audio,
 }
 
 /// The MSEG-selector tab order shown to the user. The three assignable MSEGs
@@ -323,6 +332,9 @@ pub fn effect_hit(
     }
     if in_rect(lay.trace, px, py) {
         return Some(EffectHit::Trace);
+    }
+    if in_rect(lay.audio, px, py) {
+        return Some(EffectHit::Audio);
     }
     if in_rect(lay.mseg_pane, px, py) {
         return Some(EffectHit::MsegPane);

@@ -157,6 +157,33 @@ clears when switching envelopes, rows, or effects. It fills as audio is processe
 and hides while Minitosis prepares a newly selected effect. Toggling Trace does
 not change the sound or project state.
 
+### Audio waveform backdrop
+
+In Multosis/Minitosis, **Audio** beside Smooth/Trace offers **Off**, **Input**,
+**Output**, and **Input + Output**. It draws stereo magnitude peaks beneath the
+curve: input in gray, output in the selected envelope's color. The greater
+absolute channel sets each peak. Full height is magnitude 1; louder signals
+clip visually. The horizontal axis follows the selected envelope's clock,
+including its triggers and loops. Zoom and pan apply to the backdrop too.
+
+Capture examines every audio sample and keeps the largest peak in each phase
+bin, so short transients remain visible. Each pass updates the bins it visits;
+the remaining bins retain their last observed values. **Freeze** stops capture
+and retains the current display for editing. **Unfreeze** starts fresh. Switching
+between Input/Output/Both keeps the captured data; Off clears it. Freeze survives
+focus changes and resizing. Switching envelope, row, effect, or restored state
+clears the history, including a frozen display.
+
+Multosis measures immediately before/after the selected row, including its Mix
+and Amp, before the wet-bus compressor and master blend. Inactive, muted, and None
+rows pass the same signal to both layers, including processing by preceding
+rows. Minitosis measures processor input and returned output before Output gain;
+bypass and effect latency remain visible. No display alignment changes the audio.
+
+Audio/Freeze are editor-session preferences. They do not alter curves, saved
+project state, host automation, or undo history. Capture stops when the effect
+view closes, Audio is Off, or Freeze is active. Miff/Nap retain their static views.
+
 ## Edit commands
 
 - **Compress/Expand values/times** retain their existing behavior and require a

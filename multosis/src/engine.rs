@@ -11,6 +11,7 @@ use crate::modulation::{Modulation, TrackModulation};
 use crate::propagation::{Playhead, active_rows};
 use std::sync::Arc;
 use tract_effects::modulation_telemetry::{ModulationTelemetry, TraceClock, TraceRequest};
+use tract_effects::waveform::WaveformClock;
 
 /// Upper bound on step boundaries handled within one process block. At any
 /// realistic tempo/speed/sample-rate, `samples_per_step` is at least a few
@@ -44,6 +45,7 @@ pub struct AudioEngine {
     pub telemetry: Arc<ModulationTelemetry>,
     trace_clock: TraceClock,
     trace_request: TraceRequest,
+    waveform: WaveformClock,
 }
 
 impl AudioEngine {
@@ -69,6 +71,7 @@ impl AudioEngine {
             telemetry: Arc::new(ModulationTelemetry::default()),
             trace_clock: TraceClock::default(),
             trace_request: TraceRequest::default(),
+            waveform: WaveformClock::default(),
         }
     }
 
@@ -235,23 +238,31 @@ impl AudioEngine {
         let mut cur_l = dry_l;
         let mut cur_r = dry_r;
         for r in 0..ROWS {
-            if active & (1 << r) == 0 {
-                continue;
+            let input = [cur_l, cur_r];
+            if active & (1 << r) != 0
+                && self.track_effects[r].kind != crate::effects::EffectKind::None
+            {
+                let (eff_l, eff_r) = self.effects[r].process_sample(cur_l, cur_r);
+                let mix = if MODULATE_MIX {
+                    self.modulation.next_mix(r, self.track_effects[r].mix)
+                } else {
+                    self.track_effects[r].mix
+                };
+                let lane_l = cur_l + (eff_l - cur_l) * mix;
+                let lane_r = cur_r + (eff_r - cur_r) * mix;
+                let amp = self.modulation.amplitude(r);
+                cur_l = amp * lane_l;
+                cur_r = amp * lane_r;
             }
-            if self.track_effects[r].kind == crate::effects::EffectKind::None {
-                continue;
+            if self.waveform.active() && self.waveform.request().row == r {
+                self.waveform.record_sample(
+                    &self.telemetry.waveform,
+                    input,
+                    [cur_l, cur_r],
+                    self.modulation
+                        .precise_phase(r, self.waveform.request().slot),
+                );
             }
-            let (eff_l, eff_r) = self.effects[r].process_sample(cur_l, cur_r);
-            let mix = if MODULATE_MIX {
-                self.modulation.next_mix(r, self.track_effects[r].mix)
-            } else {
-                self.track_effects[r].mix
-            };
-            let lane_l = cur_l + (eff_l - cur_l) * mix;
-            let lane_r = cur_r + (eff_r - cur_r) * mix;
-            let amp = self.modulation.amplitude(r);
-            cur_l = amp * lane_l;
-            cur_r = amp * lane_r;
         }
         if self.trace_clock.tick()
             && self.trace_request.matches(
@@ -307,6 +318,7 @@ impl AudioEngine {
     ) {
         let n = left.len().min(right.len());
         let sr = self.sample_rate as f64;
+        self.waveform.begin_block(&self.telemetry.waveform);
         self.trace_request = self.trace_clock.begin_block(&self.telemetry, sr);
         self.modulation
             .set_telemetry_request(self.trace_request, &self.track_effects);
@@ -361,6 +373,15 @@ impl AudioEngine {
             } else {
                 n
             };
+            if seg_end > cursor {
+                self.modulation.prepare_waveform_segment(
+                    &mut self.waveform,
+                    &self.telemetry.waveform,
+                    &self.track_effects,
+                    bpm,
+                    sr,
+                );
+            }
             self.modulation.advance_segment(
                 seg_end - cursor,
                 bpm,
@@ -411,6 +432,7 @@ impl AudioEngine {
         // last_active is the audible mask — what the user sees in the track
         // listing's "sounding" dot. Muted/non-soloed rows stay dark even when
         // their grid cell is on.
+        self.waveform.finish_block(&self.telemetry.waveform);
         if self.trace_request.token != 0 {
             let row = self.trace_request.row;
             let frame = self.modulation.frame(row, self.track_effects[row].kind);
@@ -1413,6 +1435,70 @@ mod tests {
             );
             assert_eq!(left, expected_left);
             assert_eq!(right, expected_right);
+        }
+    }
+
+    #[test]
+    fn waveform_measures_row_position_and_bypass_without_changing_audio_or_allocating() {
+        use crate::effects::{EffectKind, default_params_for_kind};
+        for (row, inactive, muted, expected_input, expected_output) in [
+            (1, false, false, 1.0, 0.5),
+            (1, true, false, 1.0, 1.0),
+            (1, false, true, 1.0, 1.0),
+            (2, false, false, 0.5, 0.5),
+        ] {
+            let mut engine = AudioEngine::new();
+            let mut reference = AudioEngine::new();
+            let mut tracks = [TrackEffect::default(); ROWS];
+            for track in &mut tracks[..2] {
+                track.kind = EffectKind::Bitcrush;
+                track.params = default_params_for_kind(track.kind);
+            }
+            tracks[0].params[0] = 1.0;
+            tracks[1].muted = muted;
+            let mut config = std::array::from_fn(TrackModulation::default_for_row);
+            for row in &mut config {
+                row.targets = [None; 3];
+            }
+            for node in &mut config[1].msegs[0].nodes {
+                node.value = 0.5;
+            }
+            for e in [&mut engine, &mut reference] {
+                e.set_sample_rate(48000.0);
+                e.set_modulation(&config);
+                e.set_effects(&tracks);
+            }
+            let token = engine.telemetry.waveform.request(row, 1, tracks[row].kind);
+            let mut grid = Grid::default();
+            grid.cell_mut(1, 0).enabled = !inactive;
+            assert_no_alloc::assert_no_alloc(|| {
+                for _ in 0..3 {
+                    let (mut left, mut right, mut expected_left, mut expected_right) =
+                        ([0.6; 128], [0.6; 128], [0.6; 128], [0.6; 128]);
+                    engine.process(&mut left, &mut right, false, 1000.0, 120.0, 1.0, &grid);
+                    reference.process(
+                        &mut expected_left,
+                        &mut expected_right,
+                        false,
+                        1000.0,
+                        120.0,
+                        1.0,
+                        &grid,
+                    );
+                    assert_eq!(left, expected_left);
+                    assert_eq!(right, expected_right);
+                }
+            });
+            let points: Vec<_> = (0..engine.telemetry.waveform.head())
+                .filter_map(|index| engine.telemetry.waveform.point(index, token))
+                .collect();
+            assert!(!points.is_empty());
+            assert!(
+                points
+                    .iter()
+                    .all(|point| point.input == expected_input && point.output == expected_output),
+                "row {row}: {points:?}"
+            );
         }
     }
 
