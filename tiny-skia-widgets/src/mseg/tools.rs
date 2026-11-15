@@ -75,7 +75,10 @@ pub(crate) fn flip_values(data: &mut MsegData, selection: u128) -> bool {
     changed
 }
 
-fn selected_range(data: &MsegData, selection: u128) -> Result<(usize, usize), ShapeError> {
+pub(crate) fn selected_range(
+    data: &MsegData,
+    selection: u128,
+) -> Result<(usize, usize), ShapeError> {
     let selected = effective_selection(data, selection);
     let first = selected.trailing_zeros() as usize;
     let last = 127 - selected.leading_zeros() as usize;
@@ -83,6 +86,60 @@ fn selected_range(data: &MsegData, selection: u128) -> Result<(usize, usize), Sh
         return Err(ShapeError::Selection);
     }
     Ok((first, last))
+}
+
+pub(crate) fn capture_selection(
+    data: &MsegData,
+    selection: u128,
+) -> Result<super::CurveShape, ShapeError> {
+    if selection == 0 {
+        return Err(ShapeError::Selection);
+    }
+    let (first, last) = selected_range(data, selection)?;
+    let lo = data.nodes[first].time;
+    let span = data.nodes[last].time - lo;
+    let mut nodes = data.active()[first..=last].to_vec();
+    for node in &mut nodes {
+        node.time = (node.time - lo) / span;
+    }
+    nodes[0].time = 0.0;
+    if let Some(last) = nodes.last_mut() {
+        last.time = 1.0;
+    }
+    validate_nodes(&nodes)?;
+    Ok(super::CurveShape { nodes })
+}
+
+pub(crate) fn paste_selection(
+    data: &mut MsegData,
+    shape: &super::CurveShape,
+    selection: u128,
+    merge: bool,
+) -> Result<(bool, u128), ShapeError> {
+    if selection == 0 {
+        return Err(ShapeError::Selection);
+    }
+    let (first, last) = selected_range(data, selection)?;
+    let lo = data.nodes[first].time;
+    let hi = data.nodes[last].time;
+    let mut points = shape.nodes().to_vec();
+    for point in &mut points {
+        point.time = lo + (hi - lo) * point.time;
+    }
+    points[0].time = lo;
+    if let Some(last) = points.last_mut() {
+        last.time = hi;
+    }
+    if merge {
+        let existing: Vec<_> = data.active()[first..=last]
+            .iter()
+            .filter(|node| !points.iter().any(|p| p.time == node.time))
+            .copied()
+            .collect();
+        points.extend(existing);
+        points.sort_by(|a, b| a.time.total_cmp(&b.time));
+    }
+    replace_interval(data, &points)
 }
 
 pub(crate) fn reverse(data: &mut MsegData, selection: u128) -> Result<(bool, u128), ShapeError> {
@@ -247,6 +304,62 @@ mod tests {
         let mut data = MsegData::default();
         factory_shape(kind).apply(&mut data, false).unwrap();
         data
+    }
+
+    #[test]
+    fn selection_clipboard_normalizes_only_time_and_preserves_segment_geometry() {
+        let mut data = shape(FactoryShape::Sine);
+        data.nodes[4].tension = 0.7;
+        data.nodes[5].stepped = true;
+        let clip = capture_selection(&data, 0b1111 << 4).unwrap();
+        assert_eq!(clip.nodes().len(), 4);
+        for (i, node) in clip.nodes().iter().enumerate() {
+            assert_eq!(node.value, data.nodes[i + 4].value);
+            assert_eq!(node.tension, data.nodes[i + 4].tension);
+            assert_eq!(node.stepped, data.nodes[i + 4].stepped);
+            assert!((node.time - i as f32 / 3.0).abs() < 1e-6);
+        }
+        assert_eq!(capture_selection(&data, 0b101), Err(ShapeError::Selection));
+        assert_eq!(capture_selection(&data, 0), Err(ShapeError::Selection));
+    }
+
+    #[test]
+    fn paste_into_selection_supports_replace_merge_and_preserves_the_tail() {
+        let mut base = shape(FactoryShape::Sine);
+        base.nodes[24].tension = 0.6;
+        base.nodes[24].stepped = true;
+        let clip = crate::mseg::factory_shape(FactoryShape::Triangle);
+        let selection = ((1_u128 << 17) - 1) << 8;
+        for merge in [false, true] {
+            let mut data = base;
+            let (_, selected) = paste_selection(&mut data, &clip, selection, merge).unwrap();
+            assert_eq!(data.node_count, if merge { 33 } else { 19 });
+            assert_eq!(selected.count_ones(), if merge { 17 } else { 3 });
+            assert_eq!(&data.active()[..8], &base.active()[..8]);
+            let end = data.active().iter().position(|n| n.time == 0.75).unwrap();
+            assert_eq!(data.nodes[end].tension, 0.6);
+            assert!(data.nodes[end].stepped);
+            assert_eq!(&data.active()[end + 1..], &base.active()[25..]);
+            assert_eq!(
+                data.active().iter().find(|n| n.time == 0.5).unwrap().value,
+                1.0
+            );
+            assert!(data.is_valid());
+        }
+    }
+
+    #[test]
+    fn selection_paste_overflow_is_atomic() {
+        let mut data = shape(FactoryShape::Sine);
+        repeat(&mut data, 0, 3).unwrap();
+        data.insert_node(0.001, 0.5).unwrap();
+        let before = data;
+        let clip = crate::mseg::factory_shape(FactoryShape::Sine);
+        assert_eq!(
+            paste_selection(&mut data, &clip, 0b11, true),
+            Err(ShapeError::Capacity)
+        );
+        assert_eq!(data, before);
     }
 
     #[test]

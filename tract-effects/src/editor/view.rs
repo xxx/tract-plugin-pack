@@ -752,11 +752,25 @@ pub fn draw_mseg_playhead(
     scale: f32,
 ) {
     let layout = widgets::mseg::mseg_layout(mseg_pane, false, scale);
+    draw_mseg_playhead_in_layout(pixmap, &layout, phase, scale);
+}
+
+pub fn draw_mseg_playhead_in_layout(
+    pixmap: &mut Pixmap,
+    layout: &widgets::mseg::MsegLayout,
+    phase: f32,
+    scale: f32,
+) {
+    let phase = phase.clamp(0.0, 1.0);
+    let (lo, hi) = layout.viewport.time_range();
+    if phase < lo || phase > hi {
+        return;
+    }
     let (px_, py_, pw_, ph_) = layout.plot;
     if pw_ <= 0.0 || ph_ <= 0.0 {
         return;
     }
-    let x = widgets::mseg::phase_to_x(&layout, phase.clamp(0.0, 1.0));
+    let x = widgets::mseg::phase_to_x(layout, phase);
     // Keep the line strictly inside the plot so it doesn't overflow at phase 1.
     let line_w = (scale).max(1.0);
     let x = x.min(px_ + pw_ - line_w);
@@ -1185,6 +1199,18 @@ mod tests {
                     );
                 }
             }
+        }
+
+        #[test]
+        fn playhead_follows_the_viewport_and_hides_outside_it() {
+            let mut layout = widgets::mseg::mseg_layout((20.0, 30.0, 180.0, 160.0), false, 1.0);
+            layout.viewport.fit((0.4, 0.6), (0.0, 1.0));
+            let mut actual = canvas();
+            let original = actual.clone();
+            draw_mseg_playhead_in_layout(&mut actual, &layout, 0.2, 1.0);
+            assert_eq!(actual.data(), original.data());
+            draw_mseg_playhead_in_layout(&mut actual, &layout, 0.5, 1.0);
+            assert_ne!(actual.data(), original.data());
         }
 
         #[test]

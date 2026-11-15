@@ -245,6 +245,14 @@ impl MiffWindow {
         // Lock the curve, copy the `Copy` value out, then release before drawing.
         let curve = self.params.curve.lock().map(|c| *c).unwrap_or_default();
 
+        if let Some(node) = self
+            .mseg_state
+            .inspector_node()
+            .filter(|&i| i < curve.node_count)
+        {
+            self.mseg_state
+                .set_inspector_readout(&format!("Tap {:+.6}", curve.nodes[node].value * 2.0 - 1.0));
+        }
         widgets::mseg::draw_mseg(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
@@ -255,17 +263,6 @@ impl MiffWindow {
             widgets::color_accent(),
             None,
         );
-        // Dropdown popup is no longer inline in draw_mseg — paint it
-        // explicitly. miff has no layered ghosts, so the position is
-        // immediately after the curve; the result is identical to the
-        // pre-extract behaviour.
-        widgets::mseg::draw_mseg_dropdown(
-            &mut self.surface.pixmap,
-            &mut self.text_renderer,
-            &self.mseg_state,
-            mseg_rect,
-        );
-
         // ── Response region (middle ~29%) — frequency-response view ────────
         {
             // Read the latest input spectrum from the audio thread (non-blocking).
@@ -287,6 +284,12 @@ impl MiffWindow {
 
         // ── Bottom strip (~16%) ────────────────────────────────────────────
         self.draw_strip(strip_rect, s);
+        widgets::mseg::draw_mseg_dropdown(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            &self.mseg_state,
+            mseg_rect,
+        );
     }
 
     fn resize_buffers(&mut self) {
@@ -704,6 +707,9 @@ impl baseview::WindowHandler for MiffWindow {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
+                if self.mseg_state.is_panning() {
+                    return baseview::EventStatus::Captured;
+                }
                 let (x, y) = self.drag.mouse_pos();
                 self.update_modifiers(modifiers);
 
@@ -920,7 +926,7 @@ impl baseview::WindowHandler for MiffWindow {
             }) => {
                 let (x, y) = self.drag.mouse_pos();
                 // Right-click during a controls drag: ignore (as wavetable-filter does).
-                if self.drag.active_action().is_some() {
+                if self.drag.active_action().is_some() || self.mseg_state.is_dragging() {
                     return baseview::EventStatus::Captured;
                 }
 
@@ -963,15 +969,44 @@ impl baseview::WindowHandler for MiffWindow {
                 }
             }
 
-            baseview::Event::Mouse(baseview::MouseEvent::WheelScrolled { delta, .. })
-                if self.mseg_state.has_open_menu() =>
-            {
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Middle,
+                ..
+            }) => {
+                if self.drag.active_action().is_none() {
+                    let (x, y) = self.drag.mouse_pos();
+                    if self.mseg_state.can_start_pan(x, y, mseg_rect, s) {
+                        self.commit_text_edit();
+                    }
+                    self.mseg_state.on_pan_start(x, y, mseg_rect, s);
+                }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Middle,
+                ..
+            }) => {
+                self.mseg_state.on_pan_end();
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::WheelScrolled { delta, modifiers }) => {
+                if self.drag.active_action().is_some() {
+                    return baseview::EventStatus::Captured;
+                }
                 let dy = match delta {
                     baseview::ScrollDelta::Lines { y, .. } => *y,
                     baseview::ScrollDelta::Pixels { y, .. } => *y * 0.05,
                 };
-                self.mseg_state
-                    .on_wheel(dy * self.drag.input_scale(), mseg_rect);
+                let (x, y) = self.drag.mouse_pos();
+                if let Ok(curve) = self.params.curve.lock() {
+                    self.mseg_state.on_scroll(
+                        x,
+                        y,
+                        dy,
+                        modifiers.contains(keyboard_types::Modifiers::SHIFT),
+                        &curve,
+                        mseg_rect,
+                        s,
+                    );
+                }
             }
 
             // ── Keyboard ────────────────────────────────────────────────────

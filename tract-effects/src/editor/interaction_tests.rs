@@ -1010,3 +1010,337 @@ mod event_dispatch {
         assert!(h.click(h.geometry.layout.back).back);
     }
 }
+
+mod precision_editing {
+    use super::*;
+    fn shortcut(key: Key, modifiers: Modifiers) -> Event {
+        Event::Keyboard(KeyboardEvent {
+            key,
+            modifiers,
+            state: KeyState::Down,
+            ..KeyboardEvent::default()
+        })
+    }
+    fn select_point(h: &mut Harness, index: usize, add: bool) {
+        let node = h.modulation.msegs[h.editor.selected_mseg].nodes[index];
+        let layout = h
+            .editor
+            .mseg_edit
+            .layout(h.geometry.layout.mseg_pane, h.geometry.scale);
+        h.move_to(
+            widgets::mseg::phase_to_x(&layout, node.time),
+            widgets::mseg::value_to_y(&layout, node.value),
+            Modifiers::empty(),
+        );
+        h.send(Event::Mouse(MouseEvent::ButtonPressed {
+            button: MouseButton::Left,
+            modifiers: if add {
+                Modifiers::CONTROL
+            } else {
+                Modifiers::empty()
+            },
+        }));
+        h.release();
+    }
+    fn draw(h: &mut Harness) {
+        let mut pm = tiny_skia::Pixmap::new(
+            h.geometry.window_size.0 as u32,
+            h.geometry.window_size.1 as u32,
+        )
+        .unwrap();
+        h.editor.draw(
+            &mut pm,
+            &mut h.tr,
+            &h.effect,
+            &h.modulation,
+            [0.0; 4],
+            h.geometry,
+        );
+        h.editor
+            .draw_popup(&mut pm, &mut h.tr, &h.effect, h.geometry);
+    }
+
+    #[test]
+    fn pan_start_commits_numeric_text_and_escape_cancels_the_pan() {
+        for scale in [0.5, 1.0, 2.0] {
+            for mix in [false, true] {
+                let mut h = Harness::new();
+                h.geometry = EditorGeometry {
+                    layout: view::effect_layout((16.0, 16.0, 1304.0, 640.0), scale),
+                    scale,
+                    window_size: (1336.0 * scale, 680.0 * scale),
+                };
+                let layout = h
+                    .editor
+                    .mseg_edit
+                    .layout(h.geometry.layout.mseg_pane, scale);
+                let (x, y) = (
+                    widgets::mseg::phase_to_x(&layout, 0.5),
+                    widgets::mseg::value_to_y(&layout, 0.5),
+                );
+                h.move_to(x, y, Modifiers::empty());
+                h.send(Event::Mouse(MouseEvent::WheelScrolled {
+                    delta: baseview::ScrollDelta::Lines { x: 0.0, y: 6.0 },
+                    modifiers: Modifiers::empty(),
+                }));
+                let view = h.editor.mseg_edit.viewport();
+                let dial = if mix {
+                    h.geometry.layout.mix
+                } else {
+                    h.geometry.layout.dials[0]
+                };
+                h.move_to(
+                    dial.0 + dial.2 * 0.5,
+                    dial.1 + dial.3 * 0.5,
+                    Modifiers::empty(),
+                );
+                h.press(MouseButton::Right);
+                h.type_replacement(if mix { "25" } else { "800" });
+                let modulation = h.modulation.clone();
+                let before = h.effect;
+                let mut undo = crate::undo::UndoHistory::new();
+                undo.begin_capture(before);
+                h.move_to(x, y, Modifiers::empty());
+                let response = h.press(MouseButton::Middle);
+                assert!(response.captured && response.changed);
+                assert!(!h.editor.text_edit.is_active());
+                assert!(h.editor.mseg_edit.is_panning());
+                let committed = h.effect;
+                undo.commit_capture(&committed);
+                assert_eq!(
+                    if mix {
+                        committed.mix
+                    } else {
+                        committed.params[0]
+                    },
+                    if mix { 0.25 } else { 800.0 }
+                );
+                h.move_to(x + 40.0 * scale, y + 20.0 * scale, Modifiers::empty());
+                assert_ne!(h.editor.mseg_edit.viewport(), view);
+                let response = h.key(Key::Escape);
+                assert!(response.captured && !response.changed);
+                assert!(!h.editor.mseg_edit.is_panning());
+                assert_eq!(h.editor.mseg_edit.viewport(), view);
+                assert_eq!(h.effect, committed);
+                assert_eq!(h.modulation, modulation);
+                assert_eq!(undo.undo(h.effect), Some(before));
+                assert!(undo.undo(before).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn pan_start_finalizes_invalid_numeric_text_without_changing_the_value() {
+        let mut h = Harness::new();
+        let dial = h.geometry.layout.mix;
+        h.move_to(
+            dial.0 + dial.2 * 0.5,
+            dial.1 + dial.3 * 0.5,
+            Modifiers::empty(),
+        );
+        h.press(MouseButton::Right);
+        h.type_replacement("1e");
+        let before = h.effect;
+        let layout = h.editor.mseg_edit.layout(h.geometry.layout.mseg_pane, 1.0);
+        h.move_to(
+            widgets::mseg::phase_to_x(&layout, 0.5),
+            widgets::mseg::value_to_y(&layout, 0.5),
+            Modifiers::empty(),
+        );
+        let response = h.press(MouseButton::Middle);
+        assert!(response.captured && !response.changed);
+        assert!(!h.editor.text_edit.is_active());
+        assert!(h.editor.mseg_edit.is_panning());
+        assert!(h.key(Key::Escape).captured);
+        assert!(!h.editor.mseg_edit.is_panning());
+        assert_eq!(h.effect, before);
+    }
+
+    #[test]
+    fn middle_press_outside_the_canvas_keeps_pending_numeric_input() {
+        let mut h = Harness::new();
+        let dial = h.geometry.layout.mix;
+        h.move_to(
+            dial.0 + dial.2 * 0.5,
+            dial.1 + dial.3 * 0.5,
+            Modifiers::empty(),
+        );
+        h.press(MouseButton::Right);
+        h.type_replacement("25");
+        let before = h.effect;
+        h.move_to(0.0, 0.0, Modifiers::empty());
+        let response = h.press(MouseButton::Middle);
+        assert!(!response.captured && !response.changed);
+        assert!(h.editor.text_edit.is_active());
+        assert!(!h.editor.mseg_edit.is_panning());
+        assert_eq!(h.effect, before);
+    }
+
+    #[test]
+    fn dial_drag_inhibits_navigation_and_pan_blocks_control_presses() {
+        let mut h = Harness::new();
+        let dial = h.geometry.layout.dials[0];
+        h.move_to(
+            dial.0 + dial.2 * 0.5,
+            dial.1 + dial.3 * 0.5,
+            Modifiers::empty(),
+        );
+        h.press(MouseButton::Left);
+        assert!(h.editor.effect_dial_drag.active_action().is_some());
+        assert!(h.editor.pointer_gesture_active());
+        let layout = h.editor.mseg_edit.layout(h.geometry.layout.mseg_pane, 1.0);
+        let (x, y) = (
+            widgets::mseg::phase_to_x(&layout, 0.5),
+            widgets::mseg::value_to_y(&layout, 0.5),
+        );
+        h.move_to(x, y, Modifiers::empty());
+        let view = h.editor.mseg_edit.viewport();
+        h.send(Event::Mouse(MouseEvent::WheelScrolled {
+            delta: baseview::ScrollDelta::Lines { x: 0.0, y: 6.0 },
+            modifiers: Modifiers::empty(),
+        }));
+        h.press(MouseButton::Middle);
+        assert_eq!(h.editor.mseg_edit.viewport(), view);
+        assert!(!h.editor.mseg_edit.is_panning());
+        h.release();
+        assert!(!h.editor.pointer_gesture_active());
+        h.send(Event::Mouse(MouseEvent::WheelScrolled {
+            delta: baseview::ScrollDelta::Lines { x: 0.0, y: 6.0 },
+            modifiers: Modifiers::empty(),
+        }));
+        h.press(MouseButton::Middle);
+        assert!(h.editor.mseg_edit.is_panning());
+        assert!(h.editor.pointer_gesture_active());
+        h.move_to(
+            dial.0 + dial.2 * 0.5,
+            dial.1 + dial.3 * 0.5,
+            Modifiers::empty(),
+        );
+        assert!(h.press(MouseButton::Left).captured);
+        assert!(h.editor.effect_dial_drag.active_action().is_none());
+        assert!(h.press(MouseButton::Right).captured);
+        assert!(!h.editor.text_edit.is_active());
+        h.send(Event::Mouse(MouseEvent::ButtonReleased {
+            button: MouseButton::Middle,
+            modifiers: Modifiers::empty(),
+        }));
+        assert!(!h.editor.mseg_edit.is_panning());
+        assert!(!h.editor.pointer_gesture_active());
+    }
+    #[test]
+    fn inspector_commit_is_one_undo_entry_and_readout_tracks_host_base_values() {
+        let mut h = Harness::new();
+        let slot = h.editor.selected_mseg;
+        h.modulation.msegs[slot].sync_mode = widgets::mseg::SyncMode::Beat;
+        h.modulation.msegs[slot].beats = 4.0;
+        h.modulation.targets[slot - 1] = Some(ModulationTarget::Mix);
+        h.modulation.depths[slot - 1] = 0.5;
+        h.effect.mix = 0.0;
+        select_point(&mut h, 1, false);
+        assert!(h.send(shortcut(Key::Enter, Modifiers::CONTROL)).captured);
+        assert!(h.editor.captures_keyboard());
+        draw(&mut h);
+        assert!(h.editor.mseg_edit.inspector_readout().ends_with("50 %"));
+        h.effect.mix = 0.2;
+        draw(&mut h);
+        assert!(h.editor.mseg_edit.inspector_readout().ends_with("70 %"));
+        let before = h.modulation.clone();
+        let mut undo = crate::undo::UndoHistory::new();
+        assert!(!h.key(Key::Character("1".into())).changed);
+        assert_eq!(h.modulation, before);
+        undo.begin_capture(before.clone());
+        assert!(h.key(Key::Enter).changed);
+        let after = h.modulation.clone();
+        undo.commit_capture(&after);
+        assert_eq!(after.msegs[slot].nodes[1].time, 0.25);
+        assert_eq!(undo.undo(after), Some(before.clone()));
+        assert!(undo.undo(before).is_none());
+        h.key(Key::Escape);
+        assert!(!h.editor.captures_keyboard());
+    }
+    #[test]
+    fn wheel_and_middle_drag_update_only_the_view_and_cancel_cleanly() {
+        for scale in [0.5, 1.0, 2.0] {
+            let mut h = Harness::new();
+            h.geometry = EditorGeometry {
+                layout: view::effect_layout((16.0, 16.0, 1304.0, 640.0), scale),
+                scale,
+                window_size: (1336.0 * scale, 680.0 * scale),
+            };
+            let before = h.modulation.clone();
+            let layout = h
+                .editor
+                .mseg_edit
+                .layout(h.geometry.layout.mseg_pane, scale);
+            h.move_to(
+                widgets::mseg::phase_to_x(&layout, 0.5),
+                widgets::mseg::value_to_y(&layout, 0.5),
+                Modifiers::empty(),
+            );
+            let response = h.send(Event::Mouse(MouseEvent::WheelScrolled {
+                delta: baseview::ScrollDelta::Lines { x: 0.0, y: 6.0 },
+                modifiers: Modifiers::empty(),
+            }));
+            assert!(response.captured && !response.changed);
+            let zoom = h.editor.mseg_edit.viewport();
+            assert_ne!(zoom, widgets::mseg::MsegViewport::default());
+            assert!(h.press(MouseButton::Middle).captured);
+            assert!(!h.move_to(0.0, 0.0, Modifiers::empty()).changed);
+            assert_ne!(h.editor.mseg_edit.viewport(), zoom);
+            assert!(!h.key(Key::Escape).changed);
+            assert_eq!(h.editor.mseg_edit.viewport(), zoom);
+            assert_eq!(h.modulation, before);
+            assert!(h.press(MouseButton::Right).captured);
+            assert_eq!(h.modulation, before);
+        }
+    }
+    #[test]
+    fn phrase_shortcuts_replace_only_the_selected_interval() {
+        let root =
+            std::env::temp_dir().join(format!("tract-precision-clip-{}", std::process::id()));
+        let mut source = Harness::new();
+        let mut target = Harness::new();
+        for (h, value) in [(&mut source, 0.2), (&mut target, 0.7)] {
+            let slot = h.editor.selected_mseg;
+            let curve = &mut h.modulation.msegs[slot];
+            *curve = widgets::mseg::MsegData::default();
+            curve.snap = false;
+            for phase in [0.25, 0.5, 0.75] {
+                curve.insert_node(phase, value).unwrap();
+            }
+            h.editor.mseg_edit.set_curve_library_directory(root.clone());
+            for (i, index) in [1, 2, 3].into_iter().enumerate() {
+                select_point(h, index, i != 0);
+            }
+        }
+        let source_slot = source.editor.selected_mseg;
+        source.modulation.msegs[source_slot].nodes[2].value = 0.9;
+        assert!(
+            source
+                .send(shortcut(
+                    Key::Character("c".into()),
+                    Modifiers::CONTROL | Modifiers::ALT
+                ))
+                .captured
+        );
+        let before = target.modulation.clone();
+        let slot = target.editor.selected_mseg;
+        let response = target.send(shortcut(
+            Key::Character("v".into()),
+            Modifiers::CONTROL | Modifiers::ALT,
+        ));
+        assert!(response.captured && response.changed);
+        assert_eq!(
+            target.modulation.msegs[slot].nodes[0],
+            before.msegs[slot].nodes[0]
+        );
+        assert_eq!(
+            target.modulation.msegs[slot].nodes[4],
+            before.msegs[slot].nodes[4]
+        );
+        assert_eq!(target.modulation.msegs[slot].nodes[1].value, 0.2);
+        assert_eq!(target.modulation.msegs[slot].nodes[2].value, 0.9);
+        assert_eq!(target.modulation.msegs[slot].nodes[3].value, 0.2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

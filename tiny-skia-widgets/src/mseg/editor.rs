@@ -9,9 +9,9 @@
 use crate::dropdown::{DropdownEvent, DropdownState};
 use crate::mseg::MsegData;
 use crate::mseg::randomize::RandomStyle;
-use crate::text_edit::TextEditState;
 
 mod power;
+mod precision;
 pub use power::SelectionHandle;
 
 /// Default grid option pairs used when no custom list is supplied.
@@ -47,6 +47,10 @@ pub(crate) fn transform_menu_items() -> &'static [&'static str] {
         "Mutate values",
         "Mutate shape",
         "Select all",
+        "Inspect point",
+        "Copy selection",
+        "Paste replace selection",
+        "Paste merge selection",
     ]
 }
 
@@ -84,6 +88,7 @@ pub enum StripId {
     Transform,
     Tool,
     Shapes,
+    View,
 }
 
 /// What the pointer is currently dragging.
@@ -105,6 +110,7 @@ pub enum DragTarget {
     Marquee,
     Transform(SelectionHandle),
     Pen,
+    Pan,
 }
 
 /// Which hold marker is being dragged.
@@ -118,6 +124,7 @@ pub enum MarkerHandle {
 /// Transient editor state — not persisted.
 pub struct MsegEditState {
     power: power::PowerState,
+    precision: precision::PrecisionState,
     /// When true, playback/timing controls and the marker lane are hidden.
     curve_only: bool,
     /// When false, the strip's Unipolar/Bipolar polarity toggle is hidden (and
@@ -153,10 +160,6 @@ pub struct MsegEditState {
     /// at a time; the `StripId` discriminant (`TimeGrid` vs `Style`) identifies
     /// which is active.
     dropdown: DropdownState<StripId>,
-    /// Numeric strip-field text entry.
-    // reserved for a future numeric-entry follow-up
-    #[allow(dead_code)]
-    text_edit: TextEditState<StripId>,
     /// Bumped on each Randomize click so successive clicks differ.
     seed: u32,
     /// Per-plugin grid presets `(time_divisions, value_steps)`.
@@ -174,7 +177,7 @@ impl MsegEditState {
         self.group_snapshot.clear();
         self.step_last_cell = None;
         self.dropdown.close();
-        self.text_edit.cancel();
+        self.cancel_precision();
         self.power.gesture_start = None;
         self.power.preview.clear();
         self.reset_pen_repeat();
@@ -196,6 +199,7 @@ impl MsegEditState {
         let grid_labels = Self::build_labels(&grid_options);
         Self {
             power: power::PowerState::default(),
+            precision: precision::PrecisionState::default(),
             curve_only,
             show_polarity: true,
             drag: None,
@@ -208,7 +212,6 @@ impl MsegEditState {
             stepped_draw_held: false,
             style: RandomStyle::Smooth,
             dropdown: DropdownState::new(),
-            text_edit: TextEditState::new(),
             seed: 0,
             grid_options,
             grid_labels,
@@ -383,8 +386,15 @@ impl MsegEditState {
         scale: f32,
         ctrl: bool,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{MsegHit, mseg_hit_test, mseg_layout};
-        let layout = mseg_layout(rect, self.curve_only, scale);
+        use crate::mseg::render::{MsegHit, mseg_hit_test};
+        self.prepare_precision(data, scale);
+        if self.is_panning() {
+            return None;
+        }
+        let layout = self.layout(rect, scale);
+        if self.inspector_node().is_some() {
+            return self.inspector_mouse_down(x, y, data, rect);
+        }
 
         // If a dropdown is open, route the click to it first.
         let mut closed_a_dropdown = false;
@@ -478,6 +488,7 @@ impl MsegEditState {
                     (StripId::Tool, power.tool),
                     (StripId::Shapes, power.shapes),
                     (StripId::Transform, power.edit),
+                    (StripId::View, power.view),
                 ]
                 .into_iter()
                 .find(|(_, anchor)| in_rect(*anchor, x, y))
@@ -485,6 +496,9 @@ impl MsegEditState {
                     if !closed_a_dropdown {
                         self.open_power_menu(id, anchor, window_size);
                     }
+                    None
+                } else if in_rect(power.point, x, y) {
+                    self.open_point_inspector(data);
                     None
                 } else if in_rect(b.snap, x, y) {
                     data.snap = !data.snap;
@@ -560,9 +574,17 @@ impl MsegEditState {
         scale: f32,
         fine: bool,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{MsegHit, mseg_hit_test, mseg_layout, x_to_phase, y_to_value};
-        let layout = mseg_layout(rect, self.curve_only, scale);
+        use crate::mseg::render::{MsegHit, mseg_hit_test, x_to_phase, y_to_value};
+        let layout = self.layout(rect, scale);
 
+        self.prepare_precision(data, scale);
+        if self.inspector_node().is_some() {
+            return None;
+        }
+        if self.drag == Some(DragTarget::Pan) {
+            self.move_pan(x, y, rect, scale);
+            return None;
+        }
         // Route moves to the open dropdown for hover-highlight updates.
         if self.dropdown.is_open() {
             let window_size = (rect.0 + rect.2, rect.1 + rect.3);
@@ -633,7 +655,10 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{mseg_layout, phase_to_x, value_to_y};
+        use crate::mseg::render::{phase_to_x, value_to_y};
+        if self.drag == Some(DragTarget::Pan) {
+            return None;
+        }
         self.dropdown.on_mouse_up();
         if matches!(self.drag, Some(DragTarget::Marquee))
             && let Some((ax, ay, cx, cy)) = self.marquee
@@ -648,11 +673,14 @@ impl MsegEditState {
                     self.clear_selection();
                 }
             } else {
-                let layout = mseg_layout(rect, self.curve_only, scale);
+                let layout = self.layout(rect, scale);
                 if !self.marquee_ctrl {
                     self.clear_selection();
                 }
                 for (i, n) in data.active().iter().enumerate() {
+                    if !layout.viewport.contains(n.time, n.value) {
+                        continue;
+                    }
                     let nx = phase_to_x(&layout, n.time);
                     let ny = value_to_y(&layout, n.value);
                     if nx >= rx
@@ -685,11 +713,14 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
+        if self.is_panning() {
+            return None;
+        }
         if self.tool() != crate::mseg::MsegTool::Pointer {
             return self.on_mouse_down(x, y, data, rect, scale, false);
         }
-        use crate::mseg::render::{MsegHit, mseg_hit_test, mseg_layout, x_to_phase, y_to_value};
-        let layout = mseg_layout(rect, self.curve_only, scale);
+        use crate::mseg::render::{MsegHit, mseg_hit_test, x_to_phase, y_to_value};
+        let layout = self.layout(rect, scale);
         match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
             MsegHit::Node(i) | MsegHit::SelectedNode(i) if data.remove_node(i) => {
                 self.drag = None;
@@ -721,6 +752,11 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
+        self.prepare_precision(data, scale);
+        if self.inspector_node().is_some() {
+            self.dismiss_inspector();
+            return None;
+        }
         if self.is_dragging() {
             return None;
         }
@@ -728,8 +764,8 @@ impl MsegEditState {
             self.dropdown.close();
             return None;
         }
-        use crate::mseg::render::{MsegHit, mseg_hit_test_with_selection, mseg_layout, x_to_phase};
-        let layout = mseg_layout(rect, self.curve_only, scale);
+        use crate::mseg::render::{MsegHit, mseg_hit_test_with_selection, x_to_phase};
+        let layout = self.layout(rect, scale);
         let hit = mseg_hit_test_with_selection(&layout, data, self.curve_only, scale, x, y, self);
         // A right-click on a selected node opens the transform menu instead of
         // toggling the segment-stepped flag.

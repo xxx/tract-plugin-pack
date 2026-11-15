@@ -1,7 +1,7 @@
 # Shared MSEG curve tools
 
 Multosis, Minitosis, Miff, and Nap share these editing tools. The **Tool**,
-**Shapes**, and **Edit** menus sit beneath the existing curve controls.
+**Shapes**, **Edit**, and **View** menus sit beneath the existing curve controls.
 Multosis/Minitosis provide playback and modulation routing; Miff/Nap use the
 same geometry tools for their static kernel/tail curves.
 
@@ -54,6 +54,46 @@ polarity, routing, and modulation depth. Replacing a complete shape clears its
 sustain/loop markers. Missing favorites, unavailable storage, invalid files, and
 capacity errors appear beside the menus without replacing the curve.
 
+### Copying and pasting a phrase
+
+Select at least two adjacent points, then choose **Copy selection** from Edit.
+The clipboard stores that phrase with its time normalized to 0..1. Levels,
+tension, and steps retain their original shape.
+
+Select an interval in the destination and choose **Paste replace selection** to
+fit the phrase into that interval. **Paste merge selection** retains existing
+interior points; pasted points win when their times coincide. Points outside
+the interval and the outgoing segment after its last point are preserved.
+Both modes select the resulting interval and reject the entire operation if
+it would exceed 128 points or create overlapping times.
+
+## Precise points and navigation
+
+Select one point and click **Point**, choose **Inspect point** from Edit, or press
+**Ctrl/Cmd+Enter**. The floating inspector provides exact **Time**, **Value**, and
+outgoing **Tension** fields. Time uses beats in Beat mode, milliseconds in Time
+mode, or percent in Miff/Nap. Bipolar values use -1..1. The shared effect editor
+shows the point's routed parameter value (or Amp dB) beneath the fields.
+
+Focusing a field selects its contents for replacement. Enter applies that field;
+Tab applies and moves to the next editable field (Shift+Tab moves back). Escape
+closes and discards uncommitted text. Clicking outside applies valid input and
+closes; invalid input keeps the inspector open with an error. Right-click
+dismisses it. Endpoint times, stepped tension, and the last point's unused
+tension are read-only. Exact numeric input bypasses the snap grid.
+
+**Wheel** over the canvas zooms time around the pointer; **Shift+wheel** zooms
+levels. **Middle-drag** pans. **View → Fit all** restores the full curve;
+**Fit selection** frames selected points with a little padding. Zoom is limited
+to 64x. Grids and snapping stay in document coordinates. Menus and the inspector
+consume wheel input while open. Escape cancels an in-progress pan.
+Pending dial/Mix/Output numeric input is finalized before panning starts;
+Escape cancels the pan while keeping the committed parameter value.
+
+Navigation does not alter the saved curve or create undo/bake work. Viewports
+are retained across resizing in the current editor session. Nap's panes have
+independent views, and its pulse field follows the Decay pane's view.
+
 ## Edit commands
 
 - **Compress/Expand values/times** retain their existing behavior and require a
@@ -87,6 +127,12 @@ or overlap points are rejected as a whole. The grid menu adds **6 / 8**,
 | Ctrl/Cmd+C | Copy curve |
 | Ctrl/Cmd+V | Paste curve |
 | Ctrl/Cmd+Shift+V | Paste fitted to height |
+| Ctrl/Cmd+Alt+C | Copy selection |
+| Ctrl/Cmd+Alt+V | Paste replace selection |
+| Ctrl/Cmd+Alt+Shift+V | Paste merge selection |
+| Ctrl/Cmd+Enter | Inspect selected point |
+| Wheel / Shift+wheel | Zoom time / values |
+| Middle-drag | Pan the view |
 | Left / Right | Nudge selected interior points by one time-grid cell |
 | Shift+Left / Right | Nudge by 1/16 of a cell |
 | Delete / Backspace | Delete selected interior points |

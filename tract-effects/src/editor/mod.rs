@@ -143,6 +143,23 @@ impl EffectEditor {
         self.effect_dropdown.is_open() || self.mseg_edit.has_open_menu()
     }
 
+    /// Whether shared controls own an in-progress pointer gesture.
+    pub fn pointer_gesture_active(&self) -> bool {
+        self.effect_dial_drag.active_action().is_some() || self.mseg_edit.is_dragging()
+    }
+
+    /// Allows hosts to finalize their numeric fields before the shared editor starts panning.
+    pub fn can_start_pan(&self, pointer: (f32, f32), geometry: EditorGeometry) -> bool {
+        !self.effect_dropdown.is_open()
+            && self.effect_dial_drag.active_action().is_none()
+            && self.mseg_edit.can_start_pan(
+                pointer.0,
+                pointer.1,
+                geometry.layout.mseg_pane,
+                geometry.scale,
+            )
+    }
+
     pub fn handle_event(
         &mut self,
         event: &baseview::Event,
@@ -332,6 +349,10 @@ impl<'a> Session<'a> {
                 modifiers,
             }) => {
                 let (x, y) = self.mouse_pos;
+                if self.state.mseg_edit.is_panning() {
+                    self.response.captured = true;
+                    return;
+                }
                 self.finalize_dial_edit_for_press(x, y);
                 self.state.mseg_edit.set_transform_modifiers(
                     modifiers.contains(Modifiers::ALT),
@@ -363,6 +384,35 @@ impl<'a> Session<'a> {
                     self.response.captured =
                         self.on_effect_press(x, y, modifiers.contains(Modifiers::CONTROL));
                 }
+            }
+            Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Middle,
+                ..
+            }) => {
+                if self.state.can_start_pan(
+                    self.mouse_pos,
+                    EditorGeometry {
+                        layout: self.layout,
+                        scale: self.scale_factor,
+                        window_size: win,
+                    },
+                ) {
+                    self.finalize_dial_edit_for_press(self.mouse_pos.0, self.mouse_pos.1);
+                }
+                self.response.captured = self.state.effect_dropdown.is_open()
+                    || self.state.effect_dial_drag.active_action().is_some()
+                    || self.state.mseg_edit.on_pan_start(
+                        self.mouse_pos.0,
+                        self.mouse_pos.1,
+                        self.layout.mseg_pane,
+                        self.scale_factor,
+                    );
+            }
+            Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Middle,
+                ..
+            }) => {
+                self.response.captured = self.state.mseg_edit.on_pan_end();
             }
             Event::Mouse(MouseEvent::ButtonPressed {
                 button: MouseButton::Right,
@@ -413,6 +463,26 @@ impl<'a> Session<'a> {
                     win,
                 );
                 self.response.captured = true;
+            }
+            Event::Mouse(MouseEvent::WheelScrolled { delta, modifiers }) => {
+                if self.state.effect_dial_drag.active_action().is_some() {
+                    self.response.captured = true;
+                    return;
+                }
+                let dy = match delta {
+                    baseview::ScrollDelta::Lines { y, .. } => *y,
+                    baseview::ScrollDelta::Pixels { y, .. } => *y * 0.05,
+                };
+                let sel = self.state.selected_mseg.min(3);
+                self.response.captured = self.state.mseg_edit.on_scroll(
+                    self.mouse_pos.0,
+                    self.mouse_pos.1,
+                    dy,
+                    modifiers.contains(Modifiers::SHIFT),
+                    &self.modulation.msegs[sel],
+                    self.layout.mseg_pane,
+                    self.scale_factor,
+                );
             }
             Event::Keyboard(ev) if self.state.effect_dropdown.is_open() => {
                 self.response.captured = true;
@@ -581,7 +651,9 @@ impl<'a> Session<'a> {
             ) == Some(widgets::MsegEdit::Changed);
             return baseview::EventStatus::Captured;
         }
-        if self.state.effect_dial_drag.active_action().is_some() {
+        if self.state.effect_dial_drag.active_action().is_some()
+            || self.state.mseg_edit.is_dragging()
+        {
             return baseview::EventStatus::Captured;
         }
         // First, hit-test for a param dial — only `EffectHit::Dial(i)`
@@ -717,24 +789,30 @@ impl<'a> Session<'a> {
         // Build the hover-node tooltip for the active MSEG. Amp (slot 0) shows
         // a dB readout; assignable MSEGs format through the target's ParamSpec
         // if one is set, or fall back to the raw 0..1 level.
+        let (spec, base, depth_polarity) = if sel == 0 {
+            (None, 0.0, None)
+        } else {
+            let k = sel - 1;
+            let target = modu.targets[k];
+            (
+                target.and_then(|t| t.spec(track.kind)),
+                target.map(|t| t.base_value(&track)).unwrap_or(0.0),
+                Some((modu.depths[k], modu.msegs[sel].polarity)),
+            )
+        };
         let tooltip: Option<(usize, String)> = self.state.mseg_edit.hovered_node().map(|idx| {
-            let (spec, base, depth_polarity) = if sel == 0 {
-                (None, 0.0, None)
-            } else {
-                let k = sel - 1;
-                let target = modu.targets[k];
-                let depth = modu.depths[k];
-                let polarity = modu.msegs[sel].polarity;
-                let spec = target.and_then(|target| target.spec(track.kind));
-                let base = target
-                    .map(|target| target.base_value(&track))
-                    .unwrap_or(0.0);
-                (spec, base, Some((depth, polarity)))
-            };
+            (
+                idx,
+                mseg_node_tooltip_text(sel, &modu.msegs[sel], idx, spec, base, depth_polarity),
+            )
+        });
+        if let Some(idx) = self.state.mseg_edit.inspector_node() {
             let text =
                 mseg_node_tooltip_text(sel, &modu.msegs[sel], idx, spec, base, depth_polarity);
-            (idx, text)
-        });
+            self.state
+                .mseg_edit
+                .set_inspector_readout(text.split_once('\n').map_or("", |(_, value)| value));
+        }
         let tooltip_ref = tooltip.as_ref().map(|(i, t)| (*i, t.as_str()));
         // Active MSEG first — `draw_mseg` opens with an opaque canvas fill
         // that would otherwise wipe the ghosts. Ghosts are then drawn on top
@@ -770,7 +848,15 @@ impl<'a> Session<'a> {
         // Playhead overlay: a thin vertical line at the active MSEG's current
         // phase, drawn over the active curve + ghosts.
         let phase = self.phases[sel];
-        effect_editor::draw_mseg_playhead(pixmap, lay.mseg_pane, phase, self.scale_factor);
+        effect_editor::draw_mseg_playhead_in_layout(
+            pixmap,
+            &self
+                .state
+                .mseg_edit
+                .layout(lay.mseg_pane, self.scale_factor),
+            phase,
+            self.scale_factor,
+        );
         // Selector + target + depth (when on an assignable MSEG).
         let (target, depth) = if sel == 0 {
             (None, 0.0)

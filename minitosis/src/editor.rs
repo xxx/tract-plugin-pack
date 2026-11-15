@@ -534,6 +534,30 @@ impl baseview::WindowHandler for MinitosisWindow {
                 let after = self.snapshot();
                 self.undo.commit_capture(&after);
             }
+            Event::Mouse(
+                MouseEvent::WheelScrolled { .. }
+                | MouseEvent::ButtonPressed {
+                    button: MouseButton::Middle,
+                    ..
+                },
+            ) if self.output_drag.active_action().is_some() => return EventStatus::Captured,
+            Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Middle,
+                ..
+            }) => {
+                let opened = self.undo.begin_capture(self.snapshot());
+                if self
+                    .editor
+                    .can_start_pan(self.pointer, geometry(self.scale, self.width, self.height))
+                {
+                    self.commit_output_text();
+                }
+                self.handle_effect(&event, false);
+                if opened {
+                    let after = self.snapshot();
+                    self.undo.commit_capture(&after);
+                }
+            }
             Event::Mouse(MouseEvent::CursorMoved {
                 position,
                 modifiers,
@@ -572,7 +596,9 @@ impl baseview::WindowHandler for MinitosisWindow {
                 ..
             }) => {
                 let opened = self.undo.begin_capture(self.snapshot());
-                if view::in_rect(output_rect(self.scale), self.pointer.0, self.pointer.1) {
+                if self.editor.dropdown_open() || self.editor.pointer_gesture_active() {
+                    self.handle_effect(&event, false);
+                } else if view::in_rect(output_rect(self.scale), self.pointer.0, self.pointer.1) {
                     if self.output_drag.active_action().is_none() {
                         self.handle_effect(&event, true);
                         self.commit_output_text();

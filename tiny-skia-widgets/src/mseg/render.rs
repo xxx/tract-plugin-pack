@@ -30,6 +30,7 @@ pub struct MsegLayout {
     /// inside `canvas` instead of half-clipping the edge.
     pub plot: (f32, f32, f32, f32),
     pub strip: (f32, f32, f32, f32),
+    pub viewport: crate::mseg::MsegViewport,
 }
 
 /// Compute the widget's sub-rectangles. `curve_only` drops the marker lane;
@@ -58,13 +59,17 @@ pub fn mseg_layout(rect: (f32, f32, f32, f32), curve_only: bool, scale: f32) -> 
         canvas,
         plot,
         strip: (x, y + lane_h + canvas_h, w, strip_h),
+        viewport: crate::mseg::MsegViewport::default(),
     }
 }
 
 /// Normalized phase (0..1) → plot x pixel.
 pub fn phase_to_x(layout: &MsegLayout, phase: f32) -> f32 {
     // No zero-width guard needed: phase * 0.0 == 0.0 is already correct here.
-    layout.plot.0 + phase.clamp(0.0, 1.0) * layout.plot.2
+    layout.plot.0
+        + (phase.clamp(0.0, 1.0) - layout.viewport.time.0)
+            / (layout.viewport.time.1 - layout.viewport.time.0)
+            * layout.plot.2
 }
 
 /// Plot x pixel → normalized phase (0..1, clamped).
@@ -72,12 +77,18 @@ pub fn x_to_phase(layout: &MsegLayout, x: f32) -> f32 {
     if layout.plot.2 <= 0.0 {
         return 0.0;
     }
-    ((x - layout.plot.0) / layout.plot.2).clamp(0.0, 1.0)
+    layout
+        .viewport
+        .phase_at((x - layout.plot.0) / layout.plot.2)
+        .clamp(0.0, 1.0)
 }
 
 /// Normalized value (0..1) → plot y pixel (value 1.0 at the top).
 pub fn value_to_y(layout: &MsegLayout, value: f32) -> f32 {
-    layout.plot.1 + (1.0 - value.clamp(0.0, 1.0)) * layout.plot.3
+    layout.plot.1
+        + (layout.viewport.value.1 - value.clamp(0.0, 1.0))
+            / (layout.viewport.value.1 - layout.viewport.value.0)
+            * layout.plot.3
 }
 
 /// Plot y pixel → normalized value (0..1, clamped).
@@ -85,7 +96,10 @@ pub fn y_to_value(layout: &MsegLayout, y: f32) -> f32 {
     if layout.plot.3 <= 0.0 {
         return 0.0;
     }
-    (1.0 - (y - layout.plot.1) / layout.plot.3).clamp(0.0, 1.0)
+    layout
+        .viewport
+        .level_at(1.0 - (y - layout.plot.1) / layout.plot.3)
+        .clamp(0.0, 1.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -116,7 +130,7 @@ pub fn draw_mseg(
     value_color: tiny_skia::Color,
     node_tooltip: Option<(usize, &str)>,
 ) {
-    let layout = mseg_layout(rect, state.is_curve_only(), scale);
+    let layout = state.layout(rect, scale);
     // The three sub-rects (marker lane / canvas / strip) are non-overlapping,
     // so draw order is immaterial — each paints only its own region.
     draw_canvas(pixmap, &layout, data, state, scale, value_color);
@@ -154,6 +168,7 @@ pub fn draw_mseg_dropdown(
         &refs,
         window_size,
     );
+    state.draw_precision_overlay(pixmap, text_renderer, rect);
 }
 
 /// Draw the hold marker(s) in the marker lane. No-op in curve-only mode or
@@ -173,7 +188,10 @@ fn draw_marker_lane(
     draw_rect(pixmap, lx, ly, lw, lh, color_bg());
     let a = data.active();
     let mark = |pm: &mut Pixmap, node: usize, color: tiny_skia::Color| {
-        if node < data.node_count {
+        if node < data.node_count
+            && a[node].time >= layout.viewport.time.0
+            && a[node].time <= layout.viewport.time.1
+        {
             let mx = phase_to_x(layout, a[node].time);
             draw_rect(
                 pm,
@@ -221,12 +239,20 @@ fn draw_canvas(
     let grid_color = tiny_skia::Color::from_rgba8(0x44, 0x47, 0x4e, 0xff);
     let tdiv = data.time_divisions.max(1);
     for i in 1..tdiv {
+        let phase = i as f32 / tdiv as f32;
+        if phase < layout.viewport.time.0 || phase > layout.viewport.time.1 {
+            continue;
+        }
         let gx = phase_to_x(layout, i as f32 / tdiv as f32);
         draw_rect(pixmap, gx, py0, 1.0, ph, grid_color);
     }
     // Horizontal value-grid lines.
     let vsteps = data.value_steps.max(1);
     for i in 1..vsteps {
+        let value = i as f32 / vsteps as f32;
+        if value < layout.viewport.value.0 || value > layout.viewport.value.1 {
+            continue;
+        }
         let gy = value_to_y(layout, i as f32 / vsteps as f32);
         draw_rect(pixmap, px0, gy, pw, 1.0, grid_color);
     }
@@ -235,7 +261,10 @@ fn draw_canvas(
     // zero point for consumers that re-map via `2·value − 1`: miff's kernel
     // taps, multosis's assignable modulation). In Unipolar view the bottom
     // of the plot is "zero" and the midline would be visual noise.
-    if matches!(data.polarity, crate::mseg::Polarity::Bipolar) {
+    if matches!(data.polarity, crate::mseg::Polarity::Bipolar)
+        && layout.viewport.value.0 <= 0.5
+        && layout.viewport.value.1 >= 0.5
+    {
         let mid_color = tiny_skia::Color::from_rgba8(0x82, 0x86, 0x90, 0xff);
         let my = value_to_y(layout, 0.5);
         draw_rect(pixmap, px0, my, pw, 1.0, mid_color);
@@ -245,11 +274,11 @@ fn draw_canvas(
     let cols = pw.max(1.0) as usize;
     let mut prev: Option<(f32, f32)> = None;
     for col in 0..=cols {
-        let phase = col as f32 / cols as f32;
+        let phase = layout.viewport.phase_at(col as f32 / cols as f32);
         let x = phase_to_x(layout, phase);
         let y = value_to_y(layout, value_at_phase(data, phase));
         if let Some((px, py)) = prev {
-            draw_line(pixmap, px, py, x, y, value_color);
+            draw_plot_line(pixmap, layout, px, py, x, y, value_color);
         }
         prev = Some((x, y));
     }
@@ -258,8 +287,18 @@ fn draw_canvas(
 
     let handles = state.selection_handles(data, layout, scale);
     if let (Some((_, (x0, y0))), Some((_, (x1, y1)))) = (handles.first(), handles.get(4)) {
-        draw_rect_outline(pixmap, *x0, *y0, x1 - x0, y1 - y0, value_color, 1.0);
+        for (a, b) in [
+            ((*x0, *y0), (*x1, *y0)),
+            ((*x1, *y0), (*x1, *y1)),
+            ((*x1, *y1), (*x0, *y1)),
+            ((*x0, *y1), (*x0, *y0)),
+        ] {
+            draw_clipped_line(pixmap, layout.canvas, a.0, a.1, b.0, b.1, value_color);
+        }
         for (_, (x, y)) in handles {
+            if !in_rect(layout.canvas, x, y) {
+                continue;
+            }
             draw_rect(
                 pixmap,
                 x - 3.0 * scale,
@@ -275,9 +314,14 @@ fn draw_canvas(
         let mut document = *data;
         document.nodes[..preview.len()].copy_from_slice(preview);
         document.node_count = preview.len();
-        let start = preview[0].time;
-        let end = preview[preview.len() - 1].time;
-        let columns = ((end - start) * layout.plot.2).max(1.0) as usize;
+        let start = preview[0].time.max(layout.viewport.time.0);
+        let end = preview[preview.len() - 1]
+            .time
+            .min(layout.viewport.time.1)
+            .max(start);
+        let columns = ((end - start) / (layout.viewport.time.1 - layout.viewport.time.0)
+            * layout.plot.2)
+            .max(1.0) as usize;
         let mut previous = None;
         for column in 0..=columns {
             let t = start + (end - start) * column as f32 / columns as f32;
@@ -286,7 +330,7 @@ fn draw_canvas(
                 value_to_y(layout, value_at_phase(&document, t)),
             );
             if let Some((px, py)) = previous {
-                draw_line(pixmap, px, py, point.0, point.1, color_text());
+                draw_plot_line(pixmap, layout, px, py, point.0, point.1, color_text());
             }
             previous = Some(point);
         }
@@ -297,6 +341,12 @@ fn draw_canvas(
         && mw > 0.0
         && mh > 0.0
     {
+        let right = (mx + mw).min(cx + cw);
+        let bottom = (my + mh).min(cy + ch);
+        let mx = mx.max(cx);
+        let my = my.max(cy);
+        let mw = (right - mx).max(0.0);
+        let mh = (bottom - my).max(0.0);
         let fill = tiny_skia::Color::from_rgba(
             value_color.red(),
             value_color.green(),
@@ -329,9 +379,12 @@ fn draw_node_tooltip(
         return;
     }
     let n = data.active()[idx];
-    let (px_, py_, pw, ph) = layout.plot;
-    let cx = px_ + n.time * pw;
-    let cy = py_ + (1.0 - n.value) * ph;
+    if !layout.viewport.contains(n.time, n.value) {
+        return;
+    }
+    let (px_, _, pw, _) = layout.plot;
+    let cx = phase_to_x(layout, n.time);
+    let cy = value_to_y(layout, n.value);
     let text_size = (10.0 * scale).max(10.0);
     let line_gap = 2.0 * scale;
     let pad_x = 6.0 * scale;
@@ -379,7 +432,7 @@ pub fn draw_mseg_ghost(
     scale: f32,
     color: u32,
 ) {
-    let layout = mseg_layout(rect, state.is_curve_only(), scale);
+    let layout = state.layout(rect, scale);
     let (_px0, _py0, pw, ph) = layout.plot;
     if pw <= 0.0 || ph <= 0.0 {
         return;
@@ -396,11 +449,11 @@ pub fn draw_mseg_ghost(
     let cols = pw.max(1.0) as usize;
     let mut prev: Option<(f32, f32)> = None;
     for col in 0..=cols {
-        let phase = col as f32 / cols as f32;
+        let phase = layout.viewport.phase_at(col as f32 / cols as f32);
         let x = phase_to_x(&layout, phase);
         let y = value_to_y(&layout, value_at_phase(data, phase));
         if let Some((px, py)) = prev {
-            draw_line(pixmap, px, py, x, y, stroke);
+            draw_plot_line(pixmap, &layout, px, py, x, y, stroke);
         }
         prev = Some((x, y));
     }
@@ -433,6 +486,12 @@ fn draw_nodes(
             continue;
         }
         let mid_phase = (w[0].time + w[1].time) * 0.5;
+        if !layout
+            .viewport
+            .contains(mid_phase, value_at_phase(data, mid_phase))
+        {
+            continue;
+        }
         let hx = phase_to_x(layout, mid_phase);
         let hy = value_to_y(layout, value_at_phase(data, mid_phase));
         // A mid-gray, visible against the dark canvas but clearly secondary
@@ -442,6 +501,9 @@ fn draw_nodes(
     // Node dots. The hovered node is drawn larger; a selected node is drawn in
     // a brighter colour so the current selection reads at a glance.
     for (i, n) in a.iter().enumerate() {
+        if !layout.viewport.contains(n.time, n.value) {
+            continue;
+        }
         let nx = phase_to_x(layout, n.time);
         let ny = value_to_y(layout, n.value);
         let hovered = state.hovered_node() == Some(i);
@@ -678,6 +740,7 @@ fn draw_strip(
         (toolbar.tool, state.tool().label(), StripId::Tool),
         (toolbar.shapes, "Shapes", StripId::Shapes),
         (toolbar.edit, "Edit", StripId::Transform),
+        (toolbar.view, "View", StripId::View),
     ] {
         draw_dropdown_trigger(
             pixmap,
@@ -687,11 +750,42 @@ fn draw_strip(
             state.dropdown_is_open_for(id),
         );
     }
+    draw_button(
+        pixmap,
+        text_renderer,
+        toolbar.point.0,
+        toolbar.point.1,
+        toolbar.point.2,
+        toolbar.point.3,
+        "Point",
+        state.inspector_node().is_some(),
+        false,
+    );
     let available = (sx + sw - toolbar.message_x - 6.0 * scale).max(0.0);
+    let viewport = state.viewport();
+    let (lo, hi) = viewport.time_range();
+    let (mut bottom, mut top) = viewport.value_range();
+    if data.polarity == crate::mseg::Polarity::Bipolar {
+        bottom = bottom * 2.0 - 1.0;
+        top = top * 2.0 - 1.0;
+    }
+    let view_info = format!(
+        "Time {:.1}-{:.1}%  Value {:.2}-{:.2}",
+        lo * 100.0,
+        hi * 100.0,
+        bottom,
+        top
+    );
     let message = if state.status_message().is_empty() {
-        match state.tool() {
-            crate::mseg::MsegTool::Pointer => "Select points to stretch; Alt: centered; Ctrl: skew",
-            _ => "Drag endpoints; click again to repeat; Esc: pointer",
+        if viewport != crate::mseg::MsegViewport::default() {
+            view_info.as_str()
+        } else {
+            match state.tool() {
+                crate::mseg::MsegTool::Pointer => {
+                    "Select points to stretch; Alt: centered; Ctrl: skew"
+                }
+                _ => "Drag endpoints; click again to repeat; Esc: pointer",
+            }
         }
     } else {
         state.status_message()
@@ -718,6 +812,8 @@ pub(crate) struct PowerButtons {
     pub tool: (f32, f32, f32, f32),
     pub shapes: (f32, f32, f32, f32),
     pub edit: (f32, f32, f32, f32),
+    pub view: (f32, f32, f32, f32),
+    pub point: (f32, f32, f32, f32),
     pub message_x: f32,
 }
 
@@ -730,7 +826,14 @@ pub(crate) fn power_buttons(strip: (f32, f32, f32, f32), scale: f32) -> PowerBut
         tool: (x, y, width, height),
         shapes: (x + width + 4.0 * scale, y, width, height),
         edit: (x + 2.0 * (width + 4.0 * scale), y, width, height),
-        message_x: x + 3.0 * (width + 4.0 * scale) + 8.0 * scale,
+        view: (x + 3.0 * (width + 4.0 * scale), y, 80.0 * scale, height),
+        point: (
+            x + 3.0 * (width + 4.0 * scale) + 84.0 * scale,
+            y,
+            70.0 * scale,
+            height,
+        ),
+        message_x: x + 3.0 * (width + 4.0 * scale) + 162.0 * scale,
     }
 }
 
@@ -785,6 +888,9 @@ pub fn mseg_hit_test(
     if in_rect(layout.canvas, x, y) {
         // Nodes first.
         for (i, n) in a.iter().enumerate() {
+            if !layout.viewport.contains(n.time, n.value) {
+                continue;
+            }
             let nx = phase_to_x(layout, n.time);
             let ny = value_to_y(layout, n.value);
             if (x - nx).abs() <= hit_r && (y - ny).abs() <= hit_r {
@@ -797,6 +903,9 @@ pub fn mseg_hit_test(
                 continue;
             }
             let mid = (a[i].time + a[i + 1].time) * 0.5;
+            if !layout.viewport.contains(mid, value_at_phase(data, mid)) {
+                continue;
+            }
             let hx = phase_to_x(layout, mid);
             let hy = value_to_y(layout, value_at_phase(data, mid));
             if (x - hx).abs() <= hit_r && (y - hy).abs() <= hit_r {
@@ -855,6 +964,65 @@ fn draw_line(pixmap: &mut Pixmap, x0: f32, y0: f32, x1: f32, y1: f32, color: tin
         let t = s as f32 / steps as f32;
         draw_rect(pixmap, x0 + dx * t, y0 + dy * t, 1.0, 1.0, color);
     }
+}
+
+pub(crate) fn draw_plot_line(
+    pixmap: &mut Pixmap,
+    layout: &MsegLayout,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    color: tiny_skia::Color,
+) {
+    draw_clipped_line(pixmap, layout.plot, x0, y0, x1, y1, color);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_clipped_line(
+    pixmap: &mut Pixmap,
+    clip: (f32, f32, f32, f32),
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    color: tiny_skia::Color,
+) {
+    if clip.2 <= 0.0 || clip.3 <= 0.0 {
+        return;
+    }
+    let (dx, dy) = (x1 - x0, y1 - y0);
+    let (mut begin, mut end) = (0.0_f32, 1.0_f32);
+    for (p, q) in [
+        (-dx, x0 - clip.0),
+        (dx, clip.0 + clip.2 - x0),
+        (-dy, y0 - clip.1),
+        (dy, clip.1 + clip.3 - y0),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return;
+            }
+        } else {
+            let ratio = q / p;
+            if p < 0.0 {
+                begin = begin.max(ratio);
+            } else {
+                end = end.min(ratio);
+            }
+            if begin > end {
+                return;
+            }
+        }
+    }
+    draw_line(
+        pixmap,
+        x0 + dx * begin,
+        y0 + dy * begin,
+        x0 + dx * end,
+        y0 + dy * end,
+        color,
+    );
 }
 
 #[cfg(test)]

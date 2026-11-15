@@ -14,11 +14,13 @@ pub mod randomize;
 pub mod render;
 pub mod shape;
 pub mod tools;
+pub mod viewport;
 
 pub use editor::*;
 pub use randomize::*;
 pub use render::*;
 pub use shape::*;
+pub use viewport::MsegViewport;
 
 /// Maximum number of envelope nodes.
 pub const MAX_NODES: usize = 128;

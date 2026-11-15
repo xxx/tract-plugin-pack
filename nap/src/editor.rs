@@ -578,6 +578,16 @@ impl NapWindow {
 
         for p in 0..3 {
             let curve = self.curves[p].lock().map(|c| *c).unwrap_or_default();
+            if let Some(node) = self.states[p]
+                .inspector_node()
+                .filter(|&i| i < curve.node_count)
+            {
+                self.states[p].set_inspector_readout(&format!(
+                    "{}: {:.2}%",
+                    labels[p],
+                    curve.nodes[node].value * 100.0
+                ));
+            }
             widgets::mseg::draw_mseg(
                 &mut self.surface.pixmap,
                 &mut self.text_renderer,
@@ -604,6 +614,8 @@ impl NapWindow {
         // `decimate` caps to `cols` columns.
         self.draw_tail_overlay(rects[0], s);
 
+        self.draw_strip(strip_rect(w, h, s), s);
+
         // Dropdown popups for the panes (drawn after every pane so an open
         // grid/style popup overlays the curve beneath it).
         for (state, rect) in self.states.iter().zip(rects.iter()) {
@@ -614,8 +626,6 @@ impl NapWindow {
                 *rect,
             );
         }
-
-        self.draw_strip(strip_rect(w, h, s), s);
     }
 
     /// Draw the tail pulse-field overlay over the Decay pane (`rect`).
@@ -626,17 +636,27 @@ impl NapWindow {
     /// horizontal offset that encodes the L/R split. All drawing uses
     /// `widgets::draw_rect` so no unsafe code is needed.
     fn draw_tail_overlay(&mut self, rect: (f32, f32, f32, f32), scale: f32) {
-        use widgets::mseg::{mseg_layout, phase_to_x, value_to_y};
+        use widgets::mseg::{phase_to_x, value_to_y};
 
-        let layout = mseg_layout(rect, true, scale);
-        let plot_w = layout.plot.2.max(1.0) as usize;
+        let layout = self.states[0].layout(rect, scale);
+        let Some((plot_w, stick_w)) = tail_overlay_geometry(&layout, scale) else {
+            return;
+        };
 
         // Decimate into the reusable column buffer.
-        tail_view::decimate(&self.snapshot, plot_w, &mut self.columns);
+        if layout.viewport == widgets::mseg::MsegViewport::default() {
+            tail_view::decimate(&self.snapshot, plot_w, &mut self.columns);
+        } else {
+            tail_view::decimate_range(
+                &self.snapshot,
+                plot_w,
+                layout.viewport.time_range(),
+                &mut self.columns,
+            );
+        }
 
         // Per-column rendering constants.
-        let stick_w = 1.0_f32.max(scale * 0.75);
-        let bottom_y = value_to_y(&layout, 0.0);
+        let bottom_y = value_to_y(&layout, 0.0).clamp(layout.plot.1, layout.plot.1 + layout.plot.3);
         let pane_colors = crate::theme::pane_colors();
         // Filter-index brightness ramp: 6 filters, index 0 = darkest, 5 = brightest.
         // Blend between the decay pane accent (warm amber) dimmed vs bright.
@@ -648,12 +668,15 @@ impl NapWindow {
             }
 
             // Phase for this column (centre of the column bucket).
-            let phase = col_idx as f32 / (plot_w - 1).max(1) as f32;
+            let phase = layout
+                .viewport
+                .phase_at(col_idx as f32 / (plot_w - 1).max(1) as f32);
             let cx = phase_to_x(&layout, phase);
 
             // Stick top: coeff_abs mapped via value_to_y (value 0 = bottom,
             // coeff_abs = height above bottom). Clamp to the plot.
-            let top_y = value_to_y(&layout, col.coeff_abs.clamp(0.0, 1.0));
+            let top_y = value_to_y(&layout, col.coeff_abs.clamp(0.0, 1.0))
+                .clamp(layout.plot.1, layout.plot.1 + layout.plot.3);
             if top_y >= bottom_y {
                 continue; // degenerate / zero height
             }
@@ -693,7 +716,8 @@ impl NapWindow {
                 let mid_y = (top_y + bottom_y) * 0.5;
                 widgets::draw_rect(
                     &mut self.surface.pixmap,
-                    cx + split_px - stick_w * 0.5,
+                    (cx + split_px - stick_w * 0.5)
+                        .clamp(layout.plot.0, layout.plot.0 + layout.plot.2 - stick_w),
                     mid_y - scale,
                     stick_w,
                     2.0 * scale,
@@ -821,6 +845,14 @@ fn curve_input_pane(states: &[MsegEditState; 3], y: f32, height: f32, scale: f32
         .or_else(|| pane_at(y, height, scale))
 }
 
+fn tail_overlay_geometry(layout: &widgets::mseg::MsegLayout, scale: f32) -> Option<(usize, f32)> {
+    let stick_w = 1.0_f32.max(scale * 0.75);
+    if layout.plot.2 < stick_w || layout.plot.3 <= 0.0 {
+        return None;
+    }
+    Some((layout.plot.2 as usize, stick_w))
+}
+
 impl baseview::WindowHandler for NapWindow {
     fn on_frame(&mut self, _window: &mut baseview::Window) {
         // Rebuild the baker if the audio-thread sample rate has changed.
@@ -945,6 +977,9 @@ impl baseview::WindowHandler for NapWindow {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
+                if self.states.iter().any(MsegEditState::is_panning) {
+                    return baseview::EventStatus::Captured;
+                }
                 let (x, y) = self.drag.mouse_pos();
                 self.update_modifiers(modifiers);
                 self.commit_text_edit();
@@ -1075,7 +1110,9 @@ impl baseview::WindowHandler for NapWindow {
             }) => {
                 let (x, y) = self.drag.mouse_pos();
                 // Right-click during an active dial drag: ignore.
-                if self.drag.active_action().is_some() {
+                if self.drag.active_action().is_some()
+                    || self.states.iter().any(MsegEditState::is_dragging)
+                {
                     return baseview::EventStatus::Captured;
                 }
                 if let Some(p) = curve_input_pane(&self.states, y, h, s) {
@@ -1106,13 +1143,49 @@ impl baseview::WindowHandler for NapWindow {
                 }
             }
 
-            baseview::Event::Mouse(baseview::MouseEvent::WheelScrolled { delta, .. }) => {
-                if let Some(p) = self.states.iter().position(MsegEditState::has_open_menu) {
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Middle,
+                ..
+            }) => {
+                if self.drag.active_action().is_none() {
+                    let (x, y) = self.drag.mouse_pos();
+                    if let Some(p) = curve_input_pane(&self.states, y, h, s) {
+                        if self.states[p].can_start_pan(x, y, pane_rects(w, h, s)[p], s) {
+                            self.commit_text_edit();
+                        }
+                        self.states[p].on_pan_start(x, y, pane_rects(w, h, s)[p], s);
+                    }
+                }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Middle,
+                ..
+            }) => {
+                for state in &mut self.states {
+                    state.on_pan_end();
+                }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::WheelScrolled { delta, modifiers }) => {
+                if self.drag.active_action().is_some() {
+                    return baseview::EventStatus::Captured;
+                }
+                let (x, y) = self.drag.mouse_pos();
+                if let Some(p) = curve_input_pane(&self.states, y, h, s) {
                     let dy = match delta {
                         baseview::ScrollDelta::Lines { y, .. } => *y,
                         baseview::ScrollDelta::Pixels { y, .. } => *y * 0.05,
                     };
-                    self.states[p].on_wheel(dy * self.drag.input_scale(), pane_rects(w, h, s)[p]);
+                    if let Ok(curve) = self.curves[p].lock() {
+                        self.states[p].on_scroll(
+                            x,
+                            y,
+                            dy,
+                            modifiers.contains(keyboard_types::Modifiers::SHIFT),
+                            &curve,
+                            pane_rects(w, h, s)[p],
+                            s,
+                        );
+                    }
                 }
             }
 
@@ -1271,6 +1344,20 @@ impl Editor for NapEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tail_overlay_skips_collapsed_or_too_narrow_plots_at_every_scale() {
+        for scale in [0.5, 1.0, 2.0] {
+            let state = MsegEditState::new_curve_only();
+            for width in [1.0, 5.0, 14.0] {
+                let layout = state.layout((0.0, 0.0, width, 200.0 * scale), scale);
+                assert!(tail_overlay_geometry(&layout, scale).is_none());
+            }
+            let layout = state.layout((0.0, 0.0, 880.0 * scale, 210.0 * scale), scale);
+            let (columns, stick) = tail_overlay_geometry(&layout, scale).unwrap();
+            assert!(columns > 0 && layout.plot.2 >= stick);
+        }
+    }
 
     #[test]
     fn open_curve_menu_keeps_input_ownership_over_other_panes() {

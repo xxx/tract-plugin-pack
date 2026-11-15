@@ -24,15 +24,23 @@ pub struct Column {
 /// `out` is cleared and resized to exactly `cols` entries before filling.
 /// Columns with no pulse retain their `Column::default()` (`present = false`).
 pub fn decimate(seq: &VelvetSequence, cols: usize, out: &mut Vec<Column>) {
+    decimate_range(seq, cols, (0.0, 1.0), out);
+}
+
+pub fn decimate_range(seq: &VelvetSequence, cols: usize, range: (f32, f32), out: &mut Vec<Column>) {
     out.clear();
     out.resize(cols, Column::default());
-    if seq.count == 0 || seq.tail_len == 0 || cols == 0 {
+    if seq.count == 0 || seq.tail_len == 0 || cols == 0 || range.1 <= range.0 {
         return;
     }
     let tl = seq.tail_len as f32;
     for m in 0..seq.count {
         let phase = (seq.location[m] as f32 / tl).clamp(0.0, 1.0);
-        let c = ((phase * (cols as f32 - 1.0)).round() as usize).min(cols - 1);
+        if phase < range.0 || phase > range.1 {
+            continue;
+        }
+        let fraction = (phase - range.0) / (range.1 - range.0);
+        let c = ((fraction * (cols as f32 - 1.0)).round() as usize).min(cols - 1);
         let a = seq.coeff[m].abs();
         if !out[c].present || a > out[c].coeff_abs {
             out[c] = Column {
@@ -48,6 +56,22 @@ pub fn decimate(seq: &VelvetSequence, cols: usize, out: &mut Vec<Column>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoomed_range_excludes_hidden_pulses_and_fills_the_visible_columns() {
+        let mut sequence = VelvetSequence::new();
+        sequence.count = 5;
+        sequence.tail_len = 100;
+        sequence.location[..5].copy_from_slice(&[0, 25, 50, 75, 99]);
+        sequence.location_r[..5].copy_from_slice(&[0, 25, 50, 75, 99]);
+        sequence.coeff[..5].copy_from_slice(&[1.0, 0.2, 0.3, 0.4, 1.0]);
+        let mut columns = Vec::new();
+        decimate_range(&sequence, 3, (0.25, 0.75), &mut columns);
+        assert_eq!(
+            columns.iter().map(|c| c.coeff_abs).collect::<Vec<_>>(),
+            vec![0.2, 0.3, 0.4]
+        );
+    }
 
     #[test]
     fn decimate_keeps_loudest_per_column() {

@@ -1029,7 +1029,34 @@ impl baseview::WindowHandler for MultosisWindow {
                 }
                 return status;
             }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Middle,
+                ..
+            })
+            | baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Middle,
+                ..
+            }) => {
+                let pressing = matches!(
+                    event,
+                    baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed { .. })
+                );
+                if self.view == View::Effect
+                    && !self.speed_dropdown.is_open()
+                    && (!pressing || self.toolbar_drag.active_action().is_none())
+                {
+                    let opened = pressing && self.undo.begin_capture(self.snapshot());
+                    self.handle_effect_event(&event);
+                    if opened {
+                        let after = self.snapshot();
+                        self.undo.commit_capture(&after);
+                    }
+                }
+            }
             baseview::Event::Mouse(baseview::MouseEvent::WheelScrolled { delta, .. }) => {
+                if self.toolbar_drag.active_action().is_some() {
+                    return baseview::EventStatus::Captured;
+                }
                 // Mousewheel scrolls the currently-open dropdown popup.
                 // Lines deliver one click per detent; pixel-mode trackpads
                 // deliver fine-grained pixel counts — scale the latter to

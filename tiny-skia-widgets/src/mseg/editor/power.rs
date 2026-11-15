@@ -91,7 +91,7 @@ impl MsegEditState {
         self.power.library_directory = Some(directory);
     }
 
-    fn curve_library(&self) -> std::io::Result<CurveLibrary> {
+    pub(super) fn curve_library(&self) -> std::io::Result<CurveLibrary> {
         match &self.power.library_directory {
             Some(path) => Ok(CurveLibrary::at(path.clone())),
             None => CurveLibrary::user_library(),
@@ -120,11 +120,14 @@ impl MsegEditState {
             Vec::new()
         };
     }
+    pub(crate) fn set_status_message(&mut self, text: impl Into<String>) {
+        self.power.message = text.into();
+    }
     pub fn status_message(&self) -> &str {
         &self.power.message
     }
     pub fn has_open_menu(&self) -> bool {
-        self.dropdown.is_open()
+        self.dropdown.is_open() || self.inspector_node().is_some()
     }
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
@@ -138,7 +141,9 @@ impl MsegEditState {
     }
 
     pub(crate) fn dropdown_labels(&self) -> Vec<String> {
-        let static_items = if self.dropdown.is_open_for(StripId::TimeGrid) {
+        let static_items = if self.dropdown.is_open_for(StripId::View) {
+            super::precision::VIEW_ITEMS
+        } else if self.dropdown.is_open_for(StripId::TimeGrid) {
             return self.grid_labels.clone();
         } else if self.dropdown.is_open_for(StripId::Shapes) {
             return self.power.shape_labels.clone();
@@ -174,6 +179,10 @@ impl MsegEditState {
                 .extend(["Import shape...".to_owned(), "Export curve...".to_owned()]);
         }
         let labels: Vec<String> = match id {
+            StripId::View => super::precision::VIEW_ITEMS
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
             StripId::Tool => MsegTool::LABELS.iter().map(|s| (*s).to_owned()).collect(),
             StripId::Shapes => self.power.shape_labels.clone(),
             _ => transform_menu_items()
@@ -227,6 +236,14 @@ impl MsegEditState {
                 Ok(false)
             }
             StripId::Shapes => return self.apply_shape_menu(index, data),
+            StripId::View => {
+                if index == 0 {
+                    self.fit_all();
+                } else {
+                    self.fit_selection(data);
+                }
+                Ok(false)
+            }
             StripId::Transform => match index {
                 0 => return self.compress_values(data),
                 1 => return self.expand_values(data),
@@ -261,6 +278,12 @@ impl MsegEditState {
                     self.selection = tools::all_nodes(data.node_count);
                     Ok(false)
                 }
+                17 => {
+                    self.open_point_inspector(data);
+                    Ok(false)
+                }
+                18 => return self.copy_selected_phrase(data),
+                19 | 20 => return self.paste_selected_phrase(data, index == 20),
                 _ => Ok(false),
             },
             _ => Ok(false),
@@ -268,7 +291,10 @@ impl MsegEditState {
         self.finish_power_edit(result)
     }
 
-    fn finish_power_edit(&mut self, result: Result<bool, ShapeError>) -> Option<MsegEdit> {
+    pub(super) fn finish_power_edit(
+        &mut self,
+        result: Result<bool, ShapeError>,
+    ) -> Option<MsegEdit> {
         match result {
             Ok(true) => Some(MsegEdit::Changed),
             Ok(false) => None,
@@ -364,6 +390,9 @@ impl MsegEditState {
         if !self.has_open_menu() {
             return false;
         }
+        if self.inspector_node().is_some() {
+            return true;
+        }
         let labels = self.dropdown_labels();
         let refs: Vec<_> = labels.iter().map(String::as_str).collect();
         self.dropdown
@@ -376,8 +405,12 @@ impl MsegEditState {
         event: &KeyboardEvent,
         data: &mut MsegData,
         rect: (f32, f32, f32, f32),
-        _scale: f32,
+        scale: f32,
     ) -> (bool, Option<MsegEdit>) {
+        self.prepare_precision(data, scale);
+        if self.inspector_node().is_some() {
+            return self.inspector_key(event, data);
+        }
         if self.has_open_menu() {
             if event.state != KeyState::Down {
                 return (true, None);
@@ -410,6 +443,9 @@ impl MsegEditState {
             return (false, None);
         }
         if event.key == Key::Escape {
+            if self.cancel_pan() {
+                return (true, None);
+            }
             let changed = if let Some(start) = self.power.gesture_start {
                 let changed = *data != start;
                 *data = start;
@@ -431,6 +467,16 @@ impl MsegEditState {
             .modifiers
             .intersects(Modifiers::CONTROL | Modifiers::META);
         if command && let Key::Character(key) = &event.key {
+            if event.modifiers.contains(Modifiers::ALT) {
+                let edit = match key.to_ascii_lowercase().as_str() {
+                    "c" => self.copy_selected_phrase(data),
+                    "v" => {
+                        self.paste_selected_phrase(data, event.modifiers.contains(Modifiers::SHIFT))
+                    }
+                    _ => return (false, None),
+                };
+                return (true, edit);
+            }
             let edit = match key.to_ascii_lowercase().as_str() {
                 "a" => self.apply_menu(StripId::Transform, 16, data),
                 "c" => self.copy_curve(data),
@@ -440,6 +486,9 @@ impl MsegEditState {
             return (true, edit);
         }
         match event.key {
+            Key::Enter if command && self.selection_count() == 1 => {
+                (self.open_point_inspector(data), None)
+            }
             Key::Delete | Key::Backspace if self.selection != 0 => {
                 let edit = self.delete_selection(data);
                 (edit.is_some(), edit)
@@ -525,7 +574,9 @@ impl MsegEditState {
                 .selection_handles(data, layout, scale)
                 .into_iter()
                 .find(|(_, (hx, hy))| {
-                    (x - hx).abs() <= 5.0 * scale && (y - hy).abs() <= 5.0 * scale
+                    in_rect(layout.canvas, *hx, *hy)
+                        && (x - hx).abs() <= 5.0 * scale
+                        && (y - hy).abs() <= 5.0 * scale
                 });
             if let Some((handle, _)) = hit {
                 self.power.gesture_start = Some(*data);
