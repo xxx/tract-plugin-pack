@@ -45,6 +45,17 @@ impl TrackModulation {
             }
         })
     }
+    pub fn continuous_mask(&self, kind: EffectKind) -> u8 {
+        if self.trigger == TriggerSource::DawPosition {
+            15
+        } else {
+            self.smoothing_mask(kind)
+        }
+    }
+    pub fn continuous_parameter(&self, kind: EffectKind, index: usize) -> bool {
+        self.winning_slot(ModulationTarget::EffectParameter(index))
+            .is_some_and(|slot| self.continuous_mask(kind) & (1 << slot) != 0)
+    }
     pub fn winning_slot(&self, target: ModulationTarget) -> Option<usize> {
         self.targets
             .iter()
@@ -92,6 +103,58 @@ struct Slot {
     force_apply: bool,
     route: Option<Route>,
     held: Option<(f32, f32)>,
+    position_seen: Option<(PositionKey, u64)>,
+    loop_iteration: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PositionKey {
+    mode: SyncMode,
+    length: f32,
+    play: PlayMode,
+    hold: HoldMode,
+    markers: [f32; 2],
+}
+impl PositionKey {
+    fn new(doc: &MsegData) -> Self {
+        let length = match doc.sync_mode {
+            SyncMode::Beat => doc.beats,
+            SyncMode::Time => doc.time_seconds,
+        };
+        let hold = match (doc.play_mode, doc.hold) {
+            (PlayMode::Cyclic, HoldMode::Sustain(_)) => HoldMode::None,
+            _ => doc.hold,
+        };
+        let markers = match hold {
+            HoldMode::None => [0.0; 2],
+            HoldMode::Sustain(i) => [doc.nodes[i].time; 2],
+            HoldMode::Loop { start, end } => [doc.nodes[start].time, doc.nodes[end].time],
+        };
+        Self {
+            mode: doc.sync_mode,
+            length: if length.is_finite() && length > 0.0 {
+                length
+            } else {
+                0.0
+            },
+            play: doc.play_mode,
+            hold,
+            markers,
+        }
+    }
+}
+impl Slot {
+    fn sync_position(&mut self, doc: &MsegData, epoch: u64, iteration: f64) -> bool {
+        let key = (PositionKey::new(doc), epoch);
+        if self.position_seen == Some(key) {
+            return false;
+        }
+        self.position_seen = Some(key);
+        self.loop_iteration = iteration;
+        self.force_raw = true;
+        self.force_apply = true;
+        true
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -124,6 +187,11 @@ impl SmoothRuntime {
     pub(super) fn trigger(&mut self) {
         for s in &mut self.slots {
             s.phase = 0.0;
+        }
+        self.refresh();
+    }
+    pub(super) fn refresh(&mut self) {
+        for s in &mut self.slots {
             s.force_raw = true;
             s.force_apply = true;
         }
@@ -178,7 +246,7 @@ impl ModulationState {
                 ..
             }) = slot.route
                 && kind == track.kind
-                && !config.smoothed_parameter(kind, index)
+                && !config.continuous_parameter(kind, index)
                 && let Some(base) = track.params.get(index)
             {
                 effect.set_param(index, *base);
@@ -192,14 +260,22 @@ impl ModulationState {
         self.smooth = SmoothRuntime::default();
         self.output_valid = [false; 4];
     }
-    pub fn restart_clock(&mut self) {
+    /// Restart free clocks and refresh DAW playback without moving its phases.
+    pub fn restart_clock(&mut self, config: &TrackModulation) {
         self.trigger_epoch = self.trigger_epoch.wrapping_add(1);
-        self.phases = [0.0; 4];
+        if config.trigger == TriggerSource::DawPosition {
+            for epoch in &mut self.capture_epochs {
+                *epoch = epoch.wrapping_add(1);
+            }
+            self.smooth.refresh();
+        } else {
+            self.phases = [0.0; 4];
+            self.smooth.trigger();
+        }
         self.hz_phase = 0.0;
         self.transient.reset();
         self.precise.reset();
         self.fired = false;
-        self.smooth.trigger();
     }
     pub fn smoothing_active(&self) -> bool {
         self.smooth.mask != 0
@@ -243,7 +319,7 @@ impl ModulationState {
         bpm: f64,
         sr: f64,
     ) {
-        let mask = config.smoothing_mask(track.kind);
+        let mask = config.continuous_mask(track.kind);
         if self.smooth.mask == 0 || self.smooth.sample_rate != sr {
             self.smooth.clock = 0.0;
         }
@@ -256,6 +332,7 @@ impl ModulationState {
         let mut legacy_mix = None;
         for k in 0..4 {
             let doc = self.automated.curve(self.wave.curve(config, k), k);
+            let position = self.position.phase(doc);
             let route = if k > 0 {
                 config.targets[k - 1].and_then(|target| {
                     if config.winning_slot(target) != Some(k) {
@@ -278,22 +355,46 @@ impl ModulationState {
                 None
             };
             let slot = &mut self.smooth.slots[k];
+            if self.position.active {
+                if slot.sync_position(
+                    doc,
+                    self.position.epoch(doc.sync_mode),
+                    self.position.loop_iteration(doc).unwrap_or(0.0),
+                ) {
+                    self.capture_epochs[k] = self.capture_epochs[k].wrapping_add(1);
+                }
+            } else {
+                slot.position_seen = None;
+                slot.loop_iteration = 0.0;
+            }
             if mask & (1 << k) != 0 {
                 if !slot.active {
-                    slot.phase = self.phases[k] as f64;
+                    slot.phase = position.unwrap_or(self.phases[k] as f64);
                     slot.value = if self.output_valid[k] {
                         self.outputs[k] as f64
                     } else {
-                        value_at_phase(doc, self.phases[k]) as f64
+                        value_at_phase(doc, slot.phase as f32) as f64
                     };
-                    slot.raw = value_at_phase(doc, self.phases[k]).clamp(0.0, 1.0);
+                    slot.raw = value_at_phase(doc, slot.phase as f32).clamp(0.0, 1.0);
                     slot.force_raw = true;
                     slot.force_apply = true;
                     slot.held = None;
                 }
-                let ms = normalized_smooth_ms(config.smooth_ms[k]);
+                if let Some(position) = position {
+                    slot.phase = position;
+                    self.phases[k] = position as f32;
+                }
+                let ms = if config.smoothing_supported(k, track.kind) {
+                    normalized_smooth_ms(config.smooth_ms[k])
+                } else {
+                    0.0
+                };
                 if slot.ms != ms || slot.sample_rate != sr {
-                    slot.gain = -(-1.0 / (ms as f64 * 0.001 * sr)).exp_m1();
+                    slot.gain = if ms > 0.0 {
+                        -(-1.0 / (ms as f64 * 0.001 * sr)).exp_m1()
+                    } else {
+                        1.0
+                    };
                     slot.ms = ms;
                     slot.sample_rate = sr;
                 }
@@ -385,9 +486,12 @@ impl ModulationState {
     }
 
     pub fn process_smoothing_sample(&mut self, config: &TrackModulation, effect: &mut impl Effect) {
-        if self.smooth.mask == 0 {
+        if self.smooth.mask == 0
+            || (config.trigger == TriggerSource::DawPosition && !self.position.active)
+        {
             return;
         }
+        self.position.bump_epochs(self.position.jump_mask());
         let tick = self.smooth.clock < 1.0;
         if tick {
             self.smooth.clock += self.smooth.period;
@@ -399,11 +503,35 @@ impl ModulationState {
                 continue;
             }
             let doc = self.automated.curve(self.wave.curve(config, k), k);
-            let next = phase_next(doc, slot.phase, slot.step);
+            if self.position.active
+                && slot
+                    .position_seen
+                    .is_none_or(|(_, epoch)| epoch != self.position.epoch(doc.sync_mode))
+                && slot.sync_position(
+                    doc,
+                    self.position.epoch(doc.sync_mode),
+                    self.position.loop_iteration(doc).unwrap_or(0.0),
+                )
+            {
+                self.capture_epochs[k] = self.capture_epochs[k].wrapping_add(1);
+            }
+            if self.position.active
+                && let Some(iteration) = self.position.loop_iteration(doc)
+            {
+                if slot.loop_iteration != iteration {
+                    self.capture_epochs[k] = self.capture_epochs[k].wrapping_add(1);
+                }
+                slot.loop_iteration = iteration;
+            }
+            let next = if self.position.active {
+                self.position.phase(doc).unwrap_or(slot.phase)
+            } else {
+                phase_next(doc, slot.phase, slot.step)
+            };
             let wrapped = next < slot.phase;
             slot.phase = next;
             self.phases[k] = next as f32;
-            if tick || slot.force_raw || wrapped {
+            if self.position.active || tick || slot.force_raw || wrapped {
                 slot.raw = value_at_phase(doc, next as f32).clamp(0.0, 1.0);
                 slot.force_raw = false;
             }
@@ -441,6 +569,7 @@ impl ModulationState {
                 }
             }
         }
+        self.position.advance_sample();
     }
 }
 

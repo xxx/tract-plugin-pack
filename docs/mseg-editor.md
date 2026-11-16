@@ -398,6 +398,37 @@ and Enter/Space to toggle or open its selector. The First-note selector supports
 numeric search. Escape closes a selector before closing setup; outside/right
 clicks, focus loss and resize dismiss it without acting on controls beneath it.
 
+## DAW-position playback
+
+Choose **Trigger → DAW position** in Multosis/Minitosis to follow the song
+timeline. Every curve keeps its own length: **Beat** divides the host's quarter
+note position by its beat length; **Time** uses song seconds and its time length.
+The first sample plays the supplied position, including after a seek or restart.
+Active host loops also wrap within a processing block when their ranges are known.
+
+**Cyclic** repeats across the timeline, including negative pre-roll positions.
+**OneShot** starts at timeline zero and stops at its endpoint or sustain marker.
+Hold loops keep their normal behavior: cyclic loops use their existing wrapped
+phase, while one-shot loops play the intro before repeating the marked region.
+Reset/Retrig cannot move a DAW-driven playhead away from the song position.
+
+While stopped, phase stays at the reported cursor; moving that cursor relocates
+the curves. Missing positions freeze only the affected clock. Beat needs a valid
+tempo to advance between reported positions; Time can advance without tempo.
+Host-supplied timing determines precision. If a host only supplies beats, derived
+seconds use its current tempo: choose Beat for reliable timing through tempo changes.
+
+Smooth Off updates the source, Amp and Mix per sample. Positive Smooth keeps its
+lag across seeks; effect parameters retain their fixed 1 kHz control cadence and
+refresh immediately at discontinuities. Selector targets bypass source lag.
+The playhead, measured trace and waveform capture use the same phase; stopped or
+unavailable clocks pause capture. Curve geometry and timing remain editable.
+
+Project Wave automation and MIDI wave selection keep working with their existing
+priority. They change geometry while the DAW clock continues. Other retrigger
+sources do not override DAW position. Leaving this mode resumes free playback
+from the last phase. The mode saves per row/effect; old presets remain unchanged.
+
 ## Wave automation
 
 Multosis exposes **Amp Wave**, **1 Wave**, **2 Wave** and **3 Wave** host

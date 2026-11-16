@@ -29,6 +29,7 @@ const TRIGGERS: &[TriggerChoice] = &[
     TriggerChoice::MidiNote,
     TriggerChoice::FreeHzSample,
     TriggerChoice::TransientSample,
+    TriggerChoice::DawPosition,
 ];
 type Rect = (f32, f32, f32, f32);
 

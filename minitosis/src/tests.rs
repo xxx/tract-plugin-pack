@@ -2,6 +2,7 @@ use super::*;
 use std::cell::Cell;
 use tract_effects::effects::EffectKind;
 use tract_effects::modulation::ModulationTarget;
+mod position_tests;
 mod wave_tests;
 
 #[derive(Default)]

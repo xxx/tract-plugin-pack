@@ -173,12 +173,13 @@ While editing one slot, the other three are drawn faintly behind it as ghost cur
 
 These controls appear in a strip above the curve canvas; some appear only conditionally:
 
-- **Trigger** — dropdown to the left of the slot selector. Picks what resets the MSEG's phase to zero. The setting is per-track and applies to all four MSEGs on the row at once:
-    - **Free run** (default) — phases never reset. The MSEGs cycle continuously, locked to the host transport (Beat sync) or to a fixed wall-clock rate (Time sync).
+- **Trigger** — dropdown to the left of the slot selector. Choose a restart source or follow DAW position. The setting is per-track and applies to all four MSEGs on the row at once:
+    - **Free run** (default) — phases never reset. Beat uses the host tempo; Time uses seconds.
     - **Cell light** — phases reset on the row's inactive → active edge: when the playhead enters an active cell on this row after a stretch of inactive cells. Use for one-shot envelope behaviour that re-arms per gesture.
     - **Cell step** — phases reset on every step boundary where the row's cell is lit. Use when you want the same envelope shape to fire fresh on every active step.
     - **Free Hz** — phases reset at a fixed rate, independent of the host transport. The rate is set by the **Rate** dial (see below).
     - **Transient** — phases reset when an onset is detected in the plugin's input audio. Detection is a fast/slow envelope-follower ratio crossing a threshold; the **Sens** and **Hold** dials below tune it.
+    - **DAW position** — every curve follows the song timeline using its own Time/Beat length. Seeks and loops relocate the phase; stopped or unavailable clocks pause capture. Geometry stays editable. See [DAW-position playback](../mseg-editor.md#daw-position-playback).
 - **Rate** (Free Hz trigger) — appears beside the Trigger dropdown only when **Free Hz** is selected. Sets the re-fire frequency in Hz.
 - **Sens** (Transient trigger) — appears beside the Trigger dropdown only when **Transient** is selected. Sets the onset detection threshold; right = more sensitive (lower threshold).
 - **Hold** (Transient trigger) — appears to the right of **Sens** when **Transient** is selected. Sets the post-fire refractory period (in ms) during which further onsets are ignored, so the transient's tail doesn't trigger repeated re-fires.

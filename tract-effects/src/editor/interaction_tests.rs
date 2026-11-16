@@ -1,6 +1,7 @@
 mod context_help;
 mod curve_browser;
 mod midi_wave_switch;
+mod position;
 mod semitone_grid;
 mod wave_palette;
 
@@ -1789,6 +1790,7 @@ mod detector_controls {
             }),
             wave: None,
             wave_automation: [0; 4],
+            position_sync: false,
         };
         clock.publish(&shared, 0, &frame);
         draw(&mut h);
@@ -1966,7 +1968,7 @@ mod precise_triggers {
             };
             h.click(h.geometry.layout.trigger);
             let items = dropdown_items(&h.editor, &h.effect);
-            assert_eq!(items.len(), 8);
+            assert_eq!(items.len(), 9);
             let popup = widgets::dropdown::dropdown_popup_layout(
                 &h.editor.effect_dropdown,
                 &items,
@@ -2761,6 +2763,7 @@ mod smoothing_controls {
             detector: None,
             wave: None,
             wave_automation: [0; 4],
+            position_sync: false,
         };
         frame.parameters[0] = Some((0.123, 1));
         clock.publish(&shared, 0, &frame);

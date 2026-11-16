@@ -18,6 +18,11 @@ pub struct Modulation {
 }
 
 impl Modulation {
+    pub fn set_host_position(&mut self, position: HostPosition) {
+        for state in &mut self.states {
+            state.set_host_position(position);
+        }
+    }
     pub fn new() -> Self {
         Self {
             config: std::array::from_fn(TrackModulation::default_for_row),
@@ -62,8 +67,8 @@ impl Modulation {
         self.smooth_count = 0;
     }
     pub fn restart_clock(&mut self) {
-        for s in &mut self.states {
-            s.restart_clock();
+        for (state, config) in self.states.iter_mut().zip(&self.config) {
+            state.restart_clock(config);
         }
     }
     pub fn smoothed_parameter(
@@ -72,7 +77,7 @@ impl Modulation {
         kind: crate::effects::EffectKind,
         index: usize,
     ) -> bool {
-        self.config[row].smoothed_parameter(kind, index)
+        self.config[row].continuous_parameter(kind, index)
             && self.states[row].holds_smoothed_parameter(kind, index)
     }
     pub fn process_smoothing_sample(&mut self, effects: &mut [EffectInstance; ROWS]) {
@@ -99,6 +104,9 @@ impl Modulation {
     }
     pub fn precise_phase(&self, row: usize, slot: usize) -> f64 {
         self.states[row].precise_phase(slot)
+    }
+    pub fn capture_epoch(&self, row: usize, slot: usize) -> u64 {
+        self.states[row].capture_epoch(&self.config[row], slot)
     }
     pub fn set_telemetry_request(
         &mut self,
@@ -134,14 +142,18 @@ impl Modulation {
             return;
         }
         let row = request.row;
+        if !self.states[row].waveform_running(&self.config[row], request.slot) {
+            clock.pause();
+            return;
+        }
         clock.prepare_segment_with_curve(
             telemetry,
             row,
             tract_effects::waveform::WaveformTiming {
                 config: &self.config[row],
                 kind: tracks[row].kind,
-                phase: self.states[row].precise_phase(request.slot),
-                trigger_epoch: self.states[row].trigger_epoch(),
+                phase: self.states[row].waveform_phase(&self.config[row], request.slot),
+                trigger_epoch: self.states[row].capture_epoch(&self.config[row], request.slot),
                 bpm,
                 sample_rate,
             },

@@ -171,7 +171,13 @@ impl LiveSource {
         trace: bool,
         wave_automation: [u8; 4],
     ) {
-        let token = self.telemetry.request(self.row, slot, kind, trace);
+        let token = self.telemetry.request_for_clock(
+            self.row,
+            slot,
+            kind,
+            trace,
+            config.trigger == crate::modulation::TriggerSource::DawPosition,
+        );
         if token != self.token {
             self.bins.fill(None);
             self.frame = None;

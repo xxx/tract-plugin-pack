@@ -89,6 +89,7 @@ pub struct Minitosis {
     was_playing: bool,
     reported_latency: u32,
     trace_clock: tract_effects::modulation_telemetry::TraceClock,
+    host_position: tract_effects::modulation::HostPosition,
 }
 
 impl Default for Minitosis {
@@ -111,6 +112,7 @@ impl Default for Minitosis {
             was_playing: false,
             reported_latency: 0,
             trace_clock: tract_effects::modulation_telemetry::TraceClock::default(),
+            host_position: tract_effects::modulation::HostPosition::default(),
         }
     }
 }
@@ -194,6 +196,7 @@ impl Minitosis {
             }
         }
         let kind = self.processor.key.kind;
+        self.processor.set_host_position(self.host_position);
         if self.shared.modulation_dirty.swap(false, Ordering::AcqRel) {
             if let Ok(bank) = self.params.modulation.try_lock() {
                 self.processor.modulation = bank.get(kind).clone();
@@ -398,6 +401,17 @@ impl Plugin for Minitosis {
             .tempo
             .filter(|b| b.is_finite() && *b > 0.0)
             .unwrap_or(120.0);
+        self.host_position = tract_effects::modulation::HostPosition {
+            playing,
+            beats: transport.pos_beats(),
+            seconds: transport.pos_seconds(),
+            bpm: transport
+                .tempo
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(0.0),
+            loop_beats: transport.loop_range_beats(),
+            loop_seconds: transport.loop_range_seconds(),
+        };
         let channels = buffer.as_slice();
         if channels.len() < 2 {
             return ProcessStatus::Normal;

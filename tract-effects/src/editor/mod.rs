@@ -29,6 +29,7 @@ pub enum TriggerChoice {
     MidiNote,
     FreeHzSample,
     TransientSample,
+    DawPosition,
 }
 
 impl TriggerChoice {
@@ -41,6 +42,7 @@ impl TriggerChoice {
         Self::MidiNote,
         Self::FreeHzSample,
         Self::TransientSample,
+        Self::DawPosition,
     ];
 
     fn item(self) -> usize {
@@ -53,6 +55,7 @@ impl TriggerChoice {
             Self::MidiNote => 5,
             Self::FreeHzSample => 6,
             Self::TransientSample => 7,
+            Self::DawPosition => 8,
         }
     }
 }
@@ -2474,6 +2477,7 @@ mod tests {
                         "MIDI note",
                         "Free Hz (sample)",
                         "Transient (sample)",
+                        "DAW position",
                     ],
                     [0, 1, 2, 3, 4],
                 ),

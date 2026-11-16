@@ -624,7 +624,7 @@ pub fn target_to_item(kind: EffectKind, target: Option<ModulationTarget>) -> usi
 }
 
 /// The trigger-source dropdown items, in `TriggerSource` discriminant order.
-pub fn trigger_items() -> [&'static str; 8] {
+pub fn trigger_items() -> [&'static str; 9] {
     [
         "Free run",
         "Cell light",
@@ -634,6 +634,7 @@ pub fn trigger_items() -> [&'static str; 8] {
         "MIDI note",
         "Free Hz (sample)",
         "Transient (sample)",
+        "DAW position",
     ]
 }
 
@@ -661,6 +662,7 @@ pub fn trigger_from_item(
             threshold: carried_threshold,
             hold_ms: carried_hold_ms,
         },
+        8 => TriggerSource::DawPosition,
         _ => TriggerSource::Transient {
             threshold: carried_threshold,
             hold_ms: carried_hold_ms,
@@ -679,6 +681,7 @@ pub fn trigger_to_item(src: TriggerSource) -> usize {
         TriggerSource::MidiNote { .. } => 5,
         TriggerSource::FreeHzSample { .. } => 6,
         TriggerSource::TransientSample { .. } => 7,
+        TriggerSource::DawPosition => 8,
     }
 }
 
@@ -874,6 +877,7 @@ pub fn draw_trigger_controls(
         TriggerSource::MidiNote { .. } => "MIDI note",
         TriggerSource::FreeHzSample { .. } => "Hz exact",
         TriggerSource::TransientSample { .. } => "Audio",
+        TriggerSource::DawPosition => "DAW",
     };
     widgets::dropdown::draw_dropdown_trigger(pixmap, tr, lay.trigger, label, trigger_dropdown_open);
     match trigger {
@@ -1318,7 +1322,7 @@ mod tests {
         }
 
         #[test]
-        fn free_and_cell_sources_draw_only_their_dropdown_label_and_open_state() {
+        fn clock_sources_without_dials_draw_only_their_dropdown_label_and_open_state() {
             let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
             for scale in [0.5, 2.0] {
                 let lay = trigger_layout(scale);
@@ -1326,6 +1330,7 @@ mod tests {
                     (TriggerSource::Free, "Free run"),
                     (TriggerSource::CellLight, "Cell light"),
                     (TriggerSource::CellStep, "Cell step"),
+                    (TriggerSource::DawPosition, "DAW"),
                 ] {
                     for open in [false, true] {
                         let mut actual = canvas();
@@ -2516,7 +2521,7 @@ mod tests {
                 );
                 assert_eq!(trigger_to_item(TriggerSource::FreeHz { hz }), 3);
                 let transient = TriggerSource::Transient { threshold, hold_ms };
-                for item in [4, 8, usize::MAX] {
+                for item in [4, 9, usize::MAX] {
                     assert_eq!(trigger_from_item(item, hz, threshold, hold_ms), transient);
                 }
                 assert_eq!(
@@ -2675,7 +2680,7 @@ mod tests {
     }
 
     #[test]
-    fn trigger_items_lists_the_five_sources() {
+    fn trigger_items_preserve_existing_order_and_append_daw_position() {
         let items = trigger_items();
         assert_eq!(
             items,
@@ -2687,9 +2692,15 @@ mod tests {
                 "Transient",
                 "MIDI note",
                 "Free Hz (sample)",
-                "Transient (sample)"
+                "Transient (sample)",
+                "DAW position"
             ]
         );
+        assert_eq!(
+            trigger_from_item(8, 1.0, 1.5, 50.0),
+            TriggerSource::DawPosition
+        );
+        assert_eq!(trigger_to_item(TriggerSource::DawPosition), 8);
     }
 
     #[test]

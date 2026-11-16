@@ -225,7 +225,11 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                     ),
                     animated(
                         "Trigger / Detect",
-                        "Choose what restarts the curves. Transient (sample) offers detector threshold, filters and Main/Sidechain input.",
+                        "Follow DAW position or choose a restart source. Transient (sample) offers detector threshold, filters and Main/Sidechain input.",
+                    ),
+                    animated(
+                        "Trigger > DAW position",
+                        "Beat follows quarter notes, Time follows song seconds. Cyclic repeats; OneShot starts at timeline zero and stops at its endpoint or sustain marker. Hold loops keep their usual intro/wrap behavior. Missing positions freeze that clock. Reset/Retrig cannot move the playhead away from DAW position.",
                     ),
                     animated(
                         "MIDI waves",

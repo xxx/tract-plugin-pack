@@ -198,6 +198,7 @@ pub struct WaveformClock {
     step: f64,
     trigger_epoch: u64,
     follow_audio_phase: bool,
+    host_position: bool,
     active: bool,
     pending: Option<WaveformBin>,
 }
@@ -236,6 +237,19 @@ impl WaveformClock {
         self.doc = *doc;
     }
 
+    pub fn pause(&mut self) {
+        self.active = false;
+        self.pending = None;
+    }
+    pub fn sync_position(&mut self, telemetry: &WaveformTelemetry, epoch: u64, phase: f64) {
+        if self.active && epoch != self.trigger_epoch {
+            self.finish_block(telemetry);
+            self.pending = None;
+            self.trigger_epoch = epoch;
+            self.phase = phase;
+        }
+    }
+
     pub fn prepare_segment_with_curve(
         &mut self,
         telemetry: &WaveformTelemetry,
@@ -249,16 +263,21 @@ impl WaveformClock {
         if !self.active {
             return;
         }
-        if timing.trigger_epoch != self.trigger_epoch || timing.phase < self.phase - 1e-6 {
+        let host_position = timing.config.trigger == crate::modulation::TriggerSource::DawPosition;
+        if timing.trigger_epoch != self.trigger_epoch
+            || timing.phase < self.phase - 1e-6
+            || host_position != self.host_position
+        {
             self.finish_block(telemetry);
             self.pending = None;
         }
         self.trigger_epoch = timing.trigger_epoch;
+        self.host_position = host_position;
         self.doc = *doc;
         self.step = phase_step(&self.doc, timing.bpm, timing.sample_rate);
         self.phase = timing.phase;
-        self.follow_audio_phase =
-            timing.config.smoothing_mask(timing.kind) & (1 << self.request.slot) != 0;
+        self.follow_audio_phase = host_position
+            || timing.config.smoothing_mask(timing.kind) & (1 << self.request.slot) != 0;
         self.active &= self.step > 0.0;
     }
 
@@ -308,7 +327,10 @@ impl WaveformClock {
         if !loops && self.phase >= end && next >= end {
             return;
         }
-        if next < self.phase || (loops && self.phase + self.step >= end) {
+        // DAW capture epochs report actual traversals, including equal wrapped phases.
+        let looped =
+            next < self.phase || (!self.host_position && loops && self.phase + self.step >= end);
+        if looped {
             self.finish_block(telemetry);
             self.pending = None;
         }
@@ -871,6 +893,103 @@ mod tests {
                 .unwrap();
             assert_eq!(last_end.input, 0.9, "{play_mode:?}");
         }
+    }
+
+    #[test]
+    fn daw_one_shot_intros_preserve_same_bin_peaks_until_actual_looping() {
+        for start_phase in [0.0, 0.125, 0.25, 0.5] {
+            for split in [false, true] {
+                let telemetry = WaveformTelemetry::default();
+                let token = telemetry.request(0, 0, EffectKind::Svf);
+                let mut config = config();
+                config.trigger = crate::modulation::TriggerSource::DawPosition;
+                let doc = &mut config.msegs[0];
+                doc.play_mode = PlayMode::OneShot;
+                doc.time_seconds = 0.017066667;
+                doc.insert_node(0.5, 0.5).unwrap();
+                doc.insert_node(0.50097656, 0.5).unwrap();
+                doc.hold = HoldMode::Loop { start: 1, end: 2 };
+                let step = phase_step(doc, 120.0, 48000.0);
+                let next = phase_next(doc, start_phase, step);
+                assert_eq!(
+                    (start_phase * WAVEFORM_BINS as f64) as usize,
+                    (next * WAVEFORM_BINS as f64) as usize
+                );
+                let mut clock = WaveformClock::default();
+                prepare(&mut clock, &telemetry, &config, start_phase as f32, 0);
+                clock.record_sample(&telemetry, [1.0; 2], [1.0; 2], start_phase);
+                if split {
+                    clock.finish_block(&telemetry);
+                    clock.begin_block(&telemetry);
+                    clock.prepare_segment(
+                        &telemetry,
+                        0,
+                        WaveformTiming {
+                            config: &config,
+                            kind: EffectKind::Svf,
+                            phase: next,
+                            trigger_epoch: 0,
+                            bpm: 120.0,
+                            sample_rate: 48000.0,
+                        },
+                    );
+                }
+                if start_phase >= 0.5 {
+                    clock.sync_position(&telemetry, 1, next);
+                }
+                clock.record_sample(&telemetry, [0.1; 2], [0.1; 2], next);
+                clock.finish_block(&telemetry);
+                let point = telemetry.point(telemetry.head() - 1, token).unwrap();
+                let expected = if start_phase < 0.5 { 1.0 } else { 0.1 };
+                assert_eq!(point.input, expected, "start {start_phase}, split {split}");
+                assert_eq!(point.output, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn daw_one_shot_intro_peaks_survive_a_tempo_change_before_the_loop_return() {
+        let telemetry = WaveformTelemetry::default();
+        let token = telemetry.request(0, 0, EffectKind::Svf);
+        let mut config = config();
+        config.trigger = crate::modulation::TriggerSource::DawPosition;
+        let doc = &mut config.msegs[0];
+        doc.play_mode = PlayMode::OneShot;
+        doc.sync_mode = SyncMode::Beat;
+        doc.beats = 4.0;
+        doc.insert_node(0.5, 0.5).unwrap();
+        doc.insert_node(0.50097656, 0.5).unwrap();
+        doc.hold = HoldMode::Loop { start: 1, end: 2 };
+        let mut clock = WaveformClock::default();
+        for (phase, bpm, peak) in [(0.5003, 120.0, 1.0), (0.5008, 480.0, 0.1)] {
+            clock.begin_block(&telemetry);
+            clock.prepare_segment(
+                &telemetry,
+                0,
+                WaveformTiming {
+                    config: &config,
+                    kind: EffectKind::Svf,
+                    phase,
+                    trigger_epoch: 0,
+                    bpm,
+                    sample_rate: 1000.0,
+                },
+            );
+            clock.record_sample(&telemetry, [peak; 2], [peak; 2], phase);
+            clock.finish_block(&telemetry);
+        }
+        assert_eq!(
+            telemetry.point(telemetry.head() - 1, token).unwrap().input,
+            1.0
+        );
+        let next = phase_next(&config.msegs[0], 0.5008, clock.step);
+        clock.sync_position(&telemetry, 1, next);
+        clock.record_sample(&telemetry, [0.1; 2], [0.1; 2], next);
+        clock.finish_block(&telemetry);
+        assert_eq!(
+            telemetry.point(telemetry.head() - 1, token).unwrap().input,
+            0.1
+        );
     }
 
     #[test]

@@ -38,7 +38,9 @@ impl Session<'_> {
                 Some(EffectHit::Depth) => {
                     Some("Scale modulation; Shift: fine; double-click resets")
                 }
-                Some(EffectHit::Trigger) => Some("Choose what restarts all four curves"),
+                Some(EffectHit::Trigger) => {
+                    Some("Follow DAW position or choose what restarts all four curves")
+                }
                 Some(EffectHit::TriggerRate) => Some("Adjust trigger rate or onset sensitivity"),
                 Some(EffectHit::TriggerAux) => Some("Set the time between accepted audio triggers"),
                 Some(EffectHit::MidiFilter(_)) => Some("Filter MIDI restarts by note or channel"),

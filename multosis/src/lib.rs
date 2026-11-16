@@ -308,11 +308,19 @@ impl Plugin for Multosis {
         let transport = context.transport();
         let playing = transport.playing;
         let bpm = transport.tempo.unwrap_or(120.0);
+        let position = tract_effects::modulation::HostPosition {
+            playing,
+            beats: transport.pos_beats(),
+            seconds: transport.pos_seconds(),
+            bpm: transport
+                .tempo
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(0.0),
+            loop_beats: transport.loop_range_beats(),
+            loop_seconds: transport.loop_range_seconds(),
+        };
 
-        // Reset the sequence on the transport stopped→playing edge.
-        if playing && !self.was_playing {
-            self.engine.restart_transport();
-        }
+        let restart_transport = playing && !self.was_playing;
         self.was_playing = playing;
 
         // A Reset request from the editor resets the sequence.
@@ -355,6 +363,11 @@ impl Plugin for Multosis {
             self.engine.swap_tracks(from, to);
         }
 
+        // Restart against the installed modes after configuration edits and row swaps.
+        if restart_transport {
+            self.engine.restart_transport();
+        }
+
         // Re-report latency if the chain's total has changed (e.g. the user
         // added a Warp Zone row or muted/un-muted one). Hosts that support
         // dynamic latency re-align their PDC; the call is a no-op when the
@@ -376,6 +389,7 @@ impl Plugin for Multosis {
         );
 
         let n = buffer.samples();
+        self.engine.set_host_position(position);
         self.engine
             .set_wave_automation(std::array::from_fn(|row| self.params.waves[row].values()));
         if self.engine.uses_project_waves()

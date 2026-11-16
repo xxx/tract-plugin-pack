@@ -585,7 +585,7 @@ mod tests {
         state.prepare_wave_bank(&config, &snapshot);
         state.select_midi_wave(&config, &snapshot, note(1));
         state.advance_segment(&config, &track, &mut effect, 100, 120.0, 1000.0);
-        state.restart_clock();
+        state.restart_clock(&config);
         assert_eq!(state.midi_wave().unwrap().1, Some(1));
         state.reset();
         state.prepare_wave_bank(&config, &snapshot);

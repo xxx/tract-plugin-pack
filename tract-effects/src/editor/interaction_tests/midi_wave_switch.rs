@@ -312,6 +312,7 @@ fn live_wave_display_keeps_authored_data_and_rejects_old_mapping_readings() {
         detector: None,
         wave: Some((mapping, Some(1))),
         wave_automation: [0; 4],
+        position_sync: false,
     };
     clock.publish(&telemetry, 0, &frame);
     let playing = draw(&mut h);

@@ -61,6 +61,9 @@ pub struct Processor {
 }
 
 impl Processor {
+    pub fn set_host_position(&mut self, position: tract_effects::modulation::HostPosition) {
+        self.state.set_host_position(position);
+    }
     /// Construction and sample-rate setup are restricted to initialize/background work.
     pub fn new(key: PrepareKey, track: &TrackEffect, modulation: TrackModulation) -> Self {
         let mut effect = EffectInstance::new(key.kind);
@@ -124,7 +127,7 @@ impl Processor {
         }
         self.effect.set_bpm(bpm as f32);
         for (i, _) in self.effect.parameters().iter().enumerate() {
-            if !(self.modulation.smoothed_parameter(track.kind, i)
+            if !(self.modulation.continuous_parameter(track.kind, i)
                 && self.state.holds_smoothed_parameter(track.kind, i))
             {
                 self.effect.set_param(i, track.params[i]);
@@ -162,19 +165,23 @@ impl Processor {
         let sample_rate = f32::from_bits(self.key.sample_rate_bits) as f64;
         if let Some(telemetry) = &self.waveform_telemetry {
             let request = self.waveform.request();
-            self.waveform.prepare_segment_with_curve(
-                &telemetry.waveform,
-                0,
-                WaveformTiming {
-                    config: &self.modulation,
-                    kind: self.key.kind,
-                    phase: self.state.precise_phase(request.slot),
-                    trigger_epoch: self.state.trigger_epoch(),
-                    bpm,
-                    sample_rate,
-                },
-                self.state.effective_mseg(&self.modulation, request.slot),
-            );
+            if !self.state.waveform_running(&self.modulation, request.slot) {
+                self.waveform.pause();
+            } else {
+                self.waveform.prepare_segment_with_curve(
+                    &telemetry.waveform,
+                    0,
+                    WaveformTiming {
+                        config: &self.modulation,
+                        kind: self.key.kind,
+                        phase: self.state.waveform_phase(&self.modulation, request.slot),
+                        trigger_epoch: self.state.capture_epoch(&self.modulation, request.slot),
+                        bpm,
+                        sample_rate,
+                    },
+                    self.state.effective_mseg(&self.modulation, request.slot),
+                );
+            }
         }
         self.state.advance_segment(
             &self.modulation,
@@ -266,6 +273,7 @@ impl Processor {
         }
         self.state
             .process_smoothing_sample(&self.modulation, &mut self.effect);
+        self.latency = self.effect.latency_samples();
         let dry = self.dry.next(input, self.latency);
         let output = if self.key.kind == EffectKind::None {
             dry
@@ -285,6 +293,12 @@ impl Processor {
         if self.waveform.active()
             && let Some(telemetry) = &self.waveform_telemetry
         {
+            self.waveform.sync_position(
+                &telemetry.waveform,
+                self.state
+                    .capture_epoch(&self.modulation, self.waveform.request().slot),
+                self.state.precise_phase(self.waveform.request().slot),
+            );
             self.waveform.record_sample_with_sidechain(
                 &telemetry.waveform,
                 input,
@@ -310,7 +324,7 @@ impl Processor {
     }
     pub fn retrigger_modulation(&mut self) {
         self.skip_precise_sample = false;
-        self.state.restart_clock();
+        self.state.restart_clock(&self.modulation);
     }
     pub fn reset(&mut self) {
         self.skip_precise_sample = false;
@@ -340,6 +354,8 @@ impl Processor {
     }
 }
 
+#[cfg(test)]
+mod position_tests;
 #[cfg(test)]
 mod wave_tests;
 

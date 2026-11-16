@@ -10,12 +10,14 @@ use tiny_skia_widgets::{
 
 mod audio_trigger;
 mod automation;
+mod position;
 mod precise;
 pub use audio_trigger::{
     AudioTriggerSettings, DetectorInput, DetectorReading, FILTER_MAX_HZ, FILTER_MIN_HZ,
     LEVEL_MAX_DB, LEVEL_MIN_DB,
 };
 pub use automation::WAVE_AUTOMATION_ITEMS;
+pub use position::HostPosition;
 mod smoothing;
 pub use smoothing::{MAX_SMOOTH_MS, normalized_smooth_ms, smooth_from_norm, smooth_to_norm};
 pub(crate) use smoothing::{phase_next, phase_step};
@@ -175,6 +177,7 @@ pub enum TriggerSource {
         threshold: f32,
         hold_ms: f32,
     },
+    DawPosition,
 }
 
 mod midi;
@@ -574,6 +577,8 @@ pub struct ModulationState {
     wave: wave::MidiWaveRuntime,
     automated: automation::AutomatedWaves,
     pending_wave: Option<usize>,
+    position: position::PositionClock,
+    capture_epochs: [u64; 4],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -607,6 +612,8 @@ impl Default for ModulationState {
             wave: wave::MidiWaveRuntime::default(),
             automated: automation::AutomatedWaves::default(),
             pending_wave: None,
+            position: position::PositionClock::default(),
+            capture_epochs: [0; 4],
         }
     }
 }
@@ -624,11 +631,17 @@ impl ModulationState {
         self.wave.reset();
         self.automated.reset();
         self.pending_wave = None;
+        self.position.reset();
     }
 
     /// Restart all four envelopes and mark this block as triggered.
     pub fn trigger(&mut self) {
         self.trigger_epoch = self.trigger_epoch.wrapping_add(1);
+        if self.position.active {
+            for epoch in &mut self.capture_epochs {
+                *epoch = epoch.wrapping_add(1);
+            }
+        }
         self.phases = [0.0; 4];
         self.fired = true;
         self.smooth.trigger();
@@ -660,6 +673,10 @@ impl ModulationState {
         self.precise.prepare(config.trigger, sample_rate);
         self.precise.configure_audio(config.audio_trigger);
         let block_len = left.len().min(right.len());
+        if block_len > 0 {
+            self.position
+                .prepare(config.trigger == TriggerSource::DawPosition, sample_rate);
+        }
         let sr = sample_rate as f32;
         match config.trigger {
             TriggerSource::FreeHz { hz } if hz > 0.0 => {
@@ -718,7 +735,10 @@ impl ModulationState {
             self.output_kind = Some(track.kind);
         }
         self.restore_released_targets(config, track, effect);
-        if config.smoothing_mask(track.kind) != 0 && sample_rate.is_finite() && sample_rate > 0.0 {
+        if config.trigger == TriggerSource::DawPosition && !self.position.active {
+            return;
+        }
+        if config.continuous_mask(track.kind) != 0 && sample_rate.is_finite() && sample_rate > 0.0 {
             self.prepare_smoothing(config, track, effect, seg_len, bpm, sample_rate);
             return;
         }

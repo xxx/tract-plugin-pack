@@ -18,7 +18,7 @@ Minitosis runs one Multosis effect continuously, with three assignable MSEGs and
 2. Open the effect picker and select an effect. Effects are grouped into the same families as Multosis.
 3. Set the effect's parameters. Their names, ranges, and defaults match the [Multosis effect reference](../multosis/multosis-manual.md).
 4. To modulate a parameter, choose MSEG **1**, **2**, or **3**, select a **Target**, and change **Depth** from its default zero. At **0% Depth**, the MSEG has no effect on the target, even while the curve is running. Try **+30%** or **−30%** for a sweep in either direction. A hint in the modulation header reminds you when Depth is zero.
-5. Draw a curve and adjust **Time/Beat** and **Length**. All four envelopes continue running while the host transport is stopped.
+5. Draw a curve and adjust **Time/Beat** and **Length**. Free-running modes continue while the host transport is stopped; DAW-position mode holds the reported cursor.
 
 ## Effect controls
 
@@ -104,8 +104,14 @@ Trigger choices apply to all four envelopes:
 - **MIDI note:** restarts at matching note-on offsets, with Note (Any/0–127) and
   Ch. (Any/1–16) filters. Route MIDI to the plugin's note input. Note-off does not
   gate or release the envelopes; see [MIDI retriggering](../mseg-editor.md#midi-retriggering).
+- **DAW position:** follows the song timeline using each curve's Time/Beat length.
+  Seeks and host loops relocate the phase; stopped or unavailable clocks pause
+  waveform capture. Geometry stays editable. See [DAW-position playback](../mseg-editor.md#daw-position-playback).
 
-Time clocks use seconds. Beat clocks follow host tempo, with 120 BPM used when tempo is unavailable. One-shot envelopes hold their final value until retriggered. There are no sequencer cell triggers.
+Time clocks use seconds. Free Beat clocks use 120 BPM when tempo is unavailable;
+DAW Beat clocks hold between reported positions without a tempo. One-shot
+envelopes hold their final value until retriggered; in DAW mode their origin is
+timeline zero. There are no sequencer cell triggers.
 
 ## Automation and project state
 

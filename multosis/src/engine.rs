@@ -53,6 +53,9 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
+    pub fn set_host_position(&mut self, position: tract_effects::modulation::HostPosition) {
+        self.modulation.set_host_position(position);
+    }
     pub fn uses_midi_waves(&self) -> bool {
         self.modulation.uses_midi_waves()
     }
@@ -311,6 +314,13 @@ impl AudioEngine {
                 cur_r = amp * lane_r;
             }
             if self.waveform.active() && self.waveform.request().row == r {
+                self.waveform.sync_position(
+                    &self.telemetry.waveform,
+                    self.modulation
+                        .capture_epoch(r, self.waveform.request().slot),
+                    self.modulation
+                        .precise_phase(r, self.waveform.request().slot),
+                );
                 self.waveform.record_sample_with_sidechain(
                     &self.telemetry.waveform,
                     input,
@@ -650,6 +660,8 @@ impl Default for AudioEngine {
 }
 
 #[cfg(test)]
+mod position_tests;
+#[cfg(test)]
 mod wave_tests;
 
 #[cfg(test)]
@@ -700,8 +712,8 @@ mod tests {
         engine
     }
 
-    fn midi_mix_engine() -> AudioEngine {
-        let mut engine = midi_engine(0.0);
+    fn midi_mix_engine() -> Box<AudioEngine> {
+        let mut engine = Box::new(midi_engine(0.0));
         let mut config = std::array::from_fn(|row| engine.modulation.config_for_test(row).clone());
         for curve in &mut config[0].msegs {
             for node in &mut curve.nodes {

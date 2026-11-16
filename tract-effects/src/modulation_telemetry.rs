@@ -2,7 +2,7 @@
 use crate::effects::{EffectKind, MAX_EFFECT_PARAMS};
 use crate::modulation::{AudioTriggerSettings, DetectorInput, DetectorReading};
 use crate::modulation::{MidiWaveMapping, ModulationState, ModulationTarget, TrackModulation};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 pub const TRACE_CAPACITY: usize = 512;
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -16,6 +16,7 @@ pub struct ModulationFrame {
     pub detector: Option<DetectorReading>,
     pub wave: Option<(MidiWaveMapping, Option<u8>)>,
     pub wave_automation: [u8; 4],
+    pub position_sync: bool,
 }
 impl ModulationFrame {
     pub fn capture(kind: EffectKind, config: &TrackModulation, state: &ModulationState) -> Self {
@@ -29,10 +30,13 @@ impl ModulationFrame {
             detector: state.detector_reading(),
             wave: state.midi_wave(),
             wave_automation: state.wave_automation(),
+            position_sync: config.trigger == crate::modulation::TriggerSource::DawPosition,
         }
     }
     pub fn matches(&self, kind: EffectKind, config: &TrackModulation) -> bool {
         self.kind == kind
+            && self.position_sync
+                == (config.trigger == crate::modulation::TriggerSource::DawPosition)
             && self.targets == config.targets
             && self.wave.map(|(mapping, _)| mapping)
                 == config.wave_switch.filter(|mapping| mapping.is_valid())
@@ -124,6 +128,7 @@ struct AtomicFrame {
     detector_input: AtomicU32,
     wave: AtomicU32,
     wave_automation: AtomicU32,
+    position_sync: AtomicBool,
 }
 impl Default for AtomicFrame {
     fn default() -> Self {
@@ -139,6 +144,7 @@ impl Default for AtomicFrame {
             detector_input: AtomicU32::new(0),
             wave: AtomicU32::new(0),
             wave_automation: AtomicU32::new(0),
+            position_sync: AtomicBool::new(false),
         }
     }
 }
@@ -174,6 +180,8 @@ impl AtomicFrame {
         self.wave.store(wave_tag(frame.wave), Ordering::Release);
         self.wave_automation
             .store(u32::from_le_bytes(frame.wave_automation), Ordering::Release);
+        self.position_sync
+            .store(frame.position_sync, Ordering::Release);
         self.stamp.store(stamp, Ordering::Release);
     }
     fn load(&self, token: u64) -> Option<ModulationFrame> {
@@ -197,6 +205,7 @@ impl AtomicFrame {
         };
         let wave = read_wave_tag(self.wave.load(Ordering::Acquire));
         let wave_automation = self.wave_automation.load(Ordering::Acquire).to_le_bytes();
+        let position_sync = self.position_sync.load(Ordering::Acquire);
         if self.stamp.load(Ordering::Acquire) != stamp || actual_token != token {
             return None;
         }
@@ -222,6 +231,7 @@ impl AtomicFrame {
             }),
             wave,
             wave_automation,
+            position_sync,
         })
     }
 }
@@ -262,6 +272,16 @@ impl Default for ModulationTelemetry {
 }
 impl ModulationTelemetry {
     pub fn request(&self, row: usize, slot: usize, kind: EffectKind, trace: bool) -> u64 {
+        self.request_for_clock(row, slot, kind, trace, false)
+    }
+    pub fn request_for_clock(
+        &self,
+        row: usize,
+        slot: usize,
+        kind: EffectKind,
+        trace: bool,
+        position_sync: bool,
+    ) -> u64 {
         if row >= 16 || slot >= 4 {
             return 0;
         }
@@ -269,7 +289,8 @@ impl ModulationTelemetry {
             | ((slot as u64) << 1)
             | ((row as u64) << 3)
             | ((kind as u64) << 7)
-            | ((trace as u64) << 23);
+            | ((trace as u64) << 23)
+            | ((position_sync as u64) << 24);
         let current = self.request.load(Ordering::Acquire);
         if current as u32 == key as u32 {
             return current;
@@ -331,10 +352,14 @@ pub struct TraceRequest {
     pub slot: usize,
     pub kind: u32,
     pub trace: bool,
+    pub position_sync: bool,
 }
 impl TraceRequest {
     pub fn matches(self, row: usize, kind: EffectKind) -> bool {
         self.token != 0 && self.row == row && self.kind == kind as u32
+    }
+    fn accepts(self, row: usize, frame: &ModulationFrame) -> bool {
+        self.matches(row, frame.kind) && self.position_sync == frame.position_sync
     }
 }
 #[derive(Default)]
@@ -362,6 +387,7 @@ impl TraceClock {
             slot: ((token >> 1) & 3) as usize,
             kind: ((token >> 7) & 0xffff) as u32,
             trace: token & (1 << 23) != 0,
+            position_sync: token & (1 << 24) != 0,
         };
         self.request
     }
@@ -377,7 +403,7 @@ impl TraceClock {
         emit
     }
     pub fn record(&self, telemetry: &ModulationTelemetry, row: usize, frame: &ModulationFrame) {
-        if self.request.matches(row, frame.kind) {
+        if self.request.accepts(row, frame) {
             telemetry.record(
                 self.request.token,
                 TracePoint {
@@ -388,7 +414,7 @@ impl TraceClock {
         }
     }
     pub fn publish(&self, telemetry: &ModulationTelemetry, row: usize, frame: &ModulationFrame) {
-        if self.request.matches(row, frame.kind) {
+        if self.request.accepts(row, frame) {
             telemetry.latest.store(self.request.token, frame);
         }
     }
@@ -397,6 +423,26 @@ impl TraceClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn position_mode_tags_round_trip_and_reject_measurements_from_the_previous_clock() {
+        let mut config = TrackModulation {
+            trigger: crate::modulation::TriggerSource::DawPosition,
+            ..TrackModulation::default()
+        };
+        let state = ModulationState::default();
+        let frame = ModulationFrame::capture(EffectKind::Svf, &config, &state);
+        let telemetry = ModulationTelemetry::default();
+        let token = telemetry.request_for_clock(0, 0, EffectKind::Svf, false, true);
+        let mut clock = TraceClock::default();
+        clock.begin_block(&telemetry, 48000.0);
+        clock.publish(&telemetry, 0, &frame);
+        assert_eq!(telemetry.frame(token), Some(frame));
+        assert!(frame.matches(EffectKind::Svf, &config));
+        config.trigger = crate::modulation::TriggerSource::Free;
+        assert!(!frame.matches(EffectKind::Svf, &config));
+        let free = ModulationFrame::capture(EffectKind::Svf, &config, &state);
+        assert!(free.matches(EffectKind::Svf, &config));
+    }
     fn frame() -> ModulationFrame {
         ModulationFrame {
             kind: EffectKind::Svf,
@@ -408,6 +454,7 @@ mod tests {
             detector: None,
             wave: None,
             wave_automation: [0, 1, 4, 8],
+            position_sync: false,
         }
     }
     #[test]

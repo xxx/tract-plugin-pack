@@ -151,6 +151,7 @@ impl PreciseTrigger {
 impl ModulationState {
     pub fn inherit_precise_timing(&mut self, previous: &Self) {
         self.precise = previous.precise;
+        self.position = previous.position;
     }
 }
 

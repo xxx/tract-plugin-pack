@@ -1540,7 +1540,7 @@ dependencies = [
 [[package]]
 name = "nih_plug"
 version = "0.0.0"
-source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#c949b222c88c4b033e6335224a386203bf2468b0"
+source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#32f72ccc8194cb79ada455be6d0b8753ed638c6a"
 dependencies = [
  "anyhow",
  "anymap3",
@@ -1577,7 +1577,7 @@ dependencies = [
 [[package]]
 name = "nih_plug_derive"
 version = "0.1.0"
-source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#c949b222c88c4b033e6335224a386203bf2468b0"
+source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#32f72ccc8194cb79ada455be6d0b8753ed638c6a"
 dependencies = [
  "proc-macro2",
  "quote",
