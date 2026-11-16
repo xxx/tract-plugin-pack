@@ -9,6 +9,11 @@ use tiny_skia_widgets::{
 };
 
 mod audio_trigger;
+mod follower;
+pub use follower::{
+    FOLLOWER_ATTACK_MAX_MS, FOLLOWER_GAIN_DB, FOLLOWER_HOLD_MAX_MS, FOLLOWER_RELEASE_MAX_MS,
+    FollowerConfig, FollowerMode, FollowerReading, FollowerRoute,
+};
 mod automation;
 mod position;
 mod precise;
@@ -207,6 +212,8 @@ pub struct TrackModulation {
     pub wave_switch: Option<MidiWaveMapping>,
     #[serde(default, skip_serializing_if = "AudioTriggerSettings::is_default")]
     pub audio_trigger: AudioTriggerSettings,
+    #[serde(default, skip_serializing_if = "FollowerConfig::is_default")]
+    pub follower: FollowerConfig,
     /// The event that resets all four of this row's MSEG phases.
     #[serde(default)]
     pub trigger: TriggerSource,
@@ -380,6 +387,7 @@ impl TrackModulation {
             smooth_ms: [0.0; 4],
             wave_switch: None,
             audio_trigger: AudioTriggerSettings::default(),
+            follower: FollowerConfig::default(),
             trigger: TriggerSource::Free,
         }
     }
@@ -426,6 +434,8 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             #[serde(default)]
             audio_trigger: AudioTriggerSettings,
             #[serde(default)]
+            follower: FollowerConfig,
+            #[serde(default)]
             trigger: TriggerSource,
         }
         let h = Helper::deserialize(deserializer)?;
@@ -460,6 +470,7 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             depths,
             trigger: h.trigger,
             audio_trigger: h.audio_trigger.normalized(),
+            follower: h.follower.normalized(),
             smooth_ms: std::array::from_fn(|i| {
                 h.smooth_ms
                     .get(i)
@@ -579,6 +590,7 @@ pub struct ModulationState {
     pending_wave: Option<usize>,
     position: position::PositionClock,
     capture_epochs: [u64; 4],
+    follower: Box<follower::FollowerRuntime>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -614,6 +626,7 @@ impl Default for ModulationState {
             pending_wave: None,
             position: position::PositionClock::default(),
             capture_epochs: [0; 4],
+            follower: Box::default(),
         }
     }
 }
@@ -632,6 +645,7 @@ impl ModulationState {
         self.automated.reset();
         self.pending_wave = None;
         self.position.reset();
+        self.follower.reset();
     }
 
     /// Restart all four envelopes and mark this block as triggered.
@@ -674,6 +688,12 @@ impl ModulationState {
         self.precise.configure_audio(config.audio_trigger);
         let block_len = left.len().min(right.len());
         if block_len > 0 {
+            let changed = self.follower.prepare(config.follower, sample_rate);
+            for slot in 0..4 {
+                if changed & (1 << slot) != 0 {
+                    self.smooth.wave_changed(slot);
+                }
+            }
             self.position
                 .prepare(config.trigger == TriggerSource::DawPosition, sample_rate);
         }
@@ -742,6 +762,7 @@ impl ModulationState {
             self.prepare_smoothing(config, track, effect, seg_len, bpm, sample_rate);
             return;
         }
+        let continuous_mix = self.smooth.mix_value;
         self.smooth.deactivate();
         self.parameter_norms.fill(None);
         self.mix_slot = None;
@@ -795,7 +816,10 @@ impl ModulationState {
         if mix.is_some() || self.mix.is_some() {
             let target = mix.unwrap_or(track.mix).clamp(0.0, 1.0);
             // The previous endpoint follows the clock even if the row skipped audio.
-            let current = self.mix.as_ref().map_or(track.mix, |ramp| ramp.target);
+            let current = self
+                .mix
+                .as_ref()
+                .map_or(continuous_mix.unwrap_or(track.mix), |ramp| ramp.target);
             self.mix = if mix.is_none() && current == target {
                 None
             } else {

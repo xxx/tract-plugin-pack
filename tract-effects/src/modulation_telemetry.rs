@@ -3,6 +3,7 @@ use crate::effects::{EffectKind, MAX_EFFECT_PARAMS};
 use crate::modulation::{AudioTriggerSettings, DetectorInput, DetectorReading};
 use crate::modulation::{MidiWaveMapping, ModulationState, ModulationTarget, TrackModulation};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+mod follower;
 
 pub const TRACE_CAPACITY: usize = 512;
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -17,6 +18,7 @@ pub struct ModulationFrame {
     pub wave: Option<(MidiWaveMapping, Option<u8>)>,
     pub wave_automation: [u8; 4],
     pub position_sync: bool,
+    pub follower: Option<crate::modulation::FollowerReading>,
 }
 impl ModulationFrame {
     pub fn capture(kind: EffectKind, config: &TrackModulation, state: &ModulationState) -> Self {
@@ -31,10 +33,13 @@ impl ModulationFrame {
             wave: state.midi_wave(),
             wave_automation: state.wave_automation(),
             position_sync: config.trigger == crate::modulation::TriggerSource::DawPosition,
+            follower: state.follower_reading(),
         }
     }
     pub fn matches(&self, kind: EffectKind, config: &TrackModulation) -> bool {
         self.kind == kind
+            && self.follower.map(|reading| reading.config)
+                == (config.follower.mask() != 0).then(|| config.follower.normalized())
             && self.position_sync
                 == (config.trigger == crate::modulation::TriggerSource::DawPosition)
             && self.targets == config.targets
@@ -129,6 +134,7 @@ struct AtomicFrame {
     wave: AtomicU32,
     wave_automation: AtomicU32,
     position_sync: AtomicBool,
+    follower: follower::AtomicFollower,
 }
 impl Default for AtomicFrame {
     fn default() -> Self {
@@ -145,6 +151,7 @@ impl Default for AtomicFrame {
             wave: AtomicU32::new(0),
             wave_automation: AtomicU32::new(0),
             position_sync: AtomicBool::new(false),
+            follower: follower::AtomicFollower::default(),
         }
     }
 }
@@ -182,6 +189,7 @@ impl AtomicFrame {
             .store(u32::from_le_bytes(frame.wave_automation), Ordering::Release);
         self.position_sync
             .store(frame.position_sync, Ordering::Release);
+        self.follower.store(frame.follower);
         self.stamp.store(stamp, Ordering::Release);
     }
     fn load(&self, token: u64) -> Option<ModulationFrame> {
@@ -206,6 +214,7 @@ impl AtomicFrame {
         let wave = read_wave_tag(self.wave.load(Ordering::Acquire));
         let wave_automation = self.wave_automation.load(Ordering::Acquire).to_le_bytes();
         let position_sync = self.position_sync.load(Ordering::Acquire);
+        let follower = self.follower.load();
         if self.stamp.load(Ordering::Acquire) != stamp || actual_token != token {
             return None;
         }
@@ -232,6 +241,7 @@ impl AtomicFrame {
             wave,
             wave_automation,
             position_sync,
+            follower,
         })
     }
 }
@@ -282,6 +292,17 @@ impl ModulationTelemetry {
         trace: bool,
         position_sync: bool,
     ) -> u64 {
+        self.request_for_sources(row, slot, kind, trace, position_sync, 0)
+    }
+    pub fn request_for_sources(
+        &self,
+        row: usize,
+        slot: usize,
+        kind: EffectKind,
+        trace: bool,
+        position_sync: bool,
+        follower: u8,
+    ) -> u64 {
         if row >= 16 || slot >= 4 {
             return 0;
         }
@@ -290,7 +311,8 @@ impl ModulationTelemetry {
             | ((row as u64) << 3)
             | ((kind as u64) << 7)
             | ((trace as u64) << 23)
-            | ((position_sync as u64) << 24);
+            | ((position_sync as u64) << 24)
+            | (((follower & 7) as u64) << 25);
         let current = self.request.load(Ordering::Acquire);
         if current as u32 == key as u32 {
             return current;
@@ -353,13 +375,19 @@ pub struct TraceRequest {
     pub kind: u32,
     pub trace: bool,
     pub position_sync: bool,
+    pub follower: u8,
 }
 impl TraceRequest {
     pub fn matches(self, row: usize, kind: EffectKind) -> bool {
         self.token != 0 && self.row == row && self.kind == kind as u32
     }
     fn accepts(self, row: usize, frame: &ModulationFrame) -> bool {
-        self.matches(row, frame.kind) && self.position_sync == frame.position_sync
+        self.matches(row, frame.kind)
+            && self.position_sync == frame.position_sync
+            && self.follower
+                == frame
+                    .follower
+                    .map_or(0, |reading| reading.config.request_key(self.slot))
     }
 }
 #[derive(Default)]
@@ -388,6 +416,7 @@ impl TraceClock {
             kind: ((token >> 7) & 0xffff) as u32,
             trace: token & (1 << 23) != 0,
             position_sync: token & (1 << 24) != 0,
+            follower: ((token >> 25) & 7) as u8,
         };
         self.request
     }
@@ -455,6 +484,7 @@ mod tests {
             wave: None,
             wave_automation: [0, 1, 4, 8],
             position_sync: false,
+            follower: None,
         }
     }
     #[test]
@@ -486,6 +516,106 @@ mod tests {
         assert_ne!(replaced, next);
         assert!(telemetry.frame(replaced).is_none());
         assert!(telemetry.point(0, replaced).is_none());
+    }
+
+    #[test]
+    fn follower_readings_round_trip_and_source_changes_reject_late_measurements() {
+        use crate::modulation::{FollowerConfig, FollowerMode, FollowerReading, FollowerRoute};
+        let telemetry = ModulationTelemetry::default();
+        let mut clock = TraceClock::default();
+        let mut previous = frame();
+        for input in [DetectorInput::Main, DetectorInput::Sidechain] {
+            for mode in [
+                FollowerMode::Follow,
+                FollowerMode::Add,
+                FollowerMode::Multiply,
+            ] {
+                let config = TrackModulation {
+                    targets: [None; 3],
+                    follower: FollowerConfig {
+                        detector: AudioTriggerSettings {
+                            input,
+                            level_db: (input == DetectorInput::Main).then_some(-30.0),
+                            highpass_hz: Some(73.5),
+                            lowpass_hz: (input == DetectorInput::Sidechain).then_some(15000.0),
+                        },
+                        attack_ms: 7.0,
+                        hold_ms: 38.0,
+                        release_ms: 127.5,
+                        gain_db: -4.25,
+                        routes: [
+                            FollowerRoute {
+                                enabled: true,
+                                amount: 0.125,
+                                ..FollowerRoute::default()
+                            },
+                            FollowerRoute {
+                                enabled: true,
+                                mode,
+                                amount: if mode == FollowerMode::Add { -0.5 } else { 0.5 },
+                            },
+                            FollowerRoute {
+                                enabled: false,
+                                mode: FollowerMode::Add,
+                                amount: -1.25,
+                            },
+                            FollowerRoute {
+                                enabled: true,
+                                mode: FollowerMode::Multiply,
+                                amount: 1.75,
+                            },
+                        ],
+                    },
+                    ..TrackModulation::default()
+                };
+                let token = telemetry.request_for_sources(
+                    0,
+                    1,
+                    EffectKind::Svf,
+                    true,
+                    false,
+                    config.follower.request_key(1),
+                );
+                clock.begin_block(&telemetry, 48000.0);
+                let head = telemetry.head();
+                clock.publish(&telemetry, 0, &previous);
+                clock.record(&telemetry, 0, &previous);
+                assert!(telemetry.frame(token).is_none());
+                assert_eq!(telemetry.head(), head);
+                let mut value = frame();
+                value.follower = Some(FollowerReading {
+                    level: 0.125,
+                    envelope: 0.375,
+                    config: config.follower,
+                });
+                clock.publish(&telemetry, 0, &value);
+                clock.record(&telemetry, 0, &value);
+                let actual = telemetry.frame(token).unwrap();
+                assert_eq!(actual, value);
+                assert!(actual.matches(EffectKind::Svf, &config));
+                let mut changed = config;
+                changed.follower.gain_db += 1.0;
+                assert!(!actual.matches(EffectKind::Svf, &changed));
+                assert_eq!(
+                    telemetry.point(head, token),
+                    Some(TracePoint {
+                        phase: 0.25,
+                        value: 0.75
+                    })
+                );
+                assert!(telemetry.point(head.wrapping_sub(1), token).is_none());
+                previous = value;
+            }
+        }
+        let token = telemetry.request(0, 1, EffectKind::Svf, true);
+        clock.begin_block(&telemetry, 48000.0);
+        let head = telemetry.head();
+        clock.publish(&telemetry, 0, &previous);
+        clock.record(&telemetry, 0, &previous);
+        assert!(telemetry.frame(token).is_none());
+        assert_eq!(telemetry.head(), head);
+        clock.publish(&telemetry, 0, &frame());
+        assert_eq!(telemetry.frame(token), Some(frame()));
     }
 
     #[test]

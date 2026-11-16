@@ -49,7 +49,7 @@ impl TrackModulation {
         if self.trigger == TriggerSource::DawPosition {
             15
         } else {
-            self.smoothing_mask(kind)
+            self.smoothing_mask(kind) | self.follower.mask()
         }
     }
     pub fn continuous_parameter(&self, kind: EffectKind, index: usize) -> bool {
@@ -326,6 +326,7 @@ impl ModulationState {
         self.smooth.mask = mask;
         self.smooth.sample_rate = sr;
         self.smooth.period = (sr / 1000.0).max(1.0);
+        let continuous_mix = self.smooth.mix_value;
         self.smooth.mix_value = None;
         self.parameter_norms.fill(None);
         self.mix_slot = None;
@@ -373,9 +374,14 @@ impl ModulationState {
                     slot.value = if self.output_valid[k] {
                         self.outputs[k] as f64
                     } else {
-                        value_at_phase(doc, slot.phase as f32) as f64
+                        self.follower
+                            .combine(k, value_at_phase(doc, slot.phase as f32))
+                            as f64
                     };
-                    slot.raw = value_at_phase(doc, slot.phase as f32).clamp(0.0, 1.0);
+                    slot.raw = self
+                        .follower
+                        .combine(k, value_at_phase(doc, slot.phase as f32))
+                        .clamp(0.0, 1.0);
                     slot.force_raw = true;
                     slot.force_apply = true;
                     slot.held = None;
@@ -470,7 +476,10 @@ impl ModulationState {
             self.mix = None;
         } else if legacy_mix.is_some() || self.mix.is_some() {
             let target = legacy_mix.unwrap_or(track.mix).clamp(0.0, 1.0);
-            let current = self.mix.as_ref().map_or(track.mix, |r| r.target);
+            let current = self
+                .mix
+                .as_ref()
+                .map_or(continuous_mix.unwrap_or(track.mix), |r| r.target);
             self.mix = if legacy_mix.is_none() && current == target {
                 None
             } else {
@@ -531,8 +540,16 @@ impl ModulationState {
             let wrapped = next < slot.phase;
             slot.phase = next;
             self.phases[k] = next as f32;
-            if self.position.active || tick || slot.force_raw || wrapped {
-                slot.raw = value_at_phase(doc, next as f32).clamp(0.0, 1.0);
+            if self.position.active
+                || self.follower.config.routes[k].enabled
+                || tick
+                || slot.force_raw
+                || wrapped
+            {
+                slot.raw = self
+                    .follower
+                    .combine(k, value_at_phase(doc, next as f32))
+                    .clamp(0.0, 1.0);
                 slot.force_raw = false;
             }
             slot.value += slot.gain * (slot.raw as f64 - slot.value);

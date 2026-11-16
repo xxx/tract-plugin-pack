@@ -171,12 +171,13 @@ impl LiveSource {
         trace: bool,
         wave_automation: [u8; 4],
     ) {
-        let token = self.telemetry.request_for_clock(
+        let token = self.telemetry.request_for_sources(
             self.row,
             slot,
             kind,
             trace,
             config.trigger == crate::modulation::TriggerSource::DawPosition,
+            config.follower.normalized().request_key(slot),
         );
         if token != self.token {
             self.bins.fill(None);
@@ -223,6 +224,7 @@ impl EffectEditor {
         }
         if self.live.is_some() {
             self.cancel_detector();
+            self.follower.close();
             self.wave_midi.close();
         }
         self.disconnect_live();

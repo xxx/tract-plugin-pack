@@ -236,6 +236,10 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                         "Waves beside playback opens MIDI and host automation setup. Eight notes select Project slots; each curve's Wave lane overrides MIDI. Choose Drawn/MIDI and MIDI Off to edit geometry. Playback ignores saved hold markers while switched.",
                     ),
                     animated(
+                        "Follow",
+                        "Route audio level to Amp/1/2/3. Follow replaces the curve source; Add/Multiply combine them. Mode/Amount belong to this curve; input, filters, Gain and Attack/Hold/Release are shared. Reset response keeps routes. The white trace and meters show actual audio-driven values; geometry stays editable.",
+                    ),
+                    animated(
                         "Ctrl/Cmd+Z",
                         "Undo in Multosis/Minitosis; Shift+Z or Ctrl/Cmd+Y redoes an edit.",
                     ),

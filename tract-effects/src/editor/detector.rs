@@ -18,21 +18,21 @@ impl DetectorField {
             Self::Lowpass => "Low-pass",
         }
     }
-    fn value(self, settings: AudioTriggerSettings) -> Option<f32> {
+    pub(super) fn value(self, settings: AudioTriggerSettings) -> Option<f32> {
         match self {
             Self::Level => settings.level_db,
             Self::Highpass => settings.highpass_hz,
             Self::Lowpass => settings.lowpass_hz,
         }
     }
-    fn set(self, settings: &mut AudioTriggerSettings, value: Option<f32>) {
+    pub(super) fn set(self, settings: &mut AudioTriggerSettings, value: Option<f32>) {
         match self {
             Self::Level => settings.level_db = value,
             Self::Highpass => settings.highpass_hz = value,
             Self::Lowpass => settings.lowpass_hz = value,
         }
     }
-    fn norm(self, value: Option<f32>) -> f32 {
+    pub(super) fn norm(self, value: Option<f32>) -> f32 {
         value.map_or(0.0, |value| {
             0.05 + 0.95
                 * match self {
@@ -46,7 +46,7 @@ impl DetectorField {
                 }
         })
     }
-    fn value_at_norm(self, norm: f32) -> Option<f32> {
+    pub(super) fn value_at_norm(self, norm: f32) -> Option<f32> {
         if norm < 0.025 {
             return None;
         }
@@ -61,7 +61,7 @@ impl DetectorField {
             ),
         })
     }
-    fn parse(self, text: &str) -> Option<Option<f32>> {
+    pub(super) fn parse(self, text: &str) -> Option<Option<f32>> {
         let text = text.trim();
         if text.eq_ignore_ascii_case("off") {
             return Some(None);
@@ -83,7 +83,7 @@ impl DetectorField {
         }
         (lo..=hi).contains(&value).then_some(Some(value))
     }
-    fn display(self, value: Option<f32>) -> String {
+    pub(super) fn display(self, value: Option<f32>) -> String {
         value.map_or_else(
             || "Off".into(),
             |value| match self {

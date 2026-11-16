@@ -5,6 +5,7 @@ use crate::modulation::{ModulationTarget, TrackModulation, TriggerSource};
 use tiny_skia_widgets as widgets;
 
 mod detector;
+mod follower;
 mod help;
 mod live;
 mod midi;
@@ -112,6 +113,7 @@ pub struct EffectEditor {
     pitch_grid_binding: Option<pitch_grid::PitchGridBinding>,
     wave_midi: wave_midi::Panel,
     wave_automation: Option<[u8; 4]>,
+    follower: follower::Panel,
 }
 
 impl Default for EffectEditor {
@@ -162,6 +164,7 @@ impl EffectEditor {
             pitch_grid_binding: None,
             wave_midi: wave_midi::Panel::default(),
             wave_automation: None,
+            follower: follower::Panel::default(),
         }
     }
 
@@ -200,6 +203,7 @@ impl EffectEditor {
 
     /// End input tied to old window geometry without discarding editor preferences.
     pub fn prepare_resize(&mut self, backing_scale: f32) {
+        self.follower.close();
         self.wave_midi.close();
         self.cancel_detector();
         self.effect_dial_drag.end_drag();
@@ -214,19 +218,23 @@ impl EffectEditor {
 
     /// Commit a typed value before focus moves to a host-owned control.
     pub fn finish_text_edit(&mut self, context: EditorContext<'_>) -> EditorResponse {
-        if self.check_detector_binding(context.effect.kind, context.modulation) {
+        if self.check_detector_binding(context.effect.kind, context.modulation)
+            || self.check_follower_binding(context.effect, context.modulation)
+        {
             return EditorResponse {
                 captured: true,
                 ..EditorResponse::default()
             };
         }
         let mut session = Session::new(self, context);
+        session.commit_follower_text();
         session.finalize_dial_edit_for_press(f32::NEG_INFINITY, f32::NEG_INFINITY);
         session.response
     }
 
     pub fn captures_keyboard(&self) -> bool {
-        self.wave_midi.open()
+        self.follower.open()
+            || self.wave_midi.open()
             || self.detector_open
             || self.effect_dropdown.is_open()
             || self.text_edit.is_active()
@@ -234,7 +242,8 @@ impl EffectEditor {
     }
 
     pub fn dropdown_open(&self) -> bool {
-        self.wave_midi.open()
+        self.follower.open()
+            || self.wave_midi.open()
             || self.detector_open
             || self.effect_dropdown.is_open()
             || self.mseg_edit.has_open_menu()
@@ -242,12 +251,15 @@ impl EffectEditor {
 
     /// Whether shared controls own an in-progress pointer gesture.
     pub fn pointer_gesture_active(&self) -> bool {
-        self.effect_dial_drag.active_action().is_some() || self.mseg_edit.is_dragging()
+        self.follower.dragging()
+            || self.effect_dial_drag.active_action().is_some()
+            || self.mseg_edit.is_dragging()
     }
 
     /// Allows hosts to finalize their numeric fields before the shared editor starts panning.
     pub fn can_start_pan(&self, pointer: (f32, f32), geometry: EditorGeometry) -> bool {
-        !self.wave_midi.open()
+        !self.follower.open()
+            && !self.wave_midi.open()
             && !self.detector_open
             && !self.effect_dropdown.is_open()
             && self.effect_dial_drag.active_action().is_none()
@@ -282,6 +294,12 @@ impl EffectEditor {
                 ..EditorResponse::default()
             };
         }
+        if self.check_follower_binding(context.effect, context.modulation) {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
+        }
         let mut session = Session::new(self, context);
         session.handle_event(event);
         session
@@ -302,6 +320,7 @@ impl EffectEditor {
     ) {
         self.check_detector_binding(effect.kind, modulation);
         self.check_wave_midi_binding(effect, modulation);
+        self.check_follower_binding(effect, modulation);
         self.refresh_live(effect, modulation);
         let phases = self
             .live
@@ -354,6 +373,7 @@ impl EffectEditor {
         }
         self.draw_detector(pixmap, tr, effect, geometry);
         self.draw_wave_midi_popup(pixmap, tr, geometry);
+        self.draw_follower_popup(pixmap, tr, geometry);
     }
 }
 
@@ -467,7 +487,10 @@ impl<'a> Session<'a> {
     fn handle_event(&mut self, event: &baseview::Event) {
         use baseview::{Event, MouseButton, MouseEvent};
         use keyboard_types::{Key, KeyState, Modifiers};
-        if self.handle_wave_midi_event(event) || self.handle_detector_event(event) {
+        if self.handle_follower_event(event)
+            || self.handle_wave_midi_event(event)
+            || self.handle_detector_event(event)
+        {
             return;
         }
         let win = (self.physical_width, self.physical_height);
@@ -1163,9 +1186,27 @@ impl<'a> Session<'a> {
         );
         self.draw_live_controls(pixmap);
         self.draw_wave_midi_button(pixmap);
+        self.draw_follower_button(pixmap);
     }
 
     fn on_effect_press(&mut self, px: f32, py: f32, ctrl: bool) -> bool {
+        let strip = self
+            .state
+            .mseg_edit
+            .layout(self.layout.mseg_pane, self.scale_factor)
+            .strip;
+        if view::in_rect(
+            widgets::mseg::follower_button_rect(strip, self.scale_factor),
+            px,
+            py,
+        ) {
+            if !self.state.mseg_edit.is_dragging()
+                && self.state.effect_dial_drag.active_action().is_none()
+            {
+                self.open_follower();
+            }
+            return true;
+        }
         if self.state.mseg_edit.wave_palette().is_some() || self.modulation.wave_switch.is_some() {
             let strip = self
                 .state
@@ -2101,6 +2142,23 @@ mod tests {
                 session.layout.mseg_pane,
                 session.phases[slot],
                 session.scale_factor,
+            );
+            let strip = session
+                .state
+                .mseg_edit
+                .layout(session.layout.mseg_pane, session.scale_factor)
+                .strip;
+            let rect = widgets::mseg::follower_button_rect(strip, session.scale_factor);
+            widgets::draw_button(
+                &mut pm,
+                session.text_renderer,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+                "Follow",
+                session.modulation.follower.routes[slot].enabled,
+                false,
             );
             pm
         }

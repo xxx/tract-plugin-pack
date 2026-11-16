@@ -1038,6 +1038,19 @@ pub fn wave_midi_button_rect(strip: (f32, f32, f32, f32), scale: f32) -> (f32, f
     )
 }
 
+/// Shared effect follower setup, beside the Project-wave control.
+pub fn follower_button_rect(strip: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32) {
+    let wave = wave_midi_button_rect(strip, scale);
+    let buttons = strip_buttons_ex(strip, scale, true, true);
+    let x = wave.0 + wave.2 + 6.0 * scale;
+    (
+        x,
+        wave.1,
+        (110.0 * scale).min((buttons.style.0 - x - 6.0 * scale).max(0.0)),
+        wave.3,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Hit-testing
 // ---------------------------------------------------------------------------

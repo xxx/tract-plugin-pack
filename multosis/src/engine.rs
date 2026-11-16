@@ -293,7 +293,8 @@ impl AudioEngine {
             span_remaining,
             &mut self.waveform,
         );
-        self.modulation.process_smoothing_sample(&mut self.effects);
+        self.modulation
+            .process_smoothing_sample(&mut self.effects, [dry_l, dry_r], sidechain);
         let mut cur_l = dry_l;
         let mut cur_r = dry_r;
         for r in 0..ROWS {
@@ -659,6 +660,8 @@ impl Default for AudioEngine {
     }
 }
 
+#[cfg(test)]
+mod follower_tests;
 #[cfg(test)]
 mod position_tests;
 #[cfg(test)]

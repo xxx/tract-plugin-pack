@@ -127,9 +127,7 @@ impl Processor {
         }
         self.effect.set_bpm(bpm as f32);
         for (i, _) in self.effect.parameters().iter().enumerate() {
-            if !(self.modulation.continuous_parameter(track.kind, i)
-                && self.state.holds_smoothed_parameter(track.kind, i))
-            {
+            if !self.state.holds_smoothed_parameter(track.kind, i) {
                 self.effect.set_param(i, track.params[i]);
             }
         }
@@ -272,7 +270,7 @@ impl Processor {
             }
         }
         self.state
-            .process_smoothing_sample(&self.modulation, &mut self.effect);
+            .process_modulation_sample(&self.modulation, &mut self.effect, input, sidechain);
         self.latency = self.effect.latency_samples();
         let dry = self.dry.next(input, self.latency);
         let output = if self.key.kind == EffectKind::None {
@@ -354,6 +352,8 @@ impl Processor {
     }
 }
 
+#[cfg(test)]
+mod follower_tests;
 #[cfg(test)]
 mod position_tests;
 #[cfg(test)]

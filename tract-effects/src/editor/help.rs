@@ -7,6 +7,16 @@ impl Session<'_> {
             .mseg_edit
             .layout(self.layout.mseg_pane, self.scale_factor)
             .strip;
+        if view::in_rect(
+            widgets::mseg::follower_button_rect(strip, self.scale_factor),
+            self.mouse_pos.0,
+            self.mouse_pos.1,
+        ) {
+            self.state.mseg_edit.set_external_hint(Some(
+                "Audio follower: per-curve routing, shared input and response",
+            ));
+            return;
+        }
         if (self.state.mseg_edit.wave_palette().is_some() || self.modulation.wave_switch.is_some())
             && view::in_rect(
                 widgets::mseg::wave_midi_button_rect(strip, self.scale_factor),

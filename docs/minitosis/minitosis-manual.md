@@ -88,6 +88,11 @@ display gain. These work on frozen captures and affect only the display.
 
 **Mix** appears after the effect parameters in the Target menu. It modulates the dry/wet blend around the base Mix setting without changing the dial's base value or writing MSEG movement to host automation. A colored arc on Mix shows the effective blend, and curve-node tooltips show percentages. For a full-range blend following the curve, set Mix to **0%**, choose **Unipolar**, and set Depth to **+100%**. From Mix **100%**, use negative depth to move toward dry. Mix remains within 0–100%, with smooth transitions between modulation updates.
 
+**Follow** beside Waves adds an audio-level envelope follower. Each curve has
+its own Follow/Add/Multiply route and Amount; Input, filters, Gain, Threshold and
+Attack/Hold/Release are shared by the current effect's four curves. See
+[Envelope follower](../mseg-editor.md#envelope-follower).
+
 Trigger choices apply to all four envelopes:
 
 - **Free run:** no periodic phase reset; Cyclic envelopes loop at their own length.

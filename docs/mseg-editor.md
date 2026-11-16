@@ -398,6 +398,54 @@ and Enter/Space to toggle or open its selector. The First-note selector supports
 numeric search. Escape closes a selector before closing setup; outside/right
 clicks, focus loss and resize dismiss it without acting on controls beneath it.
 
+## Envelope follower
+
+Multosis/Minitosis provide **Follow** beside Waves. Each row/effect has one
+linked stereo envelope follower; Amp/1/2/3 independently choose whether and how
+to use it. The selected curve's panel has **This curve**, **Curve mode** and
+**Amount** controls:
+
+- **Follow:** Amount × envelope replaces the drawn source.
+- **Add:** curve + Amount × envelope; negative Amount subtracts the envelope.
+- **Multiply:** curve × Amount × envelope.
+
+Results clamp to 0–1 before Smooth and the existing polarity/Depth/Target mapping.
+Amount is 0–200%, or -200–200% for Add. Curve geometry stays editable and its
+clock keeps running, even when Follow replaces its source. For ducking Amp,
+use a flat-high curve with Add and negative Amount. Project/MIDI waves and DAW
+position continue controlling the underlying curve normally.
+
+The **shared response** applies to every enabled route on that row/effect:
+
+- **Input:** original Main audio or external Sidechain. Stereo uses the larger
+  absolute channel level after separate filters, so antiphase signals still work.
+  A missing sidechain is silent.
+- **High-pass/Low-pass:** Off or 20–20000 Hz, affecting detection only.
+- **Gain:** -24–+24 dB before threshold/envelope detection.
+- **Threshold:** Off or -60–0 dB. Quiet input feeds zero; Hold/Release still finish.
+- **Attack/Hold/Release:** 0–1000/2000/5000 ms, default 5/0/100. Attack/Release
+  are time constants; zero is instant. Hold delays decay after the input falls.
+
+**Reset response** restores all shared settings, including Input and filters,
+while preserving every curve's enable/mode/amount. Settings save with the project
+and use local modulation undo. They do not add host automation parameters.
+
+Input and Envelope meters show the actual filtered/gained detector level and
+envelope, or unavailable state. The white trace and dial arcs show the resulting
+combined modulation. Ordinary Audio backdrops remain raw; frozen captures stay
+available while adjusting the follower. Enum destinations bypass Smooth lag but
+still use the follower's response. Effect parameters retain their 1 kHz control
+cadence; Amp and Mix update each sample.
+
+Scroll the panel or use Tab/Up/Down to reach fields; Home/End and Page Up/Down
+move focus and scroll it into view. Left/Right adjust values; Enter/Space opens
+a selector or numeric field. Right-click sliders to type; Enter commits and
+Escape cancels a field before closing the panel. Outside presses, drag starts
+and focus loss commit numeric input. Shift-drag is fine; double-click restores
+the field default. No follower history is lost on retriggers or ordinary DSP
+flushes. Explicit modulation Reset starts a fresh envelope. The feature adds no
+latency and is Off in legacy presets. Miff/Nap keep static curve editing.
+
 ## DAW-position playback
 
 Choose **Trigger → DAW position** in Multosis/Minitosis to follow the song

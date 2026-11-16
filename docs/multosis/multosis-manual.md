@@ -250,6 +250,11 @@ the displayed curve. Each fixed row has four independent host automation lanes;
 a Project value overrides MIDI while preserving phase and smoothing. See
 [Wave automation](../mseg-editor.md#wave-automation).
 
+**Follow** beside Waves adds an audio-level envelope follower. Each curve has
+its own Follow/Add/Multiply route and Amount; Input, filters, Gain, Threshold and
+Attack/Hold/Release are shared across the row's four curves. See
+[Envelope follower](../mseg-editor.md#envelope-follower).
+
 Hover for footer hints, or click **?** beside Point for the gesture guide.
 **F1 / ?** and **View → Editing guide...** also open it; see
 [context help](../mseg-editor.md#context-help-and-gesture-guide).

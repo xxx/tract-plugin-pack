@@ -1,5 +1,6 @@
 mod context_help;
 mod curve_browser;
+mod follower;
 mod midi_wave_switch;
 mod position;
 mod semitone_grid;
@@ -1791,6 +1792,7 @@ mod detector_controls {
             wave: None,
             wave_automation: [0; 4],
             position_sync: false,
+            follower: None,
         };
         clock.publish(&shared, 0, &frame);
         draw(&mut h);
@@ -2764,6 +2766,7 @@ mod smoothing_controls {
             wave: None,
             wave_automation: [0; 4],
             position_sync: false,
+            follower: None,
         };
         frame.parameters[0] = Some((0.123, 1));
         clock.publish(&shared, 0, &frame);

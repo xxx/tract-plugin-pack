@@ -77,13 +77,22 @@ impl Modulation {
         kind: crate::effects::EffectKind,
         index: usize,
     ) -> bool {
-        self.config[row].continuous_parameter(kind, index)
-            && self.states[row].holds_smoothed_parameter(kind, index)
+        self.states[row].holds_smoothed_parameter(kind, index)
     }
-    pub fn process_smoothing_sample(&mut self, effects: &mut [EffectInstance; ROWS]) {
+    pub fn process_smoothing_sample(
+        &mut self,
+        effects: &mut [EffectInstance; ROWS],
+        input: [f32; 2],
+        sidechain: [f32; 2],
+    ) {
         for i in 0..self.smooth_count {
             let r = self.smooth_rows[i];
-            self.states[r].process_smoothing_sample(&self.config[r], &mut effects[r]);
+            self.states[r].process_modulation_sample(
+                &self.config[r],
+                &mut effects[r],
+                input,
+                sidechain,
+            );
         }
     }
 

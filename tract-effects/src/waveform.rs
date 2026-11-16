@@ -277,7 +277,7 @@ impl WaveformClock {
         self.step = phase_step(&self.doc, timing.bpm, timing.sample_rate);
         self.phase = timing.phase;
         self.follow_audio_phase = host_position
-            || timing.config.smoothing_mask(timing.kind) & (1 << self.request.slot) != 0;
+            || timing.config.continuous_mask(timing.kind) & (1 << self.request.slot) != 0;
         self.active &= self.step > 0.0;
     }
 
