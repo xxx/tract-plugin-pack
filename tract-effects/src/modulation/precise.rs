@@ -89,6 +89,13 @@ impl PreciseTrigger {
         self.sample_rate = sr;
     }
     pub(super) fn next_sample(&mut self, input: [f32; 2]) -> bool {
+        self.next_sample_with_sidechain(input, [0.0; 2])
+    }
+    pub(super) fn next_sample_with_sidechain(
+        &mut self,
+        input: [f32; 2],
+        sidechain: [f32; 2],
+    ) -> bool {
         if !self.active {
             return false;
         }
@@ -104,6 +111,10 @@ impl PreciseTrigger {
                 fired
             }
             TriggerSource::TransientSample { threshold, hold_ms } => {
+                let input = match self.filter.settings.input {
+                    DetectorInput::Main => input,
+                    DetectorInput::Sidechain => sidechain,
+                };
                 let mono = (input[0] + input[1]) * 0.5;
                 let filtered = self
                     .filter
@@ -122,6 +133,10 @@ impl PreciseTrigger {
     }
     pub(super) fn configure_audio(&mut self, settings: AudioTriggerSettings) {
         if self.active && self.family == 2 {
+            if settings.input != self.filter.settings.input {
+                self.detector.reset();
+                self.filter.reset();
+            }
             self.filter.configure(settings, self.sample_rate);
         }
     }
@@ -142,6 +157,84 @@ impl ModulationState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detector_input_is_saved_and_defaults_to_the_legacy_main_path() {
+        let config = TrackModulation::default();
+        let legacy = serde_json::to_string(&config).unwrap();
+        assert!(!legacy.contains("audio_trigger"));
+        assert_eq!(
+            serde_json::from_str::<TrackModulation>(&legacy).unwrap(),
+            config
+        );
+        let mut sidechain = config;
+        sidechain.audio_trigger.input = DetectorInput::Sidechain;
+        let saved = serde_json::to_string(&sidechain).unwrap();
+        assert!(saved.contains("\"input\":\"Sidechain\""));
+        assert_eq!(
+            serde_json::from_str::<TrackModulation>(&saved).unwrap(),
+            sidechain
+        );
+        let old = serde_json::from_str::<AudioTriggerSettings>(r#"{"level_db":-12}"#).unwrap();
+        assert_eq!(old.input, DetectorInput::Main);
+    }
+
+    #[test]
+    fn sidechain_selection_ignores_main_and_resets_detector_history_on_route_edits() {
+        let mut runtime = PreciseTrigger::default();
+        runtime.prepare(
+            TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 500.0,
+            },
+            48000.0,
+        );
+        assert!((0..128).any(|_| runtime.next_sample([1.0; 2])));
+        assert!(runtime.detector.refractory > 0);
+        runtime.configure_audio(AudioTriggerSettings {
+            input: DetectorInput::Sidechain,
+            ..AudioTriggerSettings::default()
+        });
+        assert_eq!(runtime.detector.refractory, 0);
+        assert_eq!(runtime.reading().unwrap().level, 0.0);
+        for _ in 0..128 {
+            assert!(!runtime.next_sample_with_sidechain([1.0; 2], [0.0; 2]));
+        }
+        assert!((0..128).any(|_| runtime.next_sample_with_sidechain([0.0; 2], [1.0; 2])));
+        assert_eq!(
+            runtime.reading().unwrap().settings.input,
+            DetectorInput::Sidechain
+        );
+        runtime.configure_audio(AudioTriggerSettings::default());
+        for _ in 0..128 {
+            assert!(!runtime.next_sample_with_sidechain([0.0; 2], [1.0; 2]));
+        }
+        assert!((0..128).any(|_| runtime.next_sample_with_sidechain([1.0; 2], [0.0; 2])));
+    }
+
+    #[test]
+    fn main_detection_and_non_audio_clocks_ignore_arbitrary_sidechain_values() {
+        for source in [
+            TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 20.0,
+            },
+            TriggerSource::FreeHzSample { hz: 13.0 },
+        ] {
+            let mut reference = PreciseTrigger::default();
+            let mut actual = PreciseTrigger::default();
+            reference.prepare(source, 48000.0);
+            actual.prepare(source, 48000.0);
+            for i in 0..10000 {
+                let input = if i % 2000 < 64 { [0.8; 2] } else { [0.0; 2] };
+                assert_eq!(
+                    actual.next_sample_with_sidechain(input, [i as f32, f32::NAN]),
+                    reference.next_sample(input)
+                );
+                assert_eq!(actual.reading(), reference.reading());
+            }
+        }
+    }
 
     #[test]
     fn quiet_rejections_do_not_arm_hold_and_quiet_audio_still_expires_hold() {

@@ -12,6 +12,7 @@ use nih_plug::prelude::*;
 use params::MinitosisParams;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use tract_effects::sidechain::SidechainInput;
 
 pub struct Shared {
     pub handoff: ProcessorHandoff,
@@ -140,10 +141,31 @@ impl Minitosis {
         midi.next_matching(&mut events, samples, |event| source.accepts_midi(event))
     }
 
+    #[cfg(test)]
     fn render(
         &mut self,
         left: &mut [f32],
         right: &mut [f32],
+        playing: bool,
+        bpm: f64,
+        context: &mut impl ProcessContext<Self>,
+    ) -> ProcessStatus {
+        self.render_with_sidechain(
+            left,
+            right,
+            SidechainInput::default(),
+            playing,
+            bpm,
+            context,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_sidechain(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        sidechain: SidechainInput<'_>,
         playing: bool,
         bpm: f64,
         context: &mut impl ProcessContext<Self>,
@@ -195,7 +217,8 @@ impl Minitosis {
         );
         self.processor
             .set_telemetry_enabled(request.matches(0, self.processor.key.kind));
-        self.processor.prepare_block(&track, left, right, bpm);
+        self.processor
+            .prepare_block_with_sidechain(&track, left, right, sidechain, bpm);
         let pending = self.processor.key != key;
         let bypass = self.params.bypass.value();
         let source = self.processor.modulation.trigger;
@@ -222,8 +245,9 @@ impl Minitosis {
                 }
             }
             for i in cursor..end {
-                let wet = self.processor.process_sample(
+                let wet = self.processor.process_sample_with_sidechain(
                     [left[i], right[i]],
+                    sidechain.sample(i),
                     self.params.mix.value(),
                     bypass || pending,
                 );
@@ -271,11 +295,23 @@ impl Plugin for Minitosis {
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
     const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
-    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
-        main_input_channels: std::num::NonZeroU32::new(2),
-        main_output_channels: std::num::NonZeroU32::new(2),
-        ..AudioIOLayout::const_default()
-    }];
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
+        AudioIOLayout {
+            main_input_channels: std::num::NonZeroU32::new(2),
+            main_output_channels: std::num::NonZeroU32::new(2),
+            aux_input_ports: &[new_nonzero_u32(2)],
+            names: PortNames {
+                aux_inputs: &["Sidechain"],
+                ..PortNames::const_default()
+            },
+            ..AudioIOLayout::const_default()
+        },
+        AudioIOLayout {
+            main_input_channels: std::num::NonZeroU32::new(2),
+            main_output_channels: std::num::NonZeroU32::new(2),
+            ..AudioIOLayout::const_default()
+        },
+    ];
     const SAMPLE_ACCURATE_AUTOMATION: bool = true;
     type SysExMessage = ();
     type BackgroundTask = PrepareKey;
@@ -343,7 +379,7 @@ impl Plugin for Minitosis {
     fn process(
         &mut self,
         buffer: &mut Buffer,
-        _aux: &mut AuxiliaryBuffers,
+        aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let transport = context.transport();
@@ -357,7 +393,12 @@ impl Plugin for Minitosis {
             return ProcessStatus::Normal;
         }
         let (left, right) = channels.split_at_mut(1);
-        self.render(left[0], right[0], playing, bpm, context)
+        let sidechain = aux
+            .inputs
+            .first()
+            .map(|input| SidechainInput::from_channels(input.as_slice_immutable()))
+            .unwrap_or_default();
+        self.render_with_sidechain(left[0], right[0], sidechain, playing, bpm, context)
     }
 }
 

@@ -373,28 +373,29 @@ impl<'a> Session<'a> {
             EffectAction::ParamDropdown(i) => self.apply_param_dropdown_selection(i, idx),
             EffectAction::MidiFilter(field) => self.apply_midi_filter(field, idx),
             EffectAction::Audio => {
-                if idx < 4 {
+                if idx < 5 {
                     self.state.set_audio_view(
                         [
                             AudioView::Off,
                             AudioView::Input,
                             AudioView::Output,
                             AudioView::Both,
+                            AudioView::Sidechain,
                         ][idx],
                     );
-                } else if idx < 7 {
+                } else if idx < 8 {
                     self.state.set_audio_display(
                         [
                             AudioDisplay::Magnitude,
                             AudioDisplay::Combined,
                             AudioDisplay::Stereo,
-                        ][idx - 4],
+                        ][idx - 5],
                     );
-                } else if idx < 10 {
+                } else if idx < 11 {
                     self.state.set_audio_gain(
-                        [AudioGain::Minus12, AudioGain::Unity, AudioGain::Plus12][idx - 7],
+                        [AudioGain::Minus12, AudioGain::Unity, AudioGain::Plus12][idx - 8],
                     );
-                } else if idx == 10 {
+                } else if idx == 11 {
                     self.state.set_audio_frozen(!self.state.audio_frozen);
                 }
             }

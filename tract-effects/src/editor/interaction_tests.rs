@@ -1503,7 +1503,7 @@ mod precision_editing {
 
 mod detector_controls {
     use super::*;
-    use crate::modulation::{AudioTriggerSettings, DetectorReading};
+    use crate::modulation::{AudioTriggerSettings, DetectorInput, DetectorReading};
     use crate::modulation_telemetry::{ModulationFrame, ModulationTelemetry, TraceClock};
     use std::sync::Arc;
 
@@ -1548,6 +1548,74 @@ mod detector_controls {
     }
 
     #[test]
+    fn sidechain_input_commits_numeric_text_and_resets_filters_without_changing_the_route() {
+        for scale in [0.5, 1.0, 2.0] {
+            let mut h = Harness::new();
+            h.resize(scale);
+            open(&mut h);
+            type_value(&mut h, DetectorField::Level, "-18 dB");
+            let before = h.modulation.clone();
+            let mut history = crate::undo::UndoHistory::new();
+            history.begin_capture(before.clone());
+            let input = layout(&h).input;
+            let response = h.click(input);
+            assert!(response.captured && response.changed);
+            assert!(h.editor.detector_panel_open() && !h.editor.text_edit.is_active());
+            assert!(!h.editor.pointer_gesture_active());
+            assert_eq!(h.modulation.audio_trigger.input, DetectorInput::Sidechain);
+            assert_eq!(h.modulation.audio_trigger.level_db, Some(-18.0));
+            history.commit_capture(&h.modulation);
+            assert_eq!(history.undo(h.modulation.clone()), Some(before));
+            assert!(h.press(MouseButton::Right).captured);
+            assert!(h.editor.detector_panel_open() && !h.editor.text_edit.is_active());
+            let reset = layout(&h).reset;
+            assert!(h.click(reset).changed);
+            assert_eq!(
+                h.modulation.audio_trigger,
+                AudioTriggerSettings {
+                    input: DetectorInput::Sidechain,
+                    ..AudioTriggerSettings::default()
+                }
+            );
+            let saved = serde_json::to_string(&h.modulation).unwrap();
+            assert_eq!(
+                serde_json::from_str::<TrackModulation>(&saved).unwrap(),
+                h.modulation
+            );
+            assert!(h.click(input).changed);
+            assert_eq!(h.modulation.audio_trigger, AudioTriggerSettings::default());
+        }
+    }
+
+    #[test]
+    fn changing_detector_input_hides_readings_from_the_previous_source() {
+        let mut h = Harness::new();
+        let shared = Arc::new(ModulationTelemetry::default());
+        h.editor.connect_live(&shared, 0);
+        open(&mut h);
+        let mut frame = ModulationFrame::capture(
+            h.effect.kind,
+            &h.modulation,
+            &crate::modulation::ModulationState::default(),
+        );
+        frame.detector = Some(DetectorReading {
+            level: 0.8,
+            settings: h.modulation.audio_trigger,
+        });
+        h.editor.live.as_mut().unwrap().frame = Some(frame);
+        assert_eq!(h.editor.detector_level(), Some(0.8));
+        let input = layout(&h).input;
+        h.click(input);
+        assert_eq!(h.editor.detector_level(), None);
+        frame.detector = Some(DetectorReading {
+            level: 0.0,
+            settings: h.modulation.audio_trigger,
+        });
+        h.editor.live.as_mut().unwrap().frame = Some(frame);
+        assert_eq!(h.editor.detector_level(), Some(0.0));
+    }
+
+    #[test]
     fn detector_numeric_settings_save_and_reset_as_one_undo_without_changing_geometry() {
         let mut h = Harness::new();
         let geometry = h.modulation.msegs;
@@ -1565,7 +1633,8 @@ mod detector_controls {
             AudioTriggerSettings {
                 level_db: Some(-24.0),
                 highpass_hz: Some(200.0),
-                lowpass_hz: Some(5000.0)
+                lowpass_hz: Some(5000.0),
+                ..AudioTriggerSettings::default()
             }
         );
         assert_eq!(h.modulation.msegs, geometry);
@@ -2071,9 +2140,22 @@ mod midi_retrigger {
                 );
                 h.editor
                     .draw_popup(&mut actual, &mut h.tr, &h.effect, h.geometry);
-                for (old, new) in expected.pixels().iter().zip(actual.pixels()) {
-                    if old.alpha() == 255 {
-                        assert_eq!(old, new);
+                // Ignore the empty filter's caret; its blink can change between renders.
+                let caret = popup
+                    .filter_rect
+                    .map(|(x, y, _, h)| (x + 7.0, y + 3.0, 1.0, h - 6.0));
+                for (index, (old, new)) in expected.pixels().iter().zip(actual.pixels()).enumerate()
+                {
+                    let x = (index % expected.width() as usize) as f32;
+                    let y = (index / expected.width() as usize) as f32;
+                    let blinking = caret.is_some_and(|(cx, cy, cw, ch)| {
+                        x >= cx.floor()
+                            && x < (cx + cw).ceil()
+                            && y >= cy.floor()
+                            && y < (cy + ch).ceil()
+                    });
+                    if old.alpha() == 255 && !blinking {
+                        assert_eq!(old, new, "{field:?} at {scale}x, pixel ({x}, {y})");
                     }
                 }
                 assert!(
@@ -2135,6 +2217,97 @@ mod audio_backdrop {
         );
         clock.record_sample(&shared.waveform, [input; 2], [output; 2], 0.0);
         clock.finish_block(&shared.waveform);
+    }
+
+    #[test]
+    fn sidechain_view_switches_capture_families_and_preserves_its_own_frozen_display() {
+        let mut h = Harness::new();
+        let shared = Arc::new(ModulationTelemetry::default());
+        h.editor.connect_live(&shared, 0);
+        h.editor.set_audio_view(AudioView::Both);
+        draw(&mut h);
+        capture(&h, &shared, 0.9, 0.3);
+        draw(&mut h);
+        h.editor.set_audio_frozen(true);
+        draw(&mut h);
+        assert!(
+            h.editor
+                .live
+                .as_ref()
+                .unwrap()
+                .waveform
+                .iter()
+                .any(Option::is_some)
+        );
+        let before = (h.effect, h.modulation.clone());
+        h.click(h.geometry.layout.audio);
+        h.key(Key::Home);
+        for _ in 0..4 {
+            h.key(Key::ArrowDown);
+        }
+        assert!(!h.key(Key::Enter).changed);
+        assert_eq!(h.editor.audio_view(), AudioView::Sidechain);
+        assert!(!h.editor.audio_frozen());
+        assert!(
+            h.editor
+                .live
+                .as_ref()
+                .unwrap()
+                .waveform
+                .iter()
+                .all(Option::is_none)
+        );
+        draw(&mut h);
+        let mut clock = WaveformClock::default();
+        clock.begin_block(&shared.waveform);
+        assert!(clock.request().sidechain);
+        clock.prepare_segment(
+            &shared.waveform,
+            0,
+            WaveformTiming {
+                config: &h.modulation,
+                kind: h.effect.kind,
+                phase: 0.0,
+                trigger_epoch: 0,
+                bpm: 120.0,
+                sample_rate: 48000.0,
+            },
+        );
+        clock.record_sample_with_sidechain(&shared.waveform, [0.9; 2], [0.3; 2], [-0.7, 0.4], 0.0);
+        clock.finish_block(&shared.waveform);
+        draw(&mut h);
+        let bins = h.editor.live.as_ref().unwrap().waveform;
+        let measured = bins.iter().flatten().next().unwrap();
+        assert_eq!(measured.input[0].min, -0.7);
+        assert_eq!(measured.input[1].max, 0.4);
+        h.editor.set_audio_frozen(true);
+        draw(&mut h);
+        for display in [
+            AudioDisplay::Magnitude,
+            AudioDisplay::Combined,
+            AudioDisplay::Stereo,
+        ] {
+            h.editor.set_audio_display(display);
+            h.editor.set_audio_gain(AudioGain::Plus12);
+            draw(&mut h);
+            assert!(h.editor.audio_frozen());
+            assert_eq!(h.editor.live.as_ref().unwrap().waveform, bins);
+        }
+        h.editor.set_audio_view(AudioView::Output);
+        assert!(!h.editor.audio_frozen());
+        assert!(
+            h.editor
+                .live
+                .as_ref()
+                .unwrap()
+                .waveform
+                .iter()
+                .all(Option::is_none)
+        );
+        draw(&mut h);
+        clock.begin_block(&shared.waveform);
+        assert!(!clock.request().sidechain);
+        assert_eq!((h.effect, h.modulation), before);
     }
 
     #[test]
@@ -2247,9 +2420,9 @@ mod audio_backdrop {
         let token = clock.request().token;
         let before = (h.effect, h.modulation.clone());
         for (index, display, gain) in [
-            (5, AudioDisplay::Combined, AudioGain::Unity),
-            (9, AudioDisplay::Combined, AudioGain::Plus12),
-            (6, AudioDisplay::Stereo, AudioGain::Plus12),
+            (6, AudioDisplay::Combined, AudioGain::Unity),
+            (10, AudioDisplay::Combined, AudioGain::Plus12),
+            (7, AudioDisplay::Stereo, AudioGain::Plus12),
         ] {
             h.click(h.geometry.layout.audio);
             h.key(Key::Home);
@@ -2301,7 +2474,7 @@ mod audio_backdrop {
             let before = (h.effect, h.modulation.clone());
             assert!(h.click(h.geometry.layout.audio).captured);
             let items = dropdown_items(&h.editor, &h.effect);
-            assert_eq!(items.len(), 11);
+            assert_eq!(items.len(), 12);
             let popup = widgets::dropdown::dropdown_popup_layout(
                 &h.editor.effect_dropdown,
                 &items,

@@ -73,6 +73,8 @@ Trigger choices apply to all four envelopes:
   Transient (sample) also exposes **Detect...** for an absolute level threshold,
   detector-only High-pass/Low-pass, and a measured level meter. These settings
   default to Off and save per effect; see [audio detector setup](../mseg-editor.md#audio-detector-setup).
+  Detect's **Input** switches between Main and the external **Sidechain** bus;
+  **Audio → Sidechain** displays its raw waveform. See [sidechain routing](../mseg-editor.md#external-sidechain).
 - **MIDI note:** restarts at matching note-on offsets, with Note (Any/0–127) and
   Ch. (Any/1–16) filters. Route MIDI to the plugin's note input. Note-off does not
   gate or release the envelopes; see [MIDI retriggering](../mseg-editor.md#midi-retriggering).

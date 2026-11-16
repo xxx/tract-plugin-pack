@@ -1,6 +1,6 @@
 //! Request-aware, bounded audio-to-editor modulation measurements.
 use crate::effects::{EffectKind, MAX_EFFECT_PARAMS};
-use crate::modulation::{AudioTriggerSettings, DetectorReading};
+use crate::modulation::{AudioTriggerSettings, DetectorInput, DetectorReading};
 use crate::modulation::{ModulationState, ModulationTarget, TrackModulation};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -91,6 +91,7 @@ struct AtomicFrame {
     parameters: [AtomicU64; MAX_EFFECT_PARAMS],
     mix: AtomicU64,
     detector: [AtomicU64; 4],
+    detector_input: AtomicU32,
 }
 impl Default for AtomicFrame {
     fn default() -> Self {
@@ -103,6 +104,7 @@ impl Default for AtomicFrame {
             parameters: std::array::from_fn(|_| AtomicU64::new(0)),
             mix: AtomicU64::new(0),
             detector: std::array::from_fn(|_| AtomicU64::new(0)),
+            detector_input: AtomicU32::new(0),
         }
     }
 }
@@ -133,6 +135,8 @@ impl AtomicFrame {
         ]) {
             dest.store(optional_float(value), Ordering::Release);
         }
+        self.detector_input
+            .store(settings.input as u32, Ordering::Release);
         self.stamp.store(stamp, Ordering::Release);
     }
     fn load(&self, token: u64) -> Option<ModulationFrame> {
@@ -150,6 +154,10 @@ impl AtomicFrame {
         let mix = unnorm(self.mix.load(Ordering::Acquire));
         let detector: [Option<f32>; 4] =
             std::array::from_fn(|i| read_optional_float(self.detector[i].load(Ordering::Acquire)));
+        let detector_input = match self.detector_input.load(Ordering::Acquire) {
+            1 => DetectorInput::Sidechain,
+            _ => DetectorInput::Main,
+        };
         if self.stamp.load(Ordering::Acquire) != stamp || actual_token != token {
             return None;
         }
@@ -167,6 +175,7 @@ impl AtomicFrame {
             detector: detector[0].map(|level| DetectorReading {
                 level,
                 settings: AudioTriggerSettings {
+                    input: detector_input,
                     level_db: detector[1],
                     highpass_hz: detector[2],
                     lowpass_hz: detector[3],
@@ -452,6 +461,11 @@ mod tests {
                 frame.detector = Some(DetectorReading {
                     level: value,
                     settings: AudioTriggerSettings {
+                        input: if value < 0.5 {
+                            DetectorInput::Main
+                        } else {
+                            DetectorInput::Sidechain
+                        },
                         level_db: Some(-60.0 * value),
                         highpass_hz: Some(20.0 + 1000.0 * value),
                         lowpass_hz: None,
@@ -472,6 +486,11 @@ mod tests {
                     Some(DetectorReading {
                         level: value,
                         settings: AudioTriggerSettings {
+                            input: if value < 0.5 {
+                                DetectorInput::Main
+                            } else {
+                                DetectorInput::Sidechain
+                            },
                             level_db: Some(-60.0 * value),
                             highpass_hz: Some(20.0 + 1000.0 * value),
                             lowpass_hz: None

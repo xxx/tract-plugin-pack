@@ -12,6 +12,7 @@ use crate::propagation::{Playhead, active_rows};
 use std::sync::Arc;
 use tract_effects::modulation::{MidiCursor, MidiNoteOn};
 use tract_effects::modulation_telemetry::{ModulationTelemetry, TraceClock, TraceRequest};
+use tract_effects::sidechain::SidechainInput;
 use tract_effects::waveform::WaveformClock;
 
 /// Upper bound on step boundaries handled within one process block. At any
@@ -239,6 +240,7 @@ impl AudioEngine {
         &mut self,
         dry_l: f32,
         dry_r: f32,
+        sidechain: [f32; 2],
         active: u16,
         span_remaining: usize,
         within_span: bool,
@@ -246,7 +248,9 @@ impl AudioEngine {
         if self.skip_precise_sample {
             self.skip_precise_sample = false;
         } else {
-            let rows = self.modulation.precise_triggers([dry_l, dry_r]);
+            let rows = self
+                .modulation
+                .precise_triggers_with_sidechain([dry_l, dry_r], sidechain);
             if rows != 0 {
                 self.modulation.fire_precise(rows, within_span);
                 if rows & (1 << self.waveform.request().row) != 0 {
@@ -289,10 +293,11 @@ impl AudioEngine {
                 cur_r = amp * lane_r;
             }
             if self.waveform.active() && self.waveform.request().row == r {
-                self.waveform.record_sample(
+                self.waveform.record_sample_with_sidechain(
                     &self.telemetry.waveform,
                     input,
                     [cur_l, cur_r],
+                    sidechain,
                     self.modulation
                         .precise_phase(r, self.waveform.request().slot),
                 );
@@ -311,10 +316,12 @@ impl AudioEngine {
         (cur_l, cur_r)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn process_segment<const MODULATE_MIX: bool>(
         &mut self,
         left: &mut [f32],
         right: &mut [f32],
+        sidechain: SidechainInput<'_>,
         active: u16,
         mix: f32,
         span_remaining: usize,
@@ -325,6 +332,7 @@ impl AudioEngine {
             let (wet_l, wet_r) = self.process_sample::<MODULATE_MIX>(
                 dry_l,
                 dry_r,
+                sidechain.sample(i),
                 active,
                 span_remaining - i,
                 within_span || i > 0,
@@ -375,6 +383,33 @@ impl AudioEngine {
         &mut self,
         left: &mut [f32],
         right: &mut [f32],
+        playing: bool,
+        samples_per_step: f64,
+        bpm: f64,
+        mix: f32,
+        grid: &Grid,
+        events: impl Iterator<Item = MidiNoteOn>,
+    ) {
+        self.process_with_inputs(
+            left,
+            right,
+            SidechainInput::default(),
+            playing,
+            samples_per_step,
+            bpm,
+            mix,
+            grid,
+            events,
+        );
+    }
+
+    /// Process main audio with a borrowed sidechain and streaming MIDI events.
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_with_inputs(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        sidechain: SidechainInput<'_>,
         playing: bool,
         samples_per_step: f64,
         bpm: f64,
@@ -458,9 +493,10 @@ impl AudioEngine {
             let advance_rows = if grid_prepared { midi_rows } else { u16::MAX };
             if grid_end > cursor && advance_rows != 0 {
                 if !grid_prepared {
-                    let rows = self
-                        .modulation
-                        .precise_triggers([left[cursor], right[cursor]]);
+                    let rows = self.modulation.precise_triggers_with_sidechain(
+                        [left[cursor], right[cursor]],
+                        sidechain.sample(cursor),
+                    );
                     if rows != 0 {
                         self.modulation.fire_precise(rows, false);
                     }
@@ -490,6 +526,7 @@ impl AudioEngine {
                 self.process_segment::<true>(
                     &mut left[cursor..seg_end],
                     &mut right[cursor..seg_end],
+                    sidechain.offset(cursor),
                     active_audio,
                     mix,
                     grid_end - cursor,
@@ -499,6 +536,7 @@ impl AudioEngine {
                 self.process_segment::<false>(
                     &mut left[cursor..seg_end],
                     &mut right[cursor..seg_end],
+                    sidechain.offset(cursor),
                     active_audio,
                     mix,
                     grid_end - cursor,
@@ -657,6 +695,145 @@ mod tests {
         engine.set_modulation(&config);
         engine.set_effects(&tracks);
         engine
+    }
+
+    #[test]
+    fn sidechain_offsets_cross_grid_and_peer_midi_boundaries_without_leaking_audio() {
+        use crate::effects::EffectKind;
+        use crate::modulation::{DetectorInput, MidiNoteOn, TransientDetector, TriggerSource};
+        let mut auxiliary = [0.0; 1024];
+        auxiliary[128..192].fill(1.0);
+        let mut detector = TransientDetector::default();
+        let last = auxiliary
+            .iter()
+            .enumerate()
+            .filter_map(|(i, value)| {
+                detector
+                    .process_sample(*value, 1.5, 5.0, 48000.0)
+                    .then_some(i)
+            })
+            .last()
+            .unwrap();
+        for mode in 0..4 {
+            let mut engine = midi_engine(0.0);
+            let mut config =
+                std::array::from_fn(|row| engine.modulation.config_for_test(row).clone());
+            config[0].trigger = TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 5.0,
+            };
+            config[0].audio_trigger.input = DetectorInput::Sidechain;
+            config[1].msegs = config[0].msegs;
+            config[1].trigger = config[0].trigger;
+            config[2].trigger = TriggerSource::MidiNote {
+                note: None,
+                channel: None,
+            };
+            engine.set_modulation(&config);
+            let phase = engine.modulation_phase(1, 0);
+            let mut tracks = engine.track_effects_for_test();
+            if mode == 2 {
+                tracks[0].muted = true;
+            }
+            if mode == 3 {
+                tracks[0].kind = EffectKind::None;
+            }
+            engine.set_effects(&tracks);
+            let mut grid = Grid::default();
+            if mode == 1 {
+                grid.cell_mut(0, 0).enabled = false;
+            }
+            let events = [
+                MidiNoteOn::new(63, 1, 60, 1.0).unwrap(),
+                MidiNoteOn::new(319, 1, 60, 1.0).unwrap(),
+            ];
+            let mut left = [0.0; 1024];
+            let mut right = [0.0; 1024];
+            assert_no_alloc::assert_no_alloc(|| {
+                engine.process_with_inputs(
+                    &mut left,
+                    &mut right,
+                    SidechainInput::new(&auxiliary, &auxiliary),
+                    true,
+                    37.25,
+                    120.0,
+                    1.0,
+                    &grid,
+                    events.into_iter(),
+                )
+            });
+            assert_eq!(left, [0.0; 1024]);
+            assert_eq!(right, [0.0; 1024]);
+            assert!((engine.modulation_phase(0, 0) - (1024 - last) as f32 / 48000.0).abs() < 1e-6);
+            assert!((engine.modulation_phase(1, 0) - phase - 1024.0 / 48000.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn main_source_with_sidechain_preserves_the_legacy_engine_output_and_missing_aux_is_silent() {
+        use crate::modulation::{DetectorInput, TriggerSource};
+        let mut actual = midi_engine(20.0);
+        let mut reference = midi_engine(20.0);
+        let mut config = std::array::from_fn(|row| actual.modulation.config_for_test(row).clone());
+        config[0].trigger = TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        };
+        actual.set_modulation(&config);
+        reference.set_modulation(&config);
+        let input = std::array::from_fn::<_, 512, _>(|i| (i as f32 * 0.1).sin() * 0.2);
+        let auxiliary = [1.0; 512];
+        let (mut left, mut right) = (input, input);
+        let (mut expected_left, mut expected_right) = (input, input);
+        let grid = Grid::default();
+        assert_no_alloc::assert_no_alloc(|| {
+            actual.process_with_inputs(
+                &mut left,
+                &mut right,
+                SidechainInput::new(&auxiliary, &auxiliary),
+                true,
+                37.25,
+                120.0,
+                1.0,
+                &grid,
+                std::iter::empty(),
+            );
+            reference.process(
+                &mut expected_left,
+                &mut expected_right,
+                true,
+                37.25,
+                120.0,
+                1.0,
+                &grid,
+            );
+        });
+        assert_eq!(left, expected_left);
+        assert_eq!(right, expected_right);
+        assert_eq!(
+            actual.modulation_phase(0, 0),
+            reference.modulation_phase(0, 0)
+        );
+        config[0].audio_trigger.input = DetectorInput::Sidechain;
+        actual.set_modulation(&config);
+        let phase = actual.modulation_phase(0, 0);
+        assert_no_alloc::assert_no_alloc(|| {
+            actual.process_with_inputs(
+                &mut [1.0; 512],
+                &mut [1.0; 512],
+                SidechainInput::default(),
+                false,
+                37.25,
+                120.0,
+                1.0,
+                &grid,
+                std::iter::empty(),
+            )
+        });
+        assert!((actual.modulation_phase(0, 0) - phase - 512.0 / 48000.0).abs() < 1e-6);
+        let layout = <crate::Multosis as nih_plug::prelude::Plugin>::AUDIO_IO_LAYOUTS[0];
+        assert_eq!(layout.aux_input_ports[0].get(), 2);
+        assert_eq!(layout.names.aux_inputs, &["Sidechain"]);
     }
 
     #[test]
@@ -2249,9 +2426,15 @@ mod tests {
         let mut e_wet = build(1.0);
 
         // Active mask = row 0 only.
-        let dry = e_dry.process_sample::<false>(0.6, 0.6, 1 << 0, 1, false).0;
-        let half = e_half.process_sample::<false>(0.6, 0.6, 1 << 0, 1, false).0;
-        let wet = e_wet.process_sample::<false>(0.6, 0.6, 1 << 0, 1, false).0;
+        let dry = e_dry
+            .process_sample::<false>(0.6, 0.6, [0.0; 2], 1 << 0, 1, false)
+            .0;
+        let half = e_half
+            .process_sample::<false>(0.6, 0.6, [0.0; 2], 1 << 0, 1, false)
+            .0;
+        let wet = e_wet
+            .process_sample::<false>(0.6, 0.6, [0.0; 2], 1 << 0, 1, false)
+            .0;
 
         // mix 0 → the lane is the dry input.
         assert!((dry - 0.6).abs() < 1e-6, "mix 0.0 should be dry: dry={dry}");

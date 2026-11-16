@@ -150,10 +150,14 @@ impl Modulation {
     }
 
     pub fn precise_triggers(&mut self, input: [f32; 2]) -> u16 {
+        self.precise_triggers_with_sidechain(input, [0.0; 2])
+    }
+
+    pub fn precise_triggers_with_sidechain(&mut self, input: [f32; 2], sidechain: [f32; 2]) -> u16 {
         let mut mask = 0;
         for i in 0..self.precise_count {
             let row = self.precise_rows[i];
-            if self.states[row].next_precise_trigger(input) {
+            if self.states[row].next_precise_trigger_with_sidechain(input, sidechain) {
                 mask |= 1 << row;
             }
         }

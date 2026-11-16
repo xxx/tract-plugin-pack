@@ -52,10 +52,22 @@ impl Default for WaveformTelemetry {
 
 impl WaveformTelemetry {
     pub fn request(&self, row: usize, slot: usize, kind: EffectKind) -> u64 {
+        self.request_source(row, slot, kind, false)
+    }
+
+    pub fn request_sidechain(&self, row: usize, slot: usize, kind: EffectKind) -> u64 {
+        self.request_source(row, slot, kind, true)
+    }
+
+    fn request_source(&self, row: usize, slot: usize, kind: EffectKind, sidechain: bool) -> u64 {
         if row >= 16 || slot >= 4 {
             return 0;
         }
-        let key = 1 | ((slot as u64) << 1) | ((row as u64) << 3) | ((kind as u64) << 7);
+        let key = 1
+            | ((slot as u64) << 1)
+            | ((row as u64) << 3)
+            | ((kind as u64) << 7)
+            | ((sidechain as u64) << 23);
         let current = self.request.load(Ordering::Acquire);
         if current as u32 == key as u32 {
             return current;
@@ -159,6 +171,7 @@ pub struct WaveformRequest {
     pub token: u64,
     pub row: usize,
     pub slot: usize,
+    pub sidechain: bool,
     kind: u32,
 }
 
@@ -203,6 +216,7 @@ impl WaveformClock {
             token,
             row: ((token >> 3) & 15) as usize,
             slot: ((token >> 1) & 3) as usize,
+            sidechain: token & (1 << 23) != 0,
             kind: ((token >> 7) & 0xffff) as u32,
         };
         self.active = false;
@@ -244,6 +258,17 @@ impl WaveformClock {
         output: [f32; 2],
         audio_phase: f64,
     ) {
+        self.record_sample_with_sidechain(telemetry, input, output, [0.0; 2], audio_phase);
+    }
+
+    pub fn record_sample_with_sidechain(
+        &mut self,
+        telemetry: &WaveformTelemetry,
+        input: [f32; 2],
+        output: [f32; 2],
+        sidechain: [f32; 2],
+        audio_phase: f64,
+    ) {
         if !self.active {
             return;
         }
@@ -282,7 +307,14 @@ impl WaveformClock {
             bin,
             audio: AudioBin::default(),
         });
-        point.audio.include(input, output);
+        point.audio.include(
+            if self.request.sidechain {
+                sidechain
+            } else {
+                input
+            },
+            output,
+        );
     }
 
     pub fn finish_block(&self, telemetry: &WaveformTelemetry) {
@@ -296,6 +328,45 @@ impl WaveformClock {
 mod tests {
     use super::*;
     use tiny_skia_widgets::SyncMode;
+
+    #[test]
+    fn sidechain_capture_uses_raw_auxiliary_samples_and_rejects_previous_source_tokens() {
+        let telemetry = WaveformTelemetry::default();
+        let main = telemetry.request(0, 0, EffectKind::Svf);
+        let config = config();
+        let mut clock = WaveformClock::default();
+        prepare(&mut clock, &telemetry, &config, 0.0, 0);
+        clock.record_sample_with_sidechain(&telemetry, [0.9; 2], [0.3; 2], [-0.7, 0.4], 0.0);
+        clock.finish_block(&telemetry);
+        let old_index = telemetry.head() - 1;
+        assert_eq!(telemetry.point(old_index, main).unwrap().input, 0.9);
+        let sidechain = telemetry.request_sidechain(0, 0, EffectKind::Svf);
+        assert_ne!(sidechain, main);
+        assert!(telemetry.stereo_point(old_index, sidechain).is_none());
+        telemetry.release(main);
+        assert_eq!(
+            telemetry.request_sidechain(0, 0, EffectKind::Svf),
+            sidechain
+        );
+        prepare(&mut clock, &telemetry, &config, 0.0, 0);
+        assert!(clock.request().sidechain);
+        clock.record_sample_with_sidechain(&telemetry, [0.9; 2], [0.3; 2], [-0.7, 0.4], 0.0);
+        clock.finish_block(&telemetry);
+        let measured = telemetry
+            .stereo_point(telemetry.head() - 1, sidechain)
+            .unwrap();
+        assert_eq!(
+            measured.audio.input[0],
+            AudioRange {
+                min: -0.7,
+                max: -0.7
+            }
+        );
+        assert_eq!(measured.audio.input[1], AudioRange { min: 0.4, max: 0.4 });
+        let next_main = telemetry.request(0, 0, EffectKind::Svf);
+        assert_ne!(next_main, sidechain);
+        assert!(telemetry.point(telemetry.head() - 1, next_main).is_none());
+    }
 
     fn config() -> TrackModulation {
         let mut config = TrackModulation::default();

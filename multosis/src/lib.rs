@@ -26,6 +26,7 @@ use crate::handoff::GridHandoff;
 use nih_plug::prelude::*;
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex};
+use tract_effects::sidechain::SidechainInput;
 
 /// The Multosis plugin's parameters and persisted state.
 #[derive(Params)]
@@ -197,11 +198,23 @@ impl Plugin for Multosis {
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
-        main_input_channels: std::num::NonZeroU32::new(2),
-        main_output_channels: std::num::NonZeroU32::new(2),
-        ..AudioIOLayout::const_default()
-    }];
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
+        AudioIOLayout {
+            main_input_channels: std::num::NonZeroU32::new(2),
+            main_output_channels: std::num::NonZeroU32::new(2),
+            aux_input_ports: &[new_nonzero_u32(2)],
+            names: PortNames {
+                aux_inputs: &["Sidechain"],
+                ..PortNames::const_default()
+            },
+            ..AudioIOLayout::const_default()
+        },
+        AudioIOLayout {
+            main_input_channels: std::num::NonZeroU32::new(2),
+            main_output_channels: std::num::NonZeroU32::new(2),
+            ..AudioIOLayout::const_default()
+        },
+    ];
 
     const SAMPLE_ACCURATE_AUTOMATION: bool = true;
     const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
@@ -276,7 +289,7 @@ impl Plugin for Multosis {
     fn process(
         &mut self,
         buffer: &mut Buffer,
-        _aux: &mut AuxiliaryBuffers,
+        aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let transport = context.transport();
@@ -371,9 +384,15 @@ impl Plugin for Multosis {
                 }
             }
         });
-        self.engine.process_with_midi(
+        let sidechain = aux
+            .inputs
+            .first()
+            .map(|input| SidechainInput::from_channels(input.as_slice_immutable()))
+            .unwrap_or_default();
+        self.engine.process_with_inputs(
             &mut *left,
             &mut *right,
+            sidechain,
             playing,
             sps,
             bpm,

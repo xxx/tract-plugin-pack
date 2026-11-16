@@ -215,6 +215,9 @@ existing Free Hz/Transient settings keep their block-aligned behavior. See
 Transient (sample) also exposes **Detect...** for an absolute level threshold,
 detector-only High-pass/Low-pass, and a measured level meter. Settings default
 to Off and save per row; see [audio detector setup](../mseg-editor.md#audio-detector-setup).
+Detect's **Input** switches each row between Main and the shared external
+**Sidechain** bus; **Audio → Sidechain** displays its raw waveform. See
+[sidechain routing](../mseg-editor.md#external-sidechain).
 
 Rows can also use **Trigger → MIDI note**, with Note (Any/0–127) and Ch.
 (Any/1–16) filters. Route MIDI to the plugin's note input; each matching note-on

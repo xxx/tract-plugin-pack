@@ -6,6 +6,7 @@ pub mod effects;
 pub mod modulation;
 pub mod modulation_telemetry;
 pub mod randomize;
+pub mod sidechain;
 pub mod undo;
 pub mod waveform;
 

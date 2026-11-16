@@ -1,6 +1,6 @@
 use super::*;
 use crate::modulation::{
-    AudioTriggerSettings, FILTER_MAX_HZ, FILTER_MIN_HZ, LEVEL_MAX_DB, LEVEL_MIN_DB,
+    AudioTriggerSettings, DetectorInput, FILTER_MAX_HZ, FILTER_MIN_HZ, LEVEL_MAX_DB, LEVEL_MIN_DB,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +107,7 @@ pub(super) struct DetectorLayout {
     pub rect: (f32, f32, f32, f32),
     pub fields: [(f32, f32, f32, f32); 3],
     pub close: (f32, f32, f32, f32),
+    pub input: (f32, f32, f32, f32),
     pub reset: (f32, f32, f32, f32),
     pub meter: (f32, f32, f32, f32),
     scale: f32,
@@ -116,9 +117,9 @@ pub(super) fn detector_layout(geometry: EditorGeometry) -> DetectorLayout {
     let s = geometry
         .scale
         .min(((ww - 8.0) / 392.0).max(0.01))
-        .min(((wh - 8.0) / 244.0).max(0.01))
+        .min(((wh - 8.0) / 286.0).max(0.01))
         .max(0.01);
-    let (w, h) = (392.0 * s, 244.0 * s);
+    let (w, h) = (392.0 * s, 286.0 * s);
     let anchor = geometry.layout.detector_setup;
     let x = anchor.0.clamp(4.0 * s, (ww - w - 4.0 * s).max(4.0 * s));
     let mut y = anchor.1 + anchor.3 + 4.0 * s;
@@ -130,14 +131,15 @@ pub(super) fn detector_layout(geometry: EditorGeometry) -> DetectorLayout {
         fields: std::array::from_fn(|i| {
             (
                 x + 12.0 * s,
-                y + (36.0 + i as f32 * 42.0) * s,
+                y + (78.0 + i as f32 * 42.0) * s,
                 w - 24.0 * s,
                 34.0 * s,
             )
         }),
         close: (x + w - 32.0 * s, y + 8.0 * s, 24.0 * s, 20.0 * s),
-        reset: (x + 12.0 * s, y + 212.0 * s, 88.0 * s, 24.0 * s),
-        meter: (x + 12.0 * s, y + 178.0 * s, w - 24.0 * s, 8.0 * s),
+        input: (x + 12.0 * s, y + 36.0 * s, w - 24.0 * s, 34.0 * s),
+        reset: (x + 12.0 * s, y + 254.0 * s, 88.0 * s, 24.0 * s),
+        meter: (x + 12.0 * s, y + 220.0 * s, w - 24.0 * s, 8.0 * s),
         scale: s,
     }
 }
@@ -235,6 +237,12 @@ impl EffectEditor {
         );
         let r = layout.close;
         widgets::controls::draw_button(pm, tr, r.0, r.1, r.2, r.3, "X", false, false);
+        let r = layout.input;
+        let label = match binding.settings.input {
+            DetectorInput::Main => "Input: Main",
+            DetectorInput::Sidechain => "Input: Sidechain",
+        };
+        widgets::controls::draw_button(pm, tr, r.0, r.1, r.2, r.3, label, false, false);
         for (field, r) in DetectorField::ALL.into_iter().zip(layout.fields) {
             let value = field.value(binding.settings);
             let editing = self.text_edit.active_for(&EffectHit::Detector(field));
@@ -277,7 +285,7 @@ impl EffectEditor {
         tr.draw_text(
             pm,
             x + 12.0 * s,
-            y + 170.0 * s,
+            y + 212.0 * s,
             &label,
             (12.0 * s).max(10.0),
             widgets::color_text(),
@@ -313,7 +321,7 @@ impl EffectEditor {
         tr.draw_text(
             pm,
             x + 12.0 * s,
-            y + 203.0 * s,
+            y + 245.0 * s,
             "Filters affect detection only",
             (11.0 * s).max(10.0),
             widgets::color_muted(),
@@ -338,15 +346,19 @@ impl Session<'_> {
         );
     }
     pub(super) fn apply_detector(&mut self, field: DetectorField, value: Option<f32>) {
+        let mut settings = self.modulation.audio_trigger.normalized();
+        field.set(&mut settings, value);
+        self.apply_detector_settings(settings);
+    }
+
+    fn apply_detector_settings(&mut self, settings: AudioTriggerSettings) {
         if !matches!(
             self.modulation.trigger,
             TriggerSource::TransientSample { .. }
         ) {
             return;
         }
-        let mut settings = self.modulation.audio_trigger.normalized();
-        field.set(&mut settings, value);
-        settings = settings.normalized();
+        let settings = settings.normalized();
         if settings != self.modulation.audio_trigger {
             self.modulation.audio_trigger = settings;
             self.response.changed = true;
@@ -425,15 +437,20 @@ impl Session<'_> {
                         let norm = self.detector_norm(field);
                         self.state.effect_dial_drag.begin_drag(action, norm, false);
                     }
+                } else if view::in_rect(layout.input, self.mouse_pos.0, self.mouse_pos.1) {
+                    self.state.effect_dial_drag.end_drag();
+                    let mut settings = self.modulation.audio_trigger;
+                    settings.input = match settings.input {
+                        DetectorInput::Main => DetectorInput::Sidechain,
+                        DetectorInput::Sidechain => DetectorInput::Main,
+                    };
+                    self.apply_detector_settings(settings);
+                    self.state.effect_click = ClickTracker::new();
                 } else if view::in_rect(layout.reset, self.mouse_pos.0, self.mouse_pos.1) {
-                    if self.modulation.audio_trigger != AudioTriggerSettings::default() {
-                        self.modulation.audio_trigger = AudioTriggerSettings::default();
-                        self.response.changed = true;
-                    }
-                    self.state.detector_owner = Some(
-                        self.state
-                            .detector_binding(self.effect.kind, self.modulation),
-                    );
+                    self.apply_detector_settings(AudioTriggerSettings {
+                        input: self.modulation.audio_trigger.input,
+                        ..AudioTriggerSettings::default()
+                    });
                 } else if view::in_rect(layout.close, self.mouse_pos.0, self.mouse_pos.1)
                     || !view::in_rect(layout.rect, self.mouse_pos.0, self.mouse_pos.1)
                 {
@@ -454,7 +471,7 @@ impl Session<'_> {
                             .text_edit
                             .begin(EffectHit::Detector(field), &text);
                         self.state.effect_click = ClickTracker::new();
-                    } else {
+                    } else if !view::in_rect(layout.input, self.mouse_pos.0, self.mouse_pos.1) {
                         self.state.cancel_detector();
                     }
                 }

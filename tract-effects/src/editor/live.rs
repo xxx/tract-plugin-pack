@@ -28,10 +28,11 @@ pub enum AudioView {
     Input,
     Output,
     Both,
+    Sidechain,
 }
 impl AudioView {
     pub(super) fn input(self) -> bool {
-        matches!(self, Self::Input | Self::Both)
+        matches!(self, Self::Input | Self::Both | Self::Sidechain)
     }
     pub(super) fn output(self) -> bool {
         matches!(self, Self::Output | Self::Both)
@@ -45,6 +46,8 @@ impl AudioView {
             (Self::Input, true) => "Frozen: In",
             (Self::Output, true) => "Frozen: Out",
             (Self::Both, true) => "Frozen: Both",
+            (Self::Sidechain, false) => "Audio: SC",
+            (Self::Sidechain, true) => "Frozen: SC",
         }
     }
 }
@@ -54,6 +57,7 @@ pub(super) fn audio_items(state: &EffectEditor) -> Vec<&'static str> {
         "Input",
         "Output",
         "Input + Output",
+        "Sidechain",
         if state.audio_display == AudioDisplay::Magnitude {
             "✓ Magnitude"
         } else {
@@ -102,7 +106,7 @@ pub(super) struct LiveSource {
     waveform_token: u64,
     waveform_cursor: u64,
     waveform_generation: u64,
-    waveform_key: Option<(EffectKind, usize)>,
+    waveform_key: Option<(EffectKind, usize, bool)>,
     pub(super) waveform: [Option<AudioBin>; WAVEFORM_BINS],
 }
 impl Drop for LiveSource {
@@ -122,12 +126,13 @@ impl LiveSource {
     fn refresh_waveform(&mut self, kind: EffectKind, slot: usize, view: AudioView, frozen: bool) {
         let telemetry = &self.telemetry.waveform;
         let generation = telemetry.generation();
-        if self.waveform_key != Some((kind, slot)) || self.waveform_generation != generation {
+        let key = (kind, slot, view == AudioView::Sidechain);
+        if self.waveform_key != Some(key) || self.waveform_generation != generation {
             telemetry.release(self.waveform_token);
             self.waveform_token = 0;
             self.waveform.fill(None);
             self.waveform_generation = generation;
-            self.waveform_key = Some((kind, slot));
+            self.waveform_key = Some(key);
         }
         if view == AudioView::Off || frozen {
             telemetry.release(self.waveform_token);
@@ -137,7 +142,11 @@ impl LiveSource {
             }
             return;
         }
-        let token = telemetry.request(self.row, slot, kind);
+        let token = if view == AudioView::Sidechain {
+            telemetry.request_sidechain(self.row, slot, kind)
+        } else {
+            telemetry.request(self.row, slot, kind)
+        };
         if token != self.waveform_token {
             self.waveform_token = token;
             self.waveform.fill(None);
@@ -235,6 +244,15 @@ impl EffectEditor {
         self.trace_enabled
     }
     pub fn set_audio_view(&mut self, view: AudioView) {
+        if (self.audio_view == AudioView::Sidechain) != (view == AudioView::Sidechain) {
+            self.audio_frozen = false;
+            if let Some(live) = &mut self.live {
+                live.telemetry.waveform.release(live.waveform_token);
+                live.waveform_token = 0;
+                live.waveform_key = None;
+                live.waveform.fill(None);
+            }
+        }
         self.audio_view = view;
         if view == AudioView::Off {
             self.audio_frozen = false;

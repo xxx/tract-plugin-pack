@@ -5,9 +5,23 @@ pub const LEVEL_MAX_DB: f32 = 0.0;
 pub const FILTER_MIN_HZ: f32 = 20.0;
 pub const FILTER_MAX_HZ: f32 = 20000.0;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DetectorInput {
+    #[default]
+    Main,
+    Sidechain,
+}
+impl DetectorInput {
+    pub fn is_main(&self) -> bool {
+        *self == Self::Main
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct AudioTriggerSettings {
+    #[serde(skip_serializing_if = "DetectorInput::is_main")]
+    pub input: DetectorInput,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub level_db: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -24,6 +38,7 @@ impl AudioTriggerSettings {
             value.filter(|v| v.is_finite()).map(|v| v.clamp(lo, hi))
         };
         Self {
+            input: self.input,
             level_db: finite(self.level_db, LEVEL_MIN_DB, LEVEL_MAX_DB),
             highpass_hz: finite(self.highpass_hz, FILTER_MIN_HZ, FILTER_MAX_HZ),
             lowpass_hz: finite(self.lowpass_hz, FILTER_MIN_HZ, FILTER_MAX_HZ),
@@ -137,6 +152,7 @@ mod tests {
             AudioTriggerSettings::default()
         );
         let settings = AudioTriggerSettings {
+            input: DetectorInput::Main,
             level_db: Some(-12.0),
             highpass_hz: Some(100.0),
             lowpass_hz: Some(4000.0),
@@ -150,6 +166,7 @@ mod tests {
         );
         assert_eq!(
             AudioTriggerSettings {
+                input: DetectorInput::Main,
                 level_db: Some(f32::NAN),
                 highpass_hz: Some(-1.0),
                 lowpass_hz: Some(f32::INFINITY)

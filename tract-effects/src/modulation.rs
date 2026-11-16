@@ -11,7 +11,8 @@ use tiny_skia_widgets::{
 mod audio_trigger;
 mod precise;
 pub use audio_trigger::{
-    AudioTriggerSettings, DetectorReading, FILTER_MAX_HZ, FILTER_MIN_HZ, LEVEL_MAX_DB, LEVEL_MIN_DB,
+    AudioTriggerSettings, DetectorInput, DetectorReading, FILTER_MAX_HZ, FILTER_MIN_HZ,
+    LEVEL_MAX_DB, LEVEL_MIN_DB,
 };
 mod smoothing;
 pub use smoothing::{MAX_SMOOTH_MS, normalized_smooth_ms, smooth_from_norm, smooth_to_norm};
@@ -666,6 +667,13 @@ impl ModulationState {
     }
     pub fn next_precise_trigger(&mut self, input: [f32; 2]) -> bool {
         self.precise.next_sample(input)
+    }
+    pub fn next_precise_trigger_with_sidechain(
+        &mut self,
+        input: [f32; 2],
+        sidechain: [f32; 2],
+    ) -> bool {
+        self.precise.next_sample_with_sidechain(input, sidechain)
     }
     pub fn detector_reading(&self) -> Option<DetectorReading> {
         self.precise.reading()

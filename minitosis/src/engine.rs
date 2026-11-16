@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tract_effects::effects::{Effect, EffectInstance, EffectKind, TrackEffect};
 use tract_effects::modulation::{ModulationState, TrackModulation};
 use tract_effects::modulation_telemetry::ModulationTelemetry;
+use tract_effects::sidechain::SidechainInput;
 use tract_effects::waveform::{WaveformClock, WaveformTiming};
 
 pub const MAX_LATENCY: usize = 4096;
@@ -102,6 +103,17 @@ impl Processor {
     }
 
     pub fn prepare_block(&mut self, track: &TrackEffect, left: &[f32], right: &[f32], bpm: f64) {
+        self.prepare_block_with_sidechain(track, left, right, SidechainInput::default(), bpm);
+    }
+
+    pub fn prepare_block_with_sidechain(
+        &mut self,
+        track: &TrackEffect,
+        left: &[f32],
+        right: &[f32],
+        sidechain: SidechainInput<'_>,
+        bpm: f64,
+    ) {
         self.effect.set_bpm(bpm as f32);
         for (i, _) in self.effect.parameters().iter().enumerate() {
             if !(self.modulation.smoothed_parameter(track.kind, i)
@@ -117,7 +129,10 @@ impl Processor {
         if self.state.precise_trigger_active()
             && let Some((&l, &r)) = left.first().zip(right.first())
         {
-            if self.state.next_precise_trigger([l, r]) {
+            if self
+                .state
+                .next_precise_trigger_with_sidechain([l, r], sidechain.sample(0))
+            {
                 self.state.trigger();
             }
             self.skip_precise_sample = true;
@@ -178,9 +193,23 @@ impl Processor {
     }
 
     pub fn process_sample(&mut self, input: [f32; 2], mix: f32, bypass: bool) -> [f32; 2] {
+        self.process_sample_with_sidechain(input, [0.0; 2], mix, bypass)
+    }
+
+    pub fn process_sample_with_sidechain(
+        &mut self,
+        input: [f32; 2],
+        sidechain: [f32; 2],
+        mix: f32,
+        bypass: bool,
+    ) -> [f32; 2] {
         if self.skip_precise_sample {
             self.skip_precise_sample = false;
-        } else if self.span_remaining > 0 && self.state.next_precise_trigger(input) {
+        } else if self.span_remaining > 0
+            && self
+                .state
+                .next_precise_trigger_with_sidechain(input, sidechain)
+        {
             if self.span_processed > 0 {
                 self.state.trigger_in_span();
             } else {
@@ -210,10 +239,11 @@ impl Processor {
         if self.waveform.active()
             && let Some(telemetry) = &self.waveform_telemetry
         {
-            self.waveform.record_sample(
+            self.waveform.record_sample_with_sidechain(
                 &telemetry.waveform,
                 input,
                 output,
+                sidechain,
                 self.state.precise_phase(self.waveform.request().slot),
             );
         }

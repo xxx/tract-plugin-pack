@@ -186,8 +186,8 @@ not change the sound or project state.
 ### Audio waveform backdrop
 
 In Multosis/Minitosis, **Audio** beside Smooth/Trace offers **Off**, **Input**,
-**Output**, and **Input + Output**. It draws stereo magnitude peaks beneath the
-curve: input in gray, output in the selected envelope's color. The greater
+**Output**, **Input + Output**, and **Sidechain**. It draws stereo magnitude peaks
+beneath the curve: input in gray, output in the selected envelope's color. The greater
 absolute channel sets each peak. Full height is magnitude 1; louder signals
 clip visually. The horizontal axis follows the selected envelope's clock,
 including its triggers and loops. Zoom and pan apply to the backdrop too.
@@ -210,6 +210,12 @@ and retains the current display for editing. **Unfreeze** starts fresh. Switchin
 between Input/Output/Both keeps the captured data; Off clears it. Freeze survives
 focus changes and resizing. Switching envelope, row, effect, or restored state
 clears the history, including a frozen display.
+
+Sidechain displays the raw auxiliary input, independently of the detector's
+Input choice. It supports the same display modes and gain, and appears as **SC**
+in the closed Audio control. Switching between Sidechain and the main
+Input/Output/Both views clears the capture and unfreezes it to collect the chosen
+source. Display mode/gain changes keep a frozen sidechain capture intact.
 
 Multosis measures immediately before/after the selected row, including its Mix
 and Amp, before the wet-bus compressor and master blend. Inactive, muted, and None
@@ -253,9 +259,10 @@ Free Hz (sample) keeps a continuous clock across host buffers, grid steps, and
 other rows' MIDI notes. Its first restart follows one full period. Rate edits
 retain clock progress. Transient (sample) uses the same dual-envelope detection
 and Hold rules as Transient, but restarts on each qualifying sample, including
-multiple detections in one buffer. It listens to the plugin's original dry
-stereo-average input, before any row's effects. Detector attack/release and the
-noise floor still apply; no lookahead or extra latency is added.
+multiple detections in one buffer. By default it listens to the plugin's original
+dry stereo-average input, before any row's effects; Detect can select the external
+Sidechain instead. Detector attack/release and the noise floor still apply; no
+lookahead or extra latency is added.
 
 Only the triggered row restarts. Other rows keep their held values and clocks.
 Smooth retains its level through the restart; Off keeps endpoint evaluation.
@@ -267,8 +274,9 @@ reinitialization. Mode/rate/Sens/Hold settings save per row/effect and are undoa
 ### Audio detector setup
 
 With **Transient (sample)** selected, click **Detect...** above the trigger menu.
-The panel provides **Threshold**, **High-pass**, and **Low-pass**, all Off by
-default. Older projects and the other trigger modes keep their existing behavior.
+The panel provides **Input: Main / Sidechain**, plus **Threshold**, **High-pass**,
+and **Low-pass**. Input defaults to Main; the other settings default to Off.
+Older projects and the other trigger modes keep their existing behavior.
 
 Threshold is Off or -60..0 dB, measured on the fast detector envelope after
 filtering. Sens still controls the fast/slow ratio and Hold still sets the
@@ -286,9 +294,30 @@ Drag to adjust, Shift-drag for fine control, double-click for Off, or right-clic
 to enter a value such as `Off`, `-24 dB`, `200 Hz`, or `5 kHz`. Numeric input is
 committed before another slider drag or outside click. Escape first cancels an
 active field, then closes the panel. **Reset** restores all three Off in one undo
-step. Settings save per row/effect, but shape clipboard/files do not transfer them.
+step while retaining the selected Input. Settings save per row/effect, but shape
+clipboard/files do not transfer them.
 Focus loss, resize, and native window close finalize edits; binding replacements
 discard old numeric buffers so they cannot apply to another row/effect.
+
+### External sidechain
+
+Multosis/Minitosis expose a stereo auxiliary input named **Sidechain**. Route a
+source track to that input in your DAW, choose **Transient (sample)**, open
+**Detect...**, and click Input to select Sidechain. The source's stereo average
+feeds the threshold and filters; the meter shows the resulting detector level.
+Missing auxiliary data is silence, so an unconnected Sidechain does not trigger
+from main audio. Mono auxiliary buffers are duplicated; short buffers use silence
+for the missing samples.
+
+Changing Input commits pending numeric text and clears detector/filter/Hold
+history while the envelopes keep their phase. The choice saves per row/effect
+and is undoable. Sidechain audio feeds detection and display only; the audible
+signal remains the main input/effect path, with unchanged latency. The legacy
+Transient source retains its main-input, block-aligned behavior.
+
+Use **Audio → Sidechain** to align curves against the unfiltered source. This
+view is independent of Detect's Input choice. A stereo-only layout also remains
+available for hosts choosing the previous audio configuration.
 
 ## Edit commands
 

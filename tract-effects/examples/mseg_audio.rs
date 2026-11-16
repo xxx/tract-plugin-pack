@@ -41,12 +41,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("midi") => 1,
         Some("audio") => 2,
         Some("hz") => 3,
-        _ => return Err("Final argument must be midi, audio, or hz".into()),
+        Some("sidechain") => 4,
+        _ => return Err("Trigger demo must be midi, audio, hz, or sidechain".into()),
     };
     let midi_demo = demo == 1;
     let detector_demo = match args.next().as_deref() {
         None => false,
-        Some("detector") if demo == 2 => true,
+        Some("detector") if demo == 2 || demo == 4 => true,
         _ => return Err("Detector panel demo requires audio detector".into()),
     };
     let caption = format!(
@@ -55,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             1 => " — MIDI note 60 / Ch. 10",
             2 => " — sample-timed audio",
             3 => " — sample-timed 4 Hz",
+            4 => " — external sidechain retrigger",
             _ => "",
         }
     );
@@ -75,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 note: Some(60),
                 channel: Some(9),
             },
-            2 => TriggerSource::TransientSample {
+            2 | 4 => TriggerSource::TransientSample {
                 threshold: 1.5,
                 hold_ms: 50.0,
             },
@@ -91,7 +93,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             level_db: Some(-36.0),
             highpass_hz: Some(120.0),
             lowpass_hz: Some(6000.0),
+            ..tract_effects::modulation::AudioTriggerSettings::default()
         };
+    }
+    if demo == 4 {
+        config.audio_trigger.input = tract_effects::modulation::DetectorInput::Sidechain;
     }
     config.msegs[1] = MsegData {
         play_mode: PlayMode::Cyclic,
@@ -117,7 +123,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut audio = WaveformClock::default();
     let mut editor = EffectEditor::default();
     editor.connect_live(&shared, 0);
-    editor.set_audio_view(AudioView::Both);
+    editor.set_audio_view(if demo == 4 {
+        AudioView::Sidechain
+    } else {
+        AudioView::Both
+    });
     editor.set_audio_display(display);
     editor.set_audio_gain(gain);
     let geometry = EditorGeometry {
@@ -127,19 +137,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     editor.draw(&mut pm, &mut text, &track, &config, [0.0; 4], geometry);
     let mut input = [0.0; 960];
+    let mut auxiliary = [0.0; 960];
     let block_samples = input.len();
     for block in 0..if detector_demo { 138 } else { 145 } {
         for (index, sample) in input.iter_mut().enumerate() {
             let time = (block * block_samples + index) as f32 / 48000.0;
             let envelope = (-((time * 4.0).fract()) * 18.0).exp();
-            *sample = envelope
+            auxiliary[index] = envelope
                 * ((std::f32::consts::TAU * 2200.0 * time).sin() * 0.65
                     + (std::f32::consts::TAU * 60.0 * time).sin() * 0.25);
+            *sample = if demo == 4 {
+                (std::f32::consts::TAU * 220.0 * time).sin() * 0.5
+            } else {
+                auxiliary[index]
+            };
         }
         trace.begin_block(&shared, 48000.0);
         audio.begin_block(&shared.waveform);
         state.begin_block(&config, &input, &input, 48000.0);
-        if state.next_precise_trigger([input[0], -input[0] * 0.8]) {
+        if state.next_precise_trigger_with_sidechain(
+            [input[0], -input[0] * 0.8],
+            [auxiliary[0], auxiliary[0] * 0.8],
+        ) {
             state.trigger();
         }
         audio.prepare_segment(
@@ -173,7 +192,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
             let midi_fire = midi_event.is_some_and(|event| config.trigger.accepts_midi(event));
-            let precise_fire = index > 0 && state.next_precise_trigger([sample, -sample * 0.8]);
+            let precise_fire = index > 0
+                && state.next_precise_trigger_with_sidechain(
+                    [sample, -sample * 0.8],
+                    [auxiliary[index], auxiliary[index] * 0.8],
+                );
             if midi_fire || precise_fire {
                 if index > 0 {
                     state.trigger_in_span();
@@ -208,10 +231,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sample * (1.0 - mix) + wet.0 * mix * state.amplitude(),
                 -sample * 0.8 * (1.0 - mix) + wet.1 * mix * state.amplitude(),
             ];
-            audio.record_sample(
+            audio.record_sample_with_sidechain(
                 &shared.waveform,
                 [sample, -sample * 0.8],
                 output,
+                [auxiliary[index], auxiliary[index] * 0.8],
                 state.precise_phase(1),
             );
             if trace.tick() {
@@ -234,7 +258,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut pm,
             24.0,
             52.0,
-            "Gray: input. Amber: processed output. White: smoothed source trace.",
+            if demo == 4 {
+                "Gray: raw sidechain. White: measured source trace. Main audio uses a separate tone."
+            } else {
+                "Gray: input. Amber: processed output. White: smoothed source trace."
+            },
             14.0,
             color_text(),
         );

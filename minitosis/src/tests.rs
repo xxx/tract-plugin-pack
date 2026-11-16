@@ -144,6 +144,147 @@ fn precise_source(plugin: &mut Minitosis, source: tract_effects::modulation::Tri
 }
 
 #[test]
+fn sidechain_native_offsets_survive_host_partitions_and_never_enter_main_audio() {
+    use tract_effects::modulation::{DetectorInput, TransientDetector, TriggerSource};
+    let layout = Minitosis::AUDIO_IO_LAYOUTS[0];
+    assert_eq!(layout.aux_input_ports[0].get(), 2);
+    assert_eq!(layout.names.aux_inputs, &["Sidechain"]);
+    assert!(Minitosis::AUDIO_IO_LAYOUTS[1].aux_input_ports.is_empty());
+    let mut auxiliary = [0.0; 1024];
+    auxiliary[128..192].fill(1.0);
+    let original = auxiliary;
+    let mut detector = TransientDetector::default();
+    let last = auxiliary
+        .iter()
+        .enumerate()
+        .filter_map(|(i, value)| {
+            detector
+                .process_sample(*value, 1.5, 5.0, 48000.0)
+                .then_some(i)
+        })
+        .last()
+        .unwrap();
+    for (kind, bypass, smooth) in [
+        (EffectKind::Bitcrush, false, 0.0),
+        (EffectKind::Bitcrush, false, 20.0),
+        (EffectKind::Bitcrush, true, 0.0),
+        (EffectKind::None, false, 0.0),
+    ] {
+        for parts in [&[1024][..], &[17, 64, 511][..]] {
+            let (mut plugin, mut context) = midi_plugin(kind, smooth, bypass);
+            plugin.processor.modulation.audio_trigger.input = DetectorInput::Sidechain;
+            precise_source(
+                &mut plugin,
+                TriggerSource::TransientSample {
+                    threshold: 1.5,
+                    hold_ms: 5.0,
+                },
+            );
+            let mut left = [0.0; 1024];
+            let mut right = [0.0; 1024];
+            let (mut cursor, mut part) = (0, 0);
+            while cursor < left.len() {
+                let end = (cursor + parts[part % parts.len()]).min(left.len());
+                assert_no_alloc::assert_no_alloc(|| {
+                    plugin.render_with_sidechain(
+                        &mut left[cursor..end],
+                        &mut right[cursor..end],
+                        SidechainInput::new(&auxiliary[cursor..end], &auxiliary[cursor..end]),
+                        false,
+                        120.0,
+                        &mut context,
+                    )
+                });
+                cursor = end;
+                part += 1;
+            }
+            assert_eq!(left, [0.0; 1024]);
+            assert_eq!(right, [0.0; 1024]);
+            assert!((plugin.processor.phase(0) - (1024 - last) as f32 / 48000.0).abs() < 1e-6);
+            assert_eq!(
+                plugin
+                    .processor
+                    .modulation_frame()
+                    .detector
+                    .unwrap()
+                    .settings
+                    .input,
+                DetectorInput::Sidechain
+            );
+            assert_eq!(context.latency.get(), 0);
+        }
+    }
+    assert_eq!(auxiliary, original);
+}
+
+#[test]
+fn main_source_is_bit_exact_with_arbitrary_sidechain_and_missing_aux_never_falls_back() {
+    use tract_effects::modulation::{DetectorInput, TriggerSource};
+    let (mut actual, mut context) = midi_plugin(EffectKind::Bitcrush, 20.0, false);
+    let (mut reference, mut reference_context) = midi_plugin(EffectKind::Bitcrush, 20.0, false);
+    for plugin in [&mut actual, &mut reference] {
+        precise_source(
+            plugin,
+            TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 50.0,
+            },
+        );
+    }
+    let input = std::array::from_fn::<_, 512, _>(|i| (i as f32 * 0.1).sin() * 0.2);
+    let auxiliary = std::array::from_fn::<_, 512, _>(|i| if i % 2 == 0 { 1.0 } else { f32::NAN });
+    let (mut left, mut right) = (input, input);
+    let (mut expected_left, mut expected_right) = (input, input);
+    assert_no_alloc::assert_no_alloc(|| {
+        actual.render_with_sidechain(
+            &mut left,
+            &mut right,
+            SidechainInput::new(&auxiliary, &auxiliary),
+            false,
+            120.0,
+            &mut context,
+        );
+        reference.render(
+            &mut expected_left,
+            &mut expected_right,
+            false,
+            120.0,
+            &mut reference_context,
+        );
+    });
+    assert_eq!(left, expected_left);
+    assert_eq!(right, expected_right);
+    assert_eq!(
+        actual.processor.modulation_frame(),
+        reference.processor.modulation_frame()
+    );
+    actual.processor.modulation.audio_trigger.input = DetectorInput::Sidechain;
+    precise_source(
+        &mut actual,
+        TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        },
+    );
+    let phase = actual.processor.phase(0);
+    assert_no_alloc::assert_no_alloc(|| {
+        actual.render_with_sidechain(
+            &mut [1.0; 512],
+            &mut [1.0; 512],
+            SidechainInput::default(),
+            false,
+            120.0,
+            &mut context,
+        )
+    });
+    assert_eq!(
+        actual.processor.modulation_frame().detector.unwrap().level,
+        0.0
+    );
+    assert!((actual.processor.phase(0) - phase - 512.0 / 48000.0).abs() < 1e-6);
+}
+
+#[test]
 fn sample_hz_restarts_after_the_full_period_at_a_buffer_interior() {
     use tract_effects::modulation::TriggerSource;
     let (mut plugin, mut context) = midi_plugin(EffectKind::Bitcrush, 0.0, false);
@@ -156,6 +297,58 @@ fn sample_hz_restarts_after_the_full_period_at_a_buffer_interior() {
     assert!(left[..352].iter().all(|value| *value > 0.24));
     assert!(left[352..].iter().all(|value| *value == 0.0));
     assert!((plugin.processor.phase(0) - 160.0 / 48000.0).abs() < 1e-7);
+}
+
+#[test]
+fn sidechain_filter_history_and_routing_survive_same_effect_sample_rate_reinitialization() {
+    use tract_effects::modulation::{AudioTriggerSettings, DetectorInput, TriggerSource};
+    let (mut plugin, mut context) = midi_plugin(EffectKind::Bitcrush, 0.0, false);
+    plugin.processor.modulation.audio_trigger = AudioTriggerSettings {
+        input: DetectorInput::Sidechain,
+        highpass_hz: Some(500.0),
+        lowpass_hz: Some(4000.0),
+        ..AudioTriggerSettings::default()
+    };
+    precise_source(
+        &mut plugin,
+        TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        },
+    );
+    let auxiliary = [0.7; 4800];
+    plugin.render_with_sidechain(
+        &mut [0.0; 4800],
+        &mut [0.0; 4800],
+        SidechainInput::new(&auxiliary, &auxiliary),
+        false,
+        120.0,
+        &mut context,
+    );
+    assert!(plugin.processor.modulation_frame().detector.unwrap().level < 1e-5);
+    assert!(plugin.processor.phase(0) > 0.05);
+    let config = BufferConfig {
+        sample_rate: 96000.0,
+        min_buffer_size: Some(1),
+        max_buffer_size: 4096,
+        process_mode: ProcessMode::Realtime,
+    };
+    assert!(plugin.initialize(&Minitosis::AUDIO_IO_LAYOUTS[0], &config, &mut context));
+    plugin.reset();
+    assert_no_alloc::assert_no_alloc(|| {
+        plugin.render_with_sidechain(
+            &mut [0.0; 1024],
+            &mut [0.0; 1024],
+            SidechainInput::new(&auxiliary, &auxiliary),
+            false,
+            120.0,
+            &mut context,
+        )
+    });
+    assert!((plugin.processor.phase(0) - 1024.0 / 96000.0).abs() < 1e-6);
+    let reading = plugin.processor.modulation_frame().detector.unwrap();
+    assert_eq!(reading.settings.input, DetectorInput::Sidechain);
+    assert!(reading.level < 1e-5);
 }
 
 #[test]
@@ -258,6 +451,7 @@ fn detector_filters_leave_audible_signal_unchanged_when_threshold_rejects_restar
         level_db: Some(0.0),
         highpass_hz: Some(1000.0),
         lowpass_hz: Some(4000.0),
+        ..AudioTriggerSettings::default()
     };
     reference.processor.modulation.audio_trigger = AudioTriggerSettings {
         level_db: Some(0.0),
