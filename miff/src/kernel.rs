@@ -316,6 +316,25 @@ mod tests {
     }
 
     #[test]
+    fn smoothed_loop_geometry_bakes_to_the_displayed_taps() {
+        use tiny_skia_widgets::mseg::MsegEditState;
+        let mut data = MsegData::default();
+        data.nodes[0].tension = -0.7;
+        let mut editor = MsegEditState::new_curve_only();
+        assert!(editor.smooth_loop_seam(&mut data).is_some());
+        for len in [16, 512, MAX_KERNEL] {
+            let mut taps = [0.0; MAX_KERNEL];
+            bake_taps(&data, len, &mut taps);
+            assert_eq!(taps[0], taps[len - 1]);
+            assert!(taps[..len].iter().any(|value| *value > 0.9));
+            for (i, value) in taps[..len].iter().enumerate() {
+                let expected = 2.0 * value_at_phase(&data, i as f32 / (len - 1) as f32) - 1.0;
+                assert_eq!(value.to_bits(), expected.to_bits());
+            }
+        }
+    }
+
+    #[test]
     fn default_flat_curve_is_valid() {
         assert!(default_flat_curve().is_valid());
     }

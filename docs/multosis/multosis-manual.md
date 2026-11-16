@@ -228,6 +228,10 @@ They are available from the **Tool**, **Shapes**, and **Edit** menus below the
 existing controls. Triplet grids `6 / 8`, `12 / 8`, and `24 / 16` supplement the
 four straight grid presets described above.
 
+Edit also provides endpoint matching and **Smooth loop seam (10%)**; amber
+marks identify playback wrap jumps, including stepped tails. Commands use the
+hold-loop region when configured. See [loop seam tools](../mseg-editor.md#loop-seam-tools).
+
 **Smooth** adds a saved per-envelope lag (Off–1000 ms) before Depth/Target
 mapping. **Trace** displays measured source output, while dial arcs show the
 delivered target values. See [live smoothing and trace](../mseg-editor.md#live-smoothing-and-trace)

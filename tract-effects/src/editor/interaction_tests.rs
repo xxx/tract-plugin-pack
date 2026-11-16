@@ -1011,6 +1011,96 @@ mod event_dispatch {
     }
 }
 
+mod loop_seams {
+    use super::*;
+    use widgets::mseg::{MsegData, PointWeight, SegmentShape};
+
+    fn open_edit(h: &mut Harness, node_index: usize) {
+        let node = h.modulation.msegs[h.editor.selected_mseg].nodes[node_index];
+        let layout = h
+            .editor
+            .mseg_edit
+            .layout(h.geometry.layout.mseg_pane, h.geometry.scale);
+        h.move_to(
+            widgets::mseg::phase_to_x(&layout, node.time),
+            widgets::mseg::value_to_y(&layout, node.value),
+            Modifiers::empty(),
+        );
+        h.press(MouseButton::Left);
+        h.release();
+        h.press(MouseButton::Right);
+        assert!(h.editor.mseg_edit.has_open_menu());
+    }
+
+    fn choose(h: &mut Harness, index: usize) -> EditorResponse {
+        h.key(Key::Home);
+        for _ in 0..index {
+            assert!(!h.key(Key::ArrowDown).changed);
+        }
+        h.key(Key::Enter)
+    }
+
+    #[test]
+    fn seam_commands_are_saved_one_step_edits_and_smoothing_preserves_point_identity() {
+        for scale in [0.5, 1.0, 2.0] {
+            let mut h = Harness::new();
+            h.resize(scale);
+            let slot = h.editor.selected_mseg;
+            h.modulation.msegs[slot] = MsegData::default();
+            h.modulation.msegs[slot].nodes[0].value = 0.2;
+            h.modulation.msegs[slot].nodes[1].value = 0.8;
+            open_edit(&mut h, 1);
+            let before = h.modulation.clone();
+            let mut history = crate::undo::UndoHistory::new();
+            history.begin_capture(before.clone());
+            let response = choose(&mut h, 29);
+            assert!(response.captured && response.changed);
+            history.commit_capture(&h.modulation);
+            let after = h.modulation.clone();
+            let curve = &after.msegs[slot];
+            assert_eq!(curve.node_count, 3);
+            assert_eq!(curve.nodes[0].value, curve.nodes[2].value);
+            assert_eq!(curve.nodes[1].value, 0.8);
+            assert_eq!(curve.nodes[1].shape, SegmentShape::SCurve);
+            assert_eq!(curve.nodes[0].weight, PointWeight::Soft);
+            assert!(h.editor.mseg_edit.is_node_selected(2));
+            let mut geometry_only = before.clone();
+            geometry_only.msegs[slot] = *curve;
+            assert_eq!(after, geometry_only);
+            assert_eq!(history.undo(after.clone()), Some(before.clone()));
+            assert!(history.undo(before.clone()).is_none());
+            assert_eq!(history.redo(before), Some(after.clone()));
+            assert_eq!(
+                serde_json::from_str::<TrackModulation>(&serde_json::to_string(&after).unwrap())
+                    .unwrap(),
+                after
+            );
+            open_edit(&mut h, 2);
+            assert!(!choose(&mut h, 29).changed);
+            assert_eq!(h.modulation, after);
+        }
+    }
+
+    #[test]
+    fn endpoint_matches_reach_the_correct_hold_loop_without_touching_other_routing() {
+        for (index, target, value) in [(27, 2, 0.2), (28, 1, 0.8)] {
+            let mut h = Harness::new();
+            let slot = h.editor.selected_mseg;
+            let curve = &mut h.modulation.msegs[slot];
+            *curve = MsegData::default();
+            curve.insert_node(0.2, 0.2).unwrap();
+            curve.insert_node(0.8, 0.8).unwrap();
+            curve.hold = widgets::mseg::HoldMode::Loop { start: 1, end: 2 };
+            open_edit(&mut h, 1);
+            let mut expected = h.modulation.clone();
+            expected.msegs[slot].nodes[target].value = value;
+            let response = choose(&mut h, index);
+            assert!(response.captured && response.changed);
+            assert_eq!(h.modulation, expected);
+        }
+    }
+}
+
 mod precision_editing {
     use super::*;
     fn shortcut(key: Key, modifiers: Modifiers) -> Event {
@@ -1090,7 +1180,10 @@ mod precision_editing {
                     h.key(Key::ArrowDown);
                 }
             } else {
-                h.key(Key::End);
+                h.key(Key::Home);
+                for _ in 0..26 {
+                    h.key(Key::ArrowDown);
+                }
             }
             undo.begin_capture(h.modulation.clone());
             assert!(h.key(Key::Enter).changed);

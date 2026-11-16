@@ -14,6 +14,7 @@ pub mod interpolation;
 pub mod library;
 pub mod randomize;
 pub mod render;
+mod seam;
 pub mod shape;
 pub mod tools;
 pub mod viewport;

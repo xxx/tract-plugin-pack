@@ -57,6 +57,9 @@ pub(crate) fn transform_menu_items() -> &'static [&'static str] {
         "Hard points",
         "Medium points",
         "Soft points",
+        "Match loop end to start",
+        "Match loop start to end",
+        "Smooth loop seam (10%)",
     ]
 }
 
@@ -790,14 +793,10 @@ impl MsegEditState {
         // toggling the segment-stepped flag.
         if let MsegHit::SelectedNode(_) = hit {
             let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-            // The dropdown popup widget derives both item height (`ah`) and
-            // popup width (`aw`) from the anchor rect. Use a sensible row
-            // height + a width that fits the longest label ("Compress values")
-            // with chevron + padding; anchor at the click point with the
-            // anchor's height absorbed above so the first item opens *at*
-            // the cursor rather than below it.
+            // Anchor above the click so the first row opens at the pointer;
+            // keep labels readable at small scales.
             let item_h = 22.0 * scale;
-            let popup_w = 240.0 * scale;
+            let popup_w = (240.0 * scale).max(160.0);
             self.dropdown.open(
                 StripId::Transform,
                 (x, (y - item_h).max(rect.1), popup_w, item_h),

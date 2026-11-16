@@ -201,7 +201,16 @@ impl MsegEditState {
         };
         self.dropdown.open(
             id,
-            (anchor.0, anchor.1, anchor.2.max(anchor.3 * 9.0), anchor.3),
+            (
+                anchor.0,
+                anchor.1,
+                if id == StripId::Transform {
+                    anchor.2.max(anchor.3 * 9.0).max(160.0)
+                } else {
+                    anchor.2.max(anchor.3 * 9.0)
+                },
+                anchor.3,
+            ),
             DropdownList::flat(&refs),
             selected,
             false,
@@ -303,10 +312,47 @@ impl MsegEditState {
                         crate::mseg::PointWeight::Soft,
                     ][index - 24],
                 )),
+                27 => return self.match_loop_end_to_start(data),
+                28 => return self.match_loop_start_to_end(data),
+                29 => return self.smooth_loop_seam(data),
                 _ => Ok(false),
             },
             _ => Ok(false),
         };
+        self.finish_power_edit(result)
+    }
+
+    /// Match the loop's terminal node level to its initial node level.
+    pub fn match_loop_end_to_start(&mut self, data: &mut MsegData) -> Option<MsegEdit> {
+        self.match_loop_endpoint(data, true)
+    }
+
+    /// Match the loop's initial node level to its terminal node level.
+    pub fn match_loop_start_to_end(&mut self, data: &mut MsegData) -> Option<MsegEdit> {
+        self.match_loop_endpoint(data, false)
+    }
+
+    fn match_loop_endpoint(&mut self, data: &mut MsegData, end_to_start: bool) -> Option<MsegEdit> {
+        self.power.message.clear();
+        let changed = crate::mseg::seam::match_endpoint(data, self.curve_only, end_to_start);
+        if changed {
+            self.cancel_interaction();
+        }
+        self.finish_power_edit(Ok(changed))
+    }
+
+    /// Add an authored S-curve return and flatten the loop's starting tangent.
+    pub fn smooth_loop_seam(&mut self, data: &mut MsegData) -> Option<MsegEdit> {
+        self.power.message.clear();
+        let result = crate::mseg::seam::smooth(data, self.curve_only, self.selection).map(
+            |(changed, selection)| {
+                if changed {
+                    self.cancel_interaction();
+                    self.selection = selection;
+                }
+                changed
+            },
+        );
         self.finish_power_edit(result)
     }
 
@@ -1242,6 +1288,113 @@ mod tests {
         assert_eq!(data.active(), factory_shape(FactoryShape::FlatHigh).nodes());
         assert_eq!(data.beats, original.beats);
         assert!(!state.has_open_menu());
+    }
+
+    #[test]
+    fn loop_seam_commands_use_the_shared_menu_in_full_and_static_editors() {
+        for curve_only in [false, true] {
+            for scale in [0.5, 1.0, 2.0] {
+                let rect = (10.0 * scale, 10.0 * scale, 1200.0 * scale, 400.0 * scale);
+                let mut state = MsegEditState::with_curve_only(curve_only);
+                let mut data = MsegData::default();
+                let buttons = power_buttons(state.layout(rect, scale).strip, scale);
+                assert_eq!(
+                    state.on_mouse_down(
+                        buttons.edit.0 + scale,
+                        buttons.edit.1 + scale,
+                        &mut data,
+                        rect,
+                        scale,
+                        false
+                    ),
+                    None
+                );
+                assert!(state.has_open_menu());
+                assert!(state.on_wheel(-3.0, rect));
+                assert_eq!(
+                    state.on_key(&key(Key::End, Modifiers::empty()), &mut data, rect, scale),
+                    (true, None)
+                );
+                assert_eq!(
+                    state.on_key(&key(Key::Enter, Modifiers::empty()), &mut data, rect, scale),
+                    (true, Some(MsegEdit::Changed))
+                );
+                assert!(!state.has_open_menu());
+                assert_eq!(data.node_count, 3);
+                assert_eq!(data.nodes[0].value, data.nodes[2].value);
+                assert_eq!(state.smooth_loop_seam(&mut data), None);
+            }
+        }
+    }
+
+    #[test]
+    fn loop_seam_edits_remap_selection_and_fail_without_losing_it() {
+        let mut state = MsegEditState::new();
+        let mut data = MsegData::default();
+        state.toggle_selected_for_test(1);
+        assert_eq!(state.smooth_loop_seam(&mut data), Some(MsegEdit::Changed));
+        assert!(state.is_node_selected(2));
+        assert_eq!(state.selection_count(), 1);
+        assert!(!state.is_node_selected(1));
+        data.nodes[1].time = 1.0_f32.next_down();
+        data.nodes[2].value = 1.0;
+        let before = data;
+        assert_eq!(state.smooth_loop_seam(&mut data), None);
+        assert_eq!(data, before);
+        assert!(state.is_node_selected(2));
+        assert!(!state.status_message().is_empty());
+    }
+
+    #[test]
+    fn loop_seam_labels_fit_toolbar_and_context_menus_at_each_scale() {
+        use crate::dropdown::{RowKind, dropdown_popup_layout};
+        let mut text =
+            crate::TextRenderer::new(include_bytes!("../../../test_data/DejaVuSans.ttf"));
+        for scale in [0.5, 1.0, 2.0] {
+            for context in [false, true] {
+                let rect = (0.0, 0.0, 1200.0 * scale, 500.0 * scale);
+                let mut state = MsegEditState::new();
+                let mut data = fixture();
+                if context {
+                    state.select_only(1);
+                    let layout = state.layout(rect, scale);
+                    let node = data.nodes[1];
+                    assert_eq!(
+                        state.on_right_click(
+                            phase_to_x(&layout, node.time),
+                            value_to_y(&layout, node.value),
+                            &mut data,
+                            rect,
+                            scale
+                        ),
+                        None
+                    );
+                } else {
+                    let buttons = power_buttons(state.layout(rect, scale).strip, scale);
+                    state.open_power_menu(StripId::Transform, buttons.edit, (rect.2, rect.3));
+                }
+                state.on_key(&key(Key::End, Modifiers::empty()), &mut data, rect, scale);
+                let labels = state.dropdown_labels();
+                let refs: Vec<_> = labels.iter().map(String::as_str).collect();
+                let popup =
+                    dropdown_popup_layout(state.dropdown_state(), &refs, (rect.2, rect.3)).unwrap();
+                let mut found = 0;
+                for row in popup
+                    .visible_rows
+                    .iter()
+                    .filter(|row| row.kind == RowKind::Item && row.item_index >= 27)
+                {
+                    let size = (row.rect.3 * 0.5).max(10.0);
+                    assert!(
+                        text.text_width(&labels[row.item_index], size) <= row.rect.2 - 12.0,
+                        "{} at {scale}x",
+                        labels[row.item_index]
+                    );
+                    found += 1;
+                }
+                assert_eq!(found, 3);
+            }
+        }
     }
 
     #[test]

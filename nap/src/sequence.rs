@@ -280,6 +280,23 @@ mod tests {
         d
     }
 
+    #[test]
+    fn smoothed_loop_geometry_matches_the_tail_curve_sampler() {
+        use tiny_skia_widgets::mseg::MsegEditState;
+        let mut data = MsegData::default();
+        data.insert_node(0.6, 0.8).unwrap();
+        data.nodes[1].stepped = true;
+        let mut editor = MsegEditState::new_curve_only();
+        assert!(editor.smooth_loop_seam(&mut data).is_some());
+        let mut segment = 0;
+        for i in 0..=4096 {
+            let phase = i as f32 / 4096.0;
+            let value = curve_value(&data, phase, &mut segment);
+            assert_eq!(value.to_bits(), value_at_phase(&data, phase).to_bits());
+        }
+        assert_eq!(value_at_phase(&data, 0.0), value_at_phase(&data, 1.0));
+    }
+
     fn test_params() -> GenParams {
         GenParams {
             sample_rate: 48_000.0,

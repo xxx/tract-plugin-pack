@@ -311,6 +311,7 @@ fn draw_canvas(
         prev = Some((x, y));
     }
 
+    draw_loop_seam(pixmap, layout, data, state, scale);
     draw_nodes(pixmap, layout, data, state, scale, value_color);
 
     let handles = state.selection_handles(data, layout, scale);
@@ -387,6 +388,46 @@ fn draw_canvas(
     }
 
     draw_rect_outline(pixmap, cx, cy, cw, ch, color_border(), 1.0);
+}
+
+fn seam_color() -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(0xff, 0xb0, 0x52, 0xff)
+}
+
+fn draw_loop_seam(
+    pixmap: &mut Pixmap,
+    layout: &MsegLayout,
+    data: &MsegData,
+    state: &MsegEditState,
+    scale: f32,
+) {
+    let Some(seam) = crate::mseg::seam::LoopSeam::visible(data, state.is_curve_only()) else {
+        return;
+    };
+    let before = value_to_y(layout, seam.before);
+    let after = value_to_y(layout, seam.after);
+    let top = before.min(after).max(layout.plot.1);
+    let bottom = before.max(after).min(layout.plot.1 + layout.plot.3);
+    for (index, offset) in [(seam.start, 3.0 * scale), (seam.end, -3.0 * scale)] {
+        let phase = data.nodes[index].time;
+        if phase < layout.viewport.time.0 || phase > layout.viewport.time.1 {
+            continue;
+        }
+        let x = phase_to_x(layout, phase) + offset;
+        let mut y = top;
+        while y < bottom {
+            draw_plot_line(
+                pixmap,
+                layout,
+                x,
+                y,
+                x,
+                (y + 4.0 * scale).min(bottom),
+                seam_color(),
+            );
+            y += (7.0 * scale).max(1.0);
+        }
+    }
 }
 
 /// Render a small floating tooltip above (or below, when the node is near
@@ -821,8 +862,12 @@ fn draw_strip(
         bottom,
         top
     );
+    let seam_warning = crate::mseg::seam::LoopSeam::visible(data, state.is_curve_only()).is_some()
+        && state.status_message().is_empty();
     let message = if state.status_message().is_empty() {
-        if viewport != crate::mseg::MsegViewport::default() {
+        if seam_warning {
+            "Loop seam jump; Edit: match or smooth"
+        } else if viewport != crate::mseg::MsegViewport::default() {
             view_info.as_str()
         } else {
             match state.tool() {
@@ -849,7 +894,11 @@ fn draw_strip(
         toolbar.tool.1 + 20.0 * scale,
         &visible,
         11.0 * scale,
-        color_muted(),
+        if seam_warning {
+            seam_color()
+        } else {
+            color_muted()
+        },
     );
 }
 
@@ -1101,6 +1150,65 @@ mod tests {
         let cx = (l.canvas.0 + l.canvas.2 * 0.5) as u32;
         let cy = (l.canvas.1 + l.canvas.3 * 0.5) as u32;
         assert!(px_alpha(&pm, cx, cy) > 0, "canvas not painted");
+    }
+
+    #[test]
+    fn loop_seam_indicators_clip_to_the_visible_plot_at_each_scale() {
+        for scale in [0.5, 1.0, 2.0] {
+            let rect = (16.0 * scale, 16.0 * scale, 600.0 * scale, 320.0 * scale);
+            let state = MsegEditState::new();
+            let mut data = MsegData {
+                play_mode: crate::mseg::PlayMode::Cyclic,
+                ..MsegData::default()
+            };
+            data.insert_node(0.2, 0.1).unwrap();
+            data.insert_node(0.8, 0.9).unwrap();
+            data.hold = HoldMode::Loop { start: 1, end: 2 };
+            let mut layout = state.layout(rect, scale);
+            layout.viewport.value = (0.25, 0.75);
+            let mut pm = Pixmap::new((640.0 * scale) as u32, (360.0 * scale) as u32).unwrap();
+            draw_loop_seam(&mut pm, &layout, &data, &state, scale);
+            assert!(pm.pixels().iter().any(|p| p.alpha() != 0));
+            let columns = [
+                phase_to_x(&layout, 0.2) + 3.0 * scale,
+                phase_to_x(&layout, 0.8) - 3.0 * scale,
+            ];
+            for (i, pixel) in pm.pixels().iter().enumerate() {
+                if pixel.alpha() == 0 {
+                    continue;
+                }
+                let x = (i as u32 % pm.width()) as f32;
+                let y = (i as u32 / pm.width()) as f32;
+                assert!(columns.iter().any(|column| (x - column).abs() <= 1.0));
+                assert!(y >= layout.plot.1.floor() && y < (layout.plot.1 + layout.plot.3).ceil());
+            }
+            pm.fill(tiny_skia::Color::TRANSPARENT);
+            layout.viewport.time = (0.3, 0.7);
+            draw_loop_seam(&mut pm, &layout, &data, &state, scale);
+            assert!(pm.pixels().iter().all(|p| p.alpha() == 0));
+        }
+    }
+
+    #[test]
+    fn seam_indicator_follows_stepped_playback_and_disappears_after_smoothing() {
+        let rect = (16.0, 16.0, 600.0, 320.0);
+        let mut state = MsegEditState::new();
+        let mut data = MsegData {
+            play_mode: crate::mseg::PlayMode::Cyclic,
+            ..MsegData::default()
+        };
+        data.insert_node(0.6, 0.8).unwrap();
+        data.nodes[1].stepped = true;
+        data.nodes[2].value = 0.0;
+        let mut pm = Pixmap::new(640, 360).unwrap();
+        let layout = state.layout(rect, 1.0);
+        draw_loop_seam(&mut pm, &layout, &data, &state, 1.0);
+        assert!(pm.pixels().iter().any(|p| p.alpha() != 0));
+        assert_eq!(state.match_loop_end_to_start(&mut data), None);
+        assert!(state.smooth_loop_seam(&mut data).is_some());
+        pm.fill(tiny_skia::Color::TRANSPARENT);
+        draw_loop_seam(&mut pm, &layout, &data, &state, 1.0);
+        assert!(pm.pixels().iter().all(|p| p.alpha() == 0));
     }
 
     #[test]

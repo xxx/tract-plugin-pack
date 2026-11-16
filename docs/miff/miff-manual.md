@@ -86,6 +86,10 @@ reusable curves/favorites, cross-plugin copy/paste, mutation, transforms, and
 triplet grids through the **Tool**, **Shapes**, and **Edit** menus. All curve
 edits update the baked kernel.
 
+Edit includes endpoint matching and **Smooth loop seam (10%)** across the whole
+kernel curve. These modify the saved shape and rebake the kernel; see
+[loop seam tools](../mseg-editor.md#loop-seam-tools).
+
 - **Double-click empty canvas** — add a node at the pointer. (A single click-and-drag on empty canvas draws a selection marquee instead of adding a node.)
 - **Drag a node** — move it. Interior nodes stay between their neighbours; the
   first and last nodes are pinned to the left and right edges (their value can

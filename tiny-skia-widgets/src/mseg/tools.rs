@@ -20,7 +20,7 @@ pub(crate) fn effective_selection(data: &MsegData, selection: u128) -> u128 {
     }
 }
 
-fn commit(data: &mut MsegData, nodes: &[MsegNode]) -> Result<bool, ShapeError> {
+pub(crate) fn commit(data: &mut MsegData, nodes: &[MsegNode]) -> Result<bool, ShapeError> {
     validate_nodes(nodes)?;
     let find = |index: usize| nodes.iter().position(|n| n.time == data.nodes[index].time);
     let hold = match data.hold {

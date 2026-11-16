@@ -53,6 +53,10 @@ selection handles, reusable curves/favorites, cross-plugin copy/paste, mutation,
 transforms, and triplet grids. Find them in **Tool**, **Shapes**, and **Edit**.
 In Efficient mode, curve gestures defer IR baking until release.
 
+Edit includes endpoint matching and **Smooth loop seam (10%)** across the whole
+selected pane's curve. These modify its saved shape and regenerate the tail;
+see [loop seam tools](../mseg-editor.md#loop-seam-tools).
+
 The three stacked MSEG editors share a **tail-position x-axis** running from 0 % (attack of the tail) to 100 % (end of the tail). All three drive the velvet sequence generation together; any edit triggers an immediate re-generation.
 
 **Reading the curves.** Every curve runs left-to-right along the same axis — the *left edge is the start of the tail* (just after the dry hit) and the *right edge is the end of the tail* (where it fades out). The y-axis is "more of that quality": higher = louder (Decay), wider (Width), or brighter (Tone). The factory defaults are deliberately shaped to read as one **natural room**: the tail **decays** to silence, **widens** from a centred onset into a diffuse stereo bloom, and **darkens** as high frequencies are absorbed. That gives you a familiar starting point — drag any curve from there to sculpt the part of the tail you want to change.

@@ -60,6 +60,32 @@ Endpoint times stay pinned to 0 and 1. Other points cannot cross their neighbors
 Dragging back to the initial handle position restores the initial geometry,
 including after a boundary was reached. Escape cancels the gesture.
 
+## Loop seam tools
+
+Edit offers **Match loop end to start**, **Match loop start to end**, and
+**Smooth loop seam (10%)**. In the full editor, these use the hold-loop region
+when one is configured, otherwise the entire curve. Miff/Nap always use the
+entire static curve. The selected points do not change that scope.
+
+The two Match commands copy one endpoint node's level to the other. In cyclic
+playback or a hold loop, amber dashed marks and a **Loop seam jump** hint show a
+level discontinuity at the wrap. The indicator reads the incoming segment's
+actual held level: a stepped tail can still jump even when endpoint nodes match.
+
+Smooth matches the end level to the start, gives the start a Soft weight, and
+adds a Soft point followed by a native S-curve return. The return occupies the
+last 10% of the loop; if existing points occupy that window, it uses the last
+half-segment instead. Existing interior points stay in place, and a two-point
+ramp keeps its original peak at the new return point. A stepped tail uses its
+held level. Already matched, flat seams are unchanged when Smooth is reapplied.
+
+These commands edit the saved curve, including its first/last loop segments and
+any interpolation sharing those boundary points. Selection and hold markers
+follow existing nodes. Each change is one undo step in Multosis/Minitosis and
+updates the static bake in Miff/Nap. Insufficient point capacity or room for a
+return leaves the curve intact. Per-envelope [Smooth](#live-smoothing-and-trace)
+provides the separate live lag control.
+
 ## Reusing curves
 
 Shapes includes eight factory curves: Flat high, Flat center, Ramp up, Ramp down,
