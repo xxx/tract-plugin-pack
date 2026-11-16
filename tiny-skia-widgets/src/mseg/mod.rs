@@ -20,6 +20,7 @@ mod seam;
 pub mod shape;
 pub mod tools;
 pub mod viewport;
+mod wave_params;
 
 pub use audio::*;
 pub use editor::*;
@@ -32,6 +33,7 @@ pub use randomize::*;
 pub use render::*;
 pub use shape::*;
 pub use viewport::MsegViewport;
+pub use wave_params::{WAVE_AUTOMATION_ITEMS, WaveControls};
 
 /// Maximum number of envelope nodes.
 pub const MAX_NODES: usize = 128;

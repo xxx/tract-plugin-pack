@@ -9,11 +9,13 @@ use tiny_skia_widgets::{
 };
 
 mod audio_trigger;
+mod automation;
 mod precise;
 pub use audio_trigger::{
     AudioTriggerSettings, DetectorInput, DetectorReading, FILTER_MAX_HZ, FILTER_MIN_HZ,
     LEVEL_MAX_DB, LEVEL_MIN_DB,
 };
+pub use automation::WAVE_AUTOMATION_ITEMS;
 mod smoothing;
 pub use smoothing::{MAX_SMOOTH_MS, normalized_smooth_ms, smooth_from_norm, smooth_to_norm};
 pub(crate) use smoothing::{phase_next, phase_step};
@@ -570,7 +572,8 @@ pub struct ModulationState {
     telemetry_enabled: bool,
     output_kind: Option<EffectKind>,
     wave: wave::MidiWaveRuntime,
-    pending_wave: Option<(usize, Option<u8>)>,
+    automated: automation::AutomatedWaves,
+    pending_wave: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -602,6 +605,7 @@ impl Default for ModulationState {
             telemetry_enabled: true,
             output_kind: None,
             wave: wave::MidiWaveRuntime::default(),
+            automated: automation::AutomatedWaves::default(),
             pending_wave: None,
         }
     }
@@ -618,6 +622,7 @@ impl ModulationState {
         self.fired = false;
         self.reset_smoothing();
         self.wave.reset();
+        self.automated.reset();
         self.pending_wave = None;
     }
 
@@ -722,7 +727,7 @@ impl ModulationState {
         self.mix_slot = None;
         let mut mix = None;
         for k in 0..4 {
-            let mseg = self.wave.curve(config, k);
+            let mseg = self.automated.curve(self.wave.curve(config, k), k);
             let dt = mseg_phase_delta(mseg, seg_len, bpm, sample_rate);
             let (next, _) = advance(mseg, self.phases[k], dt, false);
             self.phases[k] = next;

@@ -163,7 +163,14 @@ impl LiveSource {
         }
         self.waveform_cursor = head;
     }
-    fn refresh(&mut self, kind: EffectKind, config: &TrackModulation, slot: usize, trace: bool) {
+    fn refresh(
+        &mut self,
+        kind: EffectKind,
+        config: &TrackModulation,
+        slot: usize,
+        trace: bool,
+        wave_automation: [u8; 4],
+    ) {
         let token = self.telemetry.request(self.row, slot, kind, trace);
         if token != self.token {
             self.bins.fill(None);
@@ -174,10 +181,13 @@ impl LiveSource {
         if let Some(frame) = self
             .telemetry
             .frame(token)
-            .filter(|f| f.matches(kind, config))
+            .filter(|f| f.matches(kind, config) && f.wave_automation == wave_automation)
         {
             self.frame = Some(frame);
-        } else if self.frame.is_some_and(|f| !f.matches(kind, config)) {
+        } else if self
+            .frame
+            .is_some_and(|f| !f.matches(kind, config) || f.wave_automation != wave_automation)
+        {
             self.frame = None;
         }
         let head = self.telemetry.head();
@@ -230,15 +240,20 @@ impl EffectEditor {
     }
     pub fn invalidate_trace(&mut self) {
         self.cancel_detector();
+        self.clear_modulation_trace();
+        if let Some(live) = &mut self.live {
+            live.telemetry.waveform.release(live.waveform_token);
+            live.waveform_token = 0;
+            live.waveform.fill(None);
+        }
+    }
+    pub(super) fn clear_modulation_trace(&mut self) {
         if let Some(live) = &mut self.live {
             live.telemetry.release(live.token);
             live.token = 0;
             live.frame = None;
             live.bins.fill(None);
             live.cursor = live.telemetry.head();
-            live.telemetry.waveform.release(live.waveform_token);
-            live.waveform_token = 0;
-            live.waveform.fill(None);
         }
     }
     pub fn trace_enabled(&self) -> bool {
@@ -293,6 +308,7 @@ impl EffectEditor {
                 config,
                 self.selected_mseg.min(3),
                 self.trace_enabled,
+                self.wave_automation.unwrap_or([0; 4]),
             );
         }
     }

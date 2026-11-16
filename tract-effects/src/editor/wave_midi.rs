@@ -11,13 +11,15 @@ pub(super) enum Field {
     Envelope,
     FirstNote,
     Channel,
+    Wave,
 }
 impl Field {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Enabled,
         Self::Envelope,
         Self::FirstNote,
         Self::Channel,
+        Self::Wave,
     ];
     fn items(self) -> &'static [&'static str] {
         match self {
@@ -25,6 +27,7 @@ impl Field {
             Self::Envelope => &["Amp", "1", "2", "3"],
             Self::FirstNote => &super::midi::NOTE_ITEMS[1..122],
             Self::Channel => super::midi::CHANNEL_ITEMS,
+            Self::Wave => &crate::modulation::WAVE_AUTOMATION_ITEMS,
         }
     }
 }
@@ -35,6 +38,8 @@ pub(super) struct Panel {
     draft: MidiWaveMapping,
     focus: usize,
     dropdown: DropdownState<Field>,
+    wave: u8,
+    wave_envelope: usize,
 }
 impl Default for Panel {
     fn default() -> Self {
@@ -48,6 +53,8 @@ impl Default for Panel {
             },
             focus: 0,
             dropdown: DropdownState::new(),
+            wave: 0,
+            wave_envelope: 1,
         }
     }
 }
@@ -74,6 +81,7 @@ impl Panel {
             Field::Envelope => self.draft.envelope as usize,
             Field::FirstNote => self.draft.first_note as usize,
             Field::Channel => self.draft.channel.map_or(0, |channel| channel as usize + 1),
+            Field::Wave => self.wave as usize,
         }
     }
 }
@@ -81,22 +89,22 @@ impl Panel {
 pub(super) struct Layout {
     pub panel: Rect,
     pub close: Rect,
-    pub values: [Rect; 4],
-    labels: [Rect; 4],
+    pub values: [Rect; 5],
+    labels: [Rect; 5],
     footer: Rect,
 }
 pub(super) fn layout(window: (f32, f32), pane: Rect, scale: f32) -> Option<Layout> {
     let pad = (8.0 * scale).max(4.0);
     let w = (420.0 * scale).max(240.0).min(window.0 - 2.0 * pad);
-    let h = (260.0 * scale).max(200.0).min(window.1 - 2.0 * pad);
-    if w < 100.0 || h < 144.0 {
+    let h = (308.0 * scale).max(220.0).min(window.1 - 2.0 * pad);
+    let header = (34.0 * scale).max(26.0);
+    let footer = (60.0 * scale).max(50.0);
+    if w < 216.0 || h < header + footer + 5.0 * (24.0 * scale).max(24.0) {
         return None;
     }
     let x = (pane.0 + (pane.2 - w) * 0.5).clamp(pad, (window.0 - w - pad).max(pad));
     let y = (pane.1 + (pane.3 - h) * 0.5).clamp(pad, (window.1 - h - pad).max(pad));
-    let header = (34.0 * scale).max(26.0);
-    let footer = (44.0 * scale).max(32.0);
-    let row = (h - header - footer) * 0.25;
+    let row = (h - header - footer) / 5.0;
     let label_w = ((w - 2.0 * pad) * 0.4).min(130.0 * scale).max(32.0);
     let values = std::array::from_fn(|i| {
         (
@@ -142,6 +150,20 @@ fn text(
 }
 
 impl EffectEditor {
+    /// Bind current host values; edits are returned as host parameter requests.
+    pub fn set_wave_automation(&mut self, values: [u8; 4]) {
+        let values = values.map(|value| if value <= 8 { value } else { 0 });
+        if self.wave_automation != Some(values) {
+            self.wave_automation = Some(values);
+            self.clear_modulation_trace();
+        }
+        let slot = if self.wave_midi.open {
+            self.wave_midi.wave_envelope
+        } else {
+            self.selected_mseg.min(3)
+        };
+        self.wave_midi.wave = values[slot];
+    }
     pub(super) fn check_wave_midi_binding(
         &mut self,
         effect: &TrackEffect,
@@ -163,19 +185,24 @@ impl EffectEditor {
         config: &TrackModulation,
         slot: usize,
     ) -> Option<widgets::MsegData> {
+        let automated = self.wave_automation.unwrap_or([0; 4])[slot];
         let mapping = config
             .wave_switch
-            .filter(|mapping| mapping.is_valid() && mapping.envelope as usize == slot)?;
+            .filter(|mapping| mapping.is_valid() && mapping.envelope as usize == slot);
+        if automated == 0 && mapping.is_none() {
+            return None;
+        }
         let mut display = config.msegs[slot];
         display.hold = widgets::HoldMode::None;
-        let active = self
+        let midi = self
             .live
             .as_ref()
             .and_then(|source| source.frame)
             .filter(|frame| frame.matches(effect.kind, config))
             .and_then(|frame| frame.wave)
-            .filter(|(value, _)| *value == mapping)
+            .filter(|(value, _)| Some(*value) == mapping)
             .and_then(|(_, slot)| slot);
+        let active = automated.checked_sub(1).or(midi);
         if let Some(active) = active
             && let Some(binding) = self.mseg_edit.wave_palette()
             && let Ok(palette) = binding.lock()
@@ -216,7 +243,7 @@ impl EffectEditor {
             tr,
             pm,
             (p.0 + 6.0, p.1 + (22.0 * s).max(17.0)),
-            "MIDI waves",
+            "Project waves",
             (16.0 * s).max(11.0),
             (lay.close.0 - p.0 - 10.0).max(0.0),
             widgets::color_text(),
@@ -226,11 +253,15 @@ impl EffectEditor {
         for (index, field) in Field::ALL.into_iter().enumerate() {
             let r = lay.labels[index];
             let font = (12.0 * s).max(10.0);
+            let wave_label = format!(
+                "Wave {}",
+                ["Amp", "1", "2", "3"][self.wave_midi.wave_envelope]
+            );
             text(
                 tr,
                 pm,
                 (r.0, r.1 + (r.3 + font) * 0.5 - 2.0),
-                ["On", "Curve", "First", "Ch."][index],
+                ["MIDI", "MIDI curve", "First", "Ch.", &wave_label][index],
                 font,
                 r.2,
                 widgets::color_muted(),
@@ -282,7 +313,16 @@ impl EffectEditor {
             tr,
             pm,
             (lay.footer.0, lay.footer.1 + font * 2.3),
-            "Off restores geometry editing; Esc closes",
+            "Project overrides MIDI",
+            font,
+            lay.footer.2,
+            widgets::color_muted(),
+        );
+        text(
+            tr,
+            pm,
+            (lay.footer.0, lay.footer.1 + font * 3.6),
+            "Drawn/MIDI restores normal playback",
             font,
             lay.footer.2,
             widgets::color_muted(),
@@ -312,7 +352,7 @@ impl Session<'_> {
         {
             self.state
                 .mseg_edit
-                .set_status_message("Enlarge the window for MIDI setup");
+                .set_status_message("Enlarge the window for wave setup");
             return;
         }
         self.commit_pending_text();
@@ -329,10 +369,24 @@ impl Session<'_> {
                 channel: None,
             });
         self.state.wave_midi.focus = 0;
+        self.state.wave_midi.wave_envelope = self.state.selected_mseg.min(3);
+        self.state.wave_midi.wave =
+            self.state.wave_automation.unwrap_or([0; 4])[self.state.wave_midi.wave_envelope];
         self.state.wave_midi.dropdown.close();
     }
     fn apply_wave_field(&mut self, field: Field, index: usize) {
         if index >= field.items().len() {
+            return;
+        }
+        if field == Field::Wave {
+            if let Some(mut values) = self.state.wave_automation {
+                let slot = self.state.wave_midi.wave_envelope;
+                if values[slot] != index as u8 {
+                    values[slot] = index as u8;
+                    self.state.set_wave_automation(values);
+                    self.response.wave_automation = Some((slot, index as u8));
+                }
+            }
             return;
         }
         let panel = &mut self.state.wave_midi;
@@ -352,6 +406,7 @@ impl Session<'_> {
             Field::Channel => {
                 panel.draft.channel = index.checked_sub(1).map(|channel| channel as u8)
             }
+            Field::Wave => {}
         }
         if field != Field::Enabled && self.modulation.wave_switch.is_some() {
             self.modulation.wave_switch = Some(panel.draft);
@@ -510,17 +565,21 @@ impl Session<'_> {
                         Key::Escape => self.state.wave_midi.close(),
                         Key::Tab => {
                             let delta = if key.modifiers.contains(Modifiers::SHIFT) {
-                                3
+                                Field::ALL.len() - 1
                             } else {
                                 1
                             };
-                            self.state.wave_midi.focus = (self.state.wave_midi.focus + delta) % 4;
+                            self.state.wave_midi.focus =
+                                (self.state.wave_midi.focus + delta) % Field::ALL.len();
                         }
                         Key::ArrowUp => {
-                            self.state.wave_midi.focus = (self.state.wave_midi.focus + 3) % 4
+                            self.state.wave_midi.focus =
+                                (self.state.wave_midi.focus + Field::ALL.len() - 1)
+                                    % Field::ALL.len()
                         }
                         Key::ArrowDown => {
-                            self.state.wave_midi.focus = (self.state.wave_midi.focus + 1) % 4
+                            self.state.wave_midi.focus =
+                                (self.state.wave_midi.focus + 1) % Field::ALL.len()
                         }
                         Key::ArrowLeft | Key::ArrowRight => {
                             let field = Field::ALL[self.state.wave_midi.focus];
@@ -566,13 +625,17 @@ impl Session<'_> {
             .filter(|frame| frame.matches(self.effect.kind, self.modulation))
             .and_then(|frame| frame.wave)
             .and_then(|(_, slot)| slot);
-        let label = if active {
+        let automated =
+            self.state.wave_automation.unwrap_or([0; 4])[self.state.selected_mseg.min(3)];
+        let label = if automated > 0 {
+            format!("Wave P{automated}")
+        } else if active {
             slot.map_or_else(
                 || "MIDI on".to_owned(),
                 |slot| format!("MIDI P{}", slot + 1),
             )
         } else {
-            "MIDI off".to_owned()
+            "Waves...".to_owned()
         };
         widgets::controls::draw_button(
             pm,
@@ -582,7 +645,7 @@ impl Session<'_> {
             r.2,
             r.3,
             "",
-            active,
+            active || automated > 0,
             false,
         );
         let font = (r.3 * 0.5).max(10.0);
@@ -597,7 +660,7 @@ impl Session<'_> {
             &label,
             font,
             (r.2 - 6.0).max(0.0),
-            if active {
+            if active || automated > 0 {
                 widgets::color_bg()
             } else {
                 widgets::color_text()

@@ -40,8 +40,13 @@ impl Modulation {
         if a == b || a >= ROWS || b >= ROWS {
             return;
         }
+        let waves_a = self.states[a].wave_automation();
+        let waves_b = self.states[b].wave_automation();
         self.config.swap(a, b);
         self.states.swap(a, b);
+        // Host automation lanes stay attached to their fixed row numbers.
+        self.states[a].set_wave_automation(waves_a);
+        self.states[b].set_wave_automation(waves_b);
     }
 
     pub fn reset(&mut self) {
@@ -148,7 +153,12 @@ impl Modulation {
         self.precise_count = 0;
         self.pending_wave_rows = 0;
         for (row, (state, config)) in self.states.iter_mut().zip(&self.config).enumerate() {
-            state.prepare_wave_bank(config, &self.wave_bank);
+            if !left.is_empty()
+                && !right.is_empty()
+                && state.prepare_wave_bank(config, &self.wave_bank)
+            {
+                self.pending_wave_rows |= 1 << row;
+            }
             state.begin_block(config, left, right, sample_rate);
             if state.precise_trigger_active() {
                 self.precise_rows[self.precise_count] = row;
@@ -223,6 +233,18 @@ impl Modulation {
         self.config
             .iter()
             .any(|config| config.wave_switch.is_some())
+    }
+    pub fn uses_project_waves(&self) -> bool {
+        self.uses_midi_waves()
+            || self
+                .states
+                .iter()
+                .any(|state| state.wave_automation() != [0; 4])
+    }
+    pub fn set_wave_automation(&mut self, values: [[u8; 4]; ROWS]) {
+        for (state, values) in self.states.iter_mut().zip(values) {
+            state.set_wave_automation(values);
+        }
     }
     pub fn set_wave_palette(&mut self, palette: &tiny_skia_widgets::mseg::WavePalette) {
         self.wave_bank.refresh(palette);

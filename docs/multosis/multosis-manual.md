@@ -238,11 +238,16 @@ shared slots. See [browsing thumbnails](../mseg-editor.md#browsing-thumbnails).
 The browser's **Project** tab adds eight waves saved with this instance and
 shared across all rows. See [project waves](../mseg-editor.md#project-waves).
 
-Each row's **MIDI off** control beside curve playback configures Project-wave
+Each row's **Waves...** control beside curve playback configures Project-wave
 switching for Amp/1/2/3. Its note range/channel are independent of Trigger.
 The destination displays the playing wave with geometry editing paused;
 turn switching Off to edit its authored shape. See
 [MIDI wave switching](../mseg-editor.md#midi-wave-switching).
+
+The same panel's **Wave Amp/1/2/3** field selects Drawn/MIDI or Project 1–8 for
+the displayed curve. Each fixed row has four independent host automation lanes;
+a Project value overrides MIDI while preserving phase and smoothing. See
+[Wave automation](../mseg-editor.md#wave-automation).
 
 Hover for footer hints, or click **?** beside Point for the gesture guide.
 **F1 / ?** and **View → Editing guide...** also open it; see

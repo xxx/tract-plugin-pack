@@ -362,8 +362,8 @@ Minitosis uses each effect's recalled filters as prepared processors are adopted
 
 ## MIDI wave switching
 
-In Multosis/Minitosis, click **MIDI off** beside the MSEG playback control to
-open wave-switch setup. Enable **On**, choose **Curve** (Amp/1/2/3), a **First**
+In Multosis/Minitosis, click **Waves...** beside the MSEG playback control to
+open Project-wave setup. Enable **MIDI**, choose **MIDI curve** (Amp/1/2/3), a **First**
 MIDI note from 0 to 120, and **Ch.** Any or 1–16. The eight consecutive notes
 beginning there select Project waves 1–8. Each row/effect has its own destination
 and mapping. Settings save with the project and participate in local curve undo.
@@ -397,6 +397,32 @@ Use Tab or Up/Down to choose a setup field, Left/Right to change its value,
 and Enter/Space to toggle or open its selector. The First-note selector supports
 numeric search. Escape closes a selector before closing setup; outside/right
 clicks, focus loss and resize dismiss it without acting on controls beneath it.
+
+## Wave automation
+
+Multosis exposes **Amp Wave**, **1 Wave**, **2 Wave** and **3 Wave** host
+automation parameters for each fixed row. Minitosis has an independent set for
+every effect. These are stepped selectors: **Drawn/MIDI** (default) or **Project
+1–8**. To set one from the editor, choose the curve, open **Waves...**, and use
+the **Wave Amp/1/2/3** field. These edits use host parameter gestures and host
+undo; local curve undo keeps the authored geometry separate.
+
+A selected Project slot takes priority over MIDI for that curve. MIDI keeps
+tracking notes underneath, so returning to Drawn/MIDI resumes its latest wave,
+or the drawn curve when no MIDI selection exists. An empty Project slot plays
+the drawn geometry while continuing to override MIDI. Editing, populating or
+clearing the slot refreshes playback when the bank is next available to audio.
+
+Switching preserves phase and source smoothing and follows host automation
+sample boundaries. The graph shows the playing shape with geometry editing
+paused; the strip shows **Wave P1–P8**. Hold markers are ignored during Project
+playback. Choose Drawn/MIDI and turn MIDI Off to restore normal geometry editing
+and saved hold markers. View/Help and timing/routing controls remain available.
+
+Wave values and the Project bank save with host state; older presets default
+to Drawn/MIDI. Reset reapplies host Wave values while clearing runtime MIDI
+selection; transport retrigger retains both. Multosis Wave lanes remain attached
+to their row numbers when rows move. Miff/Nap retain manual Project recall.
 
 ## Sample-timed Hz and audio triggers
 

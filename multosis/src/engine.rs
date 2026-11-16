@@ -56,6 +56,12 @@ impl AudioEngine {
     pub fn uses_midi_waves(&self) -> bool {
         self.modulation.uses_midi_waves()
     }
+    pub fn uses_project_waves(&self) -> bool {
+        self.modulation.uses_project_waves()
+    }
+    pub fn set_wave_automation(&mut self, values: [[u8; 4]; ROWS]) {
+        self.modulation.set_wave_automation(values);
+    }
     pub fn set_wave_palette(&mut self, palette: &tiny_skia_widgets::mseg::WavePalette) {
         self.modulation.set_wave_palette(palette);
     }

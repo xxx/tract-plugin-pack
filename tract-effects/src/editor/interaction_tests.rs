@@ -1788,6 +1788,7 @@ mod detector_controls {
                 settings: AudioTriggerSettings::default(),
             }),
             wave: None,
+            wave_automation: [0; 4],
         };
         clock.publish(&shared, 0, &frame);
         draw(&mut h);
@@ -2759,6 +2760,7 @@ mod smoothing_controls {
             mix: None,
             detector: None,
             wave: None,
+            wave_automation: [0; 4],
         };
         frame.parameters[0] = Some((0.123, 1));
         clock.publish(&shared, 0, &frame);

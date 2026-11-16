@@ -15,6 +15,7 @@ pub struct ModulationFrame {
     pub mix: Option<(f32, u8)>,
     pub detector: Option<DetectorReading>,
     pub wave: Option<(MidiWaveMapping, Option<u8>)>,
+    pub wave_automation: [u8; 4],
 }
 impl ModulationFrame {
     pub fn capture(kind: EffectKind, config: &TrackModulation, state: &ModulationState) -> Self {
@@ -27,6 +28,7 @@ impl ModulationFrame {
             mix: state.delivered_mix(),
             detector: state.detector_reading(),
             wave: state.midi_wave(),
+            wave_automation: state.wave_automation(),
         }
     }
     pub fn matches(&self, kind: EffectKind, config: &TrackModulation) -> bool {
@@ -121,6 +123,7 @@ struct AtomicFrame {
     detector: [AtomicU64; 4],
     detector_input: AtomicU32,
     wave: AtomicU32,
+    wave_automation: AtomicU32,
 }
 impl Default for AtomicFrame {
     fn default() -> Self {
@@ -135,6 +138,7 @@ impl Default for AtomicFrame {
             detector: std::array::from_fn(|_| AtomicU64::new(0)),
             detector_input: AtomicU32::new(0),
             wave: AtomicU32::new(0),
+            wave_automation: AtomicU32::new(0),
         }
     }
 }
@@ -168,6 +172,8 @@ impl AtomicFrame {
         self.detector_input
             .store(settings.input as u32, Ordering::Release);
         self.wave.store(wave_tag(frame.wave), Ordering::Release);
+        self.wave_automation
+            .store(u32::from_le_bytes(frame.wave_automation), Ordering::Release);
         self.stamp.store(stamp, Ordering::Release);
     }
     fn load(&self, token: u64) -> Option<ModulationFrame> {
@@ -190,6 +196,7 @@ impl AtomicFrame {
             _ => DetectorInput::Main,
         };
         let wave = read_wave_tag(self.wave.load(Ordering::Acquire));
+        let wave_automation = self.wave_automation.load(Ordering::Acquire).to_le_bytes();
         if self.stamp.load(Ordering::Acquire) != stamp || actual_token != token {
             return None;
         }
@@ -214,6 +221,7 @@ impl AtomicFrame {
                 },
             }),
             wave,
+            wave_automation,
         })
     }
 }
@@ -399,6 +407,7 @@ mod tests {
             mix: Some((0.4, 2)),
             detector: None,
             wave: None,
+            wave_automation: [0, 1, 4, 8],
         }
     }
     #[test]

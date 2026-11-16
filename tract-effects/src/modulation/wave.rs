@@ -69,11 +69,8 @@ impl MidiWaveRuntime {
             &config.msegs[slot]
         }
     }
-    pub(super) fn active(&self) -> Option<u8> {
-        self.active
-    }
-    pub(super) fn geometry_unchanged(&self, config: &TrackModulation, slot: usize) -> bool {
-        self.before_curve.active() == self.curve(config, slot).active()
+    pub(super) fn geometry_unchanged(&self, curve: &MsegData) -> bool {
+        self.before_curve.active() == curve.active() && self.before_curve.hold == curve.hold
     }
     pub(super) fn reading(&self) -> Option<(MidiWaveMapping, Option<u8>)> {
         self.binding.map(|mapping| (mapping, self.active))
@@ -167,18 +164,47 @@ impl MidiWaveRuntime {
 
 impl super::ModulationState {
     pub fn effective_mseg<'a>(&'a self, config: &'a TrackModulation, slot: usize) -> &'a MsegData {
-        self.wave.curve(config, slot)
+        self.automated.curve(self.wave.curve(config, slot), slot)
     }
     pub fn midi_wave(&self) -> Option<(MidiWaveMapping, Option<u8>)> {
         self.wave.reading()
     }
     pub fn inherit_midi_wave(&mut self, previous: &Self) {
         self.wave.inherit(&previous.wave);
+        self.automated.inherit(&previous.automated);
     }
-    pub fn prepare_wave_bank(&mut self, config: &TrackModulation, bank: &WavePaletteSnapshot) {
-        if let Some(slot) = self.wave.prepare(config, bank) {
+    /// Prepare overrides, returning whether a first-sample geometry refresh is pending.
+    pub fn prepare_wave_bank(
+        &mut self,
+        config: &TrackModulation,
+        bank: &WavePaletteSnapshot,
+    ) -> bool {
+        let transition = config
+            .wave_switch
+            .filter(|mapping| mapping.is_valid())
+            .map(|mapping| mapping.envelope as usize)
+            .filter(|&slot| self.automated.active(slot) != (self.automated.requested[slot] != 0));
+        if let Some(slot) = transition
+            && self.pending_wave.is_none()
+        {
+            // Resolve bank edits and same-offset MIDI before refreshing the audible geometry.
+            let before = *self.effective_mseg(config, slot);
+            *self.wave.before_curve = before;
+            self.pending_wave = Some(slot);
+        }
+        if let Some(slot) = self.wave.prepare(config, bank)
+            && !self.automated.active(slot)
+            && transition != Some(slot)
+        {
             self.smooth.wave_changed(slot);
         }
+        let changed = self.automated.prepare(config, &self.wave, bank);
+        for slot in 0..4 {
+            if changed & (1 << slot) != 0 && transition != Some(slot) {
+                self.smooth.wave_changed(slot);
+            }
+        }
+        self.pending_wave.is_some()
     }
     pub fn select_midi_wave(
         &mut self,
@@ -186,13 +212,15 @@ impl super::ModulationState {
         bank: &WavePaletteSnapshot,
         event: MidiNoteOn,
     ) -> bool {
-        let before = self.wave.active();
         if let Some(slot) = self
             .wave
             .select(config, bank, event, self.pending_wave.is_none())
         {
+            if self.automated.active(slot) {
+                return false;
+            }
             if self.pending_wave.is_none() {
-                self.pending_wave = Some((slot, before));
+                self.pending_wave = Some(slot);
             }
             true
         } else {
@@ -207,17 +235,18 @@ impl super::ModulationState {
         effect: &mut impl super::Effect,
         remaining: usize,
     ) -> Option<usize> {
-        let (slot, initial) = self.pending_wave.take()?;
-        if initial == self.wave.active()
-            || remaining == 0
-            || self.wave.geometry_unchanged(config, slot)
+        let slot = self.pending_wave.take()?;
+        if remaining == 0
+            || self
+                .wave
+                .geometry_unchanged(self.effective_mseg(config, slot))
         {
             return None;
         }
         if self.smooth.wave_changed(slot) {
             return Some(slot);
         }
-        let doc = self.wave.curve(config, slot);
+        let doc = self.automated.curve(self.wave.curve(config, slot), slot);
         let value = tiny_skia_widgets::mseg::value_at_phase(doc, self.phases[slot]);
         let previous = self.outputs[slot];
         self.outputs[slot] = value;
@@ -610,6 +639,260 @@ mod tests {
             assert_eq!(effect.sets, reference_effect.sets);
             assert_eq!(actual.precise_phase(1), reference.precise_phase(1));
         }
+    }
+
+    #[test]
+    fn automated_waves_override_midi_independently_and_resume_its_latest_selection() {
+        let (mut config, mut palette, mut bank, track) = setup(0);
+        let mut quarter = config.msegs[0];
+        for node in &mut quarter.nodes {
+            node.value = 0.25;
+        }
+        palette.store(2, &CurveShape::capture(&quarter)).unwrap();
+        bank.refresh(&palette);
+        config.msegs[0].hold = HoldMode::Sustain(0);
+        let saved = config.clone();
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+        state.set_wave_automation([3, 2, 8, 0]);
+        state.prepare_wave_bank(&config, &bank);
+        state.advance_segment(&config, &track, &mut effect, 64, 120.0, 48000.0);
+        state.refresh_pending_wave(&config, &track, &mut effect, 64);
+        assert_eq!(state.output(0), 0.25);
+        assert_eq!(state.output(1), 1.0);
+        assert_eq!(state.output(2), 0.0);
+        let phases = state.phases;
+        let sets = effect.sets;
+        state.select_midi_wave(&config, &bank, note(1));
+        assert_eq!(
+            state.refresh_pending_wave(&config, &track, &mut effect, 64),
+            None
+        );
+        assert_eq!(state.output(0), 0.25);
+        assert_eq!(state.phases, phases);
+        assert_eq!(effect.sets, sets);
+        state.set_wave_automation([0; 4]);
+        state.prepare_wave_bank(&config, &bank);
+        state.advance_segment(&config, &track, &mut effect, 64, 120.0, 48000.0);
+        assert_eq!(state.output(0), 1.0);
+        assert_eq!(state.midi_wave().unwrap().1, Some(1));
+        config.wave_switch = None;
+        state.prepare_wave_bank(&config, &bank);
+        assert_eq!(state.effective_mseg(&config, 0).hold, HoldMode::Sustain(0));
+        config.wave_switch = saved.wave_switch;
+        assert_eq!(config, saved);
+    }
+
+    #[test]
+    fn automated_slot_refreshes_empty_populated_deleted_and_authored_fallbacks() {
+        let (mut config, mut palette, mut bank, track) = setup(0);
+        config.wave_switch = None;
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+        state.set_wave_automation([8; 4]);
+        for expected in [0.0, 1.0, 0.0] {
+            state.prepare_wave_bank(&config, &bank);
+            state.advance_segment(&config, &track, &mut effect, 32, 120.0, 48000.0);
+            for slot in 0..4 {
+                assert_eq!(state.output(slot), expected);
+                assert_eq!(state.effective_mseg(&config, slot).hold, HoldMode::None);
+            }
+            if expected == 0.0 {
+                palette
+                    .store(7, &factory_shape(FactoryShape::FlatHigh))
+                    .unwrap();
+            } else {
+                palette.clear(7).unwrap();
+            }
+            bank.refresh(&palette);
+        }
+        state.reset();
+        state.prepare_wave_bank(&config, &bank);
+        assert_eq!(state.wave_automation(), [8; 4]);
+        state.set_wave_automation([9, 255, 0, 1]);
+        state.prepare_wave_bank(&config, &bank);
+        assert_eq!(state.wave_automation(), [0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn automation_activation_ignores_same_boundary_edits_to_the_shadowed_midi_wave() {
+        for (envelope, target) in [
+            (0, None),
+            (1, Some(ModulationTarget::EffectParameter(0))),
+            (1, Some(ModulationTarget::Mix)),
+        ] {
+            let (mut config, mut palette, mut bank, track) = setup(envelope);
+            config.targets[0] = target;
+            config.smooth_ms[envelope as usize] = 10.0;
+            config.msegs[envelope as usize].time_seconds = 0.001;
+            palette
+                .store(0, &factory_shape(FactoryShape::RampUp))
+                .unwrap();
+            palette
+                .store(1, &factory_shape(FactoryShape::RampUp))
+                .unwrap();
+            bank.refresh(&palette);
+            let old_bank = bank.clone();
+            let mut actual = ModulationState::default();
+            let mut reference = ModulationState::default();
+            let mut effect = Probe::default();
+            let mut reference_effect = Probe::default();
+            for (state, effect) in [
+                (&mut actual, &mut effect),
+                (&mut reference, &mut reference_effect),
+            ] {
+                state.prepare_wave_bank(&config, &bank);
+                state.select_midi_wave(&config, &bank, note(0));
+                state.advance_segment(&config, &track, effect, 5, 120.0, 48000.0);
+                state.refresh_pending_wave(&config, &track, effect, 5);
+                for _ in 0..5 {
+                    state.process_smoothing_sample(&config, effect);
+                    state.next_mix(track.mix);
+                }
+            }
+            palette
+                .store(0, &factory_shape(FactoryShape::FlatCenter))
+                .unwrap();
+            bank.refresh(&palette);
+            let mut values = [0; 4];
+            values[envelope as usize] = 2;
+            actual.set_wave_automation(values);
+            reference.set_wave_automation(values);
+            actual.prepare_wave_bank(&config, &bank);
+            reference.prepare_wave_bank(&config, &old_bank);
+            actual.advance_segment(&config, &track, &mut effect, 8, 120.0, 48000.0);
+            reference.advance_segment(&config, &track, &mut reference_effect, 8, 120.0, 48000.0);
+            for sample in 0..8 {
+                actual.refresh_pending_wave(&config, &track, &mut effect, 8 - sample);
+                reference.refresh_pending_wave(&config, &track, &mut reference_effect, 8 - sample);
+                actual.process_smoothing_sample(&config, &mut effect);
+                reference.process_smoothing_sample(&config, &mut reference_effect);
+                assert_eq!(
+                    actual.output(envelope as usize).to_bits(),
+                    reference.output(envelope as usize).to_bits(),
+                    "{target:?} sample {sample}"
+                );
+                assert_eq!(effect.value.to_bits(), reference_effect.value.to_bits());
+                assert_eq!(effect.sets, reference_effect.sets);
+                assert_eq!(
+                    actual.next_mix(track.mix).to_bits(),
+                    reference.next_mix(track.mix).to_bits()
+                );
+                assert_eq!(
+                    actual.precise_phase(envelope as usize),
+                    reference.precise_phase(envelope as usize)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn automation_release_and_same_offset_midi_resolve_as_one_geometry_change() {
+        for (envelope, target) in [
+            (0, None),
+            (1, Some(ModulationTarget::EffectParameter(0))),
+            (1, Some(ModulationTarget::Mix)),
+        ] {
+            let (mut config, mut palette, mut bank, track) = setup(envelope);
+            config.targets[0] = target;
+            config.smooth_ms[envelope as usize] = 10.0;
+            config.msegs[envelope as usize].time_seconds = 0.001;
+            palette
+                .store(0, &factory_shape(FactoryShape::RampUp))
+                .unwrap();
+            palette
+                .store(1, &CurveShape::capture(&config.msegs[envelope as usize]))
+                .unwrap();
+            bank.refresh(&palette);
+            let mut actual = ModulationState::default();
+            let mut reference = ModulationState::default();
+            let mut effect = Probe::default();
+            let mut reference_effect = Probe::default();
+            let mut values = [0; 4];
+            values[envelope as usize] = 1;
+            for (state, effect) in [
+                (&mut actual, &mut effect),
+                (&mut reference, &mut reference_effect),
+            ] {
+                state.set_wave_automation(values);
+                state.prepare_wave_bank(&config, &bank);
+                state.advance_segment(&config, &track, effect, 5, 120.0, 48000.0);
+                state.select_midi_wave(&config, &bank, note(1));
+                state.refresh_pending_wave(&config, &track, effect, 5);
+                for _ in 0..5 {
+                    state.process_smoothing_sample(&config, effect);
+                    state.next_mix(track.mix);
+                }
+            }
+            actual.set_wave_automation([0; 4]);
+            for (state, effect) in [
+                (&mut actual, &mut effect),
+                (&mut reference, &mut reference_effect),
+            ] {
+                state.prepare_wave_bank(&config, &bank);
+                state.select_midi_wave(&config, &bank, note(0));
+                state.advance_segment(&config, &track, effect, 8, 120.0, 48000.0);
+            }
+            for sample in 0..8 {
+                actual.refresh_pending_wave(&config, &track, &mut effect, 8 - sample);
+                reference.refresh_pending_wave(&config, &track, &mut reference_effect, 8 - sample);
+                actual.process_smoothing_sample(&config, &mut effect);
+                reference.process_smoothing_sample(&config, &mut reference_effect);
+                assert_eq!(
+                    actual.output(envelope as usize).to_bits(),
+                    reference.output(envelope as usize).to_bits(),
+                    "{target:?} sample {sample}"
+                );
+                assert_eq!(effect.value.to_bits(), reference_effect.value.to_bits());
+                assert_eq!(effect.sets, reference_effect.sets);
+                assert_eq!(
+                    actual.next_mix(track.mix).to_bits(),
+                    reference.next_mix(track.mix).to_bits()
+                );
+                assert_eq!(
+                    actual.precise_phase(envelope as usize),
+                    reference.precise_phase(envelope as usize)
+                );
+            }
+            // Releasing without another note must still refresh the newly audible source.
+            actual.set_wave_automation(values);
+            actual.prepare_wave_bank(&config, &bank);
+            actual.select_midi_wave(&config, &bank, note(1));
+            actual.set_wave_automation([0; 4]);
+            actual.prepare_wave_bank(&config, &bank);
+            actual.advance_segment(&config, &track, &mut effect, 8, 120.0, 48000.0);
+            let previous = actual.output(envelope as usize);
+            actual.refresh_pending_wave(&config, &track, &mut effect, 8);
+            actual.process_smoothing_sample(&config, &mut effect);
+            assert!(
+                (actual.output(envelope as usize) - previous * (-1.0_f32 / 480.0).exp()).abs()
+                    < 1e-7
+            );
+        }
+    }
+
+    #[test]
+    fn automation_boundary_refreshes_smoothed_raw_without_resetting_phase_or_lag() {
+        let (mut config, _, bank, track) = setup(0);
+        config.wave_switch = None;
+        config.smooth_ms = [10.0; 4];
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+        state.prepare_wave_bank(&config, &bank);
+        state.advance_segment(&config, &track, &mut effect, 5, 120.0, 48000.0);
+        for _ in 0..5 {
+            state.process_smoothing_sample(&config, &mut effect);
+        }
+        let phase = state.precise_phase(0);
+        let epoch = state.trigger_epoch();
+        state.set_wave_automation([2; 4]);
+        state.prepare_wave_bank(&config, &bank);
+        state.advance_segment(&config, &track, &mut effect, 8, 120.0, 48000.0);
+        assert_eq!(state.output(0), 0.0);
+        state.process_smoothing_sample(&config, &mut effect);
+        assert!((state.output(0) - (1.0 - (-1.0_f32 / 480.0).exp())).abs() < 1e-7);
+        assert!((state.precise_phase(0) - phase - 1.0 / 48000.0).abs() < 1e-12);
+        assert_eq!(state.trigger_epoch(), epoch);
     }
 
     #[test]

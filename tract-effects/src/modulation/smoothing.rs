@@ -255,7 +255,7 @@ impl ModulationState {
         self.mix_slot = None;
         let mut legacy_mix = None;
         for k in 0..4 {
-            let doc = self.wave.curve(config, k);
+            let doc = self.automated.curve(self.wave.curve(config, k), k);
             let route = if k > 0 {
                 config.targets[k - 1].and_then(|target| {
                     if config.winning_slot(target) != Some(k) {
@@ -398,7 +398,7 @@ impl ModulationState {
             if !slot.active {
                 continue;
             }
-            let doc = self.wave.curve(config, k);
+            let doc = self.automated.curve(self.wave.curve(config, k), k);
             let next = phase_next(doc, slot.phase, slot.step);
             let wrapped = next < slot.phase;
             slot.phase = next;

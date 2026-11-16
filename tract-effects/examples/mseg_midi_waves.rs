@@ -1,4 +1,4 @@
-//! Preview: cargo run -p tract-effects --example mseg_midi_waves -- /tmp/mseg-midi-waves.png [playing|setup] [scale]
+//! Preview: cargo run -p tract-effects --example mseg_midi_waves -- /tmp/waves.png [playing|setup|automation|automation-setup] [scale]
 use baseview::{Event, MouseButton, MouseEvent, Point};
 use keyboard_types::Modifiers;
 use std::sync::{Arc, Mutex};
@@ -18,10 +18,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = args
         .next()
         .unwrap_or_else(|| "/tmp/mseg-midi-waves.png".into());
-    let setup = match args.next().as_deref() {
-        None | Some("playing") => false,
-        Some("setup") => true,
-        _ => return Err("View must be playing or setup".into()),
+    let (setup, automation) = match args.next().as_deref() {
+        None | Some("playing") => (false, false),
+        Some("setup") => (true, false),
+        Some("automation") => (false, true),
+        Some("automation-setup") => (true, true),
+        _ => return Err("View must be playing, setup, automation, or automation-setup".into()),
     };
     let scale = args.next().map_or(Ok(1.0), |value| value.parse::<f32>())?;
     if !scale.is_finite() || !(0.5..=2.0).contains(&scale) {
@@ -68,10 +70,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         effect.set_param(index, track.params[index]);
     }
     let mut state = ModulationState::default();
+    let wave_values = if automation { [0, 2, 0, 0] } else { [0; 4] };
+    state.set_wave_automation(wave_values);
     let telemetry = Arc::new(ModulationTelemetry::default());
     let mut trace = TraceClock::default();
     let mut editor = EffectEditor::default();
     editor.bind_wave_palette(Arc::new(Mutex::new(palette)));
+    editor.set_wave_automation(wave_values);
     editor.connect_live(&telemetry, 0);
     editor.draw(&mut pm, &mut text, &track, &config, [0.0; 4], geometry);
     let input = [0.1; 960];
@@ -143,13 +148,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     pm.fill(color_bg());
     if setup && !editor.wave_midi_panel_open() {
-        return Err("MIDI setup did not open".into());
+        return Err("Wave setup did not open".into());
     }
     text.draw_text(
         &mut pm,
         24.0 * scale,
         25.0 * scale,
-        "MIDI Project wave 3 — phase preserved; authored curve retained",
+        if automation {
+            "Automated Project wave 2 — overrides MIDI wave 3"
+        } else {
+            "MIDI Project wave 3 — phase preserved; authored curve retained"
+        },
         18.0 * scale,
         color_text(),
     );

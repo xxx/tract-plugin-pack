@@ -139,6 +139,7 @@ pub fn draw_frame(
     let track = params
         .controls_for(kind)
         .track(params.mix.unmodulated_normalized_value(), true);
+    editor.set_wave_automation(params.waves_for(kind).values());
     let modulation = params
         .modulation
         .lock()
@@ -389,6 +390,8 @@ impl MinitosisWindow {
     }
 
     fn handle_effect(&mut self, event: &Event, finish_text: bool) -> bool {
+        self.editor
+            .set_wave_automation(self.params.waves_for(self.selection.displayed()).values());
         let before = self
             .params
             .controls_for(self.selection.displayed())
@@ -408,6 +411,13 @@ impl MinitosisWindow {
         } else {
             self.editor.handle_event(event, context)
         };
+        if let Some((slot, value)) = response.wave_automation {
+            let param = self.params.waves_for(before.kind).controls()[slot];
+            let setter = ParamSetter::new(self.gui_context.as_ref());
+            setter.begin_set_parameter(param);
+            setter.set_parameter(param, value as i32);
+            setter.end_set_parameter(param);
+        }
         if response.randomize {
             self.rng_seed = self.rng_seed.wrapping_add(1);
             tract_effects::randomize::randomize_track_effect(

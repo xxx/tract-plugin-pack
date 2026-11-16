@@ -48,6 +48,106 @@ fn block(plugin: &mut Minitosis, context: &mut Context) -> [f32; 64] {
 }
 
 #[test]
+fn native_host_wave_values_switch_on_subblock_boundaries_without_midi_or_allocations() {
+    for offset in [1, 5, 31, 63] {
+        let (mut plugin, mut context) = setup(true);
+        plugin.processor.modulation.wave_switch = None;
+        plugin
+            .params
+            .modulation
+            .lock()
+            .unwrap()
+            .set(EffectKind::Bitcrush, plugin.processor.modulation.clone());
+        plugin
+            .shared
+            .modulation_dirty
+            .store(true, Ordering::Release);
+        let mut prefix = [0.37; 64];
+        let mut prefix_r = prefix;
+        assert_no_alloc::assert_no_alloc(|| {
+            plugin.render(
+                &mut prefix[..offset],
+                &mut prefix_r[..offset],
+                false,
+                120.0,
+                &mut context,
+            );
+        });
+        assert!(prefix[..offset].iter().all(|value| *value == 0.0));
+        let values = &mut Arc::get_mut(&mut plugin.params).unwrap().waves
+            [state::bank_index(EffectKind::Bitcrush)];
+        values.amp = IntParam::new("test", 2, IntRange::Linear { min: 0, max: 8 });
+        let suffix = block(&mut plugin, &mut context);
+        assert!(suffix.iter().all(|value| *value > 0.3));
+        assert_eq!(
+            plugin.processor.modulation_frame().wave_automation,
+            [2, 0, 0, 0]
+        );
+        assert_eq!(plugin.processor.modulation.wave_switch, None);
+        assert_eq!(plugin.processor.modulation.msegs[0].nodes[0].value, 0.0);
+    }
+}
+
+#[test]
+fn native_automation_shadows_midi_and_refreshes_after_bank_contention_and_reset() {
+    let (mut plugin, mut context) = setup(true);
+    let set = |plugin: &mut Minitosis, value| {
+        Arc::get_mut(&mut plugin.params).unwrap().waves[state::bank_index(EffectKind::Bitcrush)]
+            .amp = IntParam::new("test", value, IntRange::Linear { min: 0, max: 8 });
+    };
+    set(&mut plugin, 8);
+    context.events = vec![midi_note(9, 2, 37, 1.0)];
+    assert!(
+        block(&mut plugin, &mut context)
+            .iter()
+            .all(|value| *value == 0.0)
+    );
+    assert_eq!(plugin.processor.modulation_frame().wave.unwrap().1, Some(1));
+    set(&mut plugin, 0);
+    assert!(
+        block(&mut plugin, &mut context)
+            .iter()
+            .all(|value| *value > 0.3)
+    );
+    set(&mut plugin, 2);
+    assert!(
+        block(&mut plugin, &mut context)
+            .iter()
+            .all(|value| *value > 0.3)
+    );
+    let binding = plugin.params.wave_palette.clone();
+    let mut locked = binding.lock().unwrap();
+    locked.clear(1).unwrap();
+    assert!(
+        block(&mut plugin, &mut context)
+            .iter()
+            .all(|value| *value > 0.3)
+    );
+    drop(locked);
+    assert!(
+        block(&mut plugin, &mut context)
+            .iter()
+            .all(|value| *value == 0.0)
+    );
+    binding
+        .lock()
+        .unwrap()
+        .store(1, &factory_shape(FactoryShape::FlatHigh))
+        .unwrap();
+    assert_no_alloc::assert_no_alloc(|| plugin.processor.reset_modulation());
+    assert!(
+        block(&mut plugin, &mut context)
+            .iter()
+            .all(|value| *value > 0.3)
+    );
+    assert_eq!(plugin.processor.modulation_frame().wave.unwrap().1, None);
+    assert_eq!(
+        plugin.processor.modulation_frame().wave_automation,
+        [2, 0, 0, 0]
+    );
+}
+
+#[test]
 fn native_wave_notes_keep_offsets_and_ignore_zero_velocity_wrong_channels_and_empty_slots() {
     for offset in [0, 1, 31, 63] {
         let (mut plugin, mut context) = setup(true);

@@ -70,6 +70,8 @@ pub struct MultosisParams {
     /// Wet-bus compressor ratio (≥ 1.0; 1.0 = bypass).
     #[id = "comp_ratio"]
     pub comp_ratio: FloatParam,
+    #[nested(array)]
+    pub waves: [tiny_skia_widgets::mseg::WaveControls; 16],
 }
 
 impl Default for MultosisParams {
@@ -84,6 +86,9 @@ impl Default for MultosisParams {
                 crate::modulation::TrackModulation::default_for_row,
             ))),
             wave_palette: Arc::new(Mutex::new(tiny_skia_widgets::mseg::WavePalette::default())),
+            waves: std::array::from_fn(|row| {
+                tiny_skia_widgets::mseg::WaveControls::new(&format!("Row {}", row + 1))
+            }),
             speed: EnumParam::new("Speed", Speed::Hold),
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit("%")
@@ -197,6 +202,7 @@ impl Default for Multosis {
 impl Plugin for Multosis {
     fn filter_state(state: &mut PluginState) {
         tiny_skia_widgets::mseg::prepare_wave_palette_state(&mut state.fields);
+        tiny_skia_widgets::mseg::WaveControls::prepare_state(state, 16);
     }
 
     const NAME: &'static str = "Multosis";
@@ -370,7 +376,9 @@ impl Plugin for Multosis {
         );
 
         let n = buffer.samples();
-        if self.engine.uses_midi_waves()
+        self.engine
+            .set_wave_automation(std::array::from_fn(|row| self.params.waves[row].values()));
+        if self.engine.uses_project_waves()
             && let Ok(palette) = self.params.wave_palette.try_lock()
         {
             self.engine.set_wave_palette(&palette);
@@ -469,6 +477,43 @@ nih_export_vst3!(Multosis);
 mod palette_tests {
     use super::*;
     use tiny_skia_widgets::mseg::{FactoryShape, WavePalette, factory_shape};
+
+    #[test]
+    fn host_wave_lanes_append_to_existing_parameters_and_legacy_states_clear_them() {
+        let params = MultosisParams::default();
+        let map = params.param_map();
+        assert_eq!(map.len(), 69);
+        assert_eq!(
+            map[..5]
+                .iter()
+                .map(|entry| entry.0.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "speed",
+                "mix",
+                "output_gain",
+                "comp_threshold",
+                "comp_ratio"
+            ]
+        );
+        for (row, ids) in map[5..].chunks_exact(4).enumerate() {
+            assert_eq!(params.waves[row].values(), [0; 4]);
+            assert_eq!(
+                ids.iter().map(|entry| entry.0.clone()).collect::<Vec<_>>(),
+                ["wave_amp", "wave_1", "wave_2", "wave_3"].map(|id| format!("{id}_{}", row + 1))
+            );
+        }
+        let unique: std::collections::HashSet<_> = map.iter().map(|entry| &entry.0).collect();
+        assert_eq!(unique.len(), map.len());
+        let mut state = PluginState {
+            version: String::new(),
+            params: Default::default(),
+            fields: Default::default(),
+        };
+        Multosis::filter_state(&mut state);
+        assert_eq!(state.params.len(), 64);
+        assert!(state.params.contains_key("wave_3_16"));
+    }
 
     #[test]
     fn project_wave_palette_persists_outside_row_configuration_and_curve_undo() {

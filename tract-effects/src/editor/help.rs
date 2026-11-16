@@ -16,7 +16,7 @@ impl Session<'_> {
         {
             self.state
                 .mseg_edit
-                .set_external_hint(Some("Switch Project waves using MIDI notes"));
+                .set_external_hint(Some("Project wave automation and MIDI switching"));
             return;
         }
         let hint = if self.state.effect_dropdown.is_open() || self.state.mseg_edit.has_open_menu() {

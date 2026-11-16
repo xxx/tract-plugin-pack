@@ -642,6 +642,8 @@ impl MultosisWindow {
     }
 
     fn dispatch_effect_event(&mut self, event: &baseview::Event, finish_text: bool) -> bool {
+        self.effect_editor
+            .set_wave_automation(self.params.waves[self.selected_track].values());
         let geometry = self.effect_geometry();
         let response = {
             let (Ok(mut effects), Ok(mut modulation)) = (
@@ -666,6 +668,13 @@ impl MultosisWindow {
         if response.changed {
             self.mark_config_dirty();
         }
+        if let Some((slot, value)) = response.wave_automation {
+            let param = self.params.waves[self.selected_track].controls()[slot];
+            let setter = ParamSetter::new(self.gui_context.as_ref());
+            setter.begin_set_parameter(param);
+            setter.set_parameter(param, value as i32);
+            setter.end_set_parameter(param);
+        }
         if response.randomize {
             self.randomize_selected_track_effect();
         }
@@ -677,6 +686,8 @@ impl MultosisWindow {
     }
 
     fn draw_effect_view(&mut self) {
+        self.effect_editor
+            .set_wave_automation(self.params.waves[self.selected_track].values());
         let effect = self.selected_track_effect();
         let modulation = self.selected_track_modulation();
         let geometry = self.effect_geometry();

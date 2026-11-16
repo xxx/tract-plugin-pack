@@ -207,7 +207,9 @@ impl Minitosis {
             self.processor.retrigger_modulation();
         }
         self.was_playing = playing;
-        if self.processor.uses_midi_waves()
+        self.processor
+            .set_wave_automation(self.params.waves_for(kind).values());
+        if self.processor.uses_project_waves()
             && let Ok(palette) = self.params.wave_palette.try_lock()
         {
             self.processor.set_wave_palette(&palette);
@@ -294,6 +296,7 @@ impl Minitosis {
 impl Plugin for Minitosis {
     fn filter_state(state: &mut PluginState) {
         tiny_skia_widgets::mseg::prepare_wave_palette_state(&mut state.fields);
+        tiny_skia_widgets::mseg::WaveControls::prepare_state(state, state::bank_kinds().len());
     }
 
     const NAME: &'static str = "Minitosis";

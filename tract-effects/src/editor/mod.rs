@@ -73,6 +73,7 @@ pub struct EditorResponse {
     pub changed: bool,
     pub back: bool,
     pub randomize: bool,
+    pub wave_automation: Option<(usize, u8)>,
 }
 
 /// Host-owned configuration and rendering context for one input event.
@@ -107,6 +108,7 @@ pub struct EffectEditor {
     detector_owner: Option<detector::DetectorBinding>,
     pitch_grid_binding: Option<pitch_grid::PitchGridBinding>,
     wave_midi: wave_midi::Panel,
+    wave_automation: Option<[u8; 4]>,
 }
 
 impl Default for EffectEditor {
@@ -156,6 +158,7 @@ impl EffectEditor {
             detector_owner: None,
             pitch_grid_binding: None,
             wave_midi: wave_midi::Panel::default(),
+            wave_automation: None,
         }
     }
 
@@ -174,6 +177,7 @@ impl EffectEditor {
         let audio_gain = self.audio_gain;
         let live = self.live.take();
         let wave_palette = self.mseg_edit.wave_palette().cloned();
+        let wave_automation = self.wave_automation;
         let input_scale = self.effect_dial_drag.input_scale();
         *self = Self::new(self.trigger_choices);
         if let Some(palette) = wave_palette {
@@ -187,6 +191,7 @@ impl EffectEditor {
         self.audio_display = audio_display;
         self.audio_gain = audio_gain;
         self.live = live;
+        self.wave_automation = wave_automation;
         self.effect_dial_drag.set_input_scale(input_scale);
     }
 

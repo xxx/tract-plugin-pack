@@ -48,6 +48,143 @@ fn draw(h: &mut Harness) -> tiny_skia::Pixmap {
 }
 
 #[test]
+fn automation_changes_preserve_live_and_frozen_waveform_captures() {
+    use crate::waveform::{WaveformClock, WaveformTiming};
+    for frozen in [false, true] {
+        let mut h = setup(1.0);
+        h.editor.set_wave_automation([0; 4]);
+        let telemetry = Arc::new(ModulationTelemetry::default());
+        h.editor.connect_live(&telemetry, 0);
+        h.editor.set_audio_view(AudioView::Both);
+        draw(&mut h);
+        let mut clock = WaveformClock::default();
+        clock.begin_block(&telemetry.waveform);
+        clock.prepare_segment(
+            &telemetry.waveform,
+            0,
+            WaveformTiming {
+                config: &h.modulation,
+                kind: h.effect.kind,
+                phase: 0.0,
+                trigger_epoch: 0,
+                bpm: 120.0,
+                sample_rate: 48000.0,
+            },
+        );
+        for _ in 0..400 {
+            clock.record_sample(&telemetry.waveform, [0.9; 2], [0.3; 2], 0.0);
+        }
+        clock.finish_block(&telemetry.waveform);
+        draw(&mut h);
+        let before = h.editor.live.as_ref().unwrap().waveform;
+        assert!(before.iter().any(Option::is_some));
+        h.editor.set_audio_frozen(frozen);
+        for values in [[1, 0, 0, 0], [1, 2, 0, 0], [0; 4]] {
+            h.editor.set_wave_automation(values);
+            draw(&mut h);
+            assert_eq!(h.editor.live.as_ref().unwrap().waveform, before);
+            assert_eq!(h.editor.audio_frozen(), frozen);
+        }
+    }
+}
+
+#[test]
+fn wave_automation_returns_host_edits_for_the_displayed_curve_and_preserves_authored_state() {
+    let mut h = setup(1.0);
+    h.editor.set_wave_automation([0; 4]);
+    let before = (h.effect, h.modulation.clone());
+    h.click(button(&h));
+    let lay = wave_midi::layout(h.geometry.window_size, h.geometry.layout.mseg_pane, 1.0).unwrap();
+    h.click(lay.values[4]);
+    h.key(Key::Home);
+    h.key(Key::ArrowDown);
+    h.key(Key::ArrowDown);
+    let response = h.key(Key::Enter);
+    assert_eq!(response.wave_automation, Some((1, 2)));
+    assert!(response.captured && !response.changed);
+    assert!(h.editor.mseg_edit.geometry_read_only());
+    assert_eq!(
+        h.editor
+            .wave_display_curve(&h.effect, &h.modulation, 1)
+            .unwrap()
+            .nodes[0]
+            .value,
+        1.0
+    );
+    assert_eq!((h.effect, h.modulation.clone()), before);
+    assert_eq!(h.modulation.wave_switch, None);
+    h.key(Key::Escape);
+    assert!(!h.key(Key::Delete).changed);
+    h.editor.cancel_interaction();
+    draw(&mut h);
+    assert!(h.editor.mseg_edit.geometry_read_only());
+    h.click(button(&h));
+    h.click(lay.values[4]);
+    h.key(Key::Home);
+    let response = h.key(Key::Enter);
+    assert_eq!(response.wave_automation, Some((1, 0)));
+    assert!(!h.editor.mseg_edit.geometry_read_only());
+    assert_eq!((h.effect, h.modulation.clone()), before);
+}
+
+#[test]
+fn automation_host_updates_keep_modal_owner_and_empty_slots_show_authored_geometry() {
+    let mut h = setup(1.0);
+    h.editor.set_wave_automation([0; 4]);
+    h.click(button(&h));
+    h.key(Key::Enter);
+    assert_eq!(h.modulation.wave_switch.unwrap().envelope, 1);
+    h.editor.set_wave_automation([0, 8, 0, 0]);
+    draw(&mut h);
+    assert!(h.editor.wave_midi_panel_open());
+    let lay = wave_midi::layout(h.geometry.window_size, h.geometry.layout.mseg_pane, 1.0).unwrap();
+    h.click(lay.values[4]);
+    assert_eq!(h.key(Key::Enter).wave_automation, None);
+    assert_eq!(
+        h.editor
+            .wave_display_curve(&h.effect, &h.modulation, 1)
+            .unwrap()
+            .active(),
+        h.modulation.msegs[1].active()
+    );
+    h.editor.set_wave_automation([0, 2, 0, 0]);
+    draw(&mut h);
+    assert_eq!(
+        h.editor
+            .wave_display_curve(&h.effect, &h.modulation, 1)
+            .unwrap()
+            .nodes[0]
+            .value,
+        1.0
+    );
+    h.key(Key::Escape);
+    h.editor.prepare_resize(1.0);
+    draw(&mut h);
+    assert!(h.editor.mseg_edit.geometry_read_only());
+}
+
+#[test]
+fn automation_field_layout_keeps_usable_rows_and_refuses_too_short_windows() {
+    for scale in [0.5, 1.0, 2.0] {
+        let mut h = setup(scale);
+        h.editor.set_wave_automation([0; 4]);
+        h.click(button(&h));
+        assert!(h.editor.wave_midi_panel_open());
+        let lay =
+            wave_midi::layout(h.geometry.window_size, h.geometry.layout.mseg_pane, scale).unwrap();
+        for r in lay.values {
+            assert!(r.2 > 70.0 && r.3 >= 20.0);
+            assert!(r.1 + r.3 <= lay.panel.1 + lay.panel.3);
+        }
+        h.click(lay.values[4]);
+        h.key(Key::End);
+        assert_eq!(h.key(Key::Enter).wave_automation, Some((1, 8)));
+        draw(&mut h);
+        assert!(wave_midi::layout((300.0, 160.0), h.geometry.layout.mseg_pane, scale).is_none());
+    }
+}
+
+#[test]
 fn wave_setup_changes_only_mapping_and_its_controls_have_keyboard_priority() {
     let mut h = setup(1.0);
     let before = (h.effect, h.modulation.clone());
@@ -174,6 +311,7 @@ fn live_wave_display_keeps_authored_data_and_rejects_old_mapping_readings() {
         mix: None,
         detector: None,
         wave: Some((mapping, Some(1))),
+        wave_automation: [0; 4],
     };
     clock.publish(&telemetry, 0, &frame);
     let playing = draw(&mut h);

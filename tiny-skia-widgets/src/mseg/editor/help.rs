@@ -229,7 +229,7 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                     ),
                     animated(
                         "MIDI waves",
-                        "Eight notes select Project slots while the clock runs. MIDI off beside playback opens setup. Turn switching Off to edit the chosen curve; saved hold markers are ignored while On.",
+                        "Waves beside playback opens MIDI and host automation setup. Eight notes select Project slots; each curve's Wave lane overrides MIDI. Choose Drawn/MIDI and MIDI Off to edit geometry. Playback ignores saved hold markers while switched.",
                     ),
                     animated(
                         "Ctrl/Cmd+Z",
@@ -375,7 +375,7 @@ impl MsegEditState {
             }
         }
         if self.geometry_read_only() && in_rect(layout.canvas, x, y) {
-            return Some("MIDI wave preview; turn MIDI off to edit geometry");
+            return Some("Wave preview; choose Drawn/MIDI and MIDI Off to edit");
         }
         if self
             .selection_handle_at(data, &layout, scale, x, y)

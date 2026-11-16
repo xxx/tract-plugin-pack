@@ -44,6 +44,219 @@ fn setup() -> (Box<AudioEngine>, Grid, [TrackModulation; ROWS], WavePalette) {
 }
 
 #[test]
+fn automation_selects_four_sources_independently_and_keeps_fixed_row_lanes_on_swap() {
+    let (mut engine, grid, mut config, _) = setup();
+    config[0].wave_switch = None;
+    config[1].wave_switch = None;
+    engine.set_modulation(&config);
+    let mut values = [[0; 4]; ROWS];
+    values[0] = [2, 0, 2, 8];
+    values[1] = [8, 2, 0, 2];
+    let (mut left, mut right) = ([0.37; 32], [0.37; 32]);
+    assert_no_alloc::assert_no_alloc(|| {
+        engine.set_wave_automation(values);
+        engine.process(&mut left, &mut right, false, 1000.0, 120.0, 1.0, &grid);
+    });
+    assert!(left.iter().all(|value| *value > 0.3));
+    let a = engine.modulation.frame(0, EffectKind::Bitcrush);
+    let b = engine.modulation.frame(1, EffectKind::None);
+    assert_eq!(a.wave_automation, values[0]);
+    assert_eq!(b.wave_automation, values[1]);
+    assert_eq!(a.outputs[0], 1.0);
+    assert_eq!(a.outputs[2], 1.0);
+    assert_eq!(b.outputs[1], 1.0);
+    assert_eq!(b.outputs[3], 1.0);
+    let untouched = engine.modulation.frame(15, EffectKind::None);
+    assert_eq!(untouched.wave_automation, [0; 4]);
+    assert_no_alloc::assert_no_alloc(|| engine.swap_tracks(0, 1));
+    assert_eq!(
+        engine.modulation.frame(0, EffectKind::None).wave_automation,
+        values[0]
+    );
+    assert_eq!(
+        engine
+            .modulation
+            .frame(1, EffectKind::Bitcrush)
+            .wave_automation,
+        values[1]
+    );
+}
+
+#[test]
+fn automation_release_batches_with_boundary_midi_before_any_smoothing_refresh() {
+    for empty_block in [false, true] {
+        let (mut actual, grid, mut config, mut palette) = setup();
+        let (mut reference, _, _, _) = setup();
+        config[0].smooth_ms[0] = 10.0;
+        config[0].msegs[0].time_seconds = 0.001;
+        palette
+            .store(0, &factory_shape(FactoryShape::RampUp))
+            .unwrap();
+        palette
+            .store(
+                1,
+                &tiny_skia_widgets::mseg::CurveShape::capture(&config[0].msegs[0]),
+            )
+            .unwrap();
+        let mut values = [[0; 4]; ROWS];
+        values[0][0] = 1;
+        for engine in [&mut actual, &mut reference] {
+            engine.set_modulation(&config);
+            engine.set_wave_palette(&palette);
+            engine.set_wave_automation(values);
+            engine.process_with_midi(
+                &mut [0.37; 5],
+                &mut [0.37; 5],
+                false,
+                1000.0,
+                120.0,
+                1.0,
+                &grid,
+                std::iter::once(MidiNoteOn {
+                    timing: 0,
+                    channel: 2,
+                    note: 37,
+                }),
+            );
+        }
+        let (mut left, mut right) = ([0.37; 8], [0.37; 8]);
+        let (mut expected_l, mut expected_r) = (left, right);
+        assert_no_alloc::assert_no_alloc(|| {
+            actual.set_wave_automation([[0; 4]; ROWS]);
+            if empty_block {
+                actual.process(&mut [], &mut [], false, 1000.0, 120.0, 1.0, &grid);
+                actual.set_wave_automation(values);
+            }
+            actual.process_with_midi(
+                &mut left,
+                &mut right,
+                false,
+                1000.0,
+                120.0,
+                1.0,
+                &grid,
+                std::iter::once(MidiNoteOn {
+                    timing: 0,
+                    channel: 2,
+                    note: 36,
+                }),
+            );
+            reference.process_with_midi(
+                &mut expected_l,
+                &mut expected_r,
+                false,
+                1000.0,
+                120.0,
+                1.0,
+                &grid,
+                std::iter::once(MidiNoteOn {
+                    timing: 0,
+                    channel: 2,
+                    note: 36,
+                }),
+            );
+        });
+        assert_eq!(left, expected_l);
+        assert_eq!(right, expected_r);
+        assert_eq!(
+            actual.modulation.phase(0, 0),
+            reference.modulation.phase(0, 0)
+        );
+        // No-note release also needs dispatch through the pending-row mask.
+        actual.set_wave_automation(values);
+        actual.process(
+            &mut [0.37; 5],
+            &mut [0.37; 5],
+            false,
+            1000.0,
+            120.0,
+            1.0,
+            &grid,
+        );
+        actual.modulation.fire_midi(
+            MidiNoteOn {
+                timing: 0,
+                channel: 2,
+                note: 37,
+            },
+            false,
+        );
+        let previous = actual.modulation.frame(0, EffectKind::Bitcrush).outputs[0];
+        actual.set_wave_automation([[0; 4]; ROWS]);
+        actual.process(
+            &mut [0.37; 1],
+            &mut [0.37; 1],
+            false,
+            1000.0,
+            120.0,
+            1.0,
+            &grid,
+        );
+        assert!(
+            (actual.modulation.frame(0, EffectKind::Bitcrush).outputs[0]
+                - previous * (-1.0_f32 / 480.0).exp())
+            .abs()
+                < 1e-7
+        );
+    }
+}
+
+#[test]
+fn smoothed_automation_on_a_subblock_boundary_matches_a_sample_timed_midi_switch() {
+    let (mut actual, grid, mut config, _) = setup();
+    let (mut reference, _, _, _) = setup();
+    config[0].smooth_ms[0] = 10.0;
+    actual.set_modulation(&config);
+    reference.set_modulation(&config);
+    let (mut left, mut right) = ([0.37; 13], [0.37; 13]);
+    let (mut expected_l, mut expected_r) = (left, right);
+    let mut values = [[0; 4]; ROWS];
+    values[0][0] = 2;
+    assert_no_alloc::assert_no_alloc(|| {
+        actual.process(
+            &mut left[..5],
+            &mut right[..5],
+            false,
+            1000.0,
+            120.0,
+            1.0,
+            &grid,
+        );
+        actual.set_wave_automation(values);
+        actual.process(
+            &mut left[5..],
+            &mut right[5..],
+            false,
+            1000.0,
+            120.0,
+            1.0,
+            &grid,
+        );
+        reference.process_with_midi(
+            &mut expected_l,
+            &mut expected_r,
+            false,
+            1000.0,
+            120.0,
+            1.0,
+            &grid,
+            std::iter::once(MidiNoteOn {
+                timing: 5,
+                channel: 2,
+                note: 37,
+            }),
+        );
+    });
+    assert_eq!(left, expected_l);
+    assert_eq!(right, expected_r);
+    assert_eq!(
+        actual.modulation.phase(0, 0),
+        reference.modulation.phase(0, 0)
+    );
+    assert!(left[5] > 0.0);
+}
+
+#[test]
 fn midi_wave_boundaries_preserve_prefix_phase_and_unaffected_rows() {
     for offset in [0, 1, 31, 63] {
         let (mut actual, grid, mut config, _) = setup();

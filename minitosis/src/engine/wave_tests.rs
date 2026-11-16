@@ -44,6 +44,82 @@ fn setup() -> (Processor, TrackEffect, WavePalette) {
 }
 
 #[test]
+fn zero_frame_automation_changes_do_not_refresh_lag_before_audio_resumes() {
+    let (mut actual, track, mut palette) = setup();
+    let (mut reference, _, _) = setup();
+    actual.modulation.smooth_ms[0] = 10.0;
+    actual.modulation.msegs[0].time_seconds = 0.001;
+    reference.modulation = actual.modulation.clone();
+    palette
+        .store(0, &factory_shape(FactoryShape::RampUp))
+        .unwrap();
+    palette
+        .store(1, &CurveShape::capture(&actual.modulation.msegs[0]))
+        .unwrap();
+    for processor in [&mut actual, &mut reference] {
+        processor.set_wave_palette(&palette);
+        processor.set_wave_automation([1, 0, 0, 0]);
+        processor.begin_block(&track, &[0.37; 5], &[0.37; 5], 120.0);
+        processor.midi_note_on(
+            MidiNoteOn {
+                timing: 0,
+                channel: 2,
+                note: 37,
+            },
+            false,
+        );
+        for _ in 0..5 {
+            processor.process_sample([0.37; 2], 1.0, false);
+        }
+    }
+    let (mut actual_audio, mut expected_audio) = ([[0.0; 2]; 8], [[0.0; 2]; 8]);
+    assert_no_alloc::assert_no_alloc(|| {
+        actual.set_wave_automation([0; 4]);
+        actual.prepare_block(&track, &[], &[], 120.0);
+        actual.set_wave_automation([1, 0, 0, 0]);
+        actual.begin_block(&track, &[0.37; 8], &[0.37; 8], 120.0);
+        reference.begin_block(&track, &[0.37; 8], &[0.37; 8], 120.0);
+        for (actual_sample, expected_sample) in actual_audio.iter_mut().zip(&mut expected_audio) {
+            *actual_sample = actual.process_sample([0.37; 2], 1.0, false);
+            *expected_sample = reference.process_sample([0.37; 2], 1.0, false);
+        }
+    });
+    assert_eq!(actual_audio, expected_audio);
+    assert_eq!(
+        actual.modulation_frame().outputs,
+        reference.modulation_frame().outputs
+    );
+    assert_eq!(actual.phase(0), reference.phase(0));
+}
+
+#[test]
+fn automation_handoff_keeps_ready_bank_during_the_first_refresh_and_uses_no_heap_work() {
+    let (mut previous, track, _) = setup();
+    previous.modulation.wave_switch = None;
+    previous.set_wave_automation([2, 8, 0, 2]);
+    previous.begin_block(&track, &[0.37; 16], &[0.37; 16], 120.0);
+    for _ in 0..16 {
+        previous.process_sample([0.37; 2], 1.0, false);
+    }
+    let mut key = previous.key;
+    key.sample_rate_bits = 96000.0_f32.to_bits();
+    let mut next = Processor::new(key, &track, previous.modulation.clone());
+    let mut output = [0.0; 2];
+    assert_no_alloc::assert_no_alloc(|| {
+        next.inherit_precise_timing(&previous);
+        next.begin_block(&track, &[0.37; 16], &[0.37; 16], 120.0);
+        output = next.process_sample([0.37; 2], 1.0, false);
+    });
+    assert!(output[0] > 0.3);
+    assert!(next.phase(0) > 0.0);
+    assert_eq!(next.modulation_frame().wave_automation, [2, 8, 0, 2]);
+    assert_eq!(
+        next.state.effective_mseg(&next.modulation, 3).nodes[0].value,
+        1.0
+    );
+}
+
+#[test]
 fn wave_note_offsets_preserve_phase_prefix_and_authored_data_without_allocations() {
     for offset in [0, 1, 63, 127] {
         let (mut actual, track, _) = setup();

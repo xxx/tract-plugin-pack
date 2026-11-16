@@ -118,8 +118,10 @@ impl Processor {
         sidechain: SidechainInput<'_>,
         bpm: f64,
     ) {
-        self.state
-            .prepare_wave_bank(&self.modulation, &self.wave_bank);
+        if !left.is_empty() && !right.is_empty() {
+            self.state
+                .prepare_wave_bank(&self.modulation, &self.wave_bank);
+        }
         self.effect.set_bpm(bpm as f32);
         for (i, _) in self.effect.parameters().iter().enumerate() {
             if !(self.modulation.smoothed_parameter(track.kind, i)
@@ -205,6 +207,12 @@ impl Processor {
 
     pub fn uses_midi_waves(&self) -> bool {
         self.modulation.wave_switch.is_some()
+    }
+    pub fn uses_project_waves(&self) -> bool {
+        self.uses_midi_waves() || self.state.wave_automation() != [0; 4]
+    }
+    pub fn set_wave_automation(&mut self, values: [u8; 4]) {
+        self.state.set_wave_automation(values);
     }
     pub fn set_wave_palette(&mut self, palette: &tiny_skia_widgets::mseg::WavePalette) {
         self.wave_bank.refresh(palette);
