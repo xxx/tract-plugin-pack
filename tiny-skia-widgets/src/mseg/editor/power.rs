@@ -127,7 +127,10 @@ impl MsegEditState {
         &self.power.message
     }
     pub fn has_open_menu(&self) -> bool {
-        self.help_open() || self.dropdown.is_open() || self.inspector_node().is_some()
+        self.help_open()
+            || self.curve_browser_open()
+            || self.dropdown.is_open()
+            || self.inspector_node().is_some()
     }
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
@@ -164,9 +167,9 @@ impl MsegEditState {
         window: (f32, f32),
     ) {
         if id == StripId::Shapes {
-            self.power.shape_labels = FactoryShape::LABELS
-                .iter()
-                .map(|s| (*s).to_owned())
+            self.power.shape_labels = std::iter::once("Browse shapes...")
+                .chain(FactoryShape::LABELS)
+                .map(|s| s.to_owned())
                 .collect();
             self.power
                 .shape_labels
@@ -223,6 +226,7 @@ impl MsegEditState {
         id: StripId,
         index: usize,
         data: &mut MsegData,
+        rect: (f32, f32, f32, f32),
     ) -> Option<MsegEdit> {
         self.power.message.clear();
         let result = match id {
@@ -255,7 +259,7 @@ impl MsegEditState {
                 self.set_tool(MsegTool::ALL[index.min(3)]);
                 Ok(false)
             }
-            StripId::Shapes => return self.apply_shape_menu(index, data),
+            StripId::Shapes => return self.apply_shape_menu(index, data, rect),
             StripId::View => {
                 if index == 0 {
                     self.fit_all();
@@ -389,7 +393,7 @@ impl MsegEditState {
         }
     }
 
-    fn apply_shape(
+    pub(super) fn apply_shape(
         &mut self,
         data: &mut MsegData,
         shape: CurveShape,
@@ -424,7 +428,17 @@ impl MsegEditState {
         }
     }
 
-    fn apply_shape_menu(&mut self, index: usize, data: &mut MsegData) -> Option<MsegEdit> {
+    fn apply_shape_menu(
+        &mut self,
+        index: usize,
+        data: &mut MsegData,
+        rect: (f32, f32, f32, f32),
+    ) -> Option<MsegEdit> {
+        if index == 0 {
+            self.open_curve_browser(rect, self.overlay_scale());
+            return None;
+        }
+        let index = index - 1;
         if let Some(kind) = FactoryShape::ALL.get(index) {
             return self.apply_shape(data, factory_shape(*kind), false);
         }
@@ -471,6 +485,9 @@ impl MsegEditState {
     }
 
     pub fn on_wheel(&mut self, delta: f32, rect: (f32, f32, f32, f32)) -> bool {
+        if self.curve_browser_open() {
+            return true;
+        }
         if self.help_open() {
             self.help_wheel(delta);
             return true;
@@ -496,6 +513,9 @@ impl MsegEditState {
         scale: f32,
     ) -> (bool, Option<MsegEdit>) {
         self.prepare_precision(data, scale);
+        if self.curve_browser_open() {
+            return (true, self.browser_key(event, data));
+        }
         if self.help_open() {
             self.help_key(event, rect, scale);
             return (true, None);
@@ -531,7 +551,7 @@ impl MsegEditState {
                     .on_key(k, &refs, (rect.0 + rect.2, rect.1 + rect.3))
             });
             let edit = if let Some(DropdownEvent::Selected(id, index)) = result {
-                self.apply_menu(id, index, data)
+                self.apply_menu(id, index, data, rect)
             } else {
                 None
             };
@@ -576,7 +596,7 @@ impl MsegEditState {
                 return (true, edit);
             }
             let edit = match key.to_ascii_lowercase().as_str() {
-                "a" => self.apply_menu(StripId::Transform, 16, data),
+                "a" => self.apply_menu(StripId::Transform, 16, data, rect),
                 "c" => self.copy_curve(data),
                 "v" => self.paste_curve(data, event.modifiers.contains(Modifiers::SHIFT)),
                 _ => return (false, None),
@@ -1329,6 +1349,12 @@ mod tests {
         assert!(state.has_open_menu());
         assert!(state.on_wheel(-5.0, RECT));
         state.on_key(&key(Key::Home, Modifiers::empty()), &mut data, RECT, 1.0);
+        state.on_key(
+            &key(Key::ArrowDown, Modifiers::empty()),
+            &mut data,
+            RECT,
+            1.0,
+        );
         assert_eq!(
             state.on_key(&key(Key::Enter, Modifiers::empty()), &mut data, RECT, 1.0),
             (true, Some(MsegEdit::Changed))
@@ -1372,7 +1398,7 @@ mod tests {
         );
         let original = data;
         assert_eq!(
-            state.apply_menu(StripId::TimeGrid, state.grid_options.len(), &mut data),
+            state.apply_menu(StripId::TimeGrid, state.grid_options.len(), &mut data, RECT),
             Some(MsegEdit::Changed)
         );
         assert_eq!(data.active(), original.active());
@@ -1563,14 +1589,14 @@ mod tests {
         data.insert_node(0.31, 0.29).unwrap();
         data.hold = crate::mseg::HoldMode::Sustain(1);
         assert_eq!(
-            state.apply_menu(StripId::Transform, 11, &mut data),
+            state.apply_menu(StripId::Transform, 11, &mut data, RECT),
             Some(MsegEdit::Changed)
         );
         assert_eq!(data.nodes[1].time, 0.3125);
         assert_eq!(data.nodes[1].value, 0.37);
         assert_eq!(data.hold, crate::mseg::HoldMode::Sustain(1));
         for index in [14, 15] {
-            state.apply_menu(StripId::Transform, index, &mut data);
+            state.apply_menu(StripId::Transform, index, &mut data, RECT);
             assert!(
                 data.active().iter().all(|node| state
                     .pitch_grid()
@@ -1591,11 +1617,14 @@ mod tests {
         );
         state.set_pitch_grid(None, &data);
         let before = data;
-        assert_eq!(state.apply_menu(StripId::Transform, 11, &mut data), None);
+        assert_eq!(
+            state.apply_menu(StripId::Transform, 11, &mut data, RECT),
+            None
+        );
         assert_eq!(data, before);
         assert!(!state.status_message().is_empty());
         assert_eq!(
-            state.apply_menu(StripId::TimeGrid, 0, &mut data),
+            state.apply_menu(StripId::TimeGrid, 0, &mut data, RECT),
             Some(MsegEdit::Changed)
         );
         assert_eq!(data.value_grid, crate::mseg::ValueGrid::Divisions);
@@ -1606,7 +1635,8 @@ mod tests {
             static_editor.apply_menu(
                 StripId::TimeGrid,
                 static_editor.grid_options.len(),
-                &mut data
+                &mut data,
+                RECT
             ),
             None
         );
@@ -1751,8 +1781,9 @@ mod tests {
         assert_eq!((destination.beats, destination.time_divisions), (17.0, 24));
         first.apply_menu(
             StripId::Shapes,
-            FactoryShape::ALL.len() + FAVORITE_COUNT + 2,
+            1 + FactoryShape::ALL.len() + FAVORITE_COUNT + 2,
             &mut source,
+            RECT,
         );
         factory_shape(FactoryShape::RampDown)
             .apply(&mut destination, false)
@@ -1760,8 +1791,9 @@ mod tests {
         assert_eq!(
             second.apply_menu(
                 StripId::Shapes,
-                FactoryShape::ALL.len() + 2,
-                &mut destination
+                1 + FactoryShape::ALL.len() + 2,
+                &mut destination,
+                RECT
             ),
             Some(MsegEdit::Changed)
         );
@@ -1769,8 +1801,9 @@ mod tests {
         let before = destination;
         second.apply_menu(
             StripId::Shapes,
-            FactoryShape::ALL.len() + 7,
+            1 + FactoryShape::ALL.len() + 7,
             &mut destination,
+            RECT,
         );
         assert_eq!(destination, before);
         assert!(second.status_message().contains("unavailable"));

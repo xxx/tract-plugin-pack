@@ -174,7 +174,7 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                     ),
                     entry(
                         "Shapes menu",
-                        "Load factory shapes, shared favorites, or import/export a curve file.",
+                        "Browse shapes... previews factory curves and shared favorites. Enter loads; Shift+Enter fits. Favorites: S stores, Delete clears, R refreshes. Import/export transfers curve files.",
                     ),
                     entry(
                         "Ctrl/Cmd+C / V",
@@ -269,11 +269,16 @@ impl MsegEditState {
         self.help.open = false;
     }
 
-    /// Supply native bounds so a guide can span its owning pane.
-    pub fn set_help_bounds(&mut self, bounds: (f32, f32)) {
+    /// Supply native bounds for shared help and curve-browser overlays.
+    pub fn set_overlay_bounds(&mut self, bounds: (f32, f32)) {
         self.help.bounds =
             (bounds.0.is_finite() && bounds.1.is_finite() && bounds.0 > 0.0 && bounds.1 > 0.0)
                 .then_some(bounds);
+    }
+
+    /// Supply native bounds so a guide can span its owning pane.
+    pub fn set_help_bounds(&mut self, bounds: (f32, f32)) {
+        self.set_overlay_bounds(bounds);
     }
 
     pub fn clear_hover_hint(&mut self) {
@@ -292,6 +297,9 @@ impl MsegEditState {
 
     pub fn context_hint(&self, data: &MsegData, rect: Rect, scale: f32) -> Option<&'static str> {
         use crate::mseg::render::MsegHit;
+        if self.curve_browser_open() {
+            return Some("Browser: select a thumbnail; Enter loads; Shift+Enter fits; Esc closes");
+        }
         if self.help_open() {
             return Some("Guide: wheel scrolls; left/right changes page; Esc closes");
         }
@@ -702,7 +710,7 @@ impl MsegEditState {
     }
 }
 
-fn draw_fitted(
+pub(super) fn draw_fitted(
     tr: &mut TextRenderer,
     pm: &mut tiny_skia::Pixmap,
     at: (f32, f32),
@@ -722,7 +730,7 @@ fn draw_fitted(
     tr.draw_text(pm, at.0, at.1, &visible, size, color);
 }
 
-fn wrap(tr: &mut TextRenderer, text: &str, size: f32, width: f32) -> Vec<String> {
+pub(super) fn wrap(tr: &mut TextRenderer, text: &str, size: f32, width: f32) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     for word in text.split_whitespace() {
@@ -867,7 +875,7 @@ mod tests {
             assert_eq!(data, before);
             assert_eq!(state.viewport(), view);
             assert!(state.is_node_selected(1));
-            assert_eq!(state.apply_menu(StripId::View, 2, &mut data), None);
+            assert_eq!(state.apply_menu(StripId::View, 2, &mut data, RECT), None);
             assert!(state.help_open());
             state.on_right_click(-1.0, -1.0, &mut data, RECT, 1.0);
             assert!(!state.help_open());

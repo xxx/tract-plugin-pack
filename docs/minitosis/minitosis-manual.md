@@ -43,6 +43,10 @@ handles, reusable curves/favorites, copy/paste between plugins, controlled
 mutation, transforms, and triplet grids. Find them in **Tool**, **Shapes**, and
 **Edit** beneath the curve. Each curve command or gesture is one undo step.
 
+**Shapes → Browse shapes...** previews factory curves and shared favorites.
+Load/Fit applies the selected thumbnail; Store/Clear manages shared slots. See
+[browsing thumbnails](../mseg-editor.md#browsing-thumbnails).
+
 Hover for footer hints, or click **?** beside Point for the gesture guide.
 **F1 / ?** and **View → Editing guide...** also open it; see
 [context help](../mseg-editor.md#context-help-and-gesture-guide).

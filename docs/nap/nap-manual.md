@@ -53,6 +53,11 @@ selection handles, reusable curves/favorites, cross-plugin copy/paste, mutation,
 transforms, and triplet grids. Find them in **Tool**, **Shapes**, and **Edit**.
 In Efficient mode, curve gestures defer IR baking until release.
 
+**Shapes → Browse shapes...** previews factory curves and shared favorites for
+the opening pane. Load/Fit replaces its curve and regenerates the tail; storing
+or clearing favorites leaves the tail unchanged. See
+[browsing thumbnails](../mseg-editor.md#browsing-thumbnails).
+
 Each pane provides hover hints and a **?** gesture guide beside Point. Point at
 a pane and press **F1 / ?**, or use **View → Editing guide...**. The guide keeps
 its pane's input ownership and leaves the tail unchanged; see

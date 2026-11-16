@@ -1,4 +1,5 @@
 mod context_help;
+mod curve_browser;
 mod semitone_grid;
 
 use super::*;

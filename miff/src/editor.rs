@@ -236,7 +236,7 @@ impl MiffWindow {
         let w = self.physical_width as f32;
         let h = self.physical_height as f32;
 
-        self.mseg_state.set_help_bounds((w, h));
+        self.mseg_state.set_overlay_bounds((w, h));
         self.drag.clear_regions();
         self.surface.pixmap.fill(widgets::color_bg());
 
@@ -578,7 +578,7 @@ impl baseview::WindowHandler for MiffWindow {
         let h = self.physical_height as f32;
         let s = self.scale_factor;
         let (mseg_rect, _response_rect, strip_rect) = layout(w, h);
-        self.mseg_state.set_help_bounds((w, h));
+        self.mseg_state.set_overlay_bounds((w, h));
 
         match &event {
             baseview::Event::Window(baseview::WindowEvent::Unfocused) => {

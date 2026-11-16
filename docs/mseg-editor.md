@@ -112,6 +112,40 @@ provides the separate live lag control.
 
 ## Reusing curves
 
+### Browsing thumbnails
+
+Choose **Shapes → Browse shapes...** to see the eight **Factory** curves and
+eight shared **Favorites** as thumbnails. Click a thumbnail to select it, use
+the arrow keys or Home/End to navigate, and use Tab to switch pages. Selection
+leaves the current curve, viewport, tool, and remembered pen placement intact.
+
+**Load** or Enter applies the selected shape. **Fit** or Shift+Enter fits its
+height to the current curve's value range. Double-clicking a populated thumbnail
+also loads it. Loading closes the browser, preserves timing/routing settings,
+and clears hold markers and stale point selection as with other whole-curve
+replacements. Each actual change is one undo step in Multosis/Minitosis and
+updates the static curve in Miff/Nap.
+
+On Favorites, **Store** or S saves the editor's current curve into the selected
+slot, replacing its previous contents. **Clear** or Delete removes that shared
+favorite. **Refresh** or R rereads the slots, including changes saved by other
+instances. Store, Clear, and Refresh leave the editor's curve and undo history
+unchanged. Existing favorite files and the older Load/Store menu commands use
+the same slots.
+
+Empty slots cannot load. Unreadable or invalid files show **Unavailable** with
+details below the thumbnails; Store can replace them and Clear can remove them.
+Storage failures leave the editor's curve intact. The browser keeps a snapshot
+until Refresh or reopening, so previews and loading agree.
+
+Escape, X, an outside left-click, or a right-click dismisses the browser without
+acting underneath it. It owns mouse, wheel, and keyboard input across the window
+and stays with its opening Nap pane. Resize and focus loss close it.
+If the window is too short or narrow for the cards, the footer asks you to
+enlarge it and the browser stays closed.
+
+### Shape menu and files
+
 Shapes includes eight factory curves: Flat high, Flat center, Ramp up, Ramp down,
 Triangle, Sine, Square, and Duck. It also provides eight shared favorite slots:
 **Store favorite N** replaces that slot; **Load favorite N** recalls it. Favorites

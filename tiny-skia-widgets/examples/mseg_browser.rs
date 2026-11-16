@@ -1,0 +1,101 @@
+//! Preview: cargo run -p tiny-skia-widgets --example mseg_browser -- /tmp/mseg-browser.png [full|static] [factory|favorites] [scale]
+
+use keyboard_types::{Key, KeyState, KeyboardEvent};
+use tiny_skia_widgets::mseg::library::CurveLibrary;
+use tiny_skia_widgets::mseg::*;
+use tiny_skia_widgets::{TextRenderer, color_bg, color_text};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = std::env::args().skip(1);
+    let output = args
+        .next()
+        .unwrap_or_else(|| "/tmp/mseg-browser.png".into());
+    let curve_only = match args.next().as_deref() {
+        None | Some("full") => false,
+        Some("static") => true,
+        _ => return Err("Editor must be full or static".into()),
+    };
+    let favorites = match args.next().as_deref() {
+        None | Some("factory") => false,
+        Some("favorites") => true,
+        _ => return Err("Page must be factory or favorites".into()),
+    };
+    let scale = args.next().map_or(Ok(1.0), |value| value.parse::<f32>())?;
+    if !scale.is_finite() || !(0.5..=2.0).contains(&scale) {
+        return Err("Scale must be between 0.5 and 2".into());
+    }
+    let root = std::env::temp_dir().join(format!(
+        "tract-browser-preview-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root)?;
+    let library = CurveLibrary::at(root.clone());
+    library.store_favorite(0, &factory_shape(FactoryShape::Duck))?;
+    library.store_favorite(3, &factory_shape(FactoryShape::Square))?;
+    let mut data = MsegData::default();
+    data.nodes[0].shape = SegmentShape::SCurve;
+    data.nodes[0].tension = -0.5;
+    data.nodes[1].weight = PointWeight::Soft;
+    library.store_favorite(5, &CurveShape::capture(&data))?;
+    factory_shape(FactoryShape::Triangle).apply(&mut data, false)?;
+    let bounds = (1280.0 * scale, 760.0 * scale);
+    let mut pm = tiny_skia::Pixmap::new(bounds.0 as u32, bounds.1 as u32)
+        .ok_or("Pixmap allocation failed")?;
+    let mut tr = TextRenderer::new(tiny_skia_widgets::DEFAULT_FONT);
+    let mut state = if curve_only {
+        MsegEditState::new_curve_only()
+    } else {
+        MsegEditState::new()
+    };
+    state.set_curve_library_directory(root.clone());
+    state.set_overlay_bounds(bounds);
+    let rect = (24.0 * scale, 70.0 * scale, 1232.0 * scale, 640.0 * scale);
+    state.open_curve_browser(rect, scale);
+    if favorites {
+        state.on_key(
+            &KeyboardEvent {
+                key: Key::Tab,
+                state: KeyState::Down,
+                ..KeyboardEvent::default()
+            },
+            &mut data,
+            rect,
+            scale,
+        );
+    }
+    pm.fill(color_bg());
+    tr.draw_text(
+        &mut pm,
+        24.0 * scale,
+        30.0 * scale,
+        "Shared MSEG curve browser",
+        20.0 * scale,
+        color_text(),
+    );
+    tr.draw_text(
+        &mut pm,
+        24.0 * scale,
+        52.0 * scale,
+        "Browse shapes and shared favorites. Load or Fit applies the selected curve.",
+        14.0 * scale,
+        color_text(),
+    );
+    draw_mseg(
+        &mut pm,
+        &mut tr,
+        rect,
+        &data,
+        &state,
+        scale,
+        tiny_skia::Color::from_rgba8(255, 200, 88, 255),
+        None,
+    );
+    draw_mseg_dropdown(&mut pm, &mut tr, &state, rect);
+    pm.save_png(&output)?;
+    std::fs::remove_dir_all(root)?;
+    println!("{output}");
+    Ok(())
+}

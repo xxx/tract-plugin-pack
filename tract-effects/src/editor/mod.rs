@@ -328,7 +328,7 @@ impl<'a> Session<'a> {
     fn new(state: &'a mut EffectEditor, context: EditorContext<'a>) -> Self {
         state
             .mseg_edit
-            .set_help_bounds(context.geometry.window_size);
+            .set_overlay_bounds(context.geometry.window_size);
         state.refresh_pitch_grid(context.effect, context.modulation);
         state.mouse_pos = context.pointer_position;
         state
@@ -444,7 +444,7 @@ impl<'a> Session<'a> {
                 self.mouse_pos = (x, y);
                 self.state.mouse_pos = (x, y);
                 self.state.effect_dial_drag.set_mouse(x, y);
-                if self.state.mseg_edit.help_open() {
+                if self.state.mseg_edit.help_open() || self.state.mseg_edit.curve_browser_open() {
                     let sel = self.state.selected_mseg.min(3);
                     self.state.mseg_edit.on_mouse_move(
                         x,

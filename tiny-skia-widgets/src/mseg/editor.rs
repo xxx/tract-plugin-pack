@@ -10,6 +10,7 @@ use crate::dropdown::{DropdownEvent, DropdownState};
 use crate::mseg::MsegData;
 use crate::mseg::randomize::RandomStyle;
 
+mod browser;
 mod help;
 mod power;
 mod precision;
@@ -157,6 +158,7 @@ pub struct MsegEditState {
     power: power::PowerState,
     precision: precision::PrecisionState,
     help: help::HelpState,
+    browser: browser::BrowserState,
     /// When true, playback/timing controls and the marker lane are hidden.
     curve_only: bool,
     /// When false, the strip's Unipolar/Bipolar polarity toggle is hidden (and
@@ -215,6 +217,7 @@ impl MsegEditState {
         self.dropdown.close();
         self.cancel_precision();
         self.close_help();
+        self.close_curve_browser();
         self.clear_hover_hint();
         self.power.gesture_start = None;
         self.power.preview.clear();
@@ -239,6 +242,7 @@ impl MsegEditState {
             power: power::PowerState::default(),
             precision: precision::PrecisionState::default(),
             help: help::HelpState::default(),
+            browser: browser::BrowserState::default(),
             curve_only,
             show_polarity: true,
             drag: None,
@@ -446,6 +450,9 @@ impl MsegEditState {
         ctrl: bool,
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{MsegHit, mseg_hit_test};
+        if self.curve_browser_open() {
+            return self.browser_mouse_down(x, y, data, rect, scale, false);
+        }
         if self.help_open() {
             self.help_mouse_down(x, y, rect, scale);
             return None;
@@ -467,7 +474,9 @@ impl MsegEditState {
             let refs: Vec<_> = labels.iter().map(String::as_str).collect();
             let ev = self.dropdown.on_mouse_down(x, y, &refs, window_size);
             match ev {
-                Some(DropdownEvent::Selected(id, idx)) => return self.apply_menu(id, idx, data),
+                Some(DropdownEvent::Selected(id, idx)) => {
+                    return self.apply_menu(id, idx, data, rect);
+                }
                 Some(DropdownEvent::Closed(_)) => {
                     // The click landed outside the popup, closing the dropdown.
                     // Fall through so the SAME click still acts on whatever it
@@ -648,7 +657,7 @@ impl MsegEditState {
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{MsegHit, mseg_hit_test, x_to_phase, y_to_value};
         self.track_hint_pointer(x, y, rect);
-        if self.help_open() {
+        if self.help_open() || self.curve_browser_open() {
             return None;
         }
         let layout = self.layout(rect, scale);
@@ -728,7 +737,7 @@ impl MsegEditState {
         scale: f32,
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{phase_to_x, value_to_y};
-        if self.help_open() {
+        if self.help_open() || self.curve_browser_open() {
             return None;
         }
         if self.drag == Some(DragTarget::Pan) {
@@ -789,6 +798,9 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
+        if self.curve_browser_open() {
+            return self.browser_mouse_down(x, y, data, rect, scale, true);
+        }
         if self.help_open() {
             self.help_mouse_down(x, y, rect, scale);
             return None;
@@ -832,6 +844,10 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
+        if self.curve_browser_open() {
+            self.close_curve_browser();
+            return None;
+        }
         if self.help_open() {
             self.close_help();
             return None;

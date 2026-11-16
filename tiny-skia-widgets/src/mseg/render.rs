@@ -164,6 +164,7 @@ pub fn draw_mseg_with_background(
     draw_strip(pixmap, text_renderer, &layout, data, state, scale);
 
     if !state.help_open()
+        && !state.curve_browser_open()
         && let Some((idx, text)) = node_tooltip
     {
         draw_node_tooltip(pixmap, text_renderer, &layout, data, idx, text, scale);
@@ -198,6 +199,7 @@ pub fn draw_mseg_dropdown(
     );
     state.draw_precision_overlay(pixmap, text_renderer, rect);
     state.draw_help(pixmap, text_renderer, rect, state.overlay_scale());
+    state.draw_curve_browser(pixmap, text_renderer, rect, state.overlay_scale());
 }
 
 /// Draw the hold marker(s) in the marker lane. No-op in curve-only mode or

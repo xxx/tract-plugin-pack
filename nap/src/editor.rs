@@ -570,7 +570,7 @@ impl NapWindow {
         let h = self.physical_height as f32;
 
         for state in &mut self.states {
-            state.set_help_bounds((w, h));
+            state.set_overlay_bounds((w, h));
         }
         self.drag.clear_regions();
         self.surface.pixmap.fill(widgets::color_bg());
@@ -876,7 +876,7 @@ impl baseview::WindowHandler for NapWindow {
         let s = self.scale_factor;
 
         for state in &mut self.states {
-            state.set_help_bounds((w, h));
+            state.set_overlay_bounds((w, h));
         }
         match &event {
             baseview::Event::Window(baseview::WindowEvent::Unfocused) => {
@@ -1451,6 +1451,52 @@ mod tests {
             assert_eq!(curves, before);
             states[owner].cancel_interaction();
             assert!(!states[owner].help_open());
+            assert_eq!(curve_input_pane(&states, 5.0, h, s), Some(0));
+        }
+    }
+
+    #[test]
+    fn curve_browser_keeps_pane_ownership_and_only_reports_an_edit_when_loading() {
+        use keyboard_types::{Key, KeyState, KeyboardEvent};
+        let (w, h, s) = (880.0, 720.0, 1.0);
+        for owner in 0..3 {
+            let mut states = std::array::from_fn(|_| MsegEditState::new_curve_only());
+            let mut curves = [widgets::mseg::MsegData::default(); 3];
+            let before = curves;
+            states[owner].set_curve_library_directory(
+                std::env::temp_dir().join(format!("tract-nap-browser-{}", std::process::id())),
+            );
+            states[owner].set_overlay_bounds((w, h));
+            let rect = pane_rects(w, h, s)[owner];
+            assert!(states[owner].open_curve_browser(rect, s));
+            assert_eq!(curve_input_pane(&states, 5.0, h, s), Some(owner));
+            assert_eq!(curve_input_pane(&states, h - 5.0, h, s), Some(owner));
+            assert!(states[owner].on_wheel(-3.0, rect));
+            let event = |key| KeyboardEvent {
+                key,
+                state: KeyState::Down,
+                ..KeyboardEvent::default()
+            };
+            assert_eq!(
+                states[owner].on_key(&event(Key::End), &mut curves[owner], rect, s),
+                (true, None)
+            );
+            assert_eq!(curves, before);
+            assert_eq!(
+                states[owner].on_key(&event(Key::Enter), &mut curves[owner], rect, s),
+                (true, Some(MsegEdit::Changed))
+            );
+            for pane in 0..3 {
+                if pane == owner {
+                    assert_eq!(
+                        curves[pane].active(),
+                        widgets::mseg::factory_shape(widgets::mseg::FactoryShape::Duck).nodes()
+                    );
+                } else {
+                    assert_eq!(curves[pane], before[pane]);
+                }
+            }
+            assert!(!states[owner].has_open_menu() && !states[owner].is_dragging());
             assert_eq!(curve_input_pane(&states, 5.0, h, s), Some(0));
         }
     }

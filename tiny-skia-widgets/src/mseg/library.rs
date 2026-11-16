@@ -43,6 +43,13 @@ impl CurveLibrary {
         Self::import(&self.favorite_path(slot)?)
     }
 
+    pub fn remove_favorite(&self, slot: usize) -> io::Result<()> {
+        match fs::remove_file(self.favorite_path(slot)?) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    }
+
     fn favorite_path(&self, slot: usize) -> io::Result<PathBuf> {
         if slot >= FAVORITE_COUNT {
             return Err(io::Error::new(
@@ -140,6 +147,37 @@ mod tests {
             second.paste().unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn favorite_removal_is_shared_idempotent_and_confined_to_the_selected_slot() {
+        let root = std::env::temp_dir().join(format!(
+            "tract-curve-remove-{}-{}",
+            std::process::id(),
+            NEXT_WRITE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let first = CurveLibrary::at(root.clone());
+        let second = CurveLibrary::at(root.clone());
+        let shape = factory_shape(FactoryShape::Duck);
+        first.copy(&shape).unwrap();
+        first.store_favorite(0, &shape).unwrap();
+        first.store_favorite(1, &shape).unwrap();
+        second.remove_favorite(0).unwrap();
+        assert_eq!(
+            first.load_favorite(0).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        first.remove_favorite(0).unwrap();
+        assert_eq!(first.load_favorite(1).unwrap(), shape);
+        assert_eq!(first.paste().unwrap(), shape);
+        assert_eq!(
+            first.remove_favorite(FAVORITE_COUNT).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        fs::create_dir(root.join("favorite-3.json")).unwrap();
+        assert!(first.remove_favorite(2).is_err());
+        assert!(root.join("favorite-3.json").is_dir());
         fs::remove_dir_all(root).unwrap();
     }
 }
