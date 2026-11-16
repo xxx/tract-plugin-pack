@@ -111,6 +111,8 @@ pub struct MinitosisParams {
     pub editor_state: Arc<tiny_skia_widgets::EditorState>,
     #[persist = "modulation-bank"]
     pub modulation: Arc<Mutex<ModulationBank>>,
+    #[persist = "wave-palette"]
+    pub wave_palette: Arc<Mutex<tiny_skia_widgets::mseg::WavePalette>>,
     #[id = "effect"]
     pub effect: IntParam,
     #[nested(array)]
@@ -140,6 +142,7 @@ impl Default for MinitosisParams {
                 crate::editor::WINDOW_HEIGHT,
             ),
             modulation: Arc::new(Mutex::new(ModulationBank::default())),
+            wave_palette: Arc::new(Mutex::new(tiny_skia_widgets::mseg::WavePalette::default())),
             effect: IntParam::new(
                 "Effect",
                 0,

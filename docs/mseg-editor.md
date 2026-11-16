@@ -115,9 +115,10 @@ provides the separate live lag control.
 ### Browsing thumbnails
 
 Choose **Shapes → Browse shapes...** to see the eight **Factory** curves and
-eight shared **Favorites** as thumbnails. Click a thumbnail to select it, use
-the arrow keys or Home/End to navigate, and use Tab to switch pages. Selection
-leaves the current curve, viewport, tool, and remembered pen placement intact.
+eight shared **Favorites** as thumbnails. Each plugin also provides eight
+instance-local waves on the **Project** tab. Click a thumbnail to select it, use
+the arrow keys or Home/End to navigate, and use Tab/Shift+Tab to switch pages.
+Selection leaves the current curve, viewport, tool, and remembered pen placement intact.
 
 **Load** or Enter applies the selected shape. **Fit** or Shift+Enter fits its
 height to the current curve's value range. Double-clicking a populated thumbnail
@@ -143,6 +144,25 @@ acting underneath it. It owns mouse, wheel, and keyboard input across the window
 and stays with its opening Nap pane. Resize and focus loss close it.
 If the window is too short or narrow for the cards, the footer asks you to
 enlarge it and the browser stays closed.
+
+### Project waves
+
+The **Project** bank saves with the plugin preset and DAW project. All curves
+in one instance share its eight slots: Multosis rows, Minitosis effects, and
+Nap panes can recall the same saved shapes. A new instance starts with empty
+slots. The bank remains available when switching rows or effects.
+
+On Project, **Store** or S captures the current curve into the selected slot;
+**Clear** or Delete empties it. **Refresh** or R rereads the bank. These actions
+leave the current curve, playback, baking and local curve undo unchanged.
+**Load**/Enter, **Fit**/Shift+Enter and a thumbnail double-click recall geometry
+using the existing curve-edit rules. Undoing a recall keeps the saved bank.
+Curve clipboard/files also retain the destination's project bank.
+
+Entering Project reads its current slots. If a restored preset or another pane
+replaces the bank while the page is open, the first recall or storage action
+refreshes the thumbnails without applying that action. Check the updated slots and choose
+again. An unavailable bank reports an error and leaves the curve intact.
 
 ### Shape menu and files
 

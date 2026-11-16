@@ -235,6 +235,9 @@ four straight grid presets described above.
 Load/Fit applies the selected thumbnail in one undo step; Store/Clear manages
 shared slots. See [browsing thumbnails](../mseg-editor.md#browsing-thumbnails).
 
+The browser's **Project** tab adds eight waves saved with this instance and
+shared across all rows. See [project waves](../mseg-editor.md#project-waves).
+
 Hover for footer hints, or click **?** beside Point for the gesture guide.
 **F1 / ?** and **View → Editing guide...** also open it; see
 [context help](../mseg-editor.md#context-help-and-gesture-guide).

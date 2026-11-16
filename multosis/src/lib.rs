@@ -47,6 +47,8 @@ pub struct MultosisParams {
     /// Per-track modulation configuration — persisted plugin state.
     #[persist = "track-modulation"]
     pub track_modulation: Arc<Mutex<[crate::modulation::TrackModulation; 16]>>,
+    #[persist = "wave-palette"]
+    pub wave_palette: Arc<Mutex<tiny_skia_widgets::mseg::WavePalette>>,
 
     /// Tempo-synced playhead advance rate.
     #[id = "speed"]
@@ -81,6 +83,7 @@ impl Default for MultosisParams {
             track_modulation: Arc::new(Mutex::new(std::array::from_fn(
                 crate::modulation::TrackModulation::default_for_row,
             ))),
+            wave_palette: Arc::new(Mutex::new(tiny_skia_widgets::mseg::WavePalette::default())),
             speed: EnumParam::new("Speed", Speed::Hold),
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit("%")
@@ -192,6 +195,10 @@ impl Default for Multosis {
 }
 
 impl Plugin for Multosis {
+    fn filter_state(state: &mut PluginState) {
+        tiny_skia_widgets::mseg::prepare_wave_palette_state(&mut state.fields);
+    }
+
     const NAME: &'static str = "Multosis";
     const VENDOR: &'static str = "mpd";
     const URL: &'static str = "";
@@ -447,3 +454,63 @@ impl Vst3Plugin for Multosis {
 
 nih_export_clap!(Multosis);
 nih_export_vst3!(Multosis);
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+    use tiny_skia_widgets::mseg::{FactoryShape, WavePalette, factory_shape};
+
+    #[test]
+    fn project_wave_palette_persists_outside_row_configuration_and_curve_undo() {
+        // Full row-array serde needs a larger debug test stack.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let params = MultosisParams::default();
+                let before = crate::undo::ConfigSnapshot::capture(&params);
+                params
+                    .wave_palette
+                    .lock()
+                    .unwrap()
+                    .store(4, &factory_shape(FactoryShape::Duck))
+                    .unwrap();
+                assert_eq!(crate::undo::ConfigSnapshot::capture(&params), before);
+                let saved = params.serialize_fields();
+                let restored = MultosisParams::default();
+                restored.deserialize_fields(&saved);
+                assert_eq!(
+                    *restored.wave_palette.lock().unwrap(),
+                    *params.wave_palette.lock().unwrap()
+                );
+                restored.wave_palette.lock().unwrap().clear(4).unwrap();
+                assert!(params.wave_palette.lock().unwrap().get(4).is_some());
+                before.restore(&params);
+                assert!(params.wave_palette.lock().unwrap().get(4).is_some());
+                let mut legacy = saved;
+                legacy.remove("wave-palette");
+                let fresh = MultosisParams::default();
+                fresh.deserialize_fields(&legacy);
+                assert_eq!(*fresh.wave_palette.lock().unwrap(), WavePalette::default());
+                restored
+                    .wave_palette
+                    .lock()
+                    .unwrap()
+                    .store(0, &factory_shape(FactoryShape::Triangle))
+                    .unwrap();
+                let mut old_state = PluginState {
+                    version: String::new(),
+                    params: Default::default(),
+                    fields: legacy,
+                };
+                Multosis::filter_state(&mut old_state);
+                restored.deserialize_fields(&old_state.fields);
+                assert_eq!(
+                    *restored.wave_palette.lock().unwrap(),
+                    WavePalette::default()
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}

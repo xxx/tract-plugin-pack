@@ -114,6 +114,14 @@ impl Default for EffectEditor {
 }
 
 impl EffectEditor {
+    /// Bind project waves without adding bank data to audio configuration.
+    pub fn bind_wave_palette(
+        &mut self,
+        palette: std::sync::Arc<std::sync::Mutex<widgets::mseg::WavePalette>>,
+    ) {
+        self.mseg_edit.bind_wave_palette(palette);
+    }
+
     pub fn new(trigger_choices: &'static [TriggerChoice]) -> Self {
         let mut mseg_edit = widgets::mseg::MsegEditState::new();
         mseg_edit.set_status_reserve(360.0);
@@ -155,8 +163,12 @@ impl EffectEditor {
         let audio_display = self.audio_display;
         let audio_gain = self.audio_gain;
         let live = self.live.take();
+        let wave_palette = self.mseg_edit.wave_palette().cloned();
         let input_scale = self.effect_dial_drag.input_scale();
         *self = Self::new(self.trigger_choices);
+        if let Some(palette) = wave_palette {
+            self.bind_wave_palette(palette);
+        }
         self.selected_mseg = selected_mseg;
         self.trace_enabled = trace_enabled;
         self.measured_arcs_only = measured_arcs_only;

@@ -32,6 +32,10 @@ impl CurveShape {
             return Err(ShapeError::Invalid);
         }
         let file: ShapeFile = serde_json::from_str(text).map_err(|_| ShapeError::Invalid)?;
+        Self::from_file(file)
+    }
+
+    fn from_file(file: ShapeFile) -> Result<Self, ShapeError> {
         if !matches!(file.version, 1 | 2)
             || (file.version == 1
                 && file
@@ -46,18 +50,7 @@ impl CurveShape {
     }
 
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(&ShapeFile {
-            version: if self
-                .nodes
-                .iter()
-                .all(|n| n.shape.is_curve() && n.weight.is_hard())
-            {
-                1
-            } else {
-                2
-            },
-            nodes: self.nodes.clone(),
-        })
+        serde_json::to_string_pretty(self)
     }
 
     pub fn apply(&self, data: &mut MsegData, fit_height: bool) -> Result<bool, ShapeError> {
@@ -79,6 +72,35 @@ impl CurveShape {
         data.node_count = nodes.len();
         data.hold = HoldMode::None;
         Ok(changed)
+    }
+}
+
+impl serde::Serialize for CurveShape {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Saved<'a> {
+            version: u32,
+            nodes: &'a [MsegNode],
+        }
+        Saved {
+            version: if self
+                .nodes
+                .iter()
+                .all(|n| n.shape.is_curve() && n.weight.is_hard())
+            {
+                1
+            } else {
+                2
+            },
+            nodes: &self.nodes,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CurveShape {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::from_file(ShapeFile::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 

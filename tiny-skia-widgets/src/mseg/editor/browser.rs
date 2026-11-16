@@ -2,12 +2,13 @@ use super::help::{draw_fitted, wrap};
 use super::{MsegEdit, MsegEditState};
 use crate::mseg::library::FAVORITE_COUNT;
 use crate::mseg::render::in_rect;
-use crate::mseg::{CurveShape, FactoryShape, MsegData, factory_shape, segment_value};
+use crate::mseg::{CurveShape, FactoryShape, MsegData, WavePalette, factory_shape, segment_value};
 use crate::{
     TextRenderer, color_accent, color_bg, color_border, color_control_bg, color_muted, color_text,
     draw_rect, draw_rect_outline,
 };
 use keyboard_types::{Key, KeyState, KeyboardEvent, Modifiers};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tiny_skia::{Paint, PathBuilder, Pixmap, Stroke, Transform};
 
@@ -18,6 +19,25 @@ enum Page {
     #[default]
     Factory,
     Favorites,
+    Project,
+}
+
+impl Page {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Factory => "Factory",
+            Self::Favorites => "Favorites",
+            Self::Project => "Project",
+        }
+    }
+
+    fn short_label(self) -> &'static str {
+        match self {
+            Self::Factory => "Fct",
+            Self::Favorites => "Fav",
+            Self::Project => "Prj",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -35,15 +55,18 @@ pub(super) struct BrowserState {
     selected: usize,
     factory: Vec<CurveShape>,
     favorites: [Favorite; FAVORITE_COUNT],
+    project_binding: Option<Arc<Mutex<WavePalette>>>,
+    project: WavePalette,
+    project_error: Option<&'static str>,
     message: String,
     last_click: Option<(Page, usize, Instant)>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct BrowserLayout {
     pub panel: Rect,
     pub close: Rect,
-    pub tabs: [Rect; 2],
+    pub tabs: Vec<Rect>,
     pub cards: [Rect; FAVORITE_COUNT],
     pub buttons: [Rect; 5],
     detail: Rect,
@@ -51,6 +74,68 @@ pub(crate) struct BrowserLayout {
 }
 
 impl MsegEditState {
+    /// The GUI/preset bank supplied by the embedding host.
+    pub fn wave_palette(&self) -> Option<&Arc<Mutex<WavePalette>>> {
+        self.browser.project_binding.as_ref()
+    }
+
+    /// Bind a GUI/preset bank shared by the curves of one plugin instance.
+    pub fn bind_wave_palette(&mut self, palette: Arc<Mutex<WavePalette>>) {
+        if self
+            .browser
+            .project_binding
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &palette))
+        {
+            return;
+        }
+        self.close_curve_browser();
+        self.browser.project_binding = Some(palette);
+        self.browser.project = WavePalette::default();
+        self.browser.project_error = None;
+    }
+
+    fn browser_pages(&self) -> &'static [Page] {
+        if self.browser.project_binding.is_some() {
+            &[Page::Factory, Page::Favorites, Page::Project]
+        } else {
+            &[Page::Factory, Page::Favorites]
+        }
+    }
+
+    fn select_browser_page(&mut self, page: Page) {
+        self.browser.page = page;
+        self.browser.selected = 0;
+        self.browser.last_click = None;
+        self.browser.message.clear();
+        if page == Page::Project {
+            self.refresh_browser_project();
+        }
+    }
+
+    fn refresh_browser_project(&mut self) {
+        let snapshot = self
+            .browser
+            .project_binding
+            .as_ref()
+            .ok_or("Project waves unavailable")
+            .and_then(|binding| {
+                binding
+                    .lock()
+                    .map(|palette| palette.clone())
+                    .map_err(|_| "Project waves unavailable")
+            });
+        match snapshot {
+            Ok(palette) => {
+                self.browser.project = palette;
+                self.browser.project_error = None;
+            }
+            Err(error) => self.browser.project_error = Some(error),
+        }
+        self.browser.last_click = None;
+        self.browser.message.clear();
+    }
+
     pub fn curve_browser_open(&self) -> bool {
         self.browser.open
     }
@@ -101,26 +186,34 @@ impl MsegEditState {
                 Favorite::Shape(shape) => Some(shape),
                 _ => None,
             },
+            Page::Project => self
+                .browser
+                .project
+                .get(self.browser.selected)
+                .filter(|_| self.browser.project_error.is_none()),
         }
     }
 
     fn browser_actions(&self) -> [bool; 5] {
         let load = self.browser_shape().is_some();
-        let favorites = self.browser.page == Page::Favorites;
-        [
-            load,
-            load,
-            favorites,
-            favorites
-                && !matches!(
+        let (store, clear) = match self.browser.page {
+            Page::Factory => (false, false),
+            Page::Favorites => (
+                true,
+                !matches!(
                     self.browser.favorites[self.browser.selected],
                     Favorite::Empty
                 ),
-            true,
-        ]
+            ),
+            Page::Project => (self.browser.project_error.is_none(), load),
+        };
+        [load, load, store, clear, true]
     }
 
     fn browser_action(&mut self, action: usize, data: &mut MsegData) -> Option<MsegEdit> {
+        if self.browser.page == Page::Project {
+            return self.project_browser_action(action, data);
+        }
         if !self.browser_actions().get(action).copied().unwrap_or(false) {
             return None;
         }
@@ -160,6 +253,51 @@ impl MsegEditState {
         None
     }
 
+    fn project_browser_action(&mut self, action: usize, data: &mut MsegData) -> Option<MsegEdit> {
+        let binding = self.browser.project_binding.as_ref()?.clone();
+        let Ok(mut live) = binding.lock() else {
+            self.browser.project_error = Some("Project waves unavailable");
+            self.browser.message = "Project waves unavailable".to_owned();
+            return None;
+        };
+        self.browser.last_click = None;
+        if action == 4 {
+            self.browser.project = live.clone();
+            self.browser.project_error = None;
+            self.browser.message = "Project waves refreshed".to_owned();
+            return None;
+        }
+        if self.browser.project != *live || self.browser.project_error.is_some() {
+            self.browser.project = live.clone();
+            self.browser.project_error = None;
+            self.browser.message = "Project waves changed; choose a slot again".to_owned();
+            return None;
+        }
+        let slot = self.browser.selected;
+        if action < 2 {
+            let shape = live.get(slot)?.clone();
+            drop(live);
+            return self.apply_shape(data, shape, action == 1);
+        }
+        let result = match action {
+            2 => live.store(slot, &CurveShape::capture(data)),
+            3 => live.clear(slot),
+            _ => return None,
+        };
+        match result {
+            Ok(_) => {
+                self.browser.project = live.clone();
+                self.browser.message = format!(
+                    "Project {} {}",
+                    slot + 1,
+                    if action == 2 { "stored" } else { "cleared" }
+                );
+            }
+            Err(error) => self.browser.message = error.to_string(),
+        }
+        None
+    }
+
     pub(crate) fn browser_layout(&self, rect: Rect, scale: f32) -> Option<BrowserLayout> {
         let base = self.help_layout(rect, scale)?;
         let (x, y, w, h) = base.panel;
@@ -181,14 +319,15 @@ impl MsegEditState {
         if preview.2 < 16.0 * min_preview_scale || preview.3 < 8.0 * min_preview_scale {
             return None;
         }
-        let tab_w = (inner_w - gap) / 2.0;
+        let tab_count = self.browser_pages().len();
+        let tab_w = (inner_w - gap * (tab_count - 1) as f32) / tab_count as f32;
         let button_w = (inner_w - 4.0 * gap) / 5.0;
         Some(BrowserLayout {
             panel: base.panel,
             close: base.close,
-            tabs: std::array::from_fn(|i| {
-                (x + pad + i as f32 * (tab_w + gap), y + header, tab_w, tab_h)
-            }),
+            tabs: (0..tab_count)
+                .map(|i| (x + pad + i as f32 * (tab_w + gap), y + header, tab_w, tab_h))
+                .collect(),
             cards: std::array::from_fn(|i| {
                 (
                     x + pad + (i % 4) as f32 * (card_w + gap),
@@ -231,10 +370,7 @@ impl MsegEditState {
         if in_rect(layout.close, x, y) || !in_rect(layout.panel, x, y) {
             self.close_curve_browser();
         } else if let Some(tab) = layout.tabs.iter().position(|r| in_rect(*r, x, y)) {
-            self.browser.last_click = None;
-            self.browser.page = [Page::Factory, Page::Favorites][tab];
-            self.browser.selected = 0;
-            self.browser.message.clear();
+            self.select_browser_page(self.browser_pages()[tab]);
         } else if let Some(card) = layout.cards.iter().position(|r| in_rect(*r, x, y)) {
             self.browser.selected = card;
             self.browser.message.clear();
@@ -272,12 +408,17 @@ impl MsegEditState {
         let selected = self.browser.selected;
         match &event.key {
             Key::Tab => {
-                self.browser.page = if self.browser.page == Page::Factory {
-                    Page::Favorites
+                let pages = self.browser_pages();
+                let index = pages
+                    .iter()
+                    .position(|page| *page == self.browser.page)
+                    .unwrap_or(0);
+                let delta = if event.modifiers.contains(Modifiers::SHIFT) {
+                    pages.len() - 1
                 } else {
-                    Page::Factory
+                    1
                 };
-                self.browser.selected = 0;
+                self.select_browser_page(pages[(index + delta) % pages.len()]);
             }
             Key::ArrowLeft => self.browser.selected = (selected + 7) % FAVORITE_COUNT,
             Key::ArrowRight => self.browser.selected = (selected + 1) % FAVORITE_COUNT,
@@ -353,17 +494,25 @@ impl MsegEditState {
         );
         let r = layout.close;
         crate::controls::draw_button(pm, tr, r.0, r.1, r.2, r.3, "X", false, false);
-        for (i, r) in layout.tabs.into_iter().enumerate() {
-            crate::controls::draw_button(
-                pm,
+        for (page, r) in self.browser_pages().iter().zip(layout.tabs) {
+            let active = self.browser.page == *page;
+            crate::controls::draw_button(pm, tr, r.0, r.1, r.2, r.3, "", active, false);
+            let size = (r.3 * 0.5).max(10.0);
+            let available = (r.2 - 8.0).max(0.0);
+            let label = if tr.text_width(page.label(), size) <= available {
+                page.label()
+            } else {
+                page.short_label()
+            };
+            let width = tr.text_width(label, size).min(available);
+            draw_fitted(
                 tr,
-                r.0,
-                r.1,
-                r.2,
-                r.3,
-                ["Factory", "Favorites"][i],
-                (self.browser.page == Page::Favorites) == (i == 1),
-                false,
+                pm,
+                (r.0 + (r.2 - width) * 0.5, r.1 + (r.3 + size) * 0.5 - 2.0),
+                label,
+                size,
+                available,
+                if active { color_bg() } else { color_text() },
             );
         }
         let font = (12.0 * s).max(10.0);
@@ -378,6 +527,29 @@ impl MsegEditState {
                     Favorite::Empty => (None, format!("{}: Empty", i + 1)),
                     Favorite::Unavailable(_) => (None, format!("{}: Unavailable", i + 1)),
                 },
+                Page::Project => {
+                    let shape = self
+                        .browser
+                        .project
+                        .get(i)
+                        .filter(|_| self.browser.project_error.is_none());
+                    (
+                        shape,
+                        if shape.is_some() {
+                            format!("Project {}", i + 1)
+                        } else {
+                            format!(
+                                "{}: {}",
+                                i + 1,
+                                if self.browser.project_error.is_some() {
+                                    "Unavailable"
+                                } else {
+                                    "Empty"
+                                }
+                            )
+                        },
+                    )
+                }
             };
             draw_rect(pm, card.0, card.1, card.2, card.3, color_control_bg());
             draw_rect_outline(
@@ -428,6 +600,18 @@ impl MsegEditState {
                         format!("Favorite {} unavailable: {err}", slot + 1)
                     }
                 },
+                Page::Project => {
+                    if let Some(error) = self.browser.project_error {
+                        error.to_owned()
+                    } else if let Some(shape) = self.browser.project.get(slot) {
+                        format!("Project {} - {} points", slot + 1, shape.nodes().len())
+                    } else {
+                        format!(
+                            "Project {} is empty; Store saves the current curve",
+                            slot + 1
+                        )
+                    }
+                }
             }
         };
         draw_fitted(
@@ -458,7 +642,7 @@ impl MsegEditState {
                 if enabled { color_text() } else { color_muted() },
             );
         }
-        let hint = if self.browser.page == Page::Favorites {
+        let hint = if self.browser.page != Page::Factory {
             "Enter: load; Shift+Enter: fit; S: store; Del: clear; R: refresh"
         } else {
             "Arrows: select; Tab: favorites; Enter: load; Shift+Enter: fit; Esc: close"
@@ -487,6 +671,9 @@ fn thumbnail_rect(card: Rect, scale: f32) -> Rect {
         (card.3 - 2.0 * pad - font * 1.5).max(0.0),
     )
 }
+
+#[cfg(test)]
+mod project_tests;
 
 fn draw_thumbnail(pm: &mut Pixmap, shape: &CurveShape, rect: Rect, scale: f32) {
     if rect.2 <= 0.0 || rect.3 <= 0.0 {

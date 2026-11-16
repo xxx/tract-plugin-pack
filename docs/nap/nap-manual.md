@@ -58,6 +58,9 @@ the opening pane. Load/Fit replaces its curve and regenerates the tail; storing
 or clearing favorites leaves the tail unchanged. See
 [browsing thumbnails](../mseg-editor.md#browsing-thumbnails).
 
+The browser's **Project** tab adds eight waves saved with this instance and
+shared across the three panes. See [project waves](../mseg-editor.md#project-waves).
+
 Each pane provides hover hints and a **?** gesture guide beside Point. Point at
 a pane and press **F1 / ?**, or use **View → Editing guide...**. The guide keeps
 its pane's input ownership and leaves the tail unchanged; see

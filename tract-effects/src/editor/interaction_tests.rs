@@ -1,6 +1,7 @@
 mod context_help;
 mod curve_browser;
 mod semitone_grid;
+mod wave_palette;
 
 use super::*;
 use baseview::{Event, MouseButton, MouseEvent, Point};

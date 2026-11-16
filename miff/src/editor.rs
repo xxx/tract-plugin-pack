@@ -203,6 +203,7 @@ impl MiffWindow {
                 })
                 .unwrap_or_default()
         };
+        let wave_palette = params.wave_palette.clone();
 
         Self {
             gui_context,
@@ -219,6 +220,7 @@ impl MiffWindow {
             // miff owns this grid list — adjust here to change available presets.
             mseg_state: {
                 let mut s = MsegEditState::new_curve_only();
+                s.bind_wave_palette(wave_palette);
                 s.set_grid_options(&[(4, 4), (8, 8), (16, 8), (32, 16), (6, 8), (12, 8), (24, 16)]);
                 s
             },

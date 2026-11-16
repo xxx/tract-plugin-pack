@@ -166,6 +166,8 @@ impl MultosisWindow {
         let ph = (WINDOW_HEIGHT as f32 * scale_factor).round() as u32;
         let surface = widgets::SoftbufferSurface::new(window, pw, ph);
         let text_renderer = widgets::TextRenderer::new(include_bytes!("fonts/DejaVuSans.ttf"));
+        let mut effect_editor = EffectEditor::default();
+        effect_editor.bind_wave_palette(params.wave_palette.clone());
         Self {
             surface,
             physical_width: pw,
@@ -190,7 +192,7 @@ impl MultosisWindow {
             grid_cache: grid_view::GridCache::new(pw, ph),
             view: View::Grid,
             selected_track: 0,
-            effect_editor: EffectEditor::default(),
+            effect_editor,
             speed_dropdown: widgets::dropdown::DropdownState::new(),
             undo: UndoHistory::new(),
             config_dirty,

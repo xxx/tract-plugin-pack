@@ -1066,6 +1066,59 @@ fn modulation_bank_content_is_persisted_with_editor_closed() {
 }
 
 #[test]
+fn project_wave_palette_persists_outside_per_effect_modulation_and_curve_undo() {
+    use tiny_skia_widgets::mseg::{FactoryShape, WavePalette, factory_shape};
+    let params = MinitosisParams::default();
+    let before = params.modulation.lock().unwrap().clone();
+    let snapshot = state::EditSnapshot {
+        kind: EffectKind::Svf,
+        modulation: before.get(EffectKind::Svf).clone(),
+    };
+    params
+        .wave_palette
+        .lock()
+        .unwrap()
+        .store(7, &factory_shape(FactoryShape::Duck))
+        .unwrap();
+    assert_eq!(
+        params.modulation.lock().unwrap().get(EffectKind::Svf),
+        &snapshot.modulation
+    );
+    let saved = params.serialize_fields();
+    let restored = MinitosisParams::default();
+    restored.deserialize_fields(&saved);
+    assert_eq!(
+        *restored.wave_palette.lock().unwrap(),
+        *params.wave_palette.lock().unwrap()
+    );
+    restored.wave_palette.lock().unwrap().clear(7).unwrap();
+    assert!(params.wave_palette.lock().unwrap().get(7).is_some());
+    assert_eq!(*params.modulation.lock().unwrap(), before);
+    let mut legacy = saved;
+    legacy.remove("wave-palette");
+    let fresh = MinitosisParams::default();
+    fresh.deserialize_fields(&legacy);
+    assert_eq!(*fresh.wave_palette.lock().unwrap(), WavePalette::default());
+    restored
+        .wave_palette
+        .lock()
+        .unwrap()
+        .store(0, &factory_shape(FactoryShape::Triangle))
+        .unwrap();
+    let mut old_state = PluginState {
+        version: String::new(),
+        params: Default::default(),
+        fields: legacy,
+    };
+    Minitosis::filter_state(&mut old_state);
+    restored.deserialize_fields(&old_state.fields);
+    assert_eq!(
+        *restored.wave_palette.lock().unwrap(),
+        WavePalette::default()
+    );
+}
+
+#[test]
 fn host_reset_preserves_mseg_phase_and_play_state_during_pdc_realignment() {
     let mut plugin = Minitosis::default();
     let mut context = Context::default();

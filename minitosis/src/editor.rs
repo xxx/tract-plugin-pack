@@ -241,6 +241,8 @@ impl MinitosisWindow {
             .map(|d| d.subsec_nanos())
             .unwrap_or(1)
             .max(1);
+        let mut editor = effect_editor();
+        editor.bind_wave_palette(params.wave_palette.clone());
         Self {
             surface: widgets::SoftbufferSurface::new(window, width, height),
             width,
@@ -251,7 +253,7 @@ impl MinitosisWindow {
             executor,
             gui_context,
             renderer: widgets::TextRenderer::new(widgets::DEFAULT_FONT),
-            editor: effect_editor(),
+            editor,
             pointer: (0.0, 0.0),
             selection: SelectionState::new(last_kind),
             undo: UndoHistory::new(),

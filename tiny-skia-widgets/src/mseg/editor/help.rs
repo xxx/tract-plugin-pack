@@ -174,7 +174,7 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                     ),
                     entry(
                         "Shapes menu",
-                        "Browse shapes... previews factory curves and shared favorites. Enter loads; Shift+Enter fits. Favorites: S stores, Delete clears, R refreshes. Import/export transfers curve files.",
+                        "Browse shapes... previews factory curves, shared Favorites and saved Project waves. Enter loads; Shift+Enter fits. Favorites/Project: S stores, Delete clears, R refreshes. Import/export transfers curve files.",
                     ),
                     entry(
                         "Ctrl/Cmd+C / V",

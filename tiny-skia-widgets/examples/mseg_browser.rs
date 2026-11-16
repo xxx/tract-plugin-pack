@@ -1,4 +1,4 @@
-//! Preview: cargo run -p tiny-skia-widgets --example mseg_browser -- /tmp/mseg-browser.png [full|static] [factory|favorites] [scale]
+//! Preview: cargo run -p tiny-skia-widgets --example mseg_browser -- /tmp/mseg-browser.png [full|static] [factory|favorites|project] [scale]
 
 use keyboard_types::{Key, KeyState, KeyboardEvent};
 use tiny_skia_widgets::mseg::library::CurveLibrary;
@@ -15,10 +15,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("static") => true,
         _ => return Err("Editor must be full or static".into()),
     };
-    let favorites = match args.next().as_deref() {
-        None | Some("factory") => false,
-        Some("favorites") => true,
-        _ => return Err("Page must be factory or favorites".into()),
+    let turns = match args.next().as_deref() {
+        None | Some("factory") => 0,
+        Some("favorites") => 1,
+        Some("project") => 2,
+        _ => return Err("Page must be factory, favorites or project".into()),
     };
     let scale = args.next().map_or(Ok(1.0), |value| value.parse::<f32>())?;
     if !scale.is_finite() || !(0.5..=2.0).contains(&scale) {
@@ -40,6 +41,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     data.nodes[0].tension = -0.5;
     data.nodes[1].weight = PointWeight::Soft;
     library.store_favorite(5, &CurveShape::capture(&data))?;
+    let mut palette = WavePalette::default();
+    palette.store(0, &CurveShape::capture(&data))?;
+    palette.store(3, &factory_shape(FactoryShape::Duck))?;
+    palette.store(5, &factory_shape(FactoryShape::Square))?;
+    palette.store(7, &factory_shape(FactoryShape::RampDown))?;
     factory_shape(FactoryShape::Triangle).apply(&mut data, false)?;
     let bounds = (1280.0 * scale, 760.0 * scale);
     let mut pm = tiny_skia::Pixmap::new(bounds.0 as u32, bounds.1 as u32)
@@ -51,10 +57,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         MsegEditState::new()
     };
     state.set_curve_library_directory(root.clone());
+    state.bind_wave_palette(std::sync::Arc::new(std::sync::Mutex::new(palette)));
     state.set_overlay_bounds(bounds);
     let rect = (24.0 * scale, 70.0 * scale, 1232.0 * scale, 640.0 * scale);
     state.open_curve_browser(rect, scale);
-    if favorites {
+    for _ in 0..turns {
         state.on_key(
             &KeyboardEvent {
                 key: Key::Tab,
@@ -79,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut pm,
         24.0 * scale,
         52.0 * scale,
-        "Browse shapes and shared favorites. Load or Fit applies the selected curve.",
+        "Factory, global Favorites and Project waves. Load or Fit applies the selected curve.",
         14.0 * scale,
         color_text(),
     );

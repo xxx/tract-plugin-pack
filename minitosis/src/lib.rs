@@ -289,6 +289,10 @@ impl Minitosis {
 }
 
 impl Plugin for Minitosis {
+    fn filter_state(state: &mut PluginState) {
+        tiny_skia_widgets::mseg::prepare_wave_palette_state(&mut state.fields);
+    }
+
     const NAME: &'static str = "Minitosis";
     const VENDOR: &'static str = "mpd";
     const URL: &'static str = "";

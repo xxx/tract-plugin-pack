@@ -286,6 +286,7 @@ impl NapWindow {
         for (i, s) in states.iter_mut().enumerate() {
             s.set_randomize_seed(pane_seed(i));
             s.set_show_polarity(false);
+            s.bind_wave_palette(params.wave_palette.clone());
         }
 
         // Seed the guard caches with the current state so the first frame does
@@ -1499,6 +1500,63 @@ mod tests {
             assert!(!states[owner].has_open_menu() && !states[owner].is_dragging());
             assert_eq!(curve_input_pane(&states, 5.0, h, s), Some(0));
         }
+    }
+
+    #[test]
+    fn project_slots_share_across_nap_panes_and_storage_does_not_request_a_curve_edit() {
+        use keyboard_types::{Key, KeyState, KeyboardEvent};
+        use widgets::mseg::{CurveShape, FactoryShape, factory_shape};
+        let params = NapParams::new();
+        let mut states = std::array::from_fn(|_| MsegEditState::new_curve_only());
+        for state in &mut states {
+            state.bind_wave_palette(params.wave_palette.clone());
+            state.set_curve_library_directory(
+                std::env::temp_dir().join(format!("tract-nap-project-{}", std::process::id())),
+            );
+            state.set_overlay_bounds((880.0, 720.0));
+        }
+        let mut curves = [widgets::mseg::MsegData::default(); 3];
+        factory_shape(FactoryShape::Duck)
+            .apply(&mut curves[2], false)
+            .unwrap();
+        let before = curves;
+        let event = |key| KeyboardEvent {
+            key,
+            state: KeyState::Down,
+            ..KeyboardEvent::default()
+        };
+        let rects = pane_rects(880.0, 720.0, 1.0);
+        assert!(states[2].open_curve_browser(rects[2], 1.0));
+        for _ in 0..2 {
+            states[2].on_key(&event(Key::Tab), &mut curves[2], rects[2], 1.0);
+        }
+        assert_eq!(curve_input_pane(&states, 5.0, 720.0, 1.0), Some(2));
+        assert_eq!(
+            states[2].on_key(
+                &event(Key::Character("s".into())),
+                &mut curves[2],
+                rects[2],
+                1.0
+            ),
+            (true, None)
+        );
+        assert_eq!(curves, before);
+        assert_eq!(
+            params.wave_palette.lock().unwrap().get(0),
+            Some(&CurveShape::capture(&before[2]))
+        );
+        states[2].on_key(&event(Key::Escape), &mut curves[2], rects[2], 1.0);
+        assert!(states[0].open_curve_browser(rects[0], 1.0));
+        for _ in 0..2 {
+            states[0].on_key(&event(Key::Tab), &mut curves[0], rects[0], 1.0);
+        }
+        assert_eq!(
+            states[0].on_key(&event(Key::Enter), &mut curves[0], rects[0], 1.0),
+            (true, Some(MsegEdit::Changed))
+        );
+        assert_eq!(curves[0].active(), before[2].active());
+        assert_eq!(curves[1], before[1]);
+        assert_eq!(curves[2], before[2]);
     }
 
     #[test]

@@ -90,6 +90,10 @@ edits update the baked kernel.
 Load/Fit replaces the kernel curve and rebakes it; storing/clearing favorites
 leaves it unchanged. See [browsing thumbnails](../mseg-editor.md#browsing-thumbnails).
 
+The browser's **Project** tab adds eight waves saved with this instance.
+Store/Clear leaves the kernel intact; Load/Fit rebakes it. See
+[project waves](../mseg-editor.md#project-waves).
+
 Hover for footer hints, or click **?** beside Point for the gesture guide.
 **F1 / ?** and **View → Editing guide...** also open it. Help leaves the curve
 and kernel intact; see [context help](../mseg-editor.md#context-help-and-gesture-guide).
