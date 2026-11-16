@@ -50,6 +50,12 @@ Load/Fit applies the selected thumbnail; Store/Clear manages shared slots. See
 The browser's **Project** tab adds eight waves saved with this instance and
 shared across its effects. See [project waves](../mseg-editor.md#project-waves).
 
+**MIDI off** beside the curve's playback control configures MIDI switching of
+those Project waves for Amp/1/2/3. Notes select waves at their sample offsets
+while the clock keeps running; Trigger still controls restarts. The chosen
+curve becomes a read-only playback preview until switching is Off. See
+[MIDI wave switching](../mseg-editor.md#midi-wave-switching).
+
 Hover for footer hints, or click **?** beside Point for the gesture guide.
 **F1 / ?** and **View → Editing guide...** also open it; see
 [context help](../mseg-editor.md#context-help-and-gesture-guide).

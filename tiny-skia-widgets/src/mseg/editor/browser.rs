@@ -142,7 +142,12 @@ impl MsegEditState {
 
     /// Open a snapshot of factory curves and shared favorites without changing the curve.
     pub fn open_curve_browser(&mut self, rect: Rect, scale: f32) -> bool {
-        if !scale.is_finite() || scale <= 0.0 || self.is_dragging() || self.has_open_menu() {
+        if !scale.is_finite()
+            || scale <= 0.0
+            || self.is_dragging()
+            || self.has_open_menu()
+            || self.geometry_read_only()
+        {
             return false;
         }
         if self.browser_layout(rect, scale).is_none() {

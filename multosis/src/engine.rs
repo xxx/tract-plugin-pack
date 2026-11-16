@@ -53,6 +53,12 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
+    pub fn uses_midi_waves(&self) -> bool {
+        self.modulation.uses_midi_waves()
+    }
+    pub fn set_wave_palette(&mut self, palette: &tiny_skia_widgets::mseg::WavePalette) {
+        self.modulation.set_wave_palette(palette);
+    }
     /// A fresh engine: unstarted playhead, zeroed clock, default per-track effects.
     pub fn new() -> Self {
         Self {
@@ -272,6 +278,12 @@ impl AudioEngine {
                 );
             }
         }
+        self.modulation.refresh_pending_waves(
+            &mut self.effects,
+            &self.track_effects,
+            span_remaining,
+            &mut self.waveform,
+        );
         self.modulation.process_smoothing_sample(&mut self.effects);
         let mut cur_l = dry_l;
         let mut cur_r = dry_r;
@@ -630,6 +642,9 @@ impl Default for AudioEngine {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod wave_tests;
 
 #[cfg(test)]
 mod tests {

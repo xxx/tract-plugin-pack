@@ -9,6 +9,7 @@ mod help;
 mod live;
 mod midi;
 mod pitch_grid;
+mod wave_midi;
 pub use detector::DetectorField;
 pub use live::{AudioGain, AudioView};
 pub use midi::MidiField;
@@ -105,6 +106,7 @@ pub struct EffectEditor {
     detector_open: bool,
     detector_owner: Option<detector::DetectorBinding>,
     pitch_grid_binding: Option<pitch_grid::PitchGridBinding>,
+    wave_midi: wave_midi::Panel,
 }
 
 impl Default for EffectEditor {
@@ -119,6 +121,13 @@ impl EffectEditor {
         &mut self,
         palette: std::sync::Arc<std::sync::Mutex<widgets::mseg::WavePalette>>,
     ) {
+        if !self
+            .mseg_edit
+            .wave_palette()
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, &palette))
+        {
+            self.wave_midi.close();
+        }
         self.mseg_edit.bind_wave_palette(palette);
     }
 
@@ -146,6 +155,7 @@ impl EffectEditor {
             detector_open: false,
             detector_owner: None,
             pitch_grid_binding: None,
+            wave_midi: wave_midi::Panel::default(),
         }
     }
 
@@ -182,6 +192,7 @@ impl EffectEditor {
 
     /// End input tied to old window geometry without discarding editor preferences.
     pub fn prepare_resize(&mut self, backing_scale: f32) {
+        self.wave_midi.close();
         self.cancel_detector();
         self.effect_dial_drag.end_drag();
         self.effect_dial_drag.clear_double_click();
@@ -207,14 +218,18 @@ impl EffectEditor {
     }
 
     pub fn captures_keyboard(&self) -> bool {
-        self.detector_open
+        self.wave_midi.open()
+            || self.detector_open
             || self.effect_dropdown.is_open()
             || self.text_edit.is_active()
             || self.mseg_edit.has_open_menu()
     }
 
     pub fn dropdown_open(&self) -> bool {
-        self.detector_open || self.effect_dropdown.is_open() || self.mseg_edit.has_open_menu()
+        self.wave_midi.open()
+            || self.detector_open
+            || self.effect_dropdown.is_open()
+            || self.mseg_edit.has_open_menu()
     }
 
     /// Whether shared controls own an in-progress pointer gesture.
@@ -224,7 +239,8 @@ impl EffectEditor {
 
     /// Allows hosts to finalize their numeric fields before the shared editor starts panning.
     pub fn can_start_pan(&self, pointer: (f32, f32), geometry: EditorGeometry) -> bool {
-        !self.detector_open
+        !self.wave_midi.open()
+            && !self.detector_open
             && !self.effect_dropdown.is_open()
             && self.effect_dial_drag.active_action().is_none()
             && self.mseg_edit.can_start_pan(
@@ -252,8 +268,17 @@ impl EffectEditor {
                 ..EditorResponse::default()
             };
         }
+        if self.check_wave_midi_binding(context.effect, context.modulation) {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
+        }
         let mut session = Session::new(self, context);
         session.handle_event(event);
+        session
+            .state
+            .sync_wave_view(session.effect, session.modulation);
         session.response
     }
 
@@ -268,6 +293,7 @@ impl EffectEditor {
         geometry: EditorGeometry,
     ) {
         self.check_detector_binding(effect.kind, modulation);
+        self.check_wave_midi_binding(effect, modulation);
         self.refresh_live(effect, modulation);
         let phases = self
             .live
@@ -319,6 +345,7 @@ impl EffectEditor {
             );
         }
         self.draw_detector(pixmap, tr, effect, geometry);
+        self.draw_wave_midi_popup(pixmap, tr, geometry);
     }
 }
 
@@ -342,6 +369,7 @@ impl<'a> Session<'a> {
             .mseg_edit
             .set_overlay_bounds(context.geometry.window_size);
         state.refresh_pitch_grid(context.effect, context.modulation);
+        state.sync_wave_view(context.effect, context.modulation);
         state.mouse_pos = context.pointer_position;
         state
             .effect_dial_drag
@@ -431,7 +459,7 @@ impl<'a> Session<'a> {
     fn handle_event(&mut self, event: &baseview::Event) {
         use baseview::{Event, MouseButton, MouseEvent};
         use keyboard_types::{Key, KeyState, Modifiers};
-        if self.handle_detector_event(event) {
+        if self.handle_wave_midi_event(event) || self.handle_detector_event(event) {
             return;
         }
         let win = (self.physical_width, self.physical_height);
@@ -1036,6 +1064,8 @@ impl<'a> Session<'a> {
         );
         for (m, mseg) in modu.msegs.iter().enumerate() {
             if m != sel {
+                let playback = self.state.wave_display_curve(&track, &modu, m);
+                let mseg = playback.as_ref().unwrap_or(mseg);
                 let c = mseg_color(m);
                 // Pack the slot colour with ghost alpha (~0x60).
                 let r = (c.red() * 255.0).round() as u32;
@@ -1124,9 +1154,29 @@ impl<'a> Session<'a> {
             &self.layout,
         );
         self.draw_live_controls(pixmap);
+        self.draw_wave_midi_button(pixmap);
     }
 
     fn on_effect_press(&mut self, px: f32, py: f32, ctrl: bool) -> bool {
+        if self.state.mseg_edit.wave_palette().is_some() || self.modulation.wave_switch.is_some() {
+            let strip = self
+                .state
+                .mseg_edit
+                .layout(self.layout.mseg_pane, self.scale_factor)
+                .strip;
+            if view::in_rect(
+                widgets::mseg::wave_midi_button_rect(strip, self.scale_factor),
+                px,
+                py,
+            ) {
+                if !self.state.mseg_edit.is_dragging()
+                    && self.state.effect_dial_drag.active_action().is_none()
+                {
+                    self.open_wave_midi();
+                }
+                return true;
+            }
+        }
         let params = self.effect_param_count();
         let trigger = self.modulation_config().trigger;
         let Some(hit) = effect_editor::effect_hit(

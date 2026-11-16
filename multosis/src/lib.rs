@@ -370,6 +370,11 @@ impl Plugin for Multosis {
         );
 
         let n = buffer.samples();
+        if self.engine.uses_midi_waves()
+            && let Ok(palette) = self.params.wave_palette.try_lock()
+        {
+            self.engine.set_wave_palette(&palette);
+        }
         let channels = buffer.as_slice();
         let (first, rest) = channels.split_at_mut(1);
         let left = &mut first[0][..n];
@@ -407,6 +412,11 @@ impl Plugin for Multosis {
             &self.grid,
             events,
         );
+        let latency = self.engine.chain_latency_samples() as u32;
+        if latency != self.last_reported_latency {
+            context.set_latency_samples(latency);
+            self.last_reported_latency = latency;
+        }
 
         // Publish the playhead column for the editor to draw.
         self.playhead_display.publish(self.engine.playhead_column());

@@ -207,6 +207,7 @@ impl EffectEditor {
         }
         if self.live.is_some() {
             self.cancel_detector();
+            self.wave_midi.close();
         }
         self.disconnect_live();
         self.live = Some(LiveSource {

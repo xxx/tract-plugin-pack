@@ -1,7 +1,7 @@
 //! Request-aware, bounded audio-to-editor modulation measurements.
 use crate::effects::{EffectKind, MAX_EFFECT_PARAMS};
 use crate::modulation::{AudioTriggerSettings, DetectorInput, DetectorReading};
-use crate::modulation::{ModulationState, ModulationTarget, TrackModulation};
+use crate::modulation::{MidiWaveMapping, ModulationState, ModulationTarget, TrackModulation};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 pub const TRACE_CAPACITY: usize = 512;
@@ -14,6 +14,7 @@ pub struct ModulationFrame {
     pub parameters: [Option<(f32, u8)>; MAX_EFFECT_PARAMS],
     pub mix: Option<(f32, u8)>,
     pub detector: Option<DetectorReading>,
+    pub wave: Option<(MidiWaveMapping, Option<u8>)>,
 }
 impl ModulationFrame {
     pub fn capture(kind: EffectKind, config: &TrackModulation, state: &ModulationState) -> Self {
@@ -25,10 +26,14 @@ impl ModulationFrame {
             parameters: state.parameter_norms(),
             mix: state.delivered_mix(),
             detector: state.detector_reading(),
+            wave: state.midi_wave(),
         }
     }
     pub fn matches(&self, kind: EffectKind, config: &TrackModulation) -> bool {
-        self.kind == kind && self.targets == config.targets
+        self.kind == kind
+            && self.targets == config.targets
+            && self.wave.map(|(mapping, _)| mapping)
+                == config.wave_switch.filter(|mapping| mapping.is_valid())
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -82,6 +87,29 @@ fn read_optional_float(bits: u64) -> Option<f32> {
     (bits >> 32 != 0).then_some(f32::from_bits(bits as u32))
 }
 
+fn wave_tag(wave: Option<(MidiWaveMapping, Option<u8>)>) -> u32 {
+    wave.map_or(0, |(mapping, slot)| {
+        (mapping.envelope as u32 + 1)
+            | ((mapping.first_note as u32) << 8)
+            | ((mapping.channel.map_or(0, |channel| channel + 1) as u32) << 16)
+            | ((slot.map_or(0, |slot| slot + 1) as u32) << 24)
+    })
+}
+fn read_wave_tag(bits: u32) -> Option<(MidiWaveMapping, Option<u8>)> {
+    let envelope = bits as u8;
+    let channel = (bits >> 16) as u8;
+    let slot = (bits >> 24) as u8;
+    if envelope == 0 || envelope > 4 || channel > 16 || slot > 8 {
+        return None;
+    }
+    let mapping = MidiWaveMapping {
+        envelope: envelope - 1,
+        first_note: (bits >> 8) as u8,
+        channel: channel.checked_sub(1),
+    };
+    mapping.is_valid().then_some((mapping, slot.checked_sub(1)))
+}
+
 struct AtomicFrame {
     stamp: AtomicU64,
     token: AtomicU64,
@@ -92,6 +120,7 @@ struct AtomicFrame {
     mix: AtomicU64,
     detector: [AtomicU64; 4],
     detector_input: AtomicU32,
+    wave: AtomicU32,
 }
 impl Default for AtomicFrame {
     fn default() -> Self {
@@ -105,6 +134,7 @@ impl Default for AtomicFrame {
             mix: AtomicU64::new(0),
             detector: std::array::from_fn(|_| AtomicU64::new(0)),
             detector_input: AtomicU32::new(0),
+            wave: AtomicU32::new(0),
         }
     }
 }
@@ -137,6 +167,7 @@ impl AtomicFrame {
         }
         self.detector_input
             .store(settings.input as u32, Ordering::Release);
+        self.wave.store(wave_tag(frame.wave), Ordering::Release);
         self.stamp.store(stamp, Ordering::Release);
     }
     fn load(&self, token: u64) -> Option<ModulationFrame> {
@@ -158,6 +189,7 @@ impl AtomicFrame {
             1 => DetectorInput::Sidechain,
             _ => DetectorInput::Main,
         };
+        let wave = read_wave_tag(self.wave.load(Ordering::Acquire));
         if self.stamp.load(Ordering::Acquire) != stamp || actual_token != token {
             return None;
         }
@@ -181,6 +213,7 @@ impl AtomicFrame {
                     lowpass_hz: detector[3],
                 },
             }),
+            wave,
         })
     }
 }
@@ -365,6 +398,7 @@ mod tests {
             parameters: [None; MAX_EFFECT_PARAMS],
             mix: Some((0.4, 2)),
             detector: None,
+            wave: None,
         }
     }
     #[test]
@@ -396,6 +430,39 @@ mod tests {
         assert_ne!(replaced, next);
         assert!(telemetry.frame(replaced).is_none());
         assert!(telemetry.point(0, replaced).is_none());
+    }
+
+    #[test]
+    fn wave_readings_round_trip_and_mapping_changes_reject_old_frames() {
+        let telemetry = ModulationTelemetry::default();
+        let token = telemetry.request(0, 3, EffectKind::Svf, true);
+        let mut clock = TraceClock::default();
+        clock.begin_block(&telemetry, 48000.0);
+        let mut config = TrackModulation::default();
+        config.targets = [None; 3];
+        for envelope in 0..4 {
+            for channel in [None, Some(0), Some(15)] {
+                for slot in [None, Some(0), Some(7)] {
+                    let mapping = MidiWaveMapping {
+                        envelope,
+                        first_note: 120,
+                        channel,
+                    };
+                    config.wave_switch = Some(mapping);
+                    let mut value = frame();
+                    value.wave = Some((mapping, slot));
+                    clock.publish(&telemetry, 0, &value);
+                    let actual = telemetry.frame(token).unwrap();
+                    assert_eq!(actual, value);
+                    assert!(actual.matches(EffectKind::Svf, &config));
+                    config.wave_switch = Some(MidiWaveMapping {
+                        first_note: 36,
+                        ..mapping
+                    });
+                    assert!(!actual.matches(EffectKind::Svf, &config));
+                }
+            }
+        }
     }
 
     #[test]

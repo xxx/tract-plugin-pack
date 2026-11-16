@@ -156,6 +156,7 @@ pub fn draw_mseg_with_background(
     node_tooltip: Option<(usize, &str)>,
     background: impl FnOnce(&mut Pixmap, &MsegLayout),
 ) {
+    let data = state.display_data(data);
     let layout = state.layout(rect, scale);
     // The three sub-rects (marker lane / canvas / strip) are non-overlapping,
     // so draw order is immaterial — each paints only its own region.
@@ -165,6 +166,7 @@ pub fn draw_mseg_with_background(
 
     if !state.help_open()
         && !state.curve_browser_open()
+        && !state.geometry_read_only()
         && let Some((idx, text)) = node_tooltip
     {
         draw_node_tooltip(pixmap, text_renderer, &layout, data, idx, text, scale);
@@ -336,7 +338,9 @@ fn draw_canvas(
     }
 
     draw_loop_seam(pixmap, layout, data, state, scale);
-    draw_nodes(pixmap, layout, data, state, scale, value_color);
+    if !state.geometry_read_only() {
+        draw_nodes(pixmap, layout, data, state, scale, value_color);
+    }
 
     let handles = state.selection_handles(data, layout, scale);
     if let (Some((_, (x0, y0))), Some((_, (x1, y1)))) = (handles.first(), handles.get(4)) {
@@ -920,12 +924,15 @@ fn draw_strip(
     let pitch_unavailable =
         data.value_grid == crate::mseg::ValueGrid::Semitones && state.pitch_grid().is_none();
     let seam_warning = hint.is_none()
+        && !state.geometry_read_only()
         && !pitch_unavailable
         && crate::mseg::seam::LoopSeam::visible(data, state.is_curve_only()).is_some()
         && state.status_message().is_empty();
     let message = if state.status_message().is_empty() {
         if let Some(hint) = hint {
             hint
+        } else if state.geometry_read_only() {
+            "Playback preview; geometry editing is disabled"
         } else if pitch_unavailable {
             "Semitone grid unavailable; choose a pitched target or numeric grid"
         } else if seam_warning {
@@ -963,6 +970,19 @@ fn draw_strip(
             color_muted()
         },
     );
+    if state.geometry_read_only() {
+        let dim = tiny_skia::Color::from_rgba8(0x1a, 0x1c, 0x22, 160);
+        for rect in [
+            toolbar.tool,
+            toolbar.shapes,
+            toolbar.edit,
+            toolbar.point,
+            b.style,
+            b.randomize,
+        ] {
+            draw_rect(pixmap, rect.0, rect.1, rect.2, rect.3, dim);
+        }
+    }
 }
 
 pub(crate) struct PowerButtons {
@@ -1004,6 +1024,18 @@ pub(crate) fn power_buttons(strip: (f32, f32, f32, f32), scale: f32) -> PowerBut
 /// Gesture-guide trigger bounds for embedding hosts and offscreen previews.
 pub fn help_button_rect(strip: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32) {
     power_buttons(strip, scale).help
+}
+
+/// Host MIDI setup fits between playback controls and the randomizer group.
+pub fn wave_midi_button_rect(strip: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32) {
+    let buttons = strip_buttons_ex(strip, scale, true, true);
+    let x = buttons.play_mode.0 + buttons.play_mode.2 + 12.0 * scale;
+    (
+        x,
+        buttons.play_mode.1,
+        (110.0 * scale).min((buttons.style.0 - x - 6.0 * scale).max(0.0)),
+        buttons.play_mode.3,
+    )
 }
 
 // ---------------------------------------------------------------------------

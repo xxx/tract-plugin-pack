@@ -104,6 +104,15 @@ pub(super) struct SmoothRuntime {
     pub(super) mix_value: Option<f32>,
 }
 impl SmoothRuntime {
+    pub(super) fn wave_changed(&mut self, slot: usize) -> bool {
+        let source = &mut self.slots[slot];
+        if !source.active {
+            return false;
+        }
+        source.force_raw = true;
+        source.force_apply = true;
+        true
+    }
     pub(super) fn deactivate(&mut self) {
         self.mask = 0;
         self.mix_value = None;
@@ -246,7 +255,7 @@ impl ModulationState {
         self.mix_slot = None;
         let mut legacy_mix = None;
         for k in 0..4 {
-            let doc = &config.msegs[k];
+            let doc = self.wave.curve(config, k);
             let route = if k > 0 {
                 config.targets[k - 1].and_then(|target| {
                     if config.winning_slot(target) != Some(k) {
@@ -389,7 +398,7 @@ impl ModulationState {
             if !slot.active {
                 continue;
             }
-            let doc = &config.msegs[k];
+            let doc = self.wave.curve(config, k);
             let next = phase_next(doc, slot.phase, slot.step);
             let wrapped = next < slot.phase;
             slot.phase = next;

@@ -25,7 +25,9 @@ pub use audio::*;
 pub use editor::*;
 pub use grid::{PitchGrid, ValueGrid};
 pub use interpolation::{PointWeight, SegmentShape, segment_value};
-pub use palette::{WAVE_PALETTE_SLOTS, WavePalette, prepare_wave_palette_state};
+pub use palette::{
+    WAVE_PALETTE_SLOTS, WavePalette, WavePaletteSnapshot, WaveShape, prepare_wave_palette_state,
+};
 pub use randomize::*;
 pub use render::*;
 pub use shape::*;

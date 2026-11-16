@@ -1,5 +1,6 @@
 mod context_help;
 mod curve_browser;
+mod midi_wave_switch;
 mod semitone_grid;
 mod wave_palette;
 
@@ -1786,6 +1787,7 @@ mod detector_controls {
                 level: 0.0,
                 settings: AudioTriggerSettings::default(),
             }),
+            wave: None,
         };
         clock.publish(&shared, 0, &frame);
         draw(&mut h);
@@ -2756,6 +2758,7 @@ mod smoothing_controls {
             parameters: [None; MAX_EFFECT_PARAMS],
             mix: None,
             detector: None,
+            wave: None,
         };
         frame.parameters[0] = Some((0.123, 1));
         clock.publish(&shared, 0, &frame);

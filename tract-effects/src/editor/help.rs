@@ -2,6 +2,23 @@ use super::*;
 
 impl Session<'_> {
     pub(super) fn update_mseg_hint(&mut self) {
+        let strip = self
+            .state
+            .mseg_edit
+            .layout(self.layout.mseg_pane, self.scale_factor)
+            .strip;
+        if (self.state.mseg_edit.wave_palette().is_some() || self.modulation.wave_switch.is_some())
+            && view::in_rect(
+                widgets::mseg::wave_midi_button_rect(strip, self.scale_factor),
+                self.mouse_pos.0,
+                self.mouse_pos.1,
+            )
+        {
+            self.state
+                .mseg_edit
+                .set_external_hint(Some("Switch Project waves using MIDI notes"));
+            return;
+        }
         let hint = if self.state.effect_dropdown.is_open() || self.state.mseg_edit.has_open_menu() {
             None
         } else {

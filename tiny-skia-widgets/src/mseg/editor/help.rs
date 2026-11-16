@@ -228,6 +228,10 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                         "Choose what restarts the curves. Transient (sample) offers detector threshold, filters and Main/Sidechain input.",
                     ),
                     animated(
+                        "MIDI waves",
+                        "Eight notes select Project slots while the clock runs. MIDI off beside playback opens setup. Turn switching Off to edit the chosen curve; saved hold markers are ignored while On.",
+                    ),
+                    animated(
                         "Ctrl/Cmd+Z",
                         "Undo in Multosis/Minitosis; Shift+Z or Ctrl/Cmd+Y redoes an edit.",
                     ),
@@ -369,6 +373,9 @@ impl MsegEditState {
             if in_rect(button, x, y) {
                 return Some(hint);
             }
+        }
+        if self.geometry_read_only() && in_rect(layout.canvas, x, y) {
+            return Some("MIDI wave preview; turn MIDI off to edit geometry");
         }
         if self
             .selection_handle_at(data, &layout, scale, x, y)

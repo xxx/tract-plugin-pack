@@ -177,6 +177,8 @@ pub enum TriggerSource {
 
 mod midi;
 pub use midi::{MidiCursor, MidiNoteOn};
+mod wave;
+pub use wave::MidiWaveMapping;
 
 /// One track row's modulation: four MSEGs and the three assignable MSEGs'
 /// targets and depths. `msegs[0]` is the amplitude MSEG; `msegs[1..=3]` are
@@ -196,6 +198,8 @@ pub struct TrackModulation {
     pub depths: [f32; 3],
     #[serde(default, skip_serializing_if = "smoothing::all_off")]
     pub smooth_ms: [f32; 4],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wave_switch: Option<MidiWaveMapping>,
     #[serde(default, skip_serializing_if = "AudioTriggerSettings::is_default")]
     pub audio_trigger: AudioTriggerSettings,
     /// The event that resets all four of this row's MSEG phases.
@@ -369,6 +373,7 @@ impl TrackModulation {
             targets: [Some(ModulationTarget::EffectParameter(0)), None, None],
             depths: [0.4, 0.0, 0.0],
             smooth_ms: [0.0; 4],
+            wave_switch: None,
             audio_trigger: AudioTriggerSettings::default(),
             trigger: TriggerSource::Free,
         }
@@ -412,6 +417,8 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             #[serde(default)]
             smooth_ms: Vec<f32>,
             #[serde(default)]
+            wave_switch: Option<MidiWaveMapping>,
+            #[serde(default)]
             audio_trigger: AudioTriggerSettings,
             #[serde(default)]
             trigger: TriggerSource,
@@ -454,6 +461,7 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
                     .copied()
                     .map_or(0.0, normalized_smooth_ms)
             }),
+            wave_switch: h.wave_switch,
         })
     }
 }
@@ -561,6 +569,8 @@ pub struct ModulationState {
     delivered_mix: Option<(f32, u8)>,
     telemetry_enabled: bool,
     output_kind: Option<EffectKind>,
+    wave: wave::MidiWaveRuntime,
+    pending_wave: Option<(usize, Option<u8>)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -591,6 +601,8 @@ impl Default for ModulationState {
             delivered_mix: None,
             telemetry_enabled: true,
             output_kind: None,
+            wave: wave::MidiWaveRuntime::default(),
+            pending_wave: None,
         }
     }
 }
@@ -605,6 +617,8 @@ impl ModulationState {
         self.precise.reset();
         self.fired = false;
         self.reset_smoothing();
+        self.wave.reset();
+        self.pending_wave = None;
     }
 
     /// Restart all four envelopes and mark this block as triggered.
@@ -681,6 +695,7 @@ impl ModulationState {
 
     /// Advance before evaluating, then apply Amp followed by slots 1–3.
     /// When targets overlap, the last assignable slot wins.
+    /// Pending wave refreshes remain staged until the first sample is processed.
     pub fn advance_segment(
         &mut self,
         config: &TrackModulation,
@@ -707,7 +722,7 @@ impl ModulationState {
         self.mix_slot = None;
         let mut mix = None;
         for k in 0..4 {
-            let mseg = &config.msegs[k];
+            let mseg = self.wave.curve(config, k);
             let dt = mseg_phase_delta(mseg, seg_len, bpm, sample_rate);
             let (next, _) = advance(mseg, self.phases[k], dt, false);
             self.phases[k] = next;

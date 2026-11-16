@@ -360,6 +360,44 @@ rules. Zero-velocity note-ons, note-offs, and other MIDI messages do not retrigg
 Muted/inactive/None rows and Minitosis bypass still receive matching triggers.
 Minitosis uses each effect's recalled filters as prepared processors are adopted.
 
+## MIDI wave switching
+
+In Multosis/Minitosis, click **MIDI off** beside the MSEG playback control to
+open wave-switch setup. Enable **On**, choose **Curve** (Amp/1/2/3), a **First**
+MIDI note from 0 to 120, and **Ch.** Any or 1–16. The eight consecutive notes
+beginning there select Project waves 1–8. Each row/effect has its own destination
+and mapping. Settings save with the project and participate in local curve undo.
+
+Positive note-ons switch at their host sample offsets. Empty slots, note-offs,
+zero-velocity notes and notes outside the range/channel leave the playing wave
+unchanged. Same-offset notes retain their order; the last valid selection wins.
+The MIDI button shows the active slot, such as **MIDI P3**.
+
+Switching preserves phase, smoothing and the other curves' clocks. The existing
+**Trigger** setting remains independent: if a note also matches MIDI retriggering,
+the newly selected wave starts after that reset. For one-shot curves already at
+the end, use retriggering when you want a new note to restart playback.
+The mapped curve ignores hold markers for the entire enabled mode; saved
+sustain/loop markers return when switching is disabled.
+
+The graph displays the playing wave with geometry tools dimmed and its points
+hidden. Turn switching Off to edit the original authored curve. View zoom/pan,
+Help, timing/polarity controls, other curves and effect controls remain available.
+MIDI selections leave the saved authored curve, Project slots and undo history
+intact. Identical wave copies keep the same smoothing/control-clock behavior.
+
+Before the first matching note, the authored geometry plays. Changing/disabling
+the mapping restores it; clearing an active slot also falls back to it. Editing
+an occupied Project slot refreshes playback at a processing-block edge. Reset
+clears the runtime selection; transport retrigger retains it. Presets save the
+bank and mapping, with playback selection established by subsequent MIDI notes.
+No extra trigger buffering is added; modulated effects retain their own latency.
+
+Use Tab or Up/Down to choose a setup field, Left/Right to change its value,
+and Enter/Space to toggle or open its selector. The First-note selector supports
+numeric search. Escape closes a selector before closing setup; outside/right
+clicks, focus loss and resize dismiss it without acting on controls beneath it.
+
 ## Sample-timed Hz and audio triggers
 
 Multosis/Minitosis offer **Free Hz (sample)** and **Transient (sample)** in the

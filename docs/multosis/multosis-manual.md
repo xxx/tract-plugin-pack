@@ -238,6 +238,12 @@ shared slots. See [browsing thumbnails](../mseg-editor.md#browsing-thumbnails).
 The browser's **Project** tab adds eight waves saved with this instance and
 shared across all rows. See [project waves](../mseg-editor.md#project-waves).
 
+Each row's **MIDI off** control beside curve playback configures Project-wave
+switching for Amp/1/2/3. Its note range/channel are independent of Trigger.
+The destination displays the playing wave with geometry editing paused;
+turn switching Off to edit its authored shape. See
+[MIDI wave switching](../mseg-editor.md#midi-wave-switching).
+
 Hover for footer hints, or click **?** beside Point for the gesture guide.
 **F1 / ?** and **View → Editing guide...** also open it; see
 [context help](../mseg-editor.md#context-help-and-gesture-guide).

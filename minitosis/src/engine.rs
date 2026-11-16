@@ -57,6 +57,7 @@ pub struct Processor {
     skip_precise_sample: bool,
     span_track: TrackEffect,
     span_bpm: f64,
+    wave_bank: tiny_skia_widgets::mseg::WavePaletteSnapshot,
 }
 
 impl Processor {
@@ -82,6 +83,7 @@ impl Processor {
             skip_precise_sample: false,
             span_track: *track,
             span_bpm: 120.0,
+            wave_bank: tiny_skia_widgets::mseg::WavePaletteSnapshot::default(),
         }
     }
 
@@ -94,6 +96,8 @@ impl Processor {
             && self.key.sample_rate_bits != previous.key.sample_rate_bits
         {
             self.state.inherit_precise_timing(&previous.state);
+            self.state.inherit_midi_wave(&previous.state);
+            self.wave_bank.clone_from(&previous.wave_bank);
         }
     }
 
@@ -114,6 +118,8 @@ impl Processor {
         sidechain: SidechainInput<'_>,
         bpm: f64,
     ) {
+        self.state
+            .prepare_wave_bank(&self.modulation, &self.wave_bank);
         self.effect.set_bpm(bpm as f32);
         for (i, _) in self.effect.parameters().iter().enumerate() {
             if !(self.modulation.smoothed_parameter(track.kind, i)
@@ -154,7 +160,7 @@ impl Processor {
         let sample_rate = f32::from_bits(self.key.sample_rate_bits) as f64;
         if let Some(telemetry) = &self.waveform_telemetry {
             let request = self.waveform.request();
-            self.waveform.prepare_segment(
+            self.waveform.prepare_segment_with_curve(
                 &telemetry.waveform,
                 0,
                 WaveformTiming {
@@ -165,6 +171,7 @@ impl Processor {
                     bpm,
                     sample_rate,
                 },
+                self.state.effective_mseg(&self.modulation, request.slot),
             );
         }
         self.state.advance_segment(
@@ -182,14 +189,33 @@ impl Processor {
         &mut self,
         event: tract_effects::modulation::MidiNoteOn,
         within_span: bool,
-    ) {
+    ) -> bool {
+        self.state
+            .select_midi_wave(&self.modulation, &self.wave_bank, event);
         if self.modulation.trigger.accepts_midi(event) {
             if within_span {
                 self.state.trigger_midi_in_span();
             } else {
                 self.state.trigger();
             }
+            return true;
         }
+        false
+    }
+
+    pub fn uses_midi_waves(&self) -> bool {
+        self.modulation.wave_switch.is_some()
+    }
+    pub fn set_wave_palette(&mut self, palette: &tiny_skia_widgets::mseg::WavePalette) {
+        self.wave_bank.refresh(palette);
+    }
+    pub fn accepts_midi(&self, event: tract_effects::modulation::MidiNoteOn) -> bool {
+        self.modulation.trigger.accepts_midi(event)
+            || self
+                .modulation
+                .wave_switch
+                .and_then(|mapping| mapping.slot(event))
+                .is_some_and(|slot| self.wave_bank.get(slot).is_some())
     }
 
     pub fn process_sample(&mut self, input: [f32; 2], mix: f32, bypass: bool) -> [f32; 2] {
@@ -217,6 +243,18 @@ impl Processor {
             }
             let track = self.span_track;
             self.advance_segment(&track, self.span_remaining, self.span_bpm);
+        }
+        if let Some(slot) = self.state.refresh_pending_wave(
+            &self.modulation,
+            &self.span_track,
+            &mut self.effect,
+            self.span_remaining,
+        ) {
+            self.latency = self.effect.latency_samples();
+            if self.waveform.request().slot == slot {
+                self.waveform
+                    .update_curve(self.state.effective_mseg(&self.modulation, slot));
+            }
         }
         self.state
             .process_smoothing_sample(&self.modulation, &mut self.effect);
@@ -293,6 +331,9 @@ impl Processor {
         )
     }
 }
+
+#[cfg(test)]
+mod wave_tests;
 
 #[cfg(test)]
 mod tests {

@@ -120,7 +120,7 @@ impl MsegEditState {
             Vec::new()
         };
     }
-    pub(crate) fn set_status_message(&mut self, text: impl Into<String>) {
+    pub fn set_status_message(&mut self, text: impl Into<String>) {
         self.power.message = text.into();
     }
     pub fn status_message(&self) -> &str {
@@ -556,6 +556,12 @@ impl MsegEditState {
                 None
             };
             return (true, edit);
+        }
+        if self.geometry_read_only() {
+            if event.state == KeyState::Down && event.key == Key::Escape {
+                self.cancel_pan();
+            }
+            return (true, None);
         }
         if event.state != KeyState::Down {
             return (false, None);

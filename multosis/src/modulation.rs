@@ -13,6 +13,8 @@ pub struct Modulation {
     smooth_count: usize,
     precise_rows: [usize; ROWS],
     precise_count: usize,
+    wave_bank: Box<tiny_skia_widgets::mseg::WavePaletteSnapshot>,
+    pending_wave_rows: u16,
 }
 
 impl Modulation {
@@ -24,6 +26,8 @@ impl Modulation {
             smooth_count: 0,
             precise_rows: [0; ROWS],
             precise_count: 0,
+            wave_bank: Box::default(),
+            pending_wave_rows: 0,
         }
     }
 
@@ -41,6 +45,7 @@ impl Modulation {
     }
 
     pub fn reset(&mut self) {
+        self.pending_wave_rows = 0;
         for state in &mut self.states {
             state.reset();
         }
@@ -124,7 +129,7 @@ impl Modulation {
             return;
         }
         let row = request.row;
-        clock.prepare_segment(
+        clock.prepare_segment_with_curve(
             telemetry,
             row,
             tract_effects::waveform::WaveformTiming {
@@ -135,12 +140,15 @@ impl Modulation {
                 bpm,
                 sample_rate,
             },
+            self.states[row].effective_mseg(&self.config[row], request.slot),
         );
     }
 
     pub fn begin_block(&mut self, left: &[f32], right: &[f32], sample_rate: f64) {
         self.precise_count = 0;
+        self.pending_wave_rows = 0;
         for (row, (state, config)) in self.states.iter_mut().zip(&self.config).enumerate() {
+            state.prepare_wave_bank(config, &self.wave_bank);
             state.begin_block(config, left, right, sample_rate);
             if state.precise_trigger_active() {
                 self.precise_rows[self.precise_count] = row;
@@ -180,7 +188,12 @@ impl Modulation {
             .iter()
             .enumerate()
             .fold(0, |mask, (row, config)| {
-                mask | if config.trigger.accepts_midi(event) {
+                mask | if config.trigger.accepts_midi(event)
+                    || config
+                        .wave_switch
+                        .and_then(|mapping| mapping.slot(event))
+                        .is_some_and(|slot| self.wave_bank.get(slot).is_some())
+                {
                     1 << row
                 } else {
                     0
@@ -189,9 +202,13 @@ impl Modulation {
     }
 
     pub fn fire_midi(&mut self, event: MidiNoteOn, within_span: bool) -> u16 {
-        let mask = self.midi_mask(event);
+        let mut mask = 0;
         for (row, state) in self.states.iter_mut().enumerate() {
-            if mask & (1 << row) != 0 {
+            if state.select_midi_wave(&self.config[row], &self.wave_bank, event) {
+                self.pending_wave_rows |= 1 << row;
+            }
+            if self.config[row].trigger.accepts_midi(event) {
+                mask |= 1 << row;
                 if within_span {
                     state.trigger_midi_in_span();
                 } else {
@@ -200,6 +217,41 @@ impl Modulation {
             }
         }
         mask
+    }
+
+    pub fn uses_midi_waves(&self) -> bool {
+        self.config
+            .iter()
+            .any(|config| config.wave_switch.is_some())
+    }
+    pub fn set_wave_palette(&mut self, palette: &tiny_skia_widgets::mseg::WavePalette) {
+        self.wave_bank.refresh(palette);
+    }
+    pub fn refresh_pending_waves(
+        &mut self,
+        effects: &mut [EffectInstance; ROWS],
+        tracks: &[TrackEffect; ROWS],
+        remaining: usize,
+        clock: &mut tract_effects::waveform::WaveformClock,
+    ) {
+        let rows = std::mem::take(&mut self.pending_wave_rows);
+        if rows == 0 {
+            return;
+        }
+        for row in 0..ROWS {
+            if rows & (1 << row) != 0
+                && let Some(slot) = self.states[row].refresh_pending_wave(
+                    &self.config[row],
+                    &tracks[row],
+                    &mut effects[row],
+                    remaining,
+                )
+                && clock.request().row == row
+                && clock.request().slot == slot
+            {
+                clock.update_curve(self.states[row].effective_mseg(&self.config[row], slot));
+            }
+        }
     }
 
     pub fn advance_segment(

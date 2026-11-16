@@ -14,6 +14,8 @@ mod browser;
 mod help;
 mod power;
 mod precision;
+#[cfg(test)]
+mod readonly_tests;
 pub use help::{HelpPage, is_help_shortcut};
 pub use power::SelectionHandle;
 
@@ -159,6 +161,7 @@ pub struct MsegEditState {
     precision: precision::PrecisionState,
     help: help::HelpState,
     browser: browser::BrowserState,
+    read_only_curve: Option<MsegData>,
     /// When true, playback/timing controls and the marker lane are hidden.
     curve_only: bool,
     /// When false, the strip's Unipolar/Bipolar polarity toggle is hidden (and
@@ -206,6 +209,21 @@ pub struct MsegEditState {
 }
 
 impl MsegEditState {
+    /// Show a playback source while retaining the authored document for later editing.
+    pub fn set_read_only_curve(&mut self, curve: Option<MsegData>) {
+        if curve.is_some() && self.read_only_curve.is_none() {
+            self.cancel_interaction();
+            self.clear_selection();
+            self.set_status_message("");
+        }
+        self.read_only_curve = curve;
+    }
+    pub fn geometry_read_only(&self) -> bool {
+        self.read_only_curve.is_some()
+    }
+    pub(crate) fn display_data<'a>(&'a self, author: &'a MsegData) -> &'a MsegData {
+        self.read_only_curve.as_ref().unwrap_or(author)
+    }
     /// Cancel transient geometry-dependent input while keeping selection and strip preferences.
     pub fn cancel_interaction(&mut self) {
         self.drag = None;
@@ -243,6 +261,7 @@ impl MsegEditState {
             precision: precision::PrecisionState::default(),
             help: help::HelpState::default(),
             browser: browser::BrowserState::default(),
+            read_only_curve: None,
             curve_only,
             show_polarity: true,
             drag: None,
@@ -489,7 +508,31 @@ impl MsegEditState {
             }
         }
 
-        if !closed_a_dropdown && let Some(edit) = self.begin_power_drag(x, y, data, &layout, scale)
+        if self.geometry_read_only() {
+            let buttons = crate::mseg::render::strip_buttons_ex(
+                layout.strip,
+                scale,
+                !self.curve_only,
+                self.show_polarity,
+            );
+            let power = crate::mseg::render::power_buttons(layout.strip, scale);
+            if ![
+                buttons.snap,
+                buttons.grid,
+                buttons.polarity,
+                buttons.play_mode,
+                power.view,
+                power.help,
+            ]
+            .into_iter()
+            .any(|rect| crate::mseg::render::in_rect(rect, x, y))
+            {
+                return None;
+            }
+        }
+        if !closed_a_dropdown
+            && !self.geometry_read_only()
+            && let Some(edit) = self.begin_power_drag(x, y, data, &layout, scale)
         {
             return edit;
         }
@@ -678,6 +721,9 @@ impl MsegEditState {
             self.dropdown.on_mouse_move(x, y, &refs, window_size);
             return None;
         }
+        if self.geometry_read_only() {
+            return None;
+        }
         // Hover highlight (only when not dragging).
         if self.drag.is_none() {
             self.hover = match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
@@ -805,6 +851,9 @@ impl MsegEditState {
             self.help_mouse_down(x, y, rect, scale);
             return None;
         }
+        if self.geometry_read_only() {
+            return None;
+        }
         if self.is_panning() {
             return None;
         }
@@ -862,6 +911,9 @@ impl MsegEditState {
         }
         if self.has_open_menu() {
             self.dropdown.close();
+            return None;
+        }
+        if self.geometry_read_only() {
             return None;
         }
         use crate::mseg::render::{MsegHit, mseg_hit_test_with_selection, x_to_phase};

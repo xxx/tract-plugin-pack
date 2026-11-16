@@ -119,7 +119,7 @@ impl Minitosis {
     fn next_midi(
         context: &mut impl ProcessContext<Self>,
         midi: &mut tract_effects::modulation::MidiCursor,
-        source: tract_effects::modulation::TriggerSource,
+        processor: &Processor,
         samples: usize,
     ) -> Option<tract_effects::modulation::MidiNoteOn> {
         let mut events = std::iter::from_fn(|| {
@@ -138,7 +138,7 @@ impl Minitosis {
                 }
             }
         });
-        midi.next_matching(&mut events, samples, |event| source.accepts_midi(event))
+        midi.next_matching(&mut events, samples, |event| processor.accepts_midi(event))
     }
 
     #[cfg(test)]
@@ -207,6 +207,11 @@ impl Minitosis {
             self.processor.retrigger_modulation();
         }
         self.was_playing = playing;
+        if self.processor.uses_midi_waves()
+            && let Ok(palette) = self.params.wave_palette.try_lock()
+        {
+            self.processor.set_wave_palette(&palette);
+        }
         let track = self
             .params
             .controls_for(kind)
@@ -221,17 +226,15 @@ impl Minitosis {
             .prepare_block_with_sidechain(&track, left, right, sidechain, bpm);
         let pending = self.processor.key != key;
         let bypass = self.params.bypass.value();
-        let source = self.processor.modulation.trigger;
         let mut midi = tract_effects::modulation::MidiCursor::default();
-        let mut note = Self::next_midi(context, &mut midi, source, samples);
+        let mut note = Self::next_midi(context, &mut midi, &self.processor, samples);
         let mut cursor = 0;
         let mut prepared = false;
         while cursor < samples {
             let mut triggered = false;
             while let Some(event) = note.filter(|event| event.timing == cursor) {
-                self.processor.midi_note_on(event, prepared);
-                triggered = true;
-                note = Self::next_midi(context, &mut midi, source, samples);
+                triggered |= self.processor.midi_note_on(event, prepared);
+                note = Self::next_midi(context, &mut midi, &self.processor, samples);
             }
             let end = note.map_or(samples, |event| event.timing);
             if triggered || !prepared {

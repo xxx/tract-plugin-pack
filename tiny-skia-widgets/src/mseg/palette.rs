@@ -1,9 +1,11 @@
 use super::shape::validate_nodes;
-use super::{CurveShape, ShapeError};
+use super::{CurveShape, HoldMode, MAX_NODES, MsegData, MsegNode, ShapeError};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const WAVE_PALETTE_SLOTS: usize = 8;
 const PALETTE_VERSION: u32 = 1;
+static NEXT_REVISION: AtomicU64 = AtomicU64::new(1);
 
 /// Reset project waves when loading a preset saved before the bank existed.
 pub fn prepare_wave_palette_state(fields: &mut std::collections::BTreeMap<String, String>) {
@@ -16,9 +18,16 @@ pub fn prepare_wave_palette_state(fields: &mut std::collections::BTreeMap<String
 }
 
 /// GUI/preset wave storage, separate from the fixed-capacity audio document.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct WavePalette {
     slots: [Option<CurveShape>; WAVE_PALETTE_SLOTS],
+    revision: u64,
+}
+
+impl PartialEq for WavePalette {
+    fn eq(&self, other: &Self) -> bool {
+        self.slots == other.slots
+    }
 }
 
 impl WavePalette {
@@ -33,16 +42,21 @@ impl WavePalette {
             return Ok(false);
         }
         *destination = Some(shape.clone());
+        self.revision = NEXT_REVISION.fetch_add(1, Ordering::Relaxed);
         Ok(true)
     }
 
     pub fn clear(&mut self, slot: usize) -> Result<bool, ShapeError> {
-        Ok(self
+        let changed = self
             .slots
             .get_mut(slot)
             .ok_or(ShapeError::Invalid)?
             .take()
-            .is_some())
+            .is_some();
+        if changed {
+            self.revision = NEXT_REVISION.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(changed)
     }
 }
 
@@ -73,7 +87,60 @@ impl<'de> Deserialize<'de> for WavePalette {
         if saved.version != PALETTE_VERSION {
             return Err(serde::de::Error::custom("Unsupported wave palette version"));
         }
-        Ok(Self { slots: saved.slots })
+        Ok(Self {
+            slots: saved.slots,
+            revision: NEXT_REVISION.fetch_add(1, Ordering::Relaxed),
+        })
+    }
+}
+
+/// Heap-free playback geometry; bank construction/ownership stays on the GUI.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WaveShape {
+    nodes: [MsegNode; MAX_NODES],
+    node_count: usize,
+}
+impl WaveShape {
+    fn capture(shape: &CurveShape) -> Self {
+        let mut result = Self {
+            nodes: [MsegNode::default(); MAX_NODES],
+            node_count: shape.nodes().len(),
+        };
+        result.nodes[..result.node_count].copy_from_slice(shape.nodes());
+        result
+    }
+    pub fn nodes(&self) -> &[MsegNode] {
+        &self.nodes[..self.node_count]
+    }
+    pub fn apply_to(&self, data: &mut MsegData) {
+        data.nodes[..self.node_count].copy_from_slice(self.nodes());
+        data.node_count = self.node_count;
+        data.hold = HoldMode::None;
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WavePaletteSnapshot {
+    slots: [Option<WaveShape>; WAVE_PALETTE_SLOTS],
+    revision: Option<u64>,
+}
+impl WavePaletteSnapshot {
+    pub fn revision(&self) -> Option<u64> {
+        self.revision
+    }
+    pub fn get(&self, slot: usize) -> Option<&WaveShape> {
+        self.slots.get(slot).and_then(Option::as_ref)
+    }
+    /// Copy under the host's try_lock without taking ownership of heap data.
+    pub fn refresh(&mut self, source: &WavePalette) -> bool {
+        if self.revision == Some(source.revision) {
+            return false;
+        }
+        for (destination, shape) in self.slots.iter_mut().zip(&source.slots) {
+            *destination = shape.as_ref().map(WaveShape::capture);
+        }
+        self.revision = Some(source.revision);
+        true
     }
 }
 
@@ -192,5 +259,48 @@ mod tests {
         let mut invalid = original;
         invalid["slots"][0]["nodes"][1]["value"] = 2.into();
         assert!(serde_json::from_value::<WavePalette>(invalid).is_err());
+    }
+
+    #[test]
+    fn fixed_snapshot_refreshes_only_after_edits_and_preserves_destination_metadata() {
+        let mut palette = WavePalette::default();
+        let mut snapshot = WavePaletteSnapshot::default();
+        assert!(snapshot.refresh(&palette));
+        assert!(!snapshot.refresh(&palette));
+        assert!(snapshot.get(0).is_none());
+        let mut source = MsegData::default();
+        source.nodes[0].shape = SegmentShape::SCurve;
+        source.nodes[1].weight = PointWeight::Soft;
+        let shape = CurveShape::capture(&source);
+        palette.store(2, &shape).unwrap();
+        assert!(snapshot.refresh(&palette));
+        let revision = snapshot.revision();
+        palette.store(2, &shape).unwrap();
+        assert!(!snapshot.refresh(&palette));
+        assert_eq!(snapshot.revision(), revision);
+        let mut destination = MsegData {
+            beats: 7.0,
+            time_seconds: 2.0,
+            hold: super::super::HoldMode::Sustain(0),
+            ..MsegData::default()
+        };
+        snapshot.get(2).unwrap().apply_to(&mut destination);
+        assert_eq!(destination.active(), source.active());
+        assert_eq!(
+            (
+                destination.beats,
+                destination.time_seconds,
+                destination.hold
+            ),
+            (7.0, 2.0, super::super::HoldMode::None)
+        );
+        let restored: WavePalette =
+            serde_json::from_str(&serde_json::to_string(&palette).unwrap()).unwrap();
+        assert_eq!(restored, palette);
+        assert!(snapshot.refresh(&restored));
+        assert_eq!(snapshot.get(2).unwrap().nodes(), source.active());
+        palette.clear(2).unwrap();
+        assert!(snapshot.refresh(&palette));
+        assert!(snapshot.get(2).is_none());
     }
 }

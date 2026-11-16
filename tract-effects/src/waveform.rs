@@ -228,6 +228,21 @@ impl WaveformClock {
         row: usize,
         timing: WaveformTiming<'_>,
     ) {
+        let doc = &timing.config.msegs[self.request.slot];
+        self.prepare_segment_with_curve(telemetry, row, timing, doc);
+    }
+
+    pub fn update_curve(&mut self, doc: &MsegData) {
+        self.doc = *doc;
+    }
+
+    pub fn prepare_segment_with_curve(
+        &mut self,
+        telemetry: &WaveformTelemetry,
+        row: usize,
+        timing: WaveformTiming<'_>,
+        doc: &MsegData,
+    ) {
         self.active = self.request.matches(row, timing.kind)
             && timing.sample_rate.is_finite()
             && timing.sample_rate > 0.0;
@@ -239,7 +254,7 @@ impl WaveformClock {
             self.pending = None;
         }
         self.trigger_epoch = timing.trigger_epoch;
-        self.doc = timing.config.msegs[self.request.slot];
+        self.doc = *doc;
         self.step = phase_step(&self.doc, timing.bpm, timing.sample_rate);
         self.phase = timing.phase;
         self.follow_audio_phase =
@@ -327,6 +342,56 @@ impl WaveformClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn midi_geometry_uses_effective_hold_free_timing_without_restarting_capture() {
+        let telemetry = WaveformTelemetry::default();
+        telemetry.request(0, 0, EffectKind::Svf);
+        let mut config = TrackModulation::default();
+        config.msegs[0] = MsegData {
+            sync_mode: tiny_skia_widgets::SyncMode::Time,
+            time_seconds: 0.01,
+            play_mode: PlayMode::Cyclic,
+            ..MsegData::default()
+        };
+        config.msegs[0].insert_node(0.25, 1.0).unwrap();
+        config.msegs[0].hold = HoldMode::Loop { start: 0, end: 1 };
+        let mut effective = config.msegs[0];
+        effective.hold = HoldMode::None;
+        let mut clock = WaveformClock::default();
+        clock.begin_block(&telemetry);
+        clock.prepare_segment_with_curve(
+            &telemetry,
+            0,
+            WaveformTiming {
+                config: &config,
+                kind: EffectKind::Svf,
+                phase: 0.0,
+                trigger_epoch: 7,
+                bpm: 120.0,
+                sample_rate: 1000.0,
+            },
+            &effective,
+        );
+        for _ in 0..5 {
+            clock.record_sample(&telemetry, [0.1; 2], [0.1; 2], 0.0);
+        }
+        assert!((clock.phase - 0.5).abs() < 1e-6);
+        let mut selected = MsegData {
+            sync_mode: tiny_skia_widgets::SyncMode::Time,
+            time_seconds: 0.01,
+            play_mode: PlayMode::Cyclic,
+            ..MsegData::default()
+        };
+        selected.nodes[0].value = 1.0;
+        clock.update_curve(&selected);
+        assert_eq!(clock.trigger_epoch, 7);
+        assert!((clock.phase - 0.5).abs() < 1e-6);
+        for _ in 0..4 {
+            clock.record_sample(&telemetry, [0.1; 2], [0.1; 2], 0.0);
+        }
+        assert!((clock.phase - 0.9).abs() < 1e-6);
+        assert_eq!(clock.trigger_epoch, 7);
+    }
     use tiny_skia_widgets::SyncMode;
 
     #[test]
