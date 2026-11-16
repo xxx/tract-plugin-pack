@@ -86,6 +86,10 @@ reusable curves/favorites, cross-plugin copy/paste, mutation, transforms, and
 triplet grids through the **Tool**, **Shapes**, and **Edit** menus. All curve
 edits update the baked kernel.
 
+Hover for footer hints, or click **?** beside Point for the gesture guide.
+**F1 / ?** and **View → Editing guide...** also open it. Help leaves the curve
+and kernel intact; see [context help](../mseg-editor.md#context-help-and-gesture-guide).
+
 Edit includes endpoint matching and **Smooth loop seam (10%)** across the whole
 kernel curve. These modify the saved shape and rebake the kernel; see
 [loop seam tools](../mseg-editor.md#loop-seam-tools).

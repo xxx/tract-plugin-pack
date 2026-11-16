@@ -878,6 +878,11 @@ impl baseview::WindowHandler for MultosisWindow {
         event: baseview::Event,
     ) -> baseview::EventStatus {
         match &event {
+            baseview::Event::Mouse(baseview::MouseEvent::CursorLeft) => {
+                if self.view == View::Effect {
+                    self.handle_effect_event(&event);
+                }
+            }
             baseview::Event::Window(baseview::WindowEvent::Unfocused) => self.finish_input(),
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
@@ -1139,6 +1144,15 @@ impl baseview::WindowHandler for MultosisWindow {
                 self.left_gesture = None;
                 let after = self.snapshot();
                 self.undo.commit_capture(&after);
+            }
+            baseview::Event::Keyboard(ev)
+                if (self.speed_dropdown.is_open()
+                    || self.toolbar_drag.active_action().is_some()
+                    || self.track_drag.is_some()
+                    || self.left_gesture.is_some())
+                    && widgets::mseg::is_help_shortcut(ev) =>
+            {
+                return baseview::EventStatus::Captured;
             }
             baseview::Event::Keyboard(_) if self.effect_editor.captures_keyboard() => {
                 let snap = self.snapshot();

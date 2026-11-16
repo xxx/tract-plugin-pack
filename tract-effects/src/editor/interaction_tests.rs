@@ -1,3 +1,4 @@
+mod context_help;
 mod semitone_grid;
 
 use super::*;

@@ -127,7 +127,7 @@ impl MsegEditState {
         &self.power.message
     }
     pub fn has_open_menu(&self) -> bool {
-        self.dropdown.is_open() || self.inspector_node().is_some()
+        self.help_open() || self.dropdown.is_open() || self.inspector_node().is_some()
     }
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
@@ -259,8 +259,10 @@ impl MsegEditState {
             StripId::View => {
                 if index == 0 {
                     self.fit_all();
-                } else {
+                } else if index == 1 {
                     self.fit_selection(data);
+                } else if index == 2 {
+                    self.open_help(self.overlay_scale());
                 }
                 Ok(false)
             }
@@ -469,6 +471,10 @@ impl MsegEditState {
     }
 
     pub fn on_wheel(&mut self, delta: f32, rect: (f32, f32, f32, f32)) -> bool {
+        if self.help_open() {
+            self.help_wheel(delta);
+            return true;
+        }
         if !self.has_open_menu() {
             return false;
         }
@@ -490,6 +496,16 @@ impl MsegEditState {
         scale: f32,
     ) -> (bool, Option<MsegEdit>) {
         self.prepare_precision(data, scale);
+        if self.help_open() {
+            self.help_key(event, rect, scale);
+            return (true, None);
+        }
+        if super::is_help_shortcut(event) && !self.has_open_menu() {
+            if !self.is_dragging() {
+                self.open_help(scale);
+            }
+            return (true, None);
+        }
         if self.inspector_node().is_some() {
             return self.inspector_key(event, data);
         }
@@ -643,6 +659,24 @@ impl MsegEditState {
             .collect()
     }
 
+    pub(super) fn selection_handle_at(
+        &self,
+        data: &MsegData,
+        layout: &MsegLayout,
+        scale: f32,
+        x: f32,
+        y: f32,
+    ) -> Option<SelectionHandle> {
+        self.selection_handles(data, layout, scale)
+            .into_iter()
+            .find_map(|(handle, (hx, hy))| {
+                (in_rect(layout.canvas, hx, hy)
+                    && (x - hx).abs() <= 5.0 * scale
+                    && (y - hy).abs() <= 5.0 * scale)
+                    .then_some(handle)
+            })
+    }
+
     pub(crate) fn begin_power_drag(
         &mut self,
         x: f32,
@@ -652,15 +686,7 @@ impl MsegEditState {
         scale: f32,
     ) -> Option<Option<MsegEdit>> {
         if self.tool() == MsegTool::Pointer {
-            let hit = self
-                .selection_handles(data, layout, scale)
-                .into_iter()
-                .find(|(_, (hx, hy))| {
-                    in_rect(layout.canvas, *hx, *hy)
-                        && (x - hx).abs() <= 5.0 * scale
-                        && (y - hy).abs() <= 5.0 * scale
-                });
-            if let Some((handle, _)) = hit {
+            if let Some(handle) = self.selection_handle_at(data, layout, scale, x, y) {
                 self.power.gesture_start = Some(*data);
                 self.power.press = (x_to_phase(layout, x), y_to_value(layout, y));
                 self.drag = Some(DragTarget::Transform(handle));

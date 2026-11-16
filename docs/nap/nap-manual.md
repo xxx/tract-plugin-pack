@@ -53,6 +53,11 @@ selection handles, reusable curves/favorites, cross-plugin copy/paste, mutation,
 transforms, and triplet grids. Find them in **Tool**, **Shapes**, and **Edit**.
 In Efficient mode, curve gestures defer IR baking until release.
 
+Each pane provides hover hints and a **?** gesture guide beside Point. Point at
+a pane and press **F1 / ?**, or use **View → Editing guide...**. The guide keeps
+its pane's input ownership and leaves the tail unchanged; see
+[context help](../mseg-editor.md#context-help-and-gesture-guide).
+
 Edit includes endpoint matching and **Smooth loop seam (10%)** across the whole
 selected pane's curve. These modify its saved shape and regenerate the tail;
 see [loop seam tools](../mseg-editor.md#loop-seam-tools).

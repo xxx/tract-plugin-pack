@@ -10,8 +10,10 @@ use crate::dropdown::{DropdownEvent, DropdownState};
 use crate::mseg::MsegData;
 use crate::mseg::randomize::RandomStyle;
 
+mod help;
 mod power;
 mod precision;
+pub use help::{HelpPage, is_help_shortcut};
 pub use power::SelectionHandle;
 
 /// Default grid option pairs used when no custom list is supplied.
@@ -154,6 +156,7 @@ pub enum MarkerHandle {
 pub struct MsegEditState {
     power: power::PowerState,
     precision: precision::PrecisionState,
+    help: help::HelpState,
     /// When true, playback/timing controls and the marker lane are hidden.
     curve_only: bool,
     /// When false, the strip's Unipolar/Bipolar polarity toggle is hidden (and
@@ -211,6 +214,8 @@ impl MsegEditState {
         self.step_last_cell = None;
         self.dropdown.close();
         self.cancel_precision();
+        self.close_help();
+        self.clear_hover_hint();
         self.power.gesture_start = None;
         self.power.preview.clear();
         self.reset_pen_repeat();
@@ -233,6 +238,7 @@ impl MsegEditState {
         Self {
             power: power::PowerState::default(),
             precision: precision::PrecisionState::default(),
+            help: help::HelpState::default(),
             curve_only,
             show_polarity: true,
             drag: None,
@@ -440,6 +446,10 @@ impl MsegEditState {
         ctrl: bool,
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{MsegHit, mseg_hit_test};
+        if self.help_open() {
+            self.help_mouse_down(x, y, rect, scale);
+            return None;
+        }
         self.prepare_precision(data, scale);
         if self.is_panning() {
             return None;
@@ -556,6 +566,9 @@ impl MsegEditState {
                         self.open_power_menu(id, anchor, window_size);
                     }
                     None
+                } else if in_rect(power.help, x, y) {
+                    self.open_help(scale);
+                    None
                 } else if in_rect(power.point, x, y) {
                     self.open_point_inspector(data);
                     None
@@ -634,6 +647,10 @@ impl MsegEditState {
         fine: bool,
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{MsegHit, mseg_hit_test, x_to_phase, y_to_value};
+        self.track_hint_pointer(x, y, rect);
+        if self.help_open() {
+            return None;
+        }
         let layout = self.layout(rect, scale);
 
         self.prepare_precision(data, scale);
@@ -711,6 +728,9 @@ impl MsegEditState {
         scale: f32,
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{phase_to_x, value_to_y};
+        if self.help_open() {
+            return None;
+        }
         if self.drag == Some(DragTarget::Pan) {
             return None;
         }
@@ -769,6 +789,10 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
+        if self.help_open() {
+            self.help_mouse_down(x, y, rect, scale);
+            return None;
+        }
         if self.is_panning() {
             return None;
         }
@@ -808,6 +832,10 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
+        if self.help_open() {
+            self.close_help();
+            return None;
+        }
         self.prepare_precision(data, scale);
         if self.inspector_node().is_some() {
             self.dismiss_inspector();
@@ -1578,8 +1606,9 @@ mod tests {
         let mut data = MsegData::default();
         let mut state = MsegEditState::new();
         let l = mseg_layout(RECT, false, 1.0);
-        let bx = l.strip.0 + l.strip.2 - 48.0;
-        let by = l.strip.1 + l.strip.3 * 0.5;
+        let button = crate::mseg::render::strip_buttons(l.strip, 1.0, true).randomize;
+        let bx = button.0 + button.2 * 0.5;
+        let by = button.1 + button.3 * 0.5;
         // Seed starts at 0; each Randomize click does wrapping_add(1).
         let ev = state.on_mouse_down(bx, by, &mut data, RECT, 1.0, false);
         assert_eq!(ev, Some(MsegEdit::Changed));

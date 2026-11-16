@@ -15,7 +15,7 @@ use tiny_skia::Pixmap;
 /// Marker-lane height in unscaled px (full editor only).
 const MARKER_LANE_H: f32 = 16.0;
 /// Control-strip height in unscaled px.
-const STRIP_H: f32 = 74.0;
+const STRIP_H: f32 = 96.0;
 
 /// Sub-rectangles of the MSEG widget, each `(x, y, w, h)`. `marker_lane` has
 /// height 0 in curve-only mode.
@@ -163,7 +163,9 @@ pub fn draw_mseg_with_background(
     draw_marker_lane(pixmap, &layout, data, state, scale, value_color);
     draw_strip(pixmap, text_renderer, &layout, data, state, scale);
 
-    if let Some((idx, text)) = node_tooltip {
+    if !state.help_open()
+        && let Some((idx, text)) = node_tooltip
+    {
         draw_node_tooltip(pixmap, text_renderer, &layout, data, idx, text, scale);
     }
 }
@@ -195,6 +197,7 @@ pub fn draw_mseg_dropdown(
         window_size,
     );
     state.draw_precision_overlay(pixmap, text_renderer, rect);
+    state.draw_help(pixmap, text_renderer, rect, state.overlay_scale());
 }
 
 /// Draw the hold marker(s) in the marker lane. No-op in curve-only mode or
@@ -878,8 +881,19 @@ fn draw_strip(
         state.inspector_node().is_some(),
         false,
     );
-    let available =
-        (sx + sw - state.status_reserve() * scale - toolbar.message_x - 6.0 * scale).max(0.0);
+    let r = toolbar.help;
+    draw_button(
+        pixmap,
+        text_renderer,
+        r.0,
+        r.1,
+        r.2,
+        r.3,
+        "?",
+        state.help_open(),
+        false,
+    );
+    let available = (sx + sw - toolbar.message_x - 6.0 * scale).max(0.0);
     let viewport = state.viewport();
     let (lo, hi) = viewport.time_range();
     let (mut bottom, mut top) = viewport.value_range();
@@ -894,13 +908,23 @@ fn draw_strip(
         bottom,
         top
     );
+    let widget_rect = (
+        layout.canvas.0,
+        layout.marker_lane.1,
+        layout.canvas.2,
+        layout.strip.1 + layout.strip.3 - layout.marker_lane.1,
+    );
+    let hint = state.context_hint(data, widget_rect, scale);
     let pitch_unavailable =
         data.value_grid == crate::mseg::ValueGrid::Semitones && state.pitch_grid().is_none();
-    let seam_warning = !pitch_unavailable
+    let seam_warning = hint.is_none()
+        && !pitch_unavailable
         && crate::mseg::seam::LoopSeam::visible(data, state.is_curve_only()).is_some()
         && state.status_message().is_empty();
     let message = if state.status_message().is_empty() {
-        if pitch_unavailable {
+        if let Some(hint) = hint {
+            hint
+        } else if pitch_unavailable {
             "Semitone grid unavailable; choose a pitched target or numeric grid"
         } else if seam_warning {
             "Loop seam jump; Edit: match or smooth"
@@ -928,7 +952,7 @@ fn draw_strip(
     text_renderer.draw_text(
         pixmap,
         toolbar.message_x,
-        toolbar.tool.1 + 20.0 * scale,
+        sy + sh - 7.0 * scale,
         &visible,
         11.0 * scale,
         if seam_warning {
@@ -945,6 +969,7 @@ pub(crate) struct PowerButtons {
     pub edit: (f32, f32, f32, f32),
     pub view: (f32, f32, f32, f32),
     pub point: (f32, f32, f32, f32),
+    pub help: (f32, f32, f32, f32),
     pub message_x: f32,
 }
 
@@ -964,8 +989,19 @@ pub(crate) fn power_buttons(strip: (f32, f32, f32, f32), scale: f32) -> PowerBut
             70.0 * scale,
             height,
         ),
-        message_x: x + 3.0 * (width + 4.0 * scale) + 162.0 * scale,
+        help: (
+            x + 3.0 * (width + 4.0 * scale) + 158.0 * scale,
+            y,
+            26.0 * scale,
+            height,
+        ),
+        message_x: x,
     }
+}
+
+/// Gesture-guide trigger bounds for embedding hosts and offscreen previews.
+pub fn help_button_rect(strip: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32) {
+    power_buttons(strip, scale).help
 }
 
 // ---------------------------------------------------------------------------
@@ -1164,6 +1200,65 @@ mod tests {
 
     fn px_alpha(pm: &Pixmap, x: u32, y: u32) -> u8 {
         pm.pixels()[(y * pm.width() + x) as usize].alpha()
+    }
+
+    #[test]
+    fn footer_renders_complete_context_hints_at_minitosis_default_size_and_zoom() {
+        for scale in [0.5, 1.0, 2.0] {
+            let rect = (30.0 * scale, 288.0 * scale, 1094.0 * scale, 390.0 * scale);
+            let mut state = MsegEditState::new();
+            state.set_status_reserve(360.0);
+            let mut data = MsegData::default();
+            let layout = state.layout(rect, scale);
+            let help = help_button_rect(layout.strip, scale);
+            state.on_mouse_move(
+                help.0 + help.2 * 0.5,
+                help.1 + help.3 * 0.5,
+                &mut data,
+                rect,
+                scale,
+                false,
+            );
+            for hint in [
+                state.context_hint(&data, rect, scale).unwrap(),
+                "Stretch; Alt: centered; Ctrl: skew; Shift: fine",
+            ] {
+                state.set_external_hint(Some(hint));
+                let mut actual =
+                    Pixmap::new((1140.0 * scale) as u32, (704.0 * scale) as u32).unwrap();
+                let mut text = TextRenderer::new(crate::DEFAULT_FONT);
+                draw_strip(&mut actual, &mut text, &layout, &data, &state, scale);
+                state.set_status_message(" ");
+                let mut blank = Pixmap::new(actual.width(), actual.height()).unwrap();
+                draw_strip(&mut blank, &mut text, &layout, &data, &state, scale);
+                let actual_ink = actual
+                    .pixels()
+                    .iter()
+                    .zip(blank.pixels())
+                    .filter(|(a, b)| a != b)
+                    .count();
+                let font = 11.0 * scale;
+                let mut reference = Pixmap::new(
+                    text.text_width(hint, font).ceil() as u32 + 4,
+                    (font * 3.0).ceil() as u32 + 4,
+                )
+                .unwrap();
+                reference.fill(color_bg());
+                text.draw_text(&mut reference, 2.0, font * 2.0, hint, font, color_muted());
+                let background = reference.pixels()[0];
+                let expected_ink = reference
+                    .pixels()
+                    .iter()
+                    .filter(|pixel| **pixel != background)
+                    .count();
+                assert!(expected_ink > 40);
+                assert!(
+                    actual_ink * 100 >= expected_ink * 98,
+                    "{scale}x: only {actual_ink}/{expected_ink} pixels of {hint:?}"
+                );
+                state.set_status_message("");
+            }
+        }
     }
 
     #[test]
@@ -1487,10 +1582,9 @@ mod tests {
     fn hit_test_randomize_button() {
         let data = MsegData::default();
         let l = mseg_layout(RECT, false, 1.0);
-        // Centre of the Randomize button: drawn 6px from the strip's right
-        // edge, 84px wide → centre is 6 + 84/2 px in from the right.
-        let bx = l.strip.0 + l.strip.2 - 6.0 - 84.0 * 0.5;
-        let by = l.strip.1 + l.strip.3 * 0.5;
+        let button = strip_buttons(l.strip, 1.0, true).randomize;
+        let bx = button.0 + button.2 * 0.5;
+        let by = button.1 + button.3 * 0.5;
         assert_eq!(
             mseg_hit_test(&l, &data, false, 1.0, bx, by),
             MsegHit::Randomize
@@ -1549,10 +1643,10 @@ mod tests {
 
     #[test]
     fn ghost_curve_draws_some_pixels() {
-        let mut pm = Pixmap::new(200, 120).unwrap();
+        let mut pm = Pixmap::new(200, 160).unwrap();
         let data = MsegData::default(); // a 0->1 ramp
         let state = MsegEditState::new();
-        let rect = (0.0, 0.0, 200.0, 120.0);
+        let rect = (0.0, 0.0, 200.0, 160.0);
         draw_mseg_ghost(&mut pm, rect, &data, &state, 1.0, 0x5A5040FF);
         // The ghost curve strokes a polyline — some pixels are non-transparent.
         let any_drawn = pm.pixels().iter().any(|p| p.alpha() != 0);

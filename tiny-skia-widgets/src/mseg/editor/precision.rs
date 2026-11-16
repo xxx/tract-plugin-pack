@@ -3,7 +3,7 @@ use crate::mseg::render::{MsegLayout, in_rect, mseg_layout};
 use crate::mseg::{MsegData, MsegViewport, PointWeight, Polarity, SegmentShape, SyncMode, tools};
 use keyboard_types::{Key, KeyState, KeyboardEvent, Modifiers};
 
-pub(crate) const VIEW_ITEMS: &[&str] = &["Fit all", "Fit selection"];
+pub(crate) const VIEW_ITEMS: &[&str] = &["Fit all", "Fit selection", "Editing guide..."];
 
 pub(super) struct PrecisionState {
     viewport: MsegViewport,
@@ -156,6 +156,12 @@ impl PointInspector {
 }
 
 impl MsegEditState {
+    pub(crate) fn overlay_scale(&self) -> f32 {
+        self.precision.scale
+    }
+    pub(crate) fn set_overlay_scale(&mut self, scale: f32) {
+        self.precision.scale = scale;
+    }
     pub fn viewport(&self) -> MsegViewport {
         self.precision.viewport
     }
@@ -683,7 +689,7 @@ fn inspector_rect(rect: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32
     let width = (340.0 * scale).min((rect.2 - 12.0 * scale).max(0.0));
     (
         rect.0 + rect.2 - width - 6.0 * scale,
-        (rect.1 + rect.3 - 74.0 * scale - 224.0 * scale).max(rect.1),
+        (mseg_layout(rect, false, scale).strip.1 - 224.0 * scale).max(rect.1),
         width,
         224.0 * scale,
     )

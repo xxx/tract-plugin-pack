@@ -569,6 +569,9 @@ impl NapWindow {
         let w = self.physical_width as f32;
         let h = self.physical_height as f32;
 
+        for state in &mut self.states {
+            state.set_help_bounds((w, h));
+        }
         self.drag.clear_regions();
         self.surface.pixmap.fill(widgets::color_bg());
 
@@ -865,14 +868,21 @@ impl baseview::WindowHandler for NapWindow {
 
     fn on_event(
         &mut self,
-        _window: &mut baseview::Window,
+        window: &mut baseview::Window,
         event: baseview::Event,
     ) -> baseview::EventStatus {
         let w = self.physical_width as f32;
         let h = self.physical_height as f32;
         let s = self.scale_factor;
 
+        for state in &mut self.states {
+            state.set_help_bounds((w, h));
+        }
         match &event {
+            baseview::Event::Window(baseview::WindowEvent::Unfocused) => {
+                let backing = self.drag.input_scale();
+                widgets::PhysicalEditor::prepare_resize(self, window, backing);
+            }
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
@@ -887,6 +897,9 @@ impl baseview::WindowHandler for NapWindow {
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorLeft) => {
                 self.drag.on_cursor_left();
+                for state in &mut self.states {
+                    state.clear_hover_hint();
+                }
             }
 
             // ── CursorMoved ──────────────────────────────────────────────────
@@ -897,6 +910,9 @@ impl baseview::WindowHandler for NapWindow {
                 let x = position.x as f32;
                 let y = position.y as f32;
                 self.drag.set_mouse(x, y);
+                for state in &mut self.states {
+                    state.clear_hover_hint();
+                }
                 self.update_modifiers(modifiers);
 
                 // A live dial drag takes priority over MSEG hover/drag.
@@ -1203,11 +1219,15 @@ impl baseview::WindowHandler for NapWindow {
                     keyboard_types::Key::Backspace => self.text_edit.backspace(),
                     keyboard_types::Key::Escape => self.text_edit.cancel(),
                     keyboard_types::Key::Enter => self.commit_text_edit(),
+                    _ if widgets::mseg::is_help_shortcut(ev) => {}
                     _ => return baseview::EventStatus::Ignored,
                 }
                 return baseview::EventStatus::Captured;
             }
             baseview::Event::Keyboard(ev) => {
+                if self.drag.active_action().is_some() && widgets::mseg::is_help_shortcut(ev) {
+                    return baseview::EventStatus::Captured;
+                }
                 let (_, y) = self.drag.mouse_pos();
                 let Some(p) = curve_input_pane(&self.states, y, h, s) else {
                     return baseview::EventStatus::Ignored;
@@ -1399,6 +1419,40 @@ mod tests {
         assert_eq!(curve_input_pane(&states, h - 95.0, h, s), Some(0));
         states[0].on_mouse_up(&mut data, rect, s);
         assert_eq!(curve_input_pane(&states, h - 95.0, h, s), Some(2));
+    }
+
+    #[test]
+    fn guide_keeps_its_opening_pane_and_native_bounds_without_curve_or_bake_edits() {
+        use keyboard_types::{Key, KeyState, KeyboardEvent};
+        let (w, h, s) = (880.0, 720.0, 1.0);
+        for owner in 0..3 {
+            let mut states = std::array::from_fn(|_| MsegEditState::new_curve_only());
+            let mut curves = [widgets::mseg::MsegData::default(); 3];
+            let before = curves;
+            states[owner].set_help_bounds((w, h));
+            let rect = pane_rects(w, h, s)[owner];
+            let key = |key| KeyboardEvent {
+                key,
+                state: KeyState::Down,
+                ..KeyboardEvent::default()
+            };
+            assert_eq!(
+                states[owner].on_key(&key(Key::F1), &mut curves[owner], rect, s),
+                (true, None)
+            );
+            assert!(states[owner].help_open());
+            assert_eq!(curve_input_pane(&states, 5.0, h, s), Some(owner));
+            assert_eq!(curve_input_pane(&states, h - 5.0, h, s), Some(owner));
+            assert_eq!(
+                states[owner].on_key(&key(Key::ArrowRight), &mut curves[owner], rect, s),
+                (true, None)
+            );
+            assert!(states[owner].on_wheel(-3.0, rect));
+            assert_eq!(curves, before);
+            states[owner].cancel_interaction();
+            assert!(!states[owner].help_open());
+            assert_eq!(curve_input_pane(&states, 5.0, h, s), Some(0));
+        }
     }
 
     #[test]

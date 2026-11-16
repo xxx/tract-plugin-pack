@@ -231,6 +231,10 @@ They are available from the **Tool**, **Shapes**, and **Edit** menus below the
 existing controls. Triplet grids `6 / 8`, `12 / 8`, and `24 / 16` supplement the
 four straight grid presets described above.
 
+Hover for footer hints, or click **?** beside Point for the gesture guide.
+**F1 / ?** and **View → Editing guide...** also open it; see
+[context help](../mseg-editor.md#context-help-and-gesture-guide).
+
 Grid also offers **Semitones** for routed pitch and logarithmic frequency
 targets, following base value, Depth, and polarity. See
 [semitone grids](../mseg-editor.md#semitone-grids).

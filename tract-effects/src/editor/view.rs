@@ -118,9 +118,10 @@ pub fn effect_layout(bounds: (f32, f32, f32, f32), scale: f32) -> EffectLayout {
     let mseg_sync = l(ox + 814.0, oy + 200.0, 110.0, 34.0);
     let mseg_length = l(ox + 934.0, oy + 200.0, 140.0, 34.0);
     let mseg_pane = l(ox, oy + 240.0, mw - inset, 390.0);
+    let mseg_strip = widgets::mseg::mseg_layout(mseg_pane, false, scale).strip;
     let smooth = (
         mseg_pane.0 + mseg_pane.2 - 234.0 * scale,
-        mseg_pane.1 + mseg_pane.3 - 30.0 * scale,
+        mseg_strip.1 + 44.0 * scale,
         150.0 * scale,
         26.0 * scale,
     );
@@ -1270,7 +1271,7 @@ mod tests {
                     let mut actual = canvas();
                     draw_mseg_playhead(&mut actual, pane, phase, scale);
                     let mut expected = canvas();
-                    widgets::draw_rect(&mut expected, x, 60.0 * scale, line_w, 42.0 * scale, color);
+                    widgets::draw_rect(&mut expected, x, 60.0 * scale, line_w, 20.0 * scale, color);
                     assert_pixels(
                         &actual,
                         &expected,

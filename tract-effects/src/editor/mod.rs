@@ -5,6 +5,7 @@ use crate::modulation::{ModulationTarget, TrackModulation, TriggerSource};
 use tiny_skia_widgets as widgets;
 
 mod detector;
+mod help;
 mod live;
 mod midi;
 mod pitch_grid;
@@ -227,6 +228,12 @@ impl EffectEditor {
         event: &baseview::Event,
         context: EditorContext<'_>,
     ) -> EditorResponse {
+        if matches!(
+            event,
+            baseview::Event::Mouse(baseview::MouseEvent::CursorLeft)
+        ) {
+            self.mseg_edit.clear_hover_hint();
+        }
         if self.check_detector_binding(context.effect.kind, context.modulation) {
             return EditorResponse {
                 captured: true,
@@ -319,6 +326,9 @@ struct Session<'a> {
 
 impl<'a> Session<'a> {
     fn new(state: &'a mut EffectEditor, context: EditorContext<'a>) -> Self {
+        state
+            .mseg_edit
+            .set_help_bounds(context.geometry.window_size);
         state.refresh_pitch_grid(context.effect, context.modulation);
         state.mouse_pos = context.pointer_position;
         state
@@ -434,6 +444,19 @@ impl<'a> Session<'a> {
                 self.mouse_pos = (x, y);
                 self.state.mouse_pos = (x, y);
                 self.state.effect_dial_drag.set_mouse(x, y);
+                if self.state.mseg_edit.help_open() {
+                    let sel = self.state.selected_mseg.min(3);
+                    self.state.mseg_edit.on_mouse_move(
+                        x,
+                        y,
+                        &mut self.modulation.msegs[sel],
+                        self.layout.mseg_pane,
+                        self.scale_factor,
+                        false,
+                    );
+                    self.response.captured = true;
+                    return;
+                }
                 let shift = modifiers.contains(Modifiers::SHIFT);
                 self.state.mseg_edit.set_transform_modifiers(
                     modifiers.contains(Modifiers::ALT),
@@ -464,6 +487,7 @@ impl<'a> Session<'a> {
                 {
                     self.response.changed = true;
                 }
+                self.update_mseg_hint();
             }
             Event::Mouse(MouseEvent::ButtonPressed {
                 button: MouseButton::Left,
@@ -655,10 +679,17 @@ impl<'a> Session<'a> {
                     Key::Backspace => self.state.text_edit.backspace(),
                     Key::Escape => self.state.text_edit.cancel(),
                     Key::Enter => self.commit_pending_text(),
+                    _ if widgets::mseg::is_help_shortcut(ev) => {}
                     _ => self.response.captured = false,
                 }
             }
             Event::Keyboard(ev) => {
+                if self.state.effect_dial_drag.active_action().is_some()
+                    && widgets::mseg::is_help_shortcut(ev)
+                {
+                    self.response.captured = true;
+                    return;
+                }
                 let sel = self.state.selected_mseg.min(3);
                 let (captured, edit) = self.state.mseg_edit.on_key(
                     ev,
@@ -2115,7 +2146,7 @@ mod tests {
                             session.layout.mseg_pane.0,
                             session.layout.mseg_pane.1,
                             session.layout.mseg_pane.2,
-                            session.layout.mseg_pane.3 - 30.0 * session.scale_factor,
+                            session.layout.smooth.1 - session.layout.mseg_pane.1,
                         ),
                         &format!("selected slot {selection}"),
                     );
@@ -2177,7 +2208,7 @@ mod tests {
                             session.layout.mseg_pane.0,
                             session.layout.mseg_pane.1,
                             session.layout.mseg_pane.2,
-                            session.layout.mseg_pane.3 - 30.0 * session.scale_factor,
+                            session.layout.smooth.1 - session.layout.mseg_pane.1,
                         ),
                         &format!("tooltip slot {slot}"),
                     );
@@ -3028,7 +3059,7 @@ mod tests {
                     );
                     let point = (
                         layout.strip.0 + 20.0 * session.scale_factor,
-                        layout.strip.1 + layout.strip.3 / 2.0,
+                        layout.strip.1 + 18.0 * session.scale_factor,
                     );
                     session.state.mseg_last_click_pos = (-999.0, -999.0);
                     assert!(session.on_effect_press(point.0, point.1, false));

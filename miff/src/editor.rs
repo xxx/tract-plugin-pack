@@ -236,6 +236,7 @@ impl MiffWindow {
         let w = self.physical_width as f32;
         let h = self.physical_height as f32;
 
+        self.mseg_state.set_help_bounds((w, h));
         self.drag.clear_regions();
         self.surface.pixmap.fill(widgets::color_bg());
 
@@ -570,15 +571,20 @@ impl baseview::WindowHandler for MiffWindow {
 
     fn on_event(
         &mut self,
-        _window: &mut baseview::Window,
+        window: &mut baseview::Window,
         event: baseview::Event,
     ) -> baseview::EventStatus {
         let w = self.physical_width as f32;
         let h = self.physical_height as f32;
         let s = self.scale_factor;
         let (mseg_rect, _response_rect, strip_rect) = layout(w, h);
+        self.mseg_state.set_help_bounds((w, h));
 
         match &event {
+            baseview::Event::Window(baseview::WindowEvent::Unfocused) => {
+                let backing = self.drag.input_scale();
+                widgets::PhysicalEditor::prepare_resize(self, window, backing);
+            }
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
@@ -593,6 +599,7 @@ impl baseview::WindowHandler for MiffWindow {
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorLeft) => {
                 self.drag.on_cursor_left();
+                self.mseg_state.clear_hover_hint();
             }
 
             // ── CursorMoved ─────────────────────────────────────────────────
@@ -603,6 +610,7 @@ impl baseview::WindowHandler for MiffWindow {
                 let x = position.x as f32;
                 let y = position.y as f32;
                 self.drag.set_mouse(x, y);
+                self.mseg_state.clear_hover_hint();
                 self.update_modifiers(modifiers);
 
                 match if self.mseg_state.has_open_menu() {
@@ -1027,11 +1035,15 @@ impl baseview::WindowHandler for MiffWindow {
                     keyboard_types::Key::Enter => {
                         self.commit_text_edit();
                     }
+                    _ if widgets::mseg::is_help_shortcut(ev) => {}
                     _ => return baseview::EventStatus::Ignored,
                 }
                 return baseview::EventStatus::Captured;
             }
             baseview::Event::Keyboard(ev) => {
+                if self.drag.active_action().is_some() && widgets::mseg::is_help_shortcut(ev) {
+                    return baseview::EventStatus::Captured;
+                }
                 let (captured, changed) = match self.params.curve.lock() {
                     Ok(mut curve) => self.mseg_state.on_key(ev, &mut curve, mseg_rect, s),
                     _ => (false, None),

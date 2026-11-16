@@ -5,6 +5,30 @@ Multosis, Minitosis, Miff, and Nap share these editing tools. The **Tool**,
 Multosis/Minitosis provide playback and modulation routing; Miff/Nap use the
 same geometry tools for their static kernel/tail curves.
 
+## Context help and gesture guide
+
+Hover a curve control, point, handle, or empty canvas to see a short hint in the
+footer. During a gesture, the hint describes that gesture. Multosis/Minitosis
+also explain their modulation controls. Moving outside a pane or window clears
+its hover hint; operation errors keep priority over hints.
+
+Click **?** beside Point, choose **View → Editing guide...**, or press **F1 / ?**
+to open the guide. In Nap, point at a pane before using the shortcut. Its four
+pages cover **Points**, **Select**, **Shapes**, and **View**. Static editors omit
+playback and routing controls unavailable in those plugins.
+
+Use the mousewheel, Up/Down, or Page Up/Down to scroll; Left/Right or Tab changes
+pages, and Home/End jumps within a page. Escape, F1, ?, or X closes the guide.
+An outside left-click or a right-click dismisses it without activating a control
+beneath. The guide keeps its opening pane's input ownership while covering other
+parts of the window.
+
+Help preserves the curve, selection, tool and viewport, with no undo or bake
+work. Numeric fields and existing menus keep keyboard priority; help shortcuts
+wait until a drawing, pan, or dial gesture ends. Clicking Help commits a pending
+host numeric value through the normal outside-click behavior. Resize and focus
+loss close the guide.
+
 ## Shape pens
 
 Choose **Line pen**, **Arc pen**, or **S-curve pen** from Tool. The white preview

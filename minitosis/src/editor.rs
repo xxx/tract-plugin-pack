@@ -642,6 +642,12 @@ impl baseview::WindowHandler for MinitosisWindow {
                 let after = self.snapshot();
                 self.undo.commit_capture(&after);
             }
+            Event::Keyboard(ev)
+                if self.output_drag.active_action().is_some()
+                    && widgets::mseg::is_help_shortcut(ev) =>
+            {
+                return EventStatus::Captured;
+            }
             Event::Keyboard(ev) if self.output_text.is_active() => {
                 if ev.state != KeyState::Down {
                     return EventStatus::Captured;
@@ -655,6 +661,7 @@ impl baseview::WindowHandler for MinitosisWindow {
                     Key::Backspace => self.output_text.backspace(),
                     Key::Escape => self.output_text.cancel(),
                     Key::Enter => self.commit_output_text(),
+                    _ if widgets::mseg::is_help_shortcut(ev) => {}
                     _ => return EventStatus::Ignored,
                 }
             }
