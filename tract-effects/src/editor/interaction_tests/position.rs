@@ -40,8 +40,9 @@ fn daw_position_menu_choice_is_bounded_undoable_and_keeps_curve_geometry_editabl
         undo.begin_capture(before.clone());
         h.click(h.geometry.layout.trigger);
         h.key(Key::End);
+        h.key(Key::ArrowUp);
         let items = dropdown_items(&h.editor, &h.effect);
-        assert_eq!(items.last(), Some(&"DAW position"));
+        assert_eq!(items.get(8), Some(&"DAW position"));
         let popup = widgets::dropdown::dropdown_popup_layout(
             &h.editor.effect_dropdown,
             &items,
@@ -111,6 +112,7 @@ fn a_clock_mode_change_discards_existing_and_late_trace_points_from_the_previous
     assert!(!region_equal(&old, &baseline));
     h.click(h.geometry.layout.trigger);
     h.key(Key::End);
+    h.key(Key::ArrowUp);
     h.key(Key::Enter);
     let switched = draw(&mut h);
     assert!(region_equal(&switched, &baseline));

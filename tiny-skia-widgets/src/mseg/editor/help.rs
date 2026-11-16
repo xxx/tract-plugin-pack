@@ -232,6 +232,10 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                         "Beat follows quarter notes, Time follows song seconds. Cyclic repeats; OneShot starts at timeline zero and stops at its endpoint or sustain marker. Hold loops keep their usual intro/wrap behavior. Missing positions freeze that clock. Reset/Retrig cannot move the playhead away from DAW position.",
                     ),
                     animated(
+                        "Trigger > MIDI pitch",
+                        "The last matching MIDI note sets the rate of all four curves and restarts at phase zero. Semi transposes -36..+36 semitones; Ch. filters notes. Note-off keeps the last rate running. Before the first note or after changing channel, phase waits at zero. Saved Time/Beat lengths return when leaving this mode.",
+                    ),
+                    animated(
                         "MIDI waves",
                         "Waves beside playback opens MIDI and host automation setup. Eight notes select Project slots; each curve's Wave lane overrides MIDI. Choose Drawn/MIDI and MIDI Off to edit geometry. Playback ignores saved hold markers while switched.",
                     ),

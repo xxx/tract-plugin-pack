@@ -238,13 +238,8 @@ impl Modulation {
             if state.select_midi_wave(&self.config[row], &self.wave_bank, event) {
                 self.pending_wave_rows |= 1 << row;
             }
-            if self.config[row].trigger.accepts_midi(event) {
+            if state.midi_note_on(&self.config[row], event, within_span) {
                 mask |= 1 << row;
-                if within_span {
-                    state.trigger_midi_in_span();
-                } else {
-                    state.trigger();
-                }
             }
         }
         mask
@@ -254,6 +249,11 @@ impl Modulation {
         self.config
             .iter()
             .any(|config| config.wave_switch.is_some())
+    }
+    pub fn uses_midi_pitch(&self) -> bool {
+        self.config
+            .iter()
+            .any(|cfg| cfg.trigger.pitch_settings().is_some())
     }
     pub fn uses_project_waves(&self) -> bool {
         self.uses_midi_waves()

@@ -171,13 +171,14 @@ impl LiveSource {
         trace: bool,
         wave_automation: [u8; 4],
     ) {
-        let token = self.telemetry.request_for_sources(
+        let token = self.telemetry.request_for_modes(
             self.row,
             slot,
             kind,
             trace,
             config.trigger == crate::modulation::TriggerSource::DawPosition,
             config.follower.normalized().request_key(slot),
+            config.trigger.pitch_settings().is_some(),
         );
         if token != self.token {
             self.bins.fill(None);

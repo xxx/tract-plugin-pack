@@ -646,6 +646,52 @@ fn midi_offsets_filters_and_last_sample_retrigger_preserve_bypass_and_none() {
 }
 
 #[test]
+fn midi_pitch_native_host_events_keep_note_off_ungated_and_empty_buffers_unconsumed() {
+    use tract_effects::modulation::TriggerSource;
+    let (mut plugin, mut context) = midi_plugin(EffectKind::Bitcrush, 0.0, false);
+    for doc in &mut plugin.processor.modulation.msegs {
+        doc.play_mode = tiny_skia_widgets::PlayMode::Cyclic;
+    }
+    precise_source(
+        &mut plugin,
+        TriggerSource::MidiPitch {
+            transpose: 0,
+            channel: Some(2),
+        },
+    );
+    context.events = vec![
+        midi_note(5, 2, 69, 1.0),
+        NoteEvent::NoteOff {
+            timing: 11,
+            voice_id: None,
+            channel: 2,
+            note: 69,
+            velocity: 1.0,
+        },
+        midi_note(13, 2, 81, 0.0),
+        midi_note(17, 2, 81, 1.0),
+        midi_note(17, 3, 57, 1.0),
+    ];
+    context.event_index = 0;
+    render(&mut plugin, &mut context, false);
+    let frame = plugin.processor.modulation_frame();
+    assert_eq!(frame.pitch.unwrap().note, Some(81));
+    assert!((frame.phases[0] as f64 - (494.0_f64 * 880.0 / 48000.0).rem_euclid(1.0)).abs() < 1e-7);
+    context.events = vec![midi_note(0, 2, 69, 1.0)];
+    context.event_index = 0;
+    assert_no_alloc::assert_no_alloc(|| {
+        plugin.render(&mut [], &mut [], false, 120.0, &mut context)
+    });
+    assert_eq!(context.event_index, 0);
+    assert_eq!(plugin.processor.modulation_frame().pitch, frame.pitch);
+    assert_no_alloc::assert_no_alloc(|| {
+        plugin.render(&mut [0.25], &mut [-0.5], false, 120.0, &mut context)
+    });
+    assert_eq!(context.event_index, 1);
+    assert_eq!(plugin.processor.phase(0), 0.0);
+}
+
+#[test]
 fn midi_retrigger_retains_smoothing_and_streams_dense_or_empty_buffers_without_allocating() {
     let (mut plugin, mut context) = midi_plugin(EffectKind::Bitcrush, 20.0, false);
     let before = plugin.processor.modulation_frame().outputs[0];

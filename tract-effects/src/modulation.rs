@@ -183,10 +183,18 @@ pub enum TriggerSource {
         hold_ms: f32,
     },
     DawPosition,
+    MidiPitch {
+        #[serde(default)]
+        transpose: i8,
+        #[serde(default)]
+        channel: Option<u8>,
+    },
 }
 
 mod midi;
 pub use midi::{MidiCursor, MidiNoteOn};
+mod pitch;
+pub use pitch::{MIDI_PITCH_TRANSPOSE_MAX, MidiPitchReading, MidiPitchSettings};
 mod wave;
 pub use wave::MidiWaveMapping;
 
@@ -591,6 +599,7 @@ pub struct ModulationState {
     position: position::PositionClock,
     capture_epochs: [u64; 4],
     follower: Box<follower::FollowerRuntime>,
+    pitch: pitch::MidiPitchRuntime,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -627,6 +636,7 @@ impl Default for ModulationState {
             position: position::PositionClock::default(),
             capture_epochs: [0; 4],
             follower: Box::default(),
+            pitch: pitch::MidiPitchRuntime::default(),
         }
     }
 }
@@ -646,12 +656,13 @@ impl ModulationState {
         self.pending_wave = None;
         self.position.reset();
         self.follower.reset();
+        self.pitch = pitch::MidiPitchRuntime::default();
     }
 
     /// Restart all four envelopes and mark this block as triggered.
     pub fn trigger(&mut self) {
         self.trigger_epoch = self.trigger_epoch.wrapping_add(1);
-        if self.position.active {
+        if self.position.active || self.pitch.active() {
             for epoch in &mut self.capture_epochs {
                 *epoch = epoch.wrapping_add(1);
             }
@@ -659,6 +670,7 @@ impl ModulationState {
         self.phases = [0.0; 4];
         self.fired = true;
         self.smooth.trigger();
+        self.pitch.restart();
     }
 
     /// MIDI can interrupt an unfinished span; keep Mix at its consumed value.
@@ -688,6 +700,17 @@ impl ModulationState {
         self.precise.configure_audio(config.audio_trigger);
         let block_len = left.len().min(right.len());
         if block_len > 0 {
+            if let Some(reset_phase) = self.pitch.prepare(config.trigger, sample_rate) {
+                if reset_phase {
+                    self.phases = [0.0; 4];
+                    self.smooth.trigger();
+                } else {
+                    self.smooth.refresh();
+                }
+                for epoch in &mut self.capture_epochs {
+                    *epoch = epoch.wrapping_add(1);
+                }
+            }
             let changed = self.follower.prepare(config.follower, sample_rate);
             for slot in 0..4 {
                 if changed & (1 << slot) != 0 {

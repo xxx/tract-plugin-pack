@@ -4,6 +4,7 @@ use crate::modulation::{AudioTriggerSettings, DetectorInput, DetectorReading};
 use crate::modulation::{MidiWaveMapping, ModulationState, ModulationTarget, TrackModulation};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 mod follower;
+mod pitch;
 
 pub const TRACE_CAPACITY: usize = 512;
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -19,6 +20,7 @@ pub struct ModulationFrame {
     pub wave_automation: [u8; 4],
     pub position_sync: bool,
     pub follower: Option<crate::modulation::FollowerReading>,
+    pub pitch: Option<crate::modulation::MidiPitchReading>,
 }
 impl ModulationFrame {
     pub fn capture(kind: EffectKind, config: &TrackModulation, state: &ModulationState) -> Self {
@@ -34,10 +36,12 @@ impl ModulationFrame {
             wave_automation: state.wave_automation(),
             position_sync: config.trigger == crate::modulation::TriggerSource::DawPosition,
             follower: state.follower_reading(),
+            pitch: state.pitch_reading(),
         }
     }
     pub fn matches(&self, kind: EffectKind, config: &TrackModulation) -> bool {
         self.kind == kind
+            && self.pitch.map(|reading| reading.settings) == config.trigger.pitch_settings()
             && self.follower.map(|reading| reading.config)
                 == (config.follower.mask() != 0).then(|| config.follower.normalized())
             && self.position_sync
@@ -135,6 +139,7 @@ struct AtomicFrame {
     wave_automation: AtomicU32,
     position_sync: AtomicBool,
     follower: follower::AtomicFollower,
+    pitch: pitch::AtomicPitch,
 }
 impl Default for AtomicFrame {
     fn default() -> Self {
@@ -152,6 +157,7 @@ impl Default for AtomicFrame {
             wave_automation: AtomicU32::new(0),
             position_sync: AtomicBool::new(false),
             follower: follower::AtomicFollower::default(),
+            pitch: pitch::AtomicPitch::default(),
         }
     }
 }
@@ -190,6 +196,7 @@ impl AtomicFrame {
         self.position_sync
             .store(frame.position_sync, Ordering::Release);
         self.follower.store(frame.follower);
+        self.pitch.store(frame.pitch);
         self.stamp.store(stamp, Ordering::Release);
     }
     fn load(&self, token: u64) -> Option<ModulationFrame> {
@@ -215,6 +222,7 @@ impl AtomicFrame {
         let wave_automation = self.wave_automation.load(Ordering::Acquire).to_le_bytes();
         let position_sync = self.position_sync.load(Ordering::Acquire);
         let follower = self.follower.load();
+        let pitch = self.pitch.load();
         if self.stamp.load(Ordering::Acquire) != stamp || actual_token != token {
             return None;
         }
@@ -242,6 +250,7 @@ impl AtomicFrame {
             wave_automation,
             position_sync,
             follower,
+            pitch,
         })
     }
 }
@@ -303,6 +312,19 @@ impl ModulationTelemetry {
         position_sync: bool,
         follower: u8,
     ) -> u64 {
+        self.request_for_modes(row, slot, kind, trace, position_sync, follower, false)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_for_modes(
+        &self,
+        row: usize,
+        slot: usize,
+        kind: EffectKind,
+        trace: bool,
+        position_sync: bool,
+        follower: u8,
+        midi_pitch: bool,
+    ) -> u64 {
         if row >= 16 || slot >= 4 {
             return 0;
         }
@@ -312,7 +334,8 @@ impl ModulationTelemetry {
             | ((kind as u64) << 7)
             | ((trace as u64) << 23)
             | ((position_sync as u64) << 24)
-            | (((follower & 7) as u64) << 25);
+            | (((follower & 7) as u64) << 25)
+            | ((midi_pitch as u64) << 28);
         let current = self.request.load(Ordering::Acquire);
         if current as u32 == key as u32 {
             return current;
@@ -376,6 +399,7 @@ pub struct TraceRequest {
     pub trace: bool,
     pub position_sync: bool,
     pub follower: u8,
+    pub midi_pitch: bool,
 }
 impl TraceRequest {
     pub fn matches(self, row: usize, kind: EffectKind) -> bool {
@@ -383,6 +407,7 @@ impl TraceRequest {
     }
     fn accepts(self, row: usize, frame: &ModulationFrame) -> bool {
         self.matches(row, frame.kind)
+            && self.midi_pitch == frame.pitch.is_some()
             && self.position_sync == frame.position_sync
             && self.follower
                 == frame
@@ -417,6 +442,7 @@ impl TraceClock {
             trace: token & (1 << 23) != 0,
             position_sync: token & (1 << 24) != 0,
             follower: ((token >> 25) & 7) as u8,
+            midi_pitch: token & (1 << 28) != 0,
         };
         self.request
     }
@@ -453,6 +479,56 @@ impl TraceClock {
 mod tests {
     use super::*;
     #[test]
+    fn pitch_telemetry_preserves_waiting_and_extreme_notes_and_rejects_other_clock_modes() {
+        use crate::modulation::{MidiPitchReading, TriggerSource};
+        let telemetry = ModulationTelemetry::default();
+        let token = telemetry.request_for_modes(0, 0, EffectKind::Svf, true, false, 0, true);
+        let mut clock = TraceClock::default();
+        clock.begin_block(&telemetry, 48000.0);
+        clock.record(&telemetry, 0, &frame());
+        clock.publish(&telemetry, 0, &frame());
+        assert!(telemetry.frame(token).is_none());
+        assert_eq!(telemetry.head(), 0);
+        for transpose in [-36, 0, 36] {
+            for channel in [None, Some(0), Some(15), Some(255)] {
+                let config = TrackModulation {
+                    targets: [None; 3],
+                    trigger: TriggerSource::MidiPitch { transpose, channel },
+                    ..TrackModulation::default()
+                };
+                for note in [None, Some(0), Some(69), Some(127)] {
+                    let hz = note.map_or(0.0, |n| {
+                        440.0 * 2.0_f64.powf((n as f64 - 69.0 + transpose as f64) / 12.0)
+                    });
+                    let mut value = frame();
+                    value.pitch = Some(MidiPitchReading {
+                        settings: config.trigger.pitch_settings().unwrap(),
+                        note,
+                        hz,
+                    });
+                    clock.publish(&telemetry, 0, &value);
+                    clock.record(&telemetry, 0, &value);
+                    assert_eq!(telemetry.frame(token), Some(value));
+                    assert!(value.matches(EffectKind::Svf, &config));
+                    assert!(!value.matches(
+                        EffectKind::Svf,
+                        &TrackModulation {
+                            trigger: TriggerSource::Free,
+                            ..config
+                        }
+                    ));
+                }
+            }
+        }
+        let free = telemetry.request(0, 0, EffectKind::Svf, true);
+        assert_ne!(token, free);
+        assert!(telemetry.frame(free).is_none());
+        assert!(telemetry.point(telemetry.head() - 1, free).is_none());
+        clock.begin_block(&telemetry, 48000.0);
+        clock.publish(&telemetry, 0, &frame());
+        assert_eq!(telemetry.frame(free), Some(frame()));
+    }
+    #[test]
     fn position_mode_tags_round_trip_and_reject_measurements_from_the_previous_clock() {
         let mut config = TrackModulation {
             trigger: crate::modulation::TriggerSource::DawPosition,
@@ -485,6 +561,7 @@ mod tests {
             wave_automation: [0, 1, 4, 8],
             position_sync: false,
             follower: None,
+            pitch: None,
         }
     }
     #[test]

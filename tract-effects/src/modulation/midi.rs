@@ -28,6 +28,11 @@ impl TriggerSource {
                     && note.is_none_or(|note| note == event.note)
                     && channel.is_none_or(|channel| channel == event.channel)
             }
+            Self::MidiPitch { channel, .. } => {
+                event.note < 128
+                    && event.channel < 16
+                    && channel.is_none_or(|channel| channel == event.channel)
+            }
             _ => false,
         }
     }

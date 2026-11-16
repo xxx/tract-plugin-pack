@@ -219,11 +219,16 @@ impl super::ModulationState {
             .unwrap_or_else(|| self.precise_phase(slot))
     }
     pub fn waveform_running(&self, config: &super::TrackModulation, slot: usize) -> bool {
+        if config.trigger.pitch_settings().is_some() {
+            return self.pitch.running();
+        }
         config.trigger != super::TriggerSource::DawPosition
             || (self.position.active && self.position.running(self.effective_mseg(config, slot)))
     }
     pub fn capture_epoch(&self, config: &super::TrackModulation, slot: usize) -> u64 {
-        if config.trigger == super::TriggerSource::DawPosition {
+        if config.trigger == super::TriggerSource::DawPosition
+            || config.trigger.pitch_settings().is_some()
+        {
             self.capture_epochs[slot]
         } else {
             self.trigger_epoch

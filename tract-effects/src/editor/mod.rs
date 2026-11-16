@@ -31,6 +31,7 @@ pub enum TriggerChoice {
     FreeHzSample,
     TransientSample,
     DawPosition,
+    MidiPitch,
 }
 
 impl TriggerChoice {
@@ -44,6 +45,7 @@ impl TriggerChoice {
         Self::FreeHzSample,
         Self::TransientSample,
         Self::DawPosition,
+        Self::MidiPitch,
     ];
 
     fn item(self) -> usize {
@@ -57,6 +59,7 @@ impl TriggerChoice {
             Self::FreeHzSample => 6,
             Self::TransientSample => 7,
             Self::DawPosition => 8,
+            Self::MidiPitch => 9,
         }
     }
 }
@@ -114,6 +117,7 @@ pub struct EffectEditor {
     wave_midi: wave_midi::Panel,
     wave_automation: Option<[u8; 4]>,
     follower: follower::Panel,
+    midi_filter_owner: Option<midi::Binding>,
 }
 
 impl Default for EffectEditor {
@@ -165,6 +169,7 @@ impl EffectEditor {
             wave_midi: wave_midi::Panel::default(),
             wave_automation: None,
             follower: follower::Panel::default(),
+            midi_filter_owner: None,
         }
     }
 
@@ -276,11 +281,18 @@ impl EffectEditor {
         event: &baseview::Event,
         context: EditorContext<'_>,
     ) -> EditorResponse {
+        self.finish_inactive_pitch_controls(context.modulation);
         if matches!(
             event,
             baseview::Event::Mouse(baseview::MouseEvent::CursorLeft)
         ) {
             self.mseg_edit.clear_hover_hint();
+        }
+        if self.check_midi_filter_binding(context.effect, context.modulation) {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
         }
         if self.check_detector_binding(context.effect.kind, context.modulation) {
             return EditorResponse {
@@ -318,6 +330,8 @@ impl EffectEditor {
         phases: [f32; 4],
         geometry: EditorGeometry,
     ) {
+        self.finish_inactive_pitch_controls(modulation);
+        self.check_midi_filter_binding(effect, modulation);
         self.check_detector_binding(effect.kind, modulation);
         self.check_wave_midi_binding(effect, modulation);
         self.check_follower_binding(effect, modulation);
@@ -853,7 +867,7 @@ impl<'a> Session<'a> {
                 mix: frame.mix,
             };
         }
-        if self.state.measured_arcs_only || self.modulation.smoothing_mask(self.effect.kind) != 0 {
+        if self.state.measured_arcs_only || self.modulation.continuous_mask(self.effect.kind) != 0 {
             return view::ModulationDisplay::default();
         }
         let mut result = view::ModulationDisplay::default();
@@ -1177,13 +1191,17 @@ impl<'a> Session<'a> {
         }
         // Active MSEG's sync/length controls (sit on the modulation row to
         // the right of the depth dial).
-        effect_editor::draw_mseg_controls(
-            pixmap,
-            self.text_renderer,
-            &modu.msegs[sel],
-            self.scale_factor,
-            &self.layout,
-        );
+        if modu.trigger.pitch_settings().is_some() {
+            self.draw_pitch_rate(pixmap);
+        } else {
+            effect_editor::draw_mseg_controls(
+                pixmap,
+                self.text_renderer,
+                &modu.msegs[sel],
+                self.scale_factor,
+                &self.layout,
+            );
+        }
         self.draw_live_controls(pixmap);
         self.draw_wave_midi_button(pixmap);
         self.draw_follower_button(pixmap);
@@ -1558,6 +1576,9 @@ impl<'a> Session<'a> {
     }
 
     fn apply_mseg_sync(&mut self, seg: usize) {
+        if self.modulation.trigger.pitch_settings().is_some() {
+            return;
+        }
         let new_mode = if seg == 0 {
             tiny_skia_widgets::SyncMode::Time
         } else {
@@ -1571,6 +1592,9 @@ impl<'a> Session<'a> {
     }
 
     fn apply_mseg_length_drag(&mut self, norm: f32) {
+        if self.modulation.trigger.pitch_settings().is_some() {
+            return;
+        }
         let k = self.state.selected_mseg.min(3);
 
         let mseg = &mut self.modulation.msegs[k];
@@ -1851,6 +1875,8 @@ impl<'a> Session<'a> {
 
         self.modulation.trigger = if matches!(new_trigger, TriggerSource::MidiNote { .. })
             && matches!(self.modulation.trigger, TriggerSource::MidiNote { .. })
+            || matches!(new_trigger, TriggerSource::MidiPitch { .. })
+                && matches!(self.modulation.trigger, TriggerSource::MidiPitch { .. })
         {
             self.modulation.trigger
         } else {
@@ -1866,6 +1892,11 @@ fn dropdown_items(state: &EffectEditor, effect: &TrackEffect) -> Vec<&'static st
         .is_open_for(EffectAction::MidiFilter(MidiField::Note))
     {
         midi::NOTE_ITEMS.to_vec()
+    } else if state
+        .effect_dropdown
+        .is_open_for(EffectAction::MidiFilter(MidiField::Transpose))
+    {
+        midi::TRANSPOSE_ITEMS.to_vec()
     } else if state
         .effect_dropdown
         .is_open_for(EffectAction::MidiFilter(MidiField::Channel))
@@ -2536,6 +2567,7 @@ mod tests {
                         "Free Hz (sample)",
                         "Transient (sample)",
                         "DAW position",
+                        "MIDI pitch",
                     ],
                     [0, 1, 2, 3, 4],
                 ),

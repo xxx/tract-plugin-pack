@@ -153,6 +153,17 @@ impl ModulationState {
         self.precise = previous.precise;
         self.position = previous.position;
         *self.follower = *previous.follower;
+        self.pitch = previous.pitch;
+        if previous.pitch.active() {
+            self.smooth.clone_from(&previous.smooth);
+            self.smooth.refresh();
+            self.phases = previous.phases;
+            self.outputs = previous.outputs;
+            self.output_valid = previous.output_valid;
+            self.amplitude = previous.amplitude;
+            self.trigger_epoch = previous.trigger_epoch;
+            self.capture_epochs = previous.capture_epochs;
+        }
     }
 }
 

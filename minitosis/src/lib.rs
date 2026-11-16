@@ -124,6 +124,9 @@ impl Minitosis {
         processor: &Processor,
         samples: usize,
     ) -> Option<tract_effects::modulation::MidiNoteOn> {
+        if samples == 0 && processor.modulation.trigger.pitch_settings().is_some() {
+            return None;
+        }
         let mut events = std::iter::from_fn(|| {
             loop {
                 if let NoteEvent::NoteOn {

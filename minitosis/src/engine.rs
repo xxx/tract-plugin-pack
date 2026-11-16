@@ -199,15 +199,8 @@ impl Processor {
     ) -> bool {
         self.state
             .select_midi_wave(&self.modulation, &self.wave_bank, event);
-        if self.modulation.trigger.accepts_midi(event) {
-            if within_span {
-                self.state.trigger_midi_in_span();
-            } else {
-                self.state.trigger();
-            }
-            return true;
-        }
-        false
+        self.state
+            .midi_note_on(&self.modulation, event, within_span)
     }
 
     pub fn uses_midi_waves(&self) -> bool {
@@ -354,6 +347,8 @@ impl Processor {
 
 #[cfg(test)]
 mod follower_tests;
+#[cfg(test)]
+mod pitch_tests;
 #[cfg(test)]
 mod position_tests;
 #[cfg(test)]

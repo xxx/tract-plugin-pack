@@ -7,6 +7,14 @@ impl Session<'_> {
             .mseg_edit
             .layout(self.layout.mseg_pane, self.scale_factor)
             .strip;
+        if self.modulation.trigger.pitch_settings().is_some()
+            && [self.layout.mseg_sync, self.layout.mseg_length]
+                .iter()
+                .any(|r| view::in_rect(*r, self.mouse_pos.0, self.mouse_pos.1))
+        {
+            self.state.mseg_edit.set_external_hint(Some("MIDI pitch controls cycle rate; last matching note wins, note-off keeps it running"));
+            return;
+        }
         if view::in_rect(
             widgets::mseg::follower_button_rect(strip, self.scale_factor),
             self.mouse_pos.0,
@@ -49,10 +57,18 @@ impl Session<'_> {
                     Some("Scale modulation; Shift: fine; double-click resets")
                 }
                 Some(EffectHit::Trigger) => {
-                    Some("Follow DAW position or choose what restarts all four curves")
+                    Some("Choose a shared free, DAW or MIDI pitch clock for all four curves")
                 }
                 Some(EffectHit::TriggerRate) => Some("Adjust trigger rate or onset sensitivity"),
                 Some(EffectHit::TriggerAux) => Some("Set the time between accepted audio triggers"),
+                Some(EffectHit::MidiFilter(MidiField::Transpose)) => Some(
+                    "Transpose MIDI pitch by -36 to +36 semitones; note-off keeps the last pitch",
+                ),
+                Some(EffectHit::MidiFilter(MidiField::Channel))
+                    if self.modulation.trigger.pitch_settings().is_some() =>
+                {
+                    Some("Choose the MIDI pitch channel; changing it waits for a new note")
+                }
                 Some(EffectHit::MidiFilter(_)) => Some("Filter MIDI restarts by note or channel"),
                 Some(EffectHit::MsegSync(_)) => Some("Set curve length in seconds or host beats"),
                 Some(EffectHit::MsegLength) => Some("Set this curve's playback length"),

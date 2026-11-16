@@ -198,7 +198,7 @@ pub struct WaveformClock {
     step: f64,
     trigger_epoch: u64,
     follow_audio_phase: bool,
-    host_position: bool,
+    external_clock: bool,
     active: bool,
     pending: Option<WaveformBin>,
 }
@@ -263,22 +263,23 @@ impl WaveformClock {
         if !self.active {
             return;
         }
-        let host_position = timing.config.trigger == crate::modulation::TriggerSource::DawPosition;
+        let external_clock = timing.config.trigger == crate::modulation::TriggerSource::DawPosition
+            || timing.config.trigger.pitch_settings().is_some();
         if timing.trigger_epoch != self.trigger_epoch
             || timing.phase < self.phase - 1e-6
-            || host_position != self.host_position
+            || external_clock != self.external_clock
         {
             self.finish_block(telemetry);
             self.pending = None;
         }
         self.trigger_epoch = timing.trigger_epoch;
-        self.host_position = host_position;
+        self.external_clock = external_clock;
         self.doc = *doc;
         self.step = phase_step(&self.doc, timing.bpm, timing.sample_rate);
         self.phase = timing.phase;
-        self.follow_audio_phase = host_position
+        self.follow_audio_phase = external_clock
             || timing.config.continuous_mask(timing.kind) & (1 << self.request.slot) != 0;
-        self.active &= self.step > 0.0;
+        self.active &= self.step > 0.0 || external_clock;
     }
 
     pub fn active(&self) -> bool {
@@ -327,9 +328,9 @@ impl WaveformClock {
         if !loops && self.phase >= end && next >= end {
             return;
         }
-        // DAW capture epochs report actual traversals, including equal wrapped phases.
+        // External clocks report actual traversals, including equal wrapped phases.
         let looped =
-            next < self.phase || (!self.host_position && loops && self.phase + self.step >= end);
+            next < self.phase || (!self.external_clock && loops && self.phase + self.step >= end);
         if looped {
             self.finish_block(telemetry);
             self.pending = None;

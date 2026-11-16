@@ -446,6 +446,35 @@ the field default. No follower history is lost on retriggers or ordinary DSP
 flushes. Explicit modulation Reset starts a fresh envelope. The feature adds no
 latency and is Off in legacy presets. Miff/Nap keep static curve editing.
 
+## MIDI pitch playback
+
+In Multosis/Minitosis choose **Trigger → MIDI pitch** to clock all four curves
+from MIDI notes. A matching note-on sets the full 0–1 phase rate to that note's
+frequency and restarts at phase zero on the note's exact sample. **Semi** selects
+-36..+36 semitones of transpose; **Ch.** selects Any or MIDI channel 1–16. The
+last matching note wins, including simultaneous notes in host order. Note-off
+keeps that rate running; velocity-zero notes and pitch bend do not affect it.
+
+Before the first note, phases wait at zero. Changing Channel clears the latched
+note and waits again. Changing Semi retunes the last note without restarting.
+The old Time/Beat controls show the measured note and Hz/kHz, **Waiting**, or
+**No data** when there is no matching measurement yet. Saved Time/Beat lengths
+return when leaving MIDI pitch; they do not change its rate or tempo response.
+
+Cyclic, OneShot and hold markers retain their traversal behavior. A shorter
+hold loop naturally repeats faster than the full-curve Hz rate. Every new note
+restarts a completed OneShot. MIDI/Project waves and envelope-follower routes
+can be used together; a note can switch a wave and set pitch at the same time.
+Smooth retains its level across notes; Amp and Mix update per sample while
+effect parameters retain the fixed 1 kHz control cadence.
+
+The waveform and white trace follow actual pitch phases. Waiting pauses audio
+capture; frozen captures stay available. Retrigger on play keeps the last note
+and restarts phase. Ordinary DSP flush and same-effect sample-rate changes keep
+pitch and phase; a different effect kind waits for a fresh note. Explicit
+modulation Reset clears the pitch. Settings save per row/effect and use local
+modulation undo; there are no additional host parameter IDs or latency.
+
 ## DAW-position playback
 
 Choose **Trigger → DAW position** in Multosis/Minitosis to follow the song

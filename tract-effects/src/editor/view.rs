@@ -309,6 +309,16 @@ pub fn effect_hit(
             }
         }
     }
+    if matches!(trigger, TriggerSource::MidiPitch { .. }) {
+        for field in [super::MidiField::Transpose, super::MidiField::Channel] {
+            if in_rect(field.rect(lay, scale), px, py) {
+                return Some(EffectHit::MidiFilter(field));
+            }
+        }
+        if in_rect(lay.mseg_sync, px, py) || in_rect(lay.mseg_length, px, py) {
+            return None;
+        }
+    }
     let trigger_has_rate = matches!(
         trigger,
         TriggerSource::FreeHz { .. }
@@ -624,7 +634,7 @@ pub fn target_to_item(kind: EffectKind, target: Option<ModulationTarget>) -> usi
 }
 
 /// The trigger-source dropdown items, in `TriggerSource` discriminant order.
-pub fn trigger_items() -> [&'static str; 9] {
+pub fn trigger_items() -> [&'static str; 10] {
     [
         "Free run",
         "Cell light",
@@ -635,6 +645,7 @@ pub fn trigger_items() -> [&'static str; 9] {
         "Free Hz (sample)",
         "Transient (sample)",
         "DAW position",
+        "MIDI pitch",
     ]
 }
 
@@ -663,6 +674,10 @@ pub fn trigger_from_item(
             hold_ms: carried_hold_ms,
         },
         8 => TriggerSource::DawPosition,
+        9 => TriggerSource::MidiPitch {
+            transpose: 0,
+            channel: None,
+        },
         _ => TriggerSource::Transient {
             threshold: carried_threshold,
             hold_ms: carried_hold_ms,
@@ -682,6 +697,7 @@ pub fn trigger_to_item(src: TriggerSource) -> usize {
         TriggerSource::FreeHzSample { .. } => 6,
         TriggerSource::TransientSample { .. } => 7,
         TriggerSource::DawPosition => 8,
+        TriggerSource::MidiPitch { .. } => 9,
     }
 }
 
@@ -878,6 +894,7 @@ pub fn draw_trigger_controls(
         TriggerSource::FreeHzSample { .. } => "Hz exact",
         TriggerSource::TransientSample { .. } => "Audio",
         TriggerSource::DawPosition => "DAW",
+        TriggerSource::MidiPitch { .. } => "MIDI pitch",
     };
     widgets::dropdown::draw_dropdown_trigger(pixmap, tr, lay.trigger, label, trigger_dropdown_open);
     match trigger {
@@ -2521,7 +2538,7 @@ mod tests {
                 );
                 assert_eq!(trigger_to_item(TriggerSource::FreeHz { hz }), 3);
                 let transient = TriggerSource::Transient { threshold, hold_ms };
-                for item in [4, 9, usize::MAX] {
+                for item in [4, 10, usize::MAX] {
                     assert_eq!(trigger_from_item(item, hz, threshold, hold_ms), transient);
                 }
                 assert_eq!(
@@ -2693,7 +2710,8 @@ mod tests {
                 "MIDI note",
                 "Free Hz (sample)",
                 "Transient (sample)",
-                "DAW position"
+                "DAW position",
+                "MIDI pitch"
             ]
         );
         assert_eq!(

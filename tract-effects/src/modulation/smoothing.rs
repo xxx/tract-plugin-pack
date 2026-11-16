@@ -46,7 +46,7 @@ impl TrackModulation {
         })
     }
     pub fn continuous_mask(&self, kind: EffectKind) -> u8 {
-        if self.trigger == TriggerSource::DawPosition {
+        if self.trigger == TriggerSource::DawPosition || self.trigger.pitch_settings().is_some() {
             15
         } else {
             self.smoothing_mask(kind) | self.follower.mask()
@@ -263,14 +263,18 @@ impl ModulationState {
     /// Restart free clocks and refresh DAW playback without moving its phases.
     pub fn restart_clock(&mut self, config: &TrackModulation) {
         self.trigger_epoch = self.trigger_epoch.wrapping_add(1);
-        if config.trigger == TriggerSource::DawPosition {
+        if config.trigger == TriggerSource::DawPosition || config.trigger.pitch_settings().is_some()
+        {
             for epoch in &mut self.capture_epochs {
                 *epoch = epoch.wrapping_add(1);
             }
+        }
+        if config.trigger == TriggerSource::DawPosition {
             self.smooth.refresh();
         } else {
             self.phases = [0.0; 4];
             self.smooth.trigger();
+            self.pitch.restart();
         }
         self.hz_phase = 0.0;
         self.transient.reset();
@@ -284,7 +288,9 @@ impl ModulationState {
         self.trigger_epoch
     }
     pub fn precise_phase(&self, slot: usize) -> f64 {
-        if self.smooth.slots[slot].active {
+        if self.pitch.active() {
+            self.pitch.phases[slot]
+        } else if self.smooth.slots[slot].active {
             self.smooth.slots[slot].phase
         } else {
             self.phases[slot] as f64
@@ -370,7 +376,11 @@ impl ModulationState {
             }
             if mask & (1 << k) != 0 {
                 if !slot.active {
-                    slot.phase = position.unwrap_or(self.phases[k] as f64);
+                    slot.phase = if self.pitch.active() {
+                        self.pitch.phases[k]
+                    } else {
+                        position.unwrap_or(self.phases[k] as f64)
+                    };
                     slot.value = if self.output_valid[k] {
                         self.outputs[k] as f64
                     } else {
@@ -416,7 +426,11 @@ impl ModulationState {
                 }
                 slot.route = route;
                 slot.active = true;
-                slot.step = phase_step(doc, bpm, sr);
+                slot.step = if self.pitch.active() {
+                    self.pitch.step
+                } else {
+                    phase_step(doc, bpm, sr)
+                };
                 if let Some(route) = route {
                     match route.target {
                         ModulationTarget::EffectParameter(index) => {
@@ -534,13 +548,30 @@ impl ModulationState {
             }
             let next = if self.position.active {
                 self.position.phase(doc).unwrap_or(slot.phase)
+            } else if self.pitch.active() && (self.pitch.first_sample || !self.pitch.running()) {
+                slot.phase
             } else {
                 phase_next(doc, slot.phase, slot.step)
             };
+            if self.pitch.running() && !self.pitch.first_sample {
+                let end = match doc.hold {
+                    HoldMode::Loop { end, .. } => doc.nodes[end].time as f64,
+                    _ => 1.0,
+                };
+                let loops =
+                    doc.play_mode == PlayMode::Cyclic || matches!(doc.hold, HoldMode::Loop { .. });
+                if loops && slot.phase + slot.step >= end {
+                    self.capture_epochs[k] = self.capture_epochs[k].wrapping_add(1);
+                }
+            }
             let wrapped = next < slot.phase;
             slot.phase = next;
+            if self.pitch.active() {
+                self.pitch.phases[k] = next;
+            }
             self.phases[k] = next as f32;
             if self.position.active
+                || self.pitch.active()
                 || self.follower.config.routes[k].enabled
                 || tick
                 || slot.force_raw
@@ -587,6 +618,7 @@ impl ModulationState {
             }
         }
         self.position.advance_sample();
+        self.pitch.first_sample = false;
     }
 }
 

@@ -500,9 +500,13 @@ impl AudioEngine {
         let mut cursor = 0usize;
         let mut bi = 0usize;
         let mut midi = MidiCursor::default();
-        let mut note = midi.next_matching(&mut events, n, |event| {
-            self.modulation.midi_mask(event) != 0
-        });
+        let mut note = if n == 0 && self.modulation.uses_midi_pitch() {
+            None
+        } else {
+            midi.next_matching(&mut events, n, |event| {
+                self.modulation.midi_mask(event) != 0
+            })
+        };
         let mut grid_prepared = false;
         let mut grid_start = 0;
         while cursor < n {
@@ -662,6 +666,8 @@ impl Default for AudioEngine {
 
 #[cfg(test)]
 mod follower_tests;
+#[cfg(test)]
+mod pitch_tests;
 #[cfg(test)]
 mod position_tests;
 #[cfg(test)]

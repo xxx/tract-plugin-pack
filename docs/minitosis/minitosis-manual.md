@@ -112,6 +112,10 @@ Trigger choices apply to all four envelopes:
 - **DAW position:** follows the song timeline using each curve's Time/Beat length.
   Seeks and host loops relocate the phase; stopped or unavailable clocks pause
   waveform capture. Geometry stays editable. See [DAW-position playback](../mseg-editor.md#daw-position-playback).
+- **MIDI pitch:** the last matching note sets all four curves' rate and restarts
+  them at its sample offset. Semi transposes -36..+36 semitones; Ch. filters the
+  input channel. Note-off keeps running. Saved Time/Beat lengths return when
+  leaving this mode. See [MIDI pitch playback](../mseg-editor.md#midi-pitch-playback).
 
 Time clocks use seconds. Free Beat clocks use 120 BPM when tempo is unavailable;
 DAW Beat clocks hold between reported positions without a tempo. One-shot
