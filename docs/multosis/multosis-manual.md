@@ -231,6 +231,10 @@ They are available from the **Tool**, **Shapes**, and **Edit** menus below the
 existing controls. Triplet grids `6 / 8`, `12 / 8`, and `24 / 16` supplement the
 four straight grid presets described above.
 
+Grid also offers **Semitones** for routed pitch and logarithmic frequency
+targets, following base value, Depth, and polarity. See
+[semitone grids](../mseg-editor.md#semitone-grids).
+
 Edit also provides endpoint matching and **Smooth loop seam (10%)**; amber
 marks identify playback wrap jumps, including stepped tails. Commands use the
 hold-loop region when configured. See [loop seam tools](../mseg-editor.md#loop-seam-tools).

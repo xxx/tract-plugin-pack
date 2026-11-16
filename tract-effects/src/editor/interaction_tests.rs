@@ -1,3 +1,5 @@
+mod semitone_grid;
+
 use super::*;
 use baseview::{Event, MouseButton, MouseEvent, Point};
 use keyboard_types::{Key, KeyState, KeyboardEvent, Modifiers};

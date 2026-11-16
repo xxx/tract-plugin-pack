@@ -296,15 +296,21 @@ pub(crate) fn nudge(data: &mut MsegData, selection: u128, delta: f32) -> Result<
     Ok(changed)
 }
 
-pub(crate) fn quantize(data: &mut MsegData, selection: u128) -> Result<bool, ShapeError> {
+pub(crate) fn quantize(
+    data: &mut MsegData,
+    selection: u128,
+    pitch: Option<&super::PitchGrid>,
+) -> Result<bool, ShapeError> {
+    if data.value_grid == super::ValueGrid::Semitones && pitch.is_none() {
+        return Err(ShapeError::UnavailableGrid);
+    }
     let selected = effective_selection(data, selection);
     let mut nodes = data.active().to_vec();
     for (i, node) in nodes.iter_mut().enumerate() {
         if selected & (1 << i) != 0 {
             let cols = data.time_divisions.max(1) as f32;
-            let rows = data.value_steps.max(1) as f32;
             node.time = (node.time * cols).round() / cols;
-            node.value = (node.value * rows).round() / rows;
+            node.value = super::grid::snap_value(data, pitch, node.value);
         }
     }
     let hold = data.hold;
@@ -313,7 +319,13 @@ pub(crate) fn quantize(data: &mut MsegData, selection: u128) -> Result<bool, Sha
     Ok(changed)
 }
 
-pub(crate) fn mutate(data: &mut MsegData, selection: u128, seed: u32, values_only: bool) -> bool {
+pub(crate) fn mutate(
+    data: &mut MsegData,
+    selection: u128,
+    seed: u32,
+    values_only: bool,
+    pitch: Option<&super::PitchGrid>,
+) -> bool {
     let selected = effective_selection(data, selection);
     let first = selected.trailing_zeros() as usize;
     let last = 127 - selected.leading_zeros() as usize;
@@ -325,8 +337,7 @@ pub(crate) fn mutate(data: &mut MsegData, selection: u128, seed: u32, values_onl
         }
         data.nodes[i].value = (data.nodes[i].value + rng.range(-0.25, 0.25)).clamp(0.0, 1.0);
         if data.snap {
-            let rows = data.value_steps.max(1) as f32;
-            data.nodes[i].value = (data.nodes[i].value * rows).round() / rows;
+            data.nodes[i].value = super::grid::snap_value(data, pitch, data.nodes[i].value);
         }
         if !values_only {
             data.nodes[i].tension =
@@ -554,7 +565,7 @@ mod tests {
         data = original;
         data.time_divisions = 2;
         let before = data;
-        assert_eq!(quantize(&mut data, 0), Err(ShapeError::Collision));
+        assert_eq!(quantize(&mut data, 0, None), Err(ShapeError::Collision));
         assert_eq!(data, before);
     }
 
@@ -562,7 +573,7 @@ mod tests {
     fn mutation_preserves_rhythm_count_and_unselected_points() {
         let mut data = shape(FactoryShape::Sine);
         let before = data;
-        assert!(mutate(&mut data, 0b11100, 19, true));
+        assert!(mutate(&mut data, 0b11100, 19, true, None));
         assert_eq!(data.node_count, before.node_count);
         for i in 0..data.node_count {
             assert_eq!(data.nodes[i].time, before.nodes[i].time);
@@ -571,7 +582,7 @@ mod tests {
             }
         }
         for seed in 0..100 {
-            mutate(&mut data, 0, seed, false);
+            mutate(&mut data, 0, seed, false, None);
             assert!(data.is_valid());
         }
     }
@@ -609,7 +620,7 @@ mod tests {
         let mut data = shape(FactoryShape::Triangle);
         data.nodes[1].time = 0.47;
         data.hold = HoldMode::Sustain(1);
-        quantize(&mut data, 1 << 1).unwrap();
+        quantize(&mut data, 1 << 1, None).unwrap();
         assert_eq!(data.nodes[1].time, 0.5);
         assert_eq!(data.hold, HoldMode::Sustain(1));
     }

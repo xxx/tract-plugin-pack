@@ -199,7 +199,10 @@ pub fn randomize(data: &mut MsegData, style: RandomStyle, seed: u32) {
             RandomStyle::Chaos => (rng.next_f32(), rng.range(-1.0, 1.0), rng.bool()),
         };
 
-        if data.snap && matches!(style, RandomStyle::Stepped | RandomStyle::Spiky) {
+        if data.snap
+            && data.value_grid == super::ValueGrid::Divisions
+            && matches!(style, RandomStyle::Stepped | RandomStyle::Spiky)
+        {
             value = snap_value(value, data.value_steps);
         }
         prev_value = value;

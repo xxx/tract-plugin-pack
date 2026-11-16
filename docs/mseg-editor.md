@@ -155,6 +155,40 @@ Navigation does not alter the saved curve or create undo/bake work. Viewports
 are retained across resizing in the current editor session. Nap's panes have
 independent views, and its pulse field follows the Decay pane's view.
 
+## Semitone grids
+
+In Multosis/Minitosis, assign an envelope to a pitch parameter in `st` or a
+logarithmic frequency parameter, set a nonzero Depth, and choose **Semitones**
+from Grid. The control shows **T/st**, keeping the current number of time
+divisions. A numeric grid preset restores ordinary value divisions. The mode
+saves per envelope and is undoable; changing it leaves existing points in place.
+
+The grid follows the routed parameter's base value, Depth, and polarity, including
+negative depth. Pitch offsets use integer semitones; frequencies use chromatic
+equal-tempered notes with A4 = 440 Hz. Only levels reachable through that routing
+are available. Base/Depth/polarity changes refresh the lines while retaining the
+existing curve, which may then have points off-grid.
+
+With **Snap On**, drawing and dragging use those note levels. **Shift-drag**
+allows fine off-grid levels. Group moves snap their anchor; selection transforms
+snap their edited edge while retaining the group's geometry. Pens, stepped-draw
+heights, mutation, and Randomize also use the musical grid. Closely spaced lines
+may be thinned visually; all note levels remain available for snapping.
+
+Use **Edit → Quantize points** to move selected points, or all points when none
+are selected, onto the current time/note grid in one undo step. A time collision
+rejects the entire edit. Exact numeric input and imported/pasted/factory shapes
+retain their authored values. Curve and S-curve segments still glide between
+their points; Step holds a note until the next point.
+
+Amp, Mix, selectors, unsupported units, zero depth, and routes with no reachable
+note have no musical grid. Choosing Semitones there leaves the curve/settings
+intact and reports the unavailable grid. A previously selected mode shows
+**st n/a** after such a routing change: time snapping continues, vertical
+interactive snapping pauses, and Quantize leaves the entire curve intact.
+Miff/Nap retain their numeric grids. Shape clipboard/files preserve the
+destination's grid preference.
+
 ## Live smoothing and trace
 
 Multosis/Minitosis provide **Smooth** and **Trace** at the lower right of the

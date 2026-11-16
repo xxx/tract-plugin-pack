@@ -275,14 +275,33 @@ fn draw_canvas(
         draw_rect(pixmap, gx, py0, 1.0, ph, grid_color);
     }
     // Horizontal value-grid lines.
-    let vsteps = data.value_steps.max(1);
-    for i in 1..vsteps {
-        let value = i as f32 / vsteps as f32;
-        if value < layout.viewport.value.0 || value > layout.viewport.value.1 {
-            continue;
+    if data.value_grid == crate::mseg::ValueGrid::Semitones {
+        if let Some(grid) = state.pitch_grid() {
+            let mut previous = f32::NEG_INFINITY;
+            for &value in grid.levels().iter().rev() {
+                if value < layout.viewport.value.0 || value > layout.viewport.value.1 {
+                    continue;
+                }
+                let gy = value_to_y(layout, value);
+                if gy - previous >= 2.0 * scale {
+                    let height = (py0 + ph - gy).clamp(0.0, 1.0);
+                    if height > 0.0 {
+                        draw_rect(pixmap, px0, gy, pw, height, grid_color);
+                    }
+                    previous = gy;
+                }
+            }
         }
-        let gy = value_to_y(layout, i as f32 / vsteps as f32);
-        draw_rect(pixmap, px0, gy, pw, 1.0, grid_color);
+    } else {
+        let vsteps = data.value_steps.max(1);
+        for i in 1..vsteps {
+            let value = i as f32 / vsteps as f32;
+            if value < layout.viewport.value.0 || value > layout.viewport.value.1 {
+                continue;
+            }
+            let gy = value_to_y(layout, value);
+            draw_rect(pixmap, px0, gy, pw, 1.0, grid_color);
+        }
     }
 
     // Midline marker at value = 0.5 — only meaningful in Bipolar view (the
@@ -706,6 +725,11 @@ pub(crate) fn strip_buttons_ex(
     }
 }
 
+/// Grid trigger bounds for embedding hosts and offscreen interaction previews.
+pub fn grid_button_rect(strip: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32) {
+    strip_buttons(strip, scale, true).grid
+}
+
 /// Draw the control strip: `Snap` toggle button, `Grid` and `Style` dropdown
 /// triggers, and the `Randomize` button. Interaction is handled in
 /// `on_mouse_down`.
@@ -743,7 +767,15 @@ fn draw_strip(
     );
 
     // Grid: dropdown trigger showing the current grid setting.
-    let grid_label = format!("Grid {}/{}", data.time_divisions, data.value_steps);
+    let grid_label = if data.value_grid == crate::mseg::ValueGrid::Semitones {
+        if state.pitch_grid().is_some() {
+            format!("{}/st", data.time_divisions)
+        } else {
+            "st n/a".to_owned()
+        }
+    } else {
+        format!("Grid {}/{}", data.time_divisions, data.value_steps)
+    };
     draw_dropdown_trigger(
         pixmap,
         text_renderer,
@@ -862,10 +894,15 @@ fn draw_strip(
         bottom,
         top
     );
-    let seam_warning = crate::mseg::seam::LoopSeam::visible(data, state.is_curve_only()).is_some()
+    let pitch_unavailable =
+        data.value_grid == crate::mseg::ValueGrid::Semitones && state.pitch_grid().is_none();
+    let seam_warning = !pitch_unavailable
+        && crate::mseg::seam::LoopSeam::visible(data, state.is_curve_only()).is_some()
         && state.status_message().is_empty();
     let message = if state.status_message().is_empty() {
-        if seam_warning {
+        if pitch_unavailable {
+            "Semitone grid unavailable; choose a pitched target or numeric grid"
+        } else if seam_warning {
             "Loop seam jump; Edit: match or smooth"
         } else if viewport != crate::mseg::MsegViewport::default() {
             view_info.as_str()
@@ -1127,6 +1164,57 @@ mod tests {
 
     fn px_alpha(pm: &Pixmap, x: u32, y: u32) -> u8 {
         pm.pixels()[(y * pm.width() + x) as usize].alpha()
+    }
+
+    #[test]
+    fn musical_grid_lines_clip_to_the_plot_including_endpoint_levels_under_zoom() {
+        for scale in [0.5, 1.0, 2.0] {
+            for zoom in [false, true] {
+                let rect = (16.0 * scale, 16.0 * scale, 600.0 * scale, 320.0 * scale);
+                let mut state = MsegEditState::new();
+                let data = MsegData {
+                    value_grid: crate::mseg::ValueGrid::Semitones,
+                    ..MsegData::default()
+                };
+                state.set_pitch_grid(
+                    crate::mseg::PitchGrid::new(vec![0.0, 0.25, 0.5, 0.75, 1.0]),
+                    &data,
+                );
+                let mut layout = state.layout(rect, scale);
+                if zoom {
+                    layout.viewport.time = (0.2, 0.8);
+                    layout.viewport.value = (0.2, 0.8);
+                }
+                let mut pm = Pixmap::new((640.0 * scale) as u32, (360.0 * scale) as u32).unwrap();
+                draw_canvas(
+                    &mut pm,
+                    &layout,
+                    &data,
+                    &state,
+                    scale,
+                    tiny_skia::Color::from_rgba8(255, 0, 0, 255),
+                    |_, _| {},
+                );
+                let mut checked = 0;
+                for (index, pixel) in pm.pixels().iter().enumerate() {
+                    if [pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()]
+                        != [0x44, 0x47, 0x4e, 0xff]
+                    {
+                        continue;
+                    }
+                    let x = (index as u32 % pm.width()) as f32;
+                    let y = (index as u32 / pm.width()) as f32;
+                    assert!(
+                        x >= layout.plot.0.floor() && x < (layout.plot.0 + layout.plot.2).ceil()
+                    );
+                    assert!(
+                        y >= layout.plot.1.floor() && y < (layout.plot.1 + layout.plot.3).ceil()
+                    );
+                    checked += 1;
+                }
+                assert!(checked > 20);
+            }
+        }
     }
 
     #[test]

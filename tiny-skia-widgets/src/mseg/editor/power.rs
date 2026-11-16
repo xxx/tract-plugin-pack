@@ -114,7 +114,7 @@ impl MsegEditState {
         self.power.preview = if self.tool() != MsegTool::Pointer {
             self.power
                 .next_pen_start
-                .map(|start| self.pen_points(data, start, self.pen_end(start), true))
+                .map(|start| self.pen_points(data, start, self.pen_end(data, start), true))
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -228,10 +228,21 @@ impl MsegEditState {
         let result = match id {
             StripId::TimeGrid => {
                 if let Some(&(t, v)) = self.grid_options.get(index) {
-                    let changed = data.time_divisions != t || data.value_steps != v;
+                    let changed = data.time_divisions != t
+                        || data.value_steps != v
+                        || data.value_grid != crate::mseg::ValueGrid::Divisions;
                     data.time_divisions = t;
                     data.value_steps = v;
+                    data.value_grid = crate::mseg::ValueGrid::Divisions;
                     Ok(changed)
+                } else if !self.curve_only && index == self.grid_options.len() {
+                    if self.pitch_grid.is_none() {
+                        Err(ShapeError::UnavailableGrid)
+                    } else {
+                        let changed = data.value_grid != crate::mseg::ValueGrid::Semitones;
+                        data.value_grid = crate::mseg::ValueGrid::Semitones;
+                        Ok(changed)
+                    }
                 } else {
                     Ok(false)
                 }
@@ -278,10 +289,16 @@ impl MsegEditState {
                     self.selection,
                     if index == 9 { -1.0 } else { 1.0 } / data.time_divisions.max(1) as f32,
                 ),
-                11 => tools::quantize(data, self.selection),
+                11 => tools::quantize(data, self.selection, self.pitch_grid.as_ref()),
                 14 | 15 => {
                     self.seed = self.seed.wrapping_add(1);
-                    Ok(tools::mutate(data, self.selection, self.seed, index == 14))
+                    Ok(tools::mutate(
+                        data,
+                        self.selection,
+                        self.seed,
+                        index == 14,
+                        self.pitch_grid.as_ref(),
+                    ))
                 }
                 16 => {
                     self.selection = tools::all_nodes(data.node_count);
@@ -653,7 +670,7 @@ impl MsegEditState {
             self.power.gesture_start = Some(*data);
             self.power.pen_cursor = (x_to_phase(layout, x), y_to_value(layout, y));
             let pointer =
-                super::snap_point(x_to_phase(layout, x), y_to_value(layout, y), data, false);
+                self.snap_point(x_to_phase(layout, x), y_to_value(layout, y), data, false);
             self.power.pen_pointer = pointer;
             self.power.pen_repeating = self.power.last_pen_pointer == Some(self.power.pen_cursor);
             self.power.press = if self.power.pen_repeating {
@@ -662,19 +679,22 @@ impl MsegEditState {
                 pointer
             };
             self.drag = Some(DragTarget::Pen);
-            let end = self.pen_end(self.power.press);
+            let end = self.pen_end(data, self.power.press);
             return Some(self.stamp_pen(data, end));
         }
         None
     }
 
-    fn pen_end(&self, start: (f32, f32)) -> (f32, f32) {
+    fn pen_end(&self, data: &MsegData, start: (f32, f32)) -> (f32, f32) {
         let mut end = (
             start.0 + self.power.pen_size.0,
             start.1 + self.power.pen_size.1,
         );
         end.0 = end.0.clamp(0.0, 1.0);
         end.1 = end.1.clamp(0.0, 1.0);
+        if data.snap && data.value_grid == crate::mseg::ValueGrid::Semitones {
+            end.1 = self.snap_value(data, end.1);
+        }
         (end.0, end.1)
     }
 
@@ -754,12 +774,15 @@ impl MsegEditState {
         fine: bool,
     ) -> Option<MsegEdit> {
         self.power.pen_cursor = (x_to_phase(layout, x), y_to_value(layout, y));
-        let pointer = super::snap_point(x_to_phase(layout, x), y_to_value(layout, y), data, fine);
+        let pointer = self.snap_point(x_to_phase(layout, x), y_to_value(layout, y), data, fine);
         if self.drag == Some(DragTarget::Pen) {
-            let end = (
+            let mut end = (
                 (self.power.press.0 + pointer.0 - self.power.pen_pointer.0).clamp(0.0, 1.0),
                 (self.power.press.1 + pointer.1 - self.power.pen_pointer.1).clamp(0.0, 1.0),
             );
+            if data.snap && !fine && data.value_grid == crate::mseg::ValueGrid::Semitones {
+                end.1 = self.snap_value(data, end.1);
+            }
             if (end.0 - self.power.press.0).abs() > 1e-4 {
                 let result = self.stamp_pen(data, end);
                 if self.power.message.is_empty() {
@@ -784,8 +807,7 @@ impl MsegEditState {
                 }
                 if sy != 0.0 && dy.abs() > 1e-6 {
                     let edge = if sy < 0.0 { bottom } else { top };
-                    let rows = data.value_steps.max(1) as f32;
-                    pointer.1 = self.power.press.1 + ((edge + dy) * rows).round() / rows - edge;
+                    pointer.1 = self.power.press.1 + self.snap_value(data, edge + dy) - edge;
                 }
             }
             return self.transform_selection(handle, pointer, data);
@@ -799,7 +821,7 @@ impl MsegEditState {
                 self.pen_points(
                     data,
                     start,
-                    self.pen_end(start),
+                    self.pen_end(data, start),
                     self.power.next_pen_start.is_some(),
                 )
             } else {
@@ -1288,6 +1310,281 @@ mod tests {
         assert_eq!(data.active(), factory_shape(FactoryShape::FlatHigh).nodes());
         assert_eq!(data.beats, original.beats);
         assert!(!state.has_open_menu());
+    }
+
+    #[test]
+    fn musical_randomization_is_independent_of_the_inactive_numeric_value_division() {
+        for style in crate::mseg::RandomStyle::ALL {
+            let (mut first, mut coarse) = musical_editor();
+            let (mut second, mut fine) = musical_editor();
+            coarse.value_steps = 1;
+            fine.value_steps = 64;
+            first.set_style(style);
+            second.set_style(style);
+            let button =
+                crate::mseg::render::strip_buttons(first.layout(RECT, 1.0).strip, 1.0, true)
+                    .randomize;
+            first.on_mouse_down(
+                button.0 + 1.0,
+                button.1 + 1.0,
+                &mut coarse,
+                RECT,
+                1.0,
+                false,
+            );
+            second.on_mouse_down(button.0 + 1.0, button.1 + 1.0, &mut fine, RECT, 1.0, false);
+            assert_eq!(coarse.active(), fine.active(), "{style:?}");
+        }
+    }
+
+    fn musical_editor() -> (MsegEditState, MsegData) {
+        let mut state = MsegEditState::new();
+        let mut data = MsegData::default();
+        state.set_pitch_grid(
+            crate::mseg::PitchGrid::new(vec![0.05, 0.2, 0.37, 0.65, 0.9]),
+            &data,
+        );
+        let original = data;
+        assert_eq!(
+            state.apply_menu(StripId::TimeGrid, state.grid_options.len(), &mut data),
+            Some(MsegEdit::Changed)
+        );
+        assert_eq!(data.active(), original.active());
+        assert_eq!(data.time_divisions, original.time_divisions);
+        (state, data)
+    }
+
+    #[test]
+    fn musical_pointer_and_group_anchor_snap_while_fine_drag_and_group_offsets_stay_free() {
+        for scale in [0.5, 1.0, 2.0] {
+            let (mut state, mut data) = musical_editor();
+            let rect = (0.0, 0.0, 1100.0 * scale, 330.0 * scale);
+            let layout = state.layout(rect, scale);
+            state.on_double_click(
+                phase_to_x(&layout, 0.25),
+                value_to_y(&layout, 0.26),
+                &mut data,
+                rect,
+                scale,
+            );
+            assert_eq!(data.nodes[1].value, 0.2);
+            state.on_mouse_down(
+                phase_to_x(&layout, 0.25),
+                value_to_y(&layout, 0.2),
+                &mut data,
+                rect,
+                scale,
+                false,
+            );
+            state.on_mouse_move(
+                phase_to_x(&layout, 0.51),
+                value_to_y(&layout, 0.58),
+                &mut data,
+                rect,
+                scale,
+                false,
+            );
+            assert_eq!(data.nodes[1].value, 0.65);
+            state.on_mouse_move(
+                phase_to_x(&layout, 0.51),
+                value_to_y(&layout, 0.58),
+                &mut data,
+                rect,
+                scale,
+                true,
+            );
+            assert!((data.nodes[1].value - 0.58).abs() < 1e-6);
+            state.on_mouse_up(&mut data, rect, scale);
+
+            data = MsegData::default();
+            data.value_grid = crate::mseg::ValueGrid::Semitones;
+            data.insert_node(0.25, 0.2).unwrap();
+            data.insert_node(0.5, 0.37).unwrap();
+            state.select_only(1);
+            state.toggle_selected_for_test(2);
+            state.on_mouse_down(
+                phase_to_x(&layout, 0.25),
+                value_to_y(&layout, 0.2),
+                &mut data,
+                rect,
+                scale,
+                false,
+            );
+            state.on_mouse_move(
+                phase_to_x(&layout, 0.31),
+                value_to_y(&layout, 0.58),
+                &mut data,
+                rect,
+                scale,
+                false,
+            );
+            assert!((data.nodes[1].value - 0.65).abs() < 1e-6);
+            assert!((data.nodes[2].value - data.nodes[1].value - 0.17).abs() < 1e-6);
+            state.on_mouse_up(&mut data, rect, scale);
+        }
+    }
+
+    #[test]
+    fn musical_selection_edge_and_stepped_draw_use_pitch_positions_and_allow_fine_levels() {
+        let (mut state, mut data) = musical_editor();
+        data.insert_node(0.25, 0.2).unwrap();
+        data.insert_node(0.5, 0.37).unwrap();
+        state.select_only(1);
+        state.toggle_selected_for_test(2);
+        let layout = state.layout(RECT, 1.0);
+        let (_, (x, y)) = state
+            .selection_handles(&data, &layout, 1.0)
+            .into_iter()
+            .find(|(handle, _)| *handle == SelectionHandle::N)
+            .unwrap();
+        state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+        state.on_mouse_move(x, y - 0.18 * layout.plot.3, &mut data, RECT, 1.0, false);
+        assert!((data.nodes[2].value - 0.65).abs() < 1e-6);
+        state.on_mouse_move(x, y - 0.18 * layout.plot.3, &mut data, RECT, 1.0, true);
+        assert!((data.nodes[2].value - 0.55).abs() < 1e-6);
+        state.on_mouse_up(&mut data, RECT, 1.0);
+        state.clear_selection();
+        data = MsegData {
+            value_grid: crate::mseg::ValueGrid::Semitones,
+            ..MsegData::default()
+        };
+        state.set_stepped_draw(true);
+        state.on_mouse_down(
+            phase_to_x(&layout, 0.125),
+            value_to_y(&layout, 0.26),
+            &mut data,
+            RECT,
+            1.0,
+            false,
+        );
+        assert_eq!(data.nodes[1].value, 0.2);
+        state.on_mouse_move(
+            phase_to_x(&layout, 0.25),
+            value_to_y(&layout, 0.58),
+            &mut data,
+            RECT,
+            1.0,
+            false,
+        );
+        assert_eq!(data.nodes[2].value, 0.65);
+        state.on_mouse_move(
+            phase_to_x(&layout, 0.375),
+            value_to_y(&layout, 0.58),
+            &mut data,
+            RECT,
+            1.0,
+            true,
+        );
+        assert!((data.nodes[3].value - 0.58).abs() < 1e-6);
+    }
+
+    #[test]
+    fn musical_pens_preview_the_snapped_endpoints_and_repeat_without_losing_fine_edits() {
+        for tool in [MsegTool::Line, MsegTool::Arc, MsegTool::SCurve] {
+            let (mut state, mut data) = musical_editor();
+            state.set_tool(tool);
+            state.power.pen_size = (0.125, 0.35);
+            let layout = state.layout(RECT, 1.0);
+            let (x, y) = (phase_to_x(&layout, 0.125), value_to_y(&layout, 0.26));
+            state.on_mouse_move(x, y, &mut data, RECT, 1.0, false);
+            let preview = state.pen_preview().to_vec();
+            assert_eq!(preview.first().unwrap().value, 0.2);
+            assert_eq!(preview.last().unwrap().value, 0.65);
+            state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+            for node in preview {
+                assert!(data.active().contains(&node));
+            }
+            state.on_mouse_up(&mut data, RECT, 1.0);
+            let repeat = state.pen_preview().to_vec();
+            state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
+            for node in repeat {
+                assert!(data.active().contains(&node));
+            }
+            state.on_mouse_up(&mut data, RECT, 1.0);
+            state.on_mouse_down(
+                phase_to_x(&layout, 0.5),
+                value_to_y(&layout, 0.37),
+                &mut data,
+                RECT,
+                1.0,
+                false,
+            );
+            state.on_mouse_move(
+                phase_to_x(&layout, 0.625),
+                value_to_y(&layout, 0.58),
+                &mut data,
+                RECT,
+                1.0,
+                false,
+            );
+            assert_eq!(state.pen_preview().last().unwrap().value, 0.65);
+            state.on_mouse_move(
+                phase_to_x(&layout, 0.63),
+                value_to_y(&layout, 0.58),
+                &mut data,
+                RECT,
+                1.0,
+                true,
+            );
+            assert!((state.pen_preview().last().unwrap().value - 0.58).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn musical_quantize_mutation_and_randomize_use_the_grid_and_reject_missing_context_atomically()
+    {
+        let (mut state, mut data) = musical_editor();
+        data.insert_node(0.31, 0.29).unwrap();
+        data.hold = crate::mseg::HoldMode::Sustain(1);
+        assert_eq!(
+            state.apply_menu(StripId::Transform, 11, &mut data),
+            Some(MsegEdit::Changed)
+        );
+        assert_eq!(data.nodes[1].time, 0.3125);
+        assert_eq!(data.nodes[1].value, 0.37);
+        assert_eq!(data.hold, crate::mseg::HoldMode::Sustain(1));
+        for index in [14, 15] {
+            state.apply_menu(StripId::Transform, index, &mut data);
+            assert!(
+                data.active().iter().all(|node| state
+                    .pitch_grid()
+                    .unwrap()
+                    .levels()
+                    .contains(&node.value))
+            );
+        }
+        let button =
+            crate::mseg::render::strip_buttons(state.layout(RECT, 1.0).strip, 1.0, true).randomize;
+        state.on_mouse_down(button.0 + 1.0, button.1 + 1.0, &mut data, RECT, 1.0, false);
+        assert!(
+            data.active().iter().all(|node| state
+                .pitch_grid()
+                .unwrap()
+                .levels()
+                .contains(&node.value))
+        );
+        state.set_pitch_grid(None, &data);
+        let before = data;
+        assert_eq!(state.apply_menu(StripId::Transform, 11, &mut data), None);
+        assert_eq!(data, before);
+        assert!(!state.status_message().is_empty());
+        assert_eq!(
+            state.apply_menu(StripId::TimeGrid, 0, &mut data),
+            Some(MsegEdit::Changed)
+        );
+        assert_eq!(data.value_grid, crate::mseg::ValueGrid::Divisions);
+        let mut static_editor = MsegEditState::new_curve_only();
+        assert!(!static_editor.grid_label_refs().contains(&"Semitones"));
+        let before = data;
+        assert_eq!(
+            static_editor.apply_menu(
+                StripId::TimeGrid,
+                static_editor.grid_options.len(),
+                &mut data
+            ),
+            None
+        );
+        assert_eq!(data, before);
     }
 
     #[test]

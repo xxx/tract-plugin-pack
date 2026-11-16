@@ -7,6 +7,7 @@ use tiny_skia_widgets as widgets;
 mod detector;
 mod live;
 mod midi;
+mod pitch_grid;
 pub use detector::DetectorField;
 pub use live::{AudioGain, AudioView};
 pub use midi::MidiField;
@@ -102,6 +103,7 @@ pub struct EffectEditor {
     audio_gain: AudioGain,
     detector_open: bool,
     detector_owner: Option<detector::DetectorBinding>,
+    pitch_grid_binding: Option<pitch_grid::PitchGridBinding>,
 }
 
 impl Default for EffectEditor {
@@ -134,6 +136,7 @@ impl EffectEditor {
             audio_gain: AudioGain::Unity,
             detector_open: false,
             detector_owner: None,
+            pitch_grid_binding: None,
         }
     }
 
@@ -316,6 +319,7 @@ struct Session<'a> {
 
 impl<'a> Session<'a> {
     fn new(state: &'a mut EffectEditor, context: EditorContext<'a>) -> Self {
+        state.refresh_pitch_grid(context.effect, context.modulation);
         state.mouse_pos = context.pointer_position;
         state
             .effect_dial_drag

@@ -10,6 +10,7 @@
 
 pub mod audio;
 pub mod editor;
+pub mod grid;
 pub mod interpolation;
 pub mod library;
 pub mod randomize;
@@ -21,6 +22,7 @@ pub mod viewport;
 
 pub use audio::*;
 pub use editor::*;
+pub use grid::{PitchGrid, ValueGrid};
 pub use interpolation::{PointWeight, SegmentShape, segment_value};
 pub use randomize::*;
 pub use render::*;
@@ -127,6 +129,8 @@ pub struct MsegData {
     pub time_divisions: u32,
     /// Vertical grid: N value levels.
     pub value_steps: u32,
+    /// Numeric divisions or a host-supplied musical editing grid.
+    pub value_grid: ValueGrid,
     pub snap: bool,
     /// View preference — affects the midline marker only; node values are
     /// still stored and reported as 0..1 regardless.
@@ -161,6 +165,7 @@ impl Default for MsegData {
             beats: 1.0,
             time_divisions: 16,
             value_steps: 8,
+            value_grid: ValueGrid::Divisions,
             snap: true,
             polarity: Polarity::Unipolar,
         }
@@ -351,6 +356,8 @@ struct MsegDataSerde {
     beats: f32,
     time_divisions: u32,
     value_steps: u32,
+    #[serde(default, skip_serializing_if = "ValueGrid::is_divisions")]
+    value_grid: ValueGrid,
     snap: bool,
     /// Defaulted on deserialize so saves predating this field load cleanly
     /// (as Unipolar — the new default view).
@@ -369,6 +376,7 @@ impl From<&MsegData> for MsegDataSerde {
             beats: d.beats,
             time_divisions: d.time_divisions,
             value_steps: d.value_steps,
+            value_grid: d.value_grid,
             snap: d.snap,
             polarity: d.polarity,
         }
@@ -394,6 +402,7 @@ impl<'de> serde::Deserialize<'de> for MsegData {
             beats: raw.beats,
             time_divisions: raw.time_divisions,
             value_steps: raw.value_steps,
+            value_grid: raw.value_grid,
             snap: raw.snap,
             polarity: raw.polarity,
         };

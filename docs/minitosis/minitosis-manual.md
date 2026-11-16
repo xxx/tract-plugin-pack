@@ -43,6 +43,10 @@ handles, reusable curves/favorites, copy/paste between plugins, controlled
 mutation, transforms, and triplet grids. Find them in **Tool**, **Shapes**, and
 **Edit** beneath the curve. Each curve command or gesture is one undo step.
 
+Grid also offers **Semitones** for routed pitch and logarithmic frequency
+targets, following base value, Depth, and polarity. See
+[semitone grids](../mseg-editor.md#semitone-grids).
+
 Edit also provides endpoint matching and **Smooth loop seam (10%)**; amber
 marks identify playback wrap jumps, including stepped tails. See
 [loop seam tools](../mseg-editor.md#loop-seam-tools).

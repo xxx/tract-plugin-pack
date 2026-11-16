@@ -223,6 +223,7 @@ pub enum ShapeError {
     Capacity,
     Selection,
     Collision,
+    UnavailableGrid,
 }
 
 impl std::fmt::Display for ShapeError {
@@ -232,6 +233,7 @@ impl std::fmt::Display for ShapeError {
             Self::Capacity => "This edit would exceed 128 points",
             Self::Selection => "Select adjacent points for this edit",
             Self::Collision => "This edit would overlap points",
+            Self::UnavailableGrid => "Semitone grid needs a pitched target with reachable notes",
         })
     }
 }

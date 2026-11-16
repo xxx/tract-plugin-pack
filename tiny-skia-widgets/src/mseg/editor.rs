@@ -66,16 +66,36 @@ pub(crate) fn transform_menu_items() -> &'static [&'static str] {
 /// Snap `(phase, value)` to the document's grid when `data.snap` is on, unless
 /// `fine` (the caller's fine-adjust modifier, e.g. Shift) bypasses it. `phase`
 /// snaps to the `time_divisions` columns, `value` to the `value_steps` rows.
-fn snap_point(phase: f32, value: f32, data: &MsegData, fine: bool) -> (f32, f32) {
-    if !data.snap || fine {
-        return (phase, value);
+impl MsegEditState {
+    fn snap_point(&self, phase: f32, value: f32, data: &MsegData, fine: bool) -> (f32, f32) {
+        if !data.snap || fine {
+            return (phase, value);
+        }
+        let cols = data.time_divisions.max(1) as f32;
+        (
+            ((phase * cols).round() / cols).clamp(0.0, 1.0),
+            self.snap_value(data, value),
+        )
     }
-    let cols = data.time_divisions.max(1) as f32;
-    let rows = data.value_steps.max(1) as f32;
-    (
-        ((phase * cols).round() / cols).clamp(0.0, 1.0),
-        ((value * rows).round() / rows).clamp(0.0, 1.0),
-    )
+
+    fn snap_value(&self, data: &MsegData, value: f32) -> f32 {
+        crate::mseg::grid::snap_value(data, self.pitch_grid.as_ref(), value)
+    }
+
+    /// Refresh target positions, preserving pen placement while musical snapping is inactive.
+    pub fn set_pitch_grid(&mut self, grid: Option<crate::mseg::PitchGrid>, data: &MsegData) {
+        if self.pitch_grid != grid {
+            self.pitch_grid = grid;
+            if data.snap && data.value_grid == crate::mseg::ValueGrid::Semitones {
+                self.power.preview.clear();
+                self.reset_pen_repeat();
+            }
+        }
+    }
+
+    pub fn pitch_grid(&self) -> Option<&crate::mseg::PitchGrid> {
+        self.pitch_grid.as_ref()
+    }
 }
 
 /// Returned by an event handler when the document changed and the consuming
@@ -176,6 +196,7 @@ pub struct MsegEditState {
     grid_options: Vec<(u32, u32)>,
     /// Display labels for `grid_options`, kept in sync by `set_grid_options`.
     grid_labels: Vec<String>,
+    pitch_grid: Option<crate::mseg::PitchGrid>,
     status_reserve: f32,
 }
 
@@ -208,7 +229,7 @@ impl MsegEditState {
 
     fn with_curve_only(curve_only: bool) -> Self {
         let grid_options: Vec<(u32, u32)> = DEFAULT_GRID_OPTIONS.to_vec();
-        let grid_labels = Self::build_labels(&grid_options);
+        let grid_labels = Self::build_labels(&grid_options, curve_only);
         Self {
             power: power::PowerState::default(),
             precision: precision::PrecisionState::default(),
@@ -228,16 +249,21 @@ impl MsegEditState {
             seed: 0,
             grid_options,
             grid_labels,
+            pitch_grid: None,
             status_reserve: 0.0,
         }
     }
 
     /// Build display labels from a slice of `(time_divisions, value_steps)` pairs.
-    fn build_labels(options: &[(u32, u32)]) -> Vec<String> {
-        options
+    fn build_labels(options: &[(u32, u32)], curve_only: bool) -> Vec<String> {
+        let mut labels: Vec<_> = options
             .iter()
             .map(|&(t, v)| format!("{} / {}", t, v))
-            .collect()
+            .collect();
+        if !curve_only {
+            labels.push("Semitones".to_owned());
+        }
+        labels
     }
 
     /// Replace the grid preset list. If `options` is empty the call is a no-op
@@ -251,7 +277,7 @@ impl MsegEditState {
             return;
         }
         self.grid_options = options.to_vec();
-        self.grid_labels = Self::build_labels(&self.grid_options);
+        self.grid_labels = Self::build_labels(&self.grid_options, self.curve_only);
     }
 
     /// The current grid presets `(time_divisions, value_steps)`.
@@ -283,6 +309,9 @@ impl MsegEditState {
     /// pair best matches `data`. Prefers an exact match; falls back to the
     /// nearest by combined absolute deviation; returns 0 on empty list.
     pub(crate) fn current_grid_index(&self, data: &MsegData) -> usize {
+        if !self.curve_only && data.value_grid == crate::mseg::ValueGrid::Semitones {
+            return self.grid_options.len();
+        }
         // Prefer an exact match.
         for (i, &(t, v)) in self.grid_options.iter().enumerate() {
             if data.time_divisions == t && data.value_steps == v {
@@ -481,7 +510,7 @@ impl MsegEditState {
             MsegHit::Canvas if self.stepped_draw_held => {
                 self.drag = Some(DragTarget::StepDraw);
                 self.step_last_cell = None;
-                self.step_draw_paint(x, y, data, &layout)
+                self.step_draw_paint(x, y, data, &layout, false)
             }
             MsegHit::Canvas => {
                 // Begin a marquee. Whether it selects (on release) or just
@@ -494,6 +523,11 @@ impl MsegEditState {
             MsegHit::Randomize => {
                 self.seed = self.seed.wrapping_add(1);
                 crate::mseg::randomize::randomize(data, self.style, self.seed);
+                if data.snap && data.value_grid == crate::mseg::ValueGrid::Semitones {
+                    for index in 0..data.node_count {
+                        data.nodes[index].value = self.snap_value(data, data.nodes[index].value);
+                    }
+                }
                 // Randomize replaces every node — any drag/hover/selection
                 // index is now stale, so clear them.
                 self.drag = None;
@@ -558,7 +592,7 @@ impl MsegEditState {
                         let grid_idx = self.current_grid_index(data);
                         self.dropdown.open(
                             StripId::TimeGrid,
-                            b.grid,
+                            (b.grid.0, b.grid.1, b.grid.2.max(120.0), b.grid.3),
                             crate::dropdown::DropdownList::flat(&grid_refs),
                             grid_idx,
                             false,
@@ -632,7 +666,7 @@ impl MsegEditState {
         match self.drag {
             Some(DragTarget::Node(i)) => {
                 let (phase, value) =
-                    snap_point(x_to_phase(&layout, x), y_to_value(&layout, y), data, fine);
+                    self.snap_point(x_to_phase(&layout, x), y_to_value(&layout, y), data, fine);
                 data.move_node(i, phase, value);
                 Some(MsegEdit::Changed)
             }
@@ -653,7 +687,7 @@ impl MsegEditState {
                 data.debug_assert_valid();
                 Some(MsegEdit::Changed)
             }
-            Some(DragTarget::StepDraw) => self.step_draw_paint(x, y, data, &layout),
+            Some(DragTarget::StepDraw) => self.step_draw_paint(x, y, data, &layout, fine),
             Some(DragTarget::Group { anchor }) => {
                 self.apply_group_move(anchor, x, y, data, &layout, fine);
                 Some(MsegEdit::Changed)
@@ -752,7 +786,7 @@ impl MsegEditState {
             }
             MsegHit::Canvas => {
                 let (phase, value) =
-                    snap_point(x_to_phase(&layout, x), y_to_value(&layout, y), data, false);
+                    self.snap_point(x_to_phase(&layout, x), y_to_value(&layout, y), data, false);
                 if data.insert_node(phase, value).is_some() {
                     self.clear_selection();
                     return Some(MsegEdit::Changed);
@@ -868,7 +902,8 @@ impl MsegEditState {
         // snapshot. Only the anchor lands on the grid; the rigid group carries
         // every other selected node off-grid by the same delta, by design.
         let (anchor_t0, anchor_v0) = self.group_snapshot[anchor];
-        let (snap_t, snap_v) = snap_point(x_to_phase(layout, x), y_to_value(layout, y), data, fine);
+        let (snap_t, snap_v) =
+            self.snap_point(x_to_phase(layout, x), y_to_value(layout, y), data, fine);
         let mut d_phase = snap_t - anchor_t0;
         let d_value = snap_v - anchor_v0;
 
@@ -968,6 +1003,7 @@ impl MsegEditState {
         y: f32,
         data: &mut MsegData,
         layout: &crate::mseg::render::MsegLayout,
+        fine: bool,
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{x_to_phase, y_to_value};
         let phase = x_to_phase(layout, x);
@@ -981,7 +1017,11 @@ impl MsegEditState {
         }
         self.step_last_cell = Some(cell);
         let snapped_phase = (cell as f32 / tdiv as f32).clamp(0.0, 1.0);
-        let value = value.clamp(0.0, 1.0);
+        let value = if data.snap && !fine && data.value_grid == crate::mseg::ValueGrid::Semitones {
+            self.snap_value(data, value)
+        } else {
+            value.clamp(0.0, 1.0)
+        };
 
         // If an interior node already sits in this grid cell, repaint its
         // value in place instead of inserting a duplicate. Without this,
@@ -1797,7 +1837,10 @@ mod tests {
         let mut state = MsegEditState::new();
         state.set_grid_options(&[(2, 2), (64, 64)]);
         assert_eq!(state.grid_options(), &[(2, 2), (64, 64)]);
-        assert_eq!(state.grid_label_refs(), vec!["2 / 2", "64 / 64"]);
+        assert_eq!(
+            state.grid_label_refs(),
+            vec!["2 / 2", "64 / 64", "Semitones"]
+        );
     }
 
     #[test]

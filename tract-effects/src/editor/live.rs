@@ -345,6 +345,7 @@ impl Session<'_> {
             Some((EffectHit::Detector(field), text)) => self.commit_detector_text(field, &text),
             _ => {}
         }
+        self.state.refresh_pitch_grid(self.effect, self.modulation);
     }
     pub(super) fn draw_live_controls(&mut self, pm: &mut tiny_skia::Pixmap) {
         let r = self.layout.audio;
