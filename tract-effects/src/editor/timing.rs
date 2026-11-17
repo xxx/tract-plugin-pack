@@ -23,9 +23,19 @@ impl Field {
             Self::Blend => settings.blend_ms,
         }
     }
+    fn min(self, lookahead: bool) -> f32 {
+        if self == Self::Delay && lookahead {
+            -MAX_AUDIO_DELAY_MS
+        } else {
+            0.0
+        }
+    }
+    fn norm(self, settings: TriggerTiming, lookahead: bool) -> f32 {
+        (self.value(settings) - self.min(lookahead)) / (self.max() - self.min(lookahead))
+    }
     fn label(self) -> &'static str {
         match self {
-            Self::Delay => "Audio delay",
+            Self::Delay => "Audio shift",
             Self::Blend => "Retrigger blend",
         }
     }
@@ -40,6 +50,7 @@ impl Field {
 struct Binding {
     kind: EffectKind,
     settings: TriggerTiming,
+    lookahead: bool,
     source: (usize, [u32; 2]),
     detector: Option<(
         crate::modulation::AudioTriggerSettings,
@@ -89,6 +100,7 @@ impl Panel {
 pub(super) struct Layout {
     pub rect: Rect,
     pub fields: [Rect; 2],
+    pub lookahead: Rect,
     pub close: Rect,
     pub reset: Rect,
     pub usable: bool,
@@ -99,9 +111,9 @@ pub(super) fn layout(geometry: EditorGeometry) -> Layout {
     let s = geometry
         .scale
         .min(((ww - 8.0) / 392.0).max(0.01))
-        .min(((wh - 8.0) / 250.0).max(0.01))
+        .min(((wh - 8.0) / 320.0).max(0.01))
         .max(0.01);
-    let (w, h) = (392.0 * s, 250.0 * s);
+    let (w, h) = (392.0 * s, 320.0 * s);
     let x = ((ww - w) * 0.5).max(0.0);
     let y = ((wh - h) * 0.5).max(0.0);
     Layout {
@@ -109,13 +121,14 @@ pub(super) fn layout(geometry: EditorGeometry) -> Layout {
         fields: std::array::from_fn(|i| {
             (
                 x + 12.0 * s,
-                y + (54.0 + 44.0 * i as f32) * s,
+                y + (98.0 + 44.0 * i as f32) * s,
                 w - 24.0 * s,
                 34.0 * s,
             )
         }),
         close: (x + w - 32.0 * s, y + 8.0 * s, 24.0 * s, 20.0 * s),
-        reset: (x + 12.0 * s, y + 216.0 * s, 88.0 * s, 24.0 * s),
+        lookahead: (x + 12.0 * s, y + 54.0 * s, w - 24.0 * s, 34.0 * s),
+        reset: (x + 12.0 * s, y + 286.0 * s, 88.0 * s, 24.0 * s),
         usable: s >= geometry.scale.max(0.5),
         scale: s,
     }
@@ -124,7 +137,8 @@ impl EffectEditor {
     fn timing_binding(&self, effect: &TrackEffect, cfg: &TrackModulation) -> Binding {
         Binding {
             kind: effect.kind,
-            settings: cfg.trigger_timing.normalized(),
+            settings: cfg.trigger_timing.normalized_with_lookahead(cfg.lookahead),
+            lookahead: cfg.lookahead,
             source: (
                 view::trigger_to_item(cfg.trigger),
                 match cfg.trigger {
@@ -217,6 +231,25 @@ impl EffectEditor {
         );
         let r = lay.close;
         widgets::draw_button(pm, tr, r.0, r.1, r.2, r.3, "X", false, false);
+        let r = lay.lookahead;
+        widgets::draw_button(
+            pm,
+            tr,
+            r.0,
+            r.1,
+            r.2,
+            r.3,
+            if owner.lookahead {
+                "Lookahead: 4 ms"
+            } else {
+                "Lookahead: Off"
+            },
+            owner.lookahead,
+            false,
+        );
+        if self.timing.focus == 2 {
+            widgets::draw_rect_outline(pm, r.0, r.1, r.2, r.3, widgets::color_accent(), 1.0);
+        }
         for (field, r) in Field::ALL.into_iter().zip(lay.fields) {
             let value = field.value(owner.settings);
             let font = (r.3 * 0.5).max(10.0);
@@ -227,7 +260,7 @@ impl EffectEditor {
                 }
                 text
             });
-            let label = if value == 0.0 {
+            let label = if value == 0.0 && !(field == Field::Delay && owner.lookahead) {
                 "Off".into()
             } else {
                 format!("{value:.2} ms")
@@ -241,7 +274,7 @@ impl EffectEditor {
                 r.3,
                 field.label(),
                 &label,
-                value / field.max(),
+                field.norm(owner.settings, owner.lookahead),
                 edit,
                 self.timing.text.caret_visible(),
             );
@@ -250,8 +283,9 @@ impl EffectEditor {
             }
         }
         for (offset, line) in [
-            (157.0, "Delay: Transient (sample) only"),
-            (183.0, "Blend skips enums / Follow / DAW"),
+            (201.0, "Shift/lookahead: Transient (sample)"),
+            (224.0, "Adds 4 ms; FX latency stays separate"),
+            (247.0, "Blend skips enums / Follow / DAW"),
         ] {
             tr.draw_text(
                 pm,
@@ -264,7 +298,7 @@ impl EffectEditor {
         }
         let r = lay.reset;
         widgets::draw_button(pm, tr, r.0, r.1, r.2, r.3, "Reset", false, false);
-        if self.timing.focus == 2 {
+        if self.timing.focus == 3 {
             widgets::draw_rect_outline(pm, r.0, r.1, r.2, r.3, widgets::color_accent(), 1.0);
         }
     }
@@ -291,7 +325,7 @@ impl Session<'_> {
             .set_mouse(self.mouse_pos.0, self.mouse_pos.1);
     }
     fn apply_timing(&mut self, settings: TriggerTiming) {
-        let settings = settings.normalized();
+        let settings = settings.normalized_with_lookahead(self.modulation.lookahead);
         if settings != self.modulation.trigger_timing {
             self.modulation.trigger_timing = settings;
             self.response.changed = true;
@@ -302,6 +336,21 @@ impl Session<'_> {
         let mut settings = self.modulation.trigger_timing;
         field.set(&mut settings, value);
         self.apply_timing(settings);
+    }
+    fn toggle_lookahead(&mut self) {
+        self.state.timing.drag.end_drag();
+        self.state.timing.start = None;
+        self.modulation.lookahead = !self.modulation.lookahead;
+        self.response.changed = true;
+        self.apply_timing(self.modulation.trigger_timing);
+        self.state.timing.click = ClickTracker::new();
+    }
+    fn reset_timing(&mut self) {
+        if self.modulation.lookahead {
+            self.modulation.lookahead = false;
+            self.response.changed = true;
+        }
+        self.apply_timing(TriggerTiming::default());
     }
     pub(super) fn commit_timing_text(&mut self) {
         if let Some((field, text)) = self.state.timing.text.commit() {
@@ -316,8 +365,9 @@ impl Session<'_> {
                     },
                 )
             };
-            if let Some(value) = value.filter(|v| v.is_finite() && (0.0..=field.max()).contains(v))
-            {
+            if let Some(value) = value.filter(|v| {
+                v.is_finite() && (field.min(self.modulation.lookahead)..=field.max()).contains(v)
+            }) {
                 self.apply_timing_field(field, value);
             } else {
                 self.state
@@ -381,14 +431,16 @@ impl Session<'_> {
                     .drag
                     .set_mouse(self.mouse_pos.0, self.mouse_pos.1);
                 if let Some(field) = self.state.timing.drag.active_action().copied() {
-                    let norm = field.value(self.modulation.trigger_timing) / field.max();
+                    let norm =
+                        field.norm(self.modulation.trigger_timing, self.modulation.lookahead);
                     if let Some(norm) = self
                         .state
                         .timing
                         .drag
                         .update_drag(modifiers.contains(Modifiers::SHIFT), norm)
                     {
-                        self.apply_timing_field(field, norm * field.max());
+                        let min = field.min(self.modulation.lookahead);
+                        self.apply_timing_field(field, min + norm * (field.max() - min));
                     }
                 }
             }
@@ -401,16 +453,20 @@ impl Session<'_> {
                     || !view::in_rect(lay.rect, self.mouse_pos.0, self.mouse_pos.1)
                 {
                     self.state.timing.close();
+                } else if view::in_rect(lay.lookahead, self.mouse_pos.0, self.mouse_pos.1) {
+                    self.state.timing.focus = 2;
+                    self.toggle_lookahead();
                 } else if view::in_rect(lay.reset, self.mouse_pos.0, self.mouse_pos.1) {
                     self.state.timing.drag.end_drag();
-                    self.apply_timing(TriggerTiming::default());
+                    self.reset_timing();
                 } else if let Some(field) = hit(self.mouse_pos) {
                     self.state.timing.focus = usize::from(field == Field::Blend);
                     if self.state.timing.click.check_and_update(field) {
                         self.apply_timing_field(field, 0.0);
                     } else {
                         self.state.timing.start = Some(self.modulation.trigger_timing);
-                        let norm = field.value(self.modulation.trigger_timing) / field.max();
+                        let norm =
+                            field.norm(self.modulation.trigger_timing, self.modulation.lookahead);
                         self.state.timing.drag.begin_drag(field, norm, false);
                     }
                 }
@@ -466,11 +522,11 @@ impl Session<'_> {
                             self.commit_timing_text();
                             self.state.timing.focus = (self.state.timing.focus
                                 + if key.modifiers.contains(Modifiers::SHIFT) {
-                                    2
+                                    3
                                 } else {
                                     1
                                 })
-                                % 3;
+                                % 4;
                         }
                         _ => {}
                     }
@@ -491,21 +547,23 @@ impl Session<'_> {
                     Key::Tab => {
                         self.state.timing.focus = (focus
                             + if key.modifiers.contains(Modifiers::SHIFT) {
-                                2
+                                3
                             } else {
                                 1
                             })
-                            % 3
+                            % 4
                     }
-                    Key::ArrowDown => self.state.timing.focus = (focus + 1) % 3,
-                    Key::ArrowUp => self.state.timing.focus = (focus + 2) % 3,
+                    Key::ArrowDown => self.state.timing.focus = (focus + 1) % 4,
+                    Key::ArrowUp => self.state.timing.focus = (focus + 3) % 4,
                     Key::Home => self.state.timing.focus = 0,
-                    Key::End => self.state.timing.focus = 2,
+                    Key::End => self.state.timing.focus = 3,
                     Key::Enter => {
                         if focus < 2 {
                             self.timing_edit(Field::ALL[focus]);
+                        } else if focus == 2 {
+                            self.toggle_lookahead();
                         } else {
-                            self.apply_timing(TriggerTiming::default());
+                            self.reset_timing();
                         }
                     }
                     Key::ArrowLeft | Key::ArrowRight if focus < 2 => {
@@ -515,9 +573,10 @@ impl Session<'_> {
                         } else {
                             0.01
                         } * if key.key == Key::ArrowLeft { -1.0 } else { 1.0 };
+                        let min = field.min(self.modulation.lookahead);
                         let value = (field.value(self.modulation.trigger_timing)
-                            + delta * field.max())
-                        .clamp(0.0, field.max());
+                            + delta * (field.max() - min))
+                            .clamp(min, field.max());
                         self.apply_timing_field(field, value);
                     }
                     _ => {}

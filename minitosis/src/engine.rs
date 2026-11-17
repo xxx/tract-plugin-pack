@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use tract_effects::effects::{Effect, EffectInstance, EffectKind, TrackEffect};
+use tract_effects::lookahead::{LookaheadDelay, LookaheadFrame, lookahead_samples};
 use tract_effects::modulation::AuditionRuntime;
 use tract_effects::modulation::{ModulationState, TrackModulation};
 use tract_effects::modulation_telemetry::ModulationTelemetry;
@@ -23,9 +24,9 @@ struct DryDelay {
 }
 
 impl DryDelay {
-    fn new() -> Self {
+    fn new(max_latency: usize) -> Self {
         Self {
-            samples: vec![[0.0; 2]; MAX_LATENCY + 1].into_boxed_slice(),
+            samples: vec![[0.0; 2]; max_latency + 1].into_boxed_slice(),
             position: 0,
         }
     }
@@ -34,10 +35,10 @@ impl DryDelay {
         self.position = 0;
     }
     fn next(&mut self, input: [f32; 2], latency: usize) -> [f32; 2] {
-        debug_assert!(latency <= MAX_LATENCY);
+        debug_assert!(latency < self.samples.len());
         self.samples[self.position] = input;
-        let index =
-            (self.position + self.samples.len() - latency.min(MAX_LATENCY)) % self.samples.len();
+        let index = (self.position + self.samples.len() - latency.min(self.samples.len() - 1))
+            % self.samples.len();
         let output = self.samples[index];
         self.position = (self.position + 1) % self.samples.len();
         output
@@ -60,6 +61,7 @@ pub struct Processor {
     span_bpm: f64,
     wave_bank: tiny_skia_widgets::mseg::WavePaletteSnapshot,
     audition: AuditionRuntime,
+    lookahead: LookaheadDelay,
 }
 
 impl Processor {
@@ -73,13 +75,19 @@ impl Processor {
         for (i, _) in effect.parameters().iter().enumerate() {
             effect.set_param(i, track.params[i]);
         }
-        let latency = effect.latency_samples();
+        let sr = f32::from_bits(key.sample_rate_bits) as f64;
+        let reserve = lookahead_samples(sr);
+        let mut lookahead = LookaheadDelay::new(reserve);
+        lookahead.prepare(modulation.lookahead_samples(sr));
+        let mut state = ModulationState::default();
+        state.set_lookahead_path(u16::from(lookahead.delay() > 0));
+        let latency = effect.latency_samples() + lookahead.delay();
         Self {
             key,
             effect,
             modulation,
-            state: ModulationState::default(),
-            dry: DryDelay::new(),
+            state,
+            dry: DryDelay::new(MAX_LATENCY + reserve),
             latency,
             waveform: WaveformClock::default(),
             waveform_telemetry: None,
@@ -89,7 +97,8 @@ impl Processor {
             span_track: *track,
             span_bpm: 120.0,
             wave_bank: tiny_skia_widgets::mseg::WavePaletteSnapshot::default(),
-            audition: AuditionRuntime::new(MAX_LATENCY),
+            audition: AuditionRuntime::new(MAX_LATENCY + reserve),
+            lookahead,
         }
     }
 
@@ -125,6 +134,7 @@ impl Processor {
         bpm: f64,
     ) {
         if !left.is_empty() && !right.is_empty() {
+            self.configure_lookahead();
             let request = self.waveform_telemetry.as_ref().and_then(|telemetry| {
                 let request = telemetry.audition.snapshot()?;
                 if request.row != 0 {
@@ -167,7 +177,7 @@ impl Processor {
         if let Some(telemetry) = &self.waveform_telemetry {
             self.waveform.begin_block(&telemetry.waveform);
         }
-        self.latency = self.effect.latency_samples();
+        self.latency = self.effect.latency_samples() + self.lookahead.delay();
     }
 
     pub fn advance_segment(&mut self, track: &TrackEffect, samples: usize, bpm: f64) {
@@ -197,6 +207,9 @@ impl Processor {
                     },
                     self.state.effective_mseg(&self.modulation, request.slot),
                 );
+                if self.state.timing_clocked() {
+                    self.waveform.follow_sample_phase();
+                }
             }
         }
         self.state.advance_segment(
@@ -207,7 +220,7 @@ impl Processor {
             bpm,
             sample_rate,
         );
-        self.latency = self.effect.latency_samples();
+        self.latency = self.effect.latency_samples() + self.lookahead.delay();
     }
 
     pub fn midi_note_on(
@@ -274,20 +287,29 @@ impl Processor {
             &mut self.effect,
             self.span_remaining,
         ) {
-            self.latency = self.effect.latency_samples();
+            self.latency = self.effect.latency_samples() + self.lookahead.delay();
             if self.waveform.request().slot == slot {
                 self.waveform
                     .update_curve(self.state.effective_mseg(&self.modulation, slot));
             }
         }
-        self.state
-            .process_modulation_sample(&self.modulation, &mut self.effect, input, sidechain);
-        self.latency = self.effect.latency_samples();
+        let ahead = self.lookahead.next(LookaheadFrame {
+            signal: input,
+            main: input,
+            sidechain,
+        });
+        self.state.process_modulation_sample(
+            &self.modulation,
+            &mut self.effect,
+            ahead.main,
+            ahead.sidechain,
+        );
+        self.latency = self.effect.latency_samples() + self.lookahead.delay();
         let dry = self.dry.next(input, self.latency);
         let output = if self.key.kind == EffectKind::None {
             dry
         } else {
-            let wet = self.effect.process_sample(input[0], input[1]);
+            let wet = self.effect.process_sample(ahead.signal[0], ahead.signal[1]);
             let mix = self.state.next_mix(mix).clamp(0.0, 1.0);
             if bypass {
                 dry
@@ -310,9 +332,9 @@ impl Processor {
             );
             self.waveform.record_sample_with_sidechain(
                 &telemetry.waveform,
-                input,
+                ahead.signal,
                 output,
-                sidechain,
+                ahead.sidechain,
                 self.state.precise_phase(self.waveform.request().slot),
             );
         }
@@ -347,6 +369,7 @@ impl Processor {
         self.state.reset();
     }
     pub fn retrigger_modulation(&mut self) {
+        self.configure_lookahead();
         self.skip_precise_sample = false;
         self.state.restart_clock(&self.modulation);
     }
@@ -356,6 +379,10 @@ impl Processor {
         self.state.reset();
     }
     pub fn flush_dsp(&mut self) {
+        if self.lookahead.delay() > 0 {
+            self.state.invalidate_lookahead_capture();
+        }
+        self.lookahead.reset();
         self.audition.reset();
         if let Some(telemetry) = &self.waveform_telemetry {
             telemetry.audition.invalidate();
@@ -366,6 +393,21 @@ impl Processor {
     }
     pub fn latency(&self) -> usize {
         self.latency
+    }
+    fn configure_lookahead(&mut self) {
+        let frames = self
+            .modulation
+            .lookahead_samples(f32::from_bits(self.key.sample_rate_bits) as f64);
+        if self.lookahead.prepare(frames) {
+            self.state.invalidate_lookahead_capture();
+            self.dry.reset();
+            self.audition.reset();
+            if let Some(telemetry) = &self.waveform_telemetry {
+                telemetry.audition.invalidate();
+            }
+        }
+        self.state.set_lookahead_path(u16::from(frames > 0));
+        self.latency = self.effect.latency_samples() + frames;
     }
     pub fn phase(&self, slot: usize) -> f32 {
         self.state.phase(slot)
@@ -388,6 +430,8 @@ mod audition_tests;
 mod detector_response_tests;
 #[cfg(test)]
 mod follower_tests;
+#[cfg(test)]
+mod lookahead_tests;
 #[cfg(test)]
 mod pitch_tests;
 #[cfg(test)]
@@ -485,7 +529,8 @@ mod tests {
         assert_no_alloc::assert_no_alloc(|| output = p.process_sample([2.0; 2], 0.0, true));
         assert_eq!(p.latency(), 512);
         assert_eq!(
-            output, [3585.0; 2],
+            output,
+            [(p.dry.samples.len() - 512) as f32; 2],
             "dry lookup used the pre-trigger latency"
         );
     }

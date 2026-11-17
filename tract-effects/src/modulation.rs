@@ -232,6 +232,8 @@ pub struct TrackModulation {
     pub detector_response: TransientSettings,
     #[serde(default, skip_serializing_if = "TriggerTiming::is_default")]
     pub trigger_timing: TriggerTiming,
+    #[serde(default, skip_serializing_if = "crate::lookahead::is_off")]
+    pub lookahead: bool,
     #[serde(default, skip_serializing_if = "FollowerConfig::is_default")]
     pub follower: FollowerConfig,
     /// The event that resets all four of this row's MSEG phases.
@@ -409,6 +411,7 @@ impl TrackModulation {
             audio_trigger: AudioTriggerSettings::default(),
             detector_response: TransientSettings::default(),
             trigger_timing: TriggerTiming::default(),
+            lookahead: false,
             follower: FollowerConfig::default(),
             trigger: TriggerSource::Free,
         }
@@ -460,6 +463,8 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             #[serde(default)]
             trigger_timing: TriggerTiming,
             #[serde(default)]
+            lookahead: bool,
+            #[serde(default)]
             follower: FollowerConfig,
             #[serde(default)]
             trigger: TriggerSource,
@@ -497,7 +502,8 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             trigger: h.trigger,
             audio_trigger: h.audio_trigger.normalized(),
             detector_response: h.detector_response.normalized(),
-            trigger_timing: h.trigger_timing.normalized(),
+            trigger_timing: h.trigger_timing.normalized_with_lookahead(h.lookahead),
+            lookahead: h.lookahead,
             follower: h.follower.normalized(),
             smooth_ms: std::array::from_fn(|i| {
                 h.smooth_ms
@@ -780,6 +786,18 @@ impl ModulationState {
     pub fn precise_trigger_active(&self) -> bool {
         self.precise.active()
     }
+    pub fn set_lookahead_path(&mut self, path: u16) {
+        self.timing.requested_path = Some(path);
+    }
+    pub fn timing_clocked(&self) -> bool {
+        self.timing.sample_clocked
+    }
+    pub fn invalidate_lookahead_capture(&mut self) {
+        self.timing.capture_epoch = self.timing.capture_epoch.wrapping_add(1);
+    }
+    pub fn discard_lookahead_cues(&mut self) {
+        self.timing.clear_pending();
+    }
     pub fn next_precise_trigger(&mut self, input: [f32; 2]) -> bool {
         let detected = self.precise.next_sample(input);
         self.timing.dispatch(detected)
@@ -819,7 +837,10 @@ impl ModulationState {
         if config.trigger == TriggerSource::DawPosition && !self.position.active {
             return;
         }
-        if config.continuous_mask(track.kind) != 0 && sample_rate.is_finite() && sample_rate > 0.0 {
+        if self.continuous_mask_for(config, track.kind) != 0
+            && sample_rate.is_finite()
+            && sample_rate > 0.0
+        {
             self.prepare_smoothing(config, track, effect, seg_len, bpm, sample_rate);
             return;
         }

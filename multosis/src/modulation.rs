@@ -18,6 +18,29 @@ pub struct Modulation {
 }
 
 impl Modulation {
+    pub fn lookahead_for_row(&self, row: usize, sr: f64) -> usize {
+        self.config[row].lookahead_samples(sr)
+    }
+    pub fn set_lookahead_path(&mut self, row: usize, path: u16) {
+        self.states[row].set_lookahead_path(path);
+    }
+    pub fn invalidate_lookahead_capture(&mut self, row: usize) {
+        self.states[row].invalidate_lookahead_capture();
+    }
+    pub fn discard_lookahead_cues(&mut self, row: usize) {
+        self.states[row].discard_lookahead_cues();
+    }
+    pub fn process_lookahead_row(
+        &mut self,
+        row: usize,
+        effect: &mut EffectInstance,
+        main: [f32; 2],
+        aux: [f32; 2],
+    ) {
+        if self.states[row].smoothing_active() {
+            self.states[row].process_modulation_sample(&self.config[row], effect, main, aux);
+        }
+    }
     pub fn audition_request(
         &self,
         control: &tract_effects::modulation::AuditionControl,
@@ -182,6 +205,9 @@ impl Modulation {
             },
             self.states[row].effective_mseg(&self.config[row], request.slot),
         );
+        if self.states[row].timing_clocked() {
+            clock.follow_sample_phase();
+        }
     }
 
     pub fn begin_block(&mut self, left: &[f32], right: &[f32], sample_rate: f64) {

@@ -285,6 +285,9 @@ impl WaveformClock {
     pub fn active(&self) -> bool {
         self.active
     }
+    pub fn follow_sample_phase(&mut self) {
+        self.follow_audio_phase = true;
+    }
 
     pub fn record_sample(
         &mut self,

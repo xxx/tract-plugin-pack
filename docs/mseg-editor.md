@@ -570,8 +570,8 @@ retain clock progress. Transient (sample) uses the same dual-envelope detection
 and Hold rules as Transient, but restarts on each qualifying sample, including
 multiple detections in one buffer. By default it listens to the plugin's original
 dry stereo-average input, before any row's effects; Detect can select the external
-Sidechain instead. Detector attack/release and the noise floor still apply; no
-lookahead or extra latency is added.
+Sidechain instead. Detector attack/release and the noise floor still apply.
+Lookahead defaults Off, so these modes add no latency until it is enabled.
 
 Only the triggered row restarts. Other rows keep their held values and clocks.
 Smooth retains its level through the restart; Off keeps endpoint evaluation.
@@ -583,14 +583,16 @@ reinitialization. Mode/rate/Sens/Hold settings save per row/effect and are undoa
 ### Trigger timing
 
 Choose **Trigger → Timing...** in Multosis/Minitosis to open timing controls
-without changing the current trigger source. Settings save per row/effect;
-both default Off and add no host automation parameters or reported latency.
+without changing the current trigger source. Settings save per row/effect and
+add no host automation parameters. Lookahead, Audio shift and Retrigger blend
+default Off; only enabled audio lookahead adds reported latency.
 
-- **Audio delay (0–4 ms):** defers phase resets from Transient (sample), rounded
-  to the nearest sample. The detector and its Threshold/Hold/meter keep their
-  original timing. Accepted hits can queue across blocks; the main/effect audio
-  remains on its normal path. Other trigger sources and MIDI wave switches keep
-  their original offsets.
+- **Audio shift (0–4 ms, or -4–+4 ms with Lookahead):** offsets phase resets from
+  Transient (sample), rounded to the nearest sample. The detector and its
+  Threshold/Hold/meter keep their original timing. Accepted hits can queue across
+  blocks. Shift alone leaves the audio path unchanged; enabling Lookahead adds
+  the input delay described below. Other trigger sources and MIDI wave switches
+  keep their original offsets.
 - **Retrigger blend (0–20 ms):** fades from the last delivered source value into
   the newly running curve after a phase reset. It follows follower combination
   and Smooth, before polarity/Depth/Target mapping. New resets during a blend
@@ -598,26 +600,66 @@ both default Off and add no host automation parameters or reported latency.
   enum destinations and absolute DAW-position playback bypass this blend.
 
 Blend applies to explicit MIDI/cell/free-Hz/audio/transport resets; ordinary
-loop wraps and wave replacements retain their existing behavior. Positive timing
-opts into per-sample source playback, including phase zero on a reset sample.
+loop wraps and wave replacements retain their existing behavior. Enabling timing
+or lookahead opts into per-sample source playback, including phase zero on a
+reset sample.
 Amp and Mix update each sample; effect parameters retain their fixed 1 kHz
-control cadence plus immediate reset refresh. With both Off, playback keeps its
-original behavior.
+control cadence plus immediate reset refresh. With all timing preferences Off,
+playback keeps its original behavior.
 
-Positive delay edits affect future detections; already queued resets retain
-their accepted delay. Turning Delay Off, changing trigger mode/input, Reset or
-transport restart clears queued resets. Positive Blend edits affect later cues;
-Off cancels the current blend. Sample-rate adoption retains/rescales pending
+Shift edits affect future detections; already queued resets retain their accepted
+timing. Turning Shift Off with no lookahead path, changing trigger mode/input,
+Reset or transport restart clears queued resets. Positive Blend edits affect
+later cues; Off cancels the current blend. Sample-rate adoption retains/rescales pending
 timing. Inactive/muted rows, bypass, Listen and frozen captures keep their normal
-roles. These controls do not advance triggers ahead of incoming audio.
+roles. Negative shifts use the delayed audio described below.
 
-Drag or Shift-drag for fine control; double-click restores Off. Right-click to
+Drag or Shift-drag for fine control; double-click restores zero. Right-click to
 type milliseconds or `Off`. Enter commits; Escape cancels a field before closing
 the dialog. Outside press, another drag and focus loss commit numeric input.
 Tab/Shift-Tab or Up/Down moves focus; Left/Right adjusts, Enter edits, and
-Home/End selects the first field or Reset. **Reset** restores both Off in one
-undo step. Resize/source/preset replacement discards stale interaction; windows
-too small for readable controls show an enlargement message.
+Home/End selects the first field or Reset. **Reset** restores all timing
+preferences Off in one undo step. Resize/source/preset replacement discards
+stale interaction; windows too small for readable controls show an enlargement
+message.
+
+### Lookahead and negative shifts
+
+**Lookahead: 4 ms** in Timing... is effective for **Transient (sample)** only.
+It delays that row/effect's input by 4 ms rounded up to samples, while detection
+still reads live original Main/Sidechain. **Audio shift** can then be -4..+4 ms.
+A negative shift moves resets earlier relative to the detector's cue on the
+delayed input; zero retains alignment against the added lookahead. Detection
+itself still follows the selected algorithm's causal response.
+Existing effect/FFT latency keeps its prior relationship to modulation and is
+separate from this shift. MIDI/free/DAW clocks and wave-note offsets retain their
+normal processing-time definitions, as with other latency-adding effects.
+
+Minitosis aligns dry, Mix and bypass to effect latency plus lookahead. Multosis
+adds the windows of unmuted lookahead rows, including inactive/None rows, so grid
+activity does not change its lookahead latency. Its global dry Mix receives the
+same added delay. Mute/Solo exclusions bypass a row's window; downstream audio
+triggers compensate for the remaining upstream windows. The host receives the
+added latency for PDC. Other effect-latency behavior remains unchanged.
+
+While lookahead is active, Multosis reports its full declared latency as a finite
+tail, including when rows are inactive/None or global Mix is zero. This protects
+queued audio and Listen during silent callbacks. CLAP continues processing while
+lookahead is enabled; disabling or bypassing all windows restores the normal
+suspension policy.
+
+Row DSP and Input/Output capture use the delayed series input/result. Followers
+read original Main/aux delayed to that row's lookahead path; Sidechain capture
+uses the delayed original aux. Listen retains its independent filters and aligns
+to total reported latency. Path changes discard old queued audio/cues and warm with zeros; they
+stop an old Listen request. Live capture starts a new aggregation without
+discarding frozen views. Buffers are reserved during setup, outside processing.
+
+Toggle Lookahead with a click or keyboard focus/Enter. Pending numeric input
+commits first. Turning it Off clamps a negative shift to zero; Reset restores
+Lookahead, Shift and Blend Off together. The preference saves per row/effect and
+uses local undo. Ordinary empty callbacks defer path/latency adoption; explicit
+transport restart retains its reset exception.
 
 ### Audio detector setup
 

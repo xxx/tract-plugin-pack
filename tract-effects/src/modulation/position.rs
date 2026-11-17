@@ -226,13 +226,14 @@ impl super::ModulationState {
             || (self.position.active && self.position.running(self.effective_mseg(config, slot)))
     }
     pub fn capture_epoch(&self, config: &super::TrackModulation, slot: usize) -> u64 {
-        if config.trigger == super::TriggerSource::DawPosition
+        let epoch = if config.trigger == super::TriggerSource::DawPosition
             || config.trigger.pitch_settings().is_some()
         {
             self.capture_epochs[slot]
         } else {
             self.trigger_epoch
-        }
+        };
+        epoch.wrapping_add(self.timing.capture_epoch)
     }
 }
 

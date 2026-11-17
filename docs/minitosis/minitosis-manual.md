@@ -130,9 +130,13 @@ DAW Beat clocks hold between reported positions without a tempo. One-shot
 envelopes hold their final value until retriggered; in DAW mode their origin is
 timeline zero. There are no sequencer cell triggers.
 
-**Trigger → Timing...** opens **Audio delay** (0–4 ms, Transient (sample) only)
+**Trigger → Timing...** opens **Audio shift** (0–4 ms, Transient (sample) only)
 and **Retrigger blend** (0–20 ms) while retaining the current source. Both default
 Off, save per effect and use local undo. See [trigger timing](../mseg-editor.md#trigger-timing).
+
+Timing also offers opt-in **4 ms Lookahead** for Transient (sample), enabling
+signed **Audio shift** (-4..+4 ms). Dry/Mix/bypass and reported latency include
+the added delay. See [lookahead](../mseg-editor.md#lookahead-and-negative-shifts).
 
 ## Automation and project state
 

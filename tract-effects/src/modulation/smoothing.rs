@@ -233,6 +233,13 @@ pub(crate) fn phase_next(data: &MsegData, phase: f64, step: f64) -> f64 {
 }
 
 impl ModulationState {
+    pub(super) fn continuous_mask_for(&self, config: &TrackModulation, kind: EffectKind) -> u8 {
+        if self.timing.sample_clocked {
+            15
+        } else {
+            config.continuous_mask(kind)
+        }
+    }
     pub(super) fn restore_released_targets(
         &mut self,
         config: &TrackModulation,
@@ -249,7 +256,9 @@ impl ModulationState {
                 ..
             }) = slot.route
                 && kind == track.kind
-                && !config.continuous_parameter(kind, index)
+                && !config
+                    .winning_slot(ModulationTarget::EffectParameter(index))
+                    .is_some_and(|slot| self.continuous_mask_for(config, kind) & (1 << slot) != 0)
                 && let Some(base) = track.params.get(index)
             {
                 effect.set_param(index, *base);
@@ -334,7 +343,7 @@ impl ModulationState {
         bpm: f64,
         sr: f64,
     ) {
-        let mask = config.continuous_mask(track.kind);
+        let mask = self.continuous_mask_for(config, track.kind);
         if self.smooth.mask == 0 || self.smooth.sample_rate != sr {
             self.smooth.clock = 0.0;
         }

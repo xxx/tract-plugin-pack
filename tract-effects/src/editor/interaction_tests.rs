@@ -3,6 +3,7 @@ mod context_help;
 mod curve_browser;
 mod detector_response;
 mod follower;
+mod lookahead;
 mod midi_pitch;
 mod midi_wave_switch;
 mod position;

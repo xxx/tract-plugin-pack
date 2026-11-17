@@ -225,9 +225,13 @@ Detect also offers Envelope, Peak rise and RMS rise algorithms with a Detail
 control for response speed. Envelope/50% keeps the original timing; Sens/Hold
 retain their roles. See [audio detector setup](../mseg-editor.md#audio-detector-setup).
 
-**Trigger → Timing...** opens **Audio delay** (0–4 ms, Transient (sample) only)
+**Trigger → Timing...** opens **Audio shift** (0–4 ms, Transient (sample) only)
 and **Retrigger blend** (0–20 ms) while retaining the current source. Both default
 Off, save per row and use local undo. See [trigger timing](../mseg-editor.md#trigger-timing).
+
+Timing also offers opt-in **4 ms Lookahead** for Transient (sample), enabling
+signed **Audio shift** (-4..+4 ms). Unmuted rows add their windows to reported
+latency, including while inactive/None. See [lookahead](../mseg-editor.md#lookahead-and-negative-shifts).
 
 Rows can also use **Trigger → MIDI note**, with Note (Any/0–127) and Ch.
 (Any/1–16) filters. Route MIDI to the plugin's note input; each matching note-on

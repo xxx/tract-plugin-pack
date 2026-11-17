@@ -14,19 +14,38 @@ impl TriggerTiming {
         *self == Self::default()
     }
     pub fn normalized(self) -> Self {
+        self.normalized_with_lookahead(false)
+    }
+    pub fn normalized_with_lookahead(self, lookahead: bool) -> Self {
         let bound = |v: f32, hi| if v.is_finite() { v.clamp(0.0, hi) } else { 0.0 };
         Self {
-            audio_delay_ms: bound(self.audio_delay_ms, MAX_AUDIO_DELAY_MS),
+            audio_delay_ms: if self.audio_delay_ms.is_finite() {
+                self.audio_delay_ms.clamp(
+                    if lookahead { -MAX_AUDIO_DELAY_MS } else { 0.0 },
+                    MAX_AUDIO_DELAY_MS,
+                )
+            } else {
+                0.0
+            },
             blend_ms: bound(self.blend_ms, MAX_RETRIGGER_BLEND_MS),
         }
     }
 }
 impl TrackModulation {
+    pub fn lookahead_samples(&self, sr: f64) -> usize {
+        if self.lookahead && matches!(self.trigger, TriggerSource::TransientSample { .. }) {
+            crate::lookahead::lookahead_samples(sr)
+        } else {
+            0
+        }
+    }
     pub(super) fn timing_active(&self) -> bool {
-        let settings = self.trigger_timing.normalized();
+        let settings = self
+            .trigger_timing
+            .normalized_with_lookahead(self.lookahead);
         self.trigger != TriggerSource::DawPosition
             && (settings.blend_ms > 0.0
-                || (settings.audio_delay_ms > 0.0
+                || ((settings.audio_delay_ms != 0.0 || self.lookahead)
                     && matches!(self.trigger, TriggerSource::TransientSample { .. })))
     }
 }
@@ -50,6 +69,9 @@ pub(super) struct TimingRuntime {
     pub(super) sample_clocked: bool,
     pub(super) first_sample: bool,
     pub(super) phases: [f64; 4],
+    pub(super) requested_path: Option<u16>,
+    path: u16,
+    pub(super) capture_epoch: u64,
 }
 impl Default for TimingRuntime {
     fn default() -> Self {
@@ -66,6 +88,9 @@ impl Default for TimingRuntime {
             sample_clocked: false,
             first_sample: false,
             phases: [0.0; 4],
+            requested_path: None,
+            path: 0,
+            capture_epoch: 0,
         }
     }
 }
@@ -86,15 +111,21 @@ impl TimingRuntime {
         self.phases = [0.0; 4];
     }
     pub(super) fn set_preferences(&mut self, config: &TrackModulation) {
-        let settings = config.trigger_timing.normalized();
-        if settings.audio_delay_ms == 0.0 && self.count != 0 {
+        let settings = config
+            .trigger_timing
+            .normalized_with_lookahead(config.lookahead);
+        let windows = self.requested_path.unwrap_or(u16::from(
+            config.lookahead && matches!(config.trigger, TriggerSource::TransientSample { .. }),
+        ));
+        if settings.audio_delay_ms == 0.0 && windows == 0 && self.count != 0 {
             self.clear_pending();
         }
         if settings.blend_ms == 0.0 || config.trigger == TriggerSource::DawPosition {
             self.cancel_blends();
         }
         self.settings = settings;
-        self.sample_clocked = config.timing_active();
+        self.sample_clocked = config.timing_active()
+            || (windows > 0 && matches!(config.trigger, TriggerSource::TransientSample { .. }));
         if !self.sample_clocked {
             self.first_sample = false;
         }
@@ -108,6 +139,13 @@ impl TimingRuntime {
         phases: [f64; 4],
     ) {
         let was_clocked = self.sample_clocked;
+        let path = self.requested_path.unwrap_or(u16::from(
+            config.lookahead && matches!(config.trigger, TriggerSource::TransientSample { .. }),
+        ));
+        if path != self.path {
+            self.clear_pending();
+            self.path = path;
+        }
         self.set_preferences(config);
         if !was_clocked && self.sample_clocked {
             self.phases = phases;
@@ -156,9 +194,11 @@ impl TimingRuntime {
         self.sample_rate = sr;
         self.audio = audio;
         self.input = input;
-        self.delay = (self.settings.audio_delay_ms as f64 * sr * 0.001)
-            .round()
-            .clamp(0.0, (PENDING_SIZE - 1) as f64) as usize;
+        self.delay = (self.path.count_ones() as f64
+            * crate::lookahead::lookahead_samples(sr) as f64
+            + (self.settings.audio_delay_ms as f64 * sr * 0.001).round())
+        .round()
+        .clamp(0.0, (PENDING_SIZE - 1) as f64) as usize;
     }
     fn enqueue(&mut self, distance: usize) {
         let index = (self.cursor + distance) % PENDING_SIZE;
@@ -229,6 +269,70 @@ impl TimingRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn signed_shift_compensates_logical_lookahead_paths_and_old_positive_states_stay_compatible() {
+        for shift in [-4.0, 0.0, 4.0] {
+            let cfg = TrackModulation {
+                trigger: TriggerSource::TransientSample {
+                    threshold: 1.5,
+                    hold_ms: 5.0,
+                },
+                lookahead: true,
+                trigger_timing: TriggerTiming {
+                    audio_delay_ms: shift,
+                    blend_ms: 0.0,
+                },
+                ..TrackModulation::default()
+            };
+            let mut timing = TimingRuntime::default();
+            timing.requested_path = Some(0b101);
+            timing.prepare(&cfg, true, 1000.0, [0.0; 4], [0.0; 4]);
+            let due = (8.0 + shift) as usize;
+            for i in 0..14 {
+                assert_eq!(timing.dispatch(i == 0), i == due);
+            }
+            assert!(timing.sample_clocked);
+            let json = serde_json::to_string(&cfg).unwrap();
+            let restored: TrackModulation = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.lookahead, true);
+            assert_eq!(restored.trigger_timing, cfg.trigger_timing);
+        }
+        let old: TriggerTiming =
+            serde_json::from_str(r#"{"audio_delay_ms":2.0,"blend_ms":3.0}"#).unwrap();
+        assert_eq!(old.normalized(), old);
+        assert!(
+            !serde_json::to_string(&TrackModulation::default())
+                .unwrap()
+                .contains("lookahead")
+        );
+    }
+    #[test]
+    fn compensated_rows_with_local_timing_off_keep_sample_clocking_and_new_topology_clears_pending()
+    {
+        let cfg = TrackModulation {
+            trigger: TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 5.0,
+            },
+            ..TrackModulation::default()
+        };
+        let mut timing = TimingRuntime::default();
+        timing.requested_path = Some(1);
+        timing.prepare(&cfg, true, 1000.0, [0.0; 4], [0.0; 4]);
+        assert!(timing.sample_clocked);
+        assert!(!timing.dispatch(true));
+        timing.prepare(&cfg, true, 1000.0, [0.0; 4], [0.0; 4]);
+        assert!(!timing.dispatch(false));
+        assert!(!timing.dispatch(false));
+        assert!(!timing.dispatch(false));
+        assert!(timing.dispatch(false));
+        assert!(!timing.dispatch(true));
+        timing.requested_path = Some(2);
+        timing.prepare(&cfg, true, 1000.0, [0.0; 4], [0.0; 4]);
+        for _ in 0..8 {
+            assert!(!timing.dispatch(false));
+        }
+    }
     #[test]
     fn queued_audio_resets_follow_each_accepted_sample_and_merge_only_coincident_deadlines() {
         let mut timing = TimingRuntime::default();

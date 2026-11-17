@@ -244,7 +244,7 @@ impl AuditionRuntime {
             filters: [AudioFilter::default(); 2],
             gain: 1.0,
             sample_rate: 0.0,
-            samples: vec![[0.0; 2]; max_latency.min(65536) + 1].into_boxed_slice(),
+            samples: vec![[0.0; 2]; max_latency.min(1 << 20) + 1].into_boxed_slice(),
             cursor: 0,
             queued: 0,
             latency: 0,
@@ -259,6 +259,14 @@ impl AuditionRuntime {
         self.blend = 0.0;
         for filter in &mut self.filters {
             filter.reset();
+        }
+    }
+    /// Reserve only during construction/sample-rate setup.
+    pub fn reserve(&mut self, max_latency: usize) {
+        let needed = max_latency.min(1 << 20) + 1;
+        if needed > self.samples.len() {
+            self.samples = vec![[0.0; 2]; needed].into_boxed_slice();
+            self.reset();
         }
     }
     pub fn prepare(&mut self, request: Option<AuditionRequest>, sr: f64) {

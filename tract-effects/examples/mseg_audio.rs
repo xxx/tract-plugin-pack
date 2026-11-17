@@ -46,10 +46,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let midi_demo = demo == 1;
     let detector_mode = args.next();
-    let timing_demo = detector_mode.as_deref() == Some("timing");
+    let lookahead_demo = detector_mode.as_deref() == Some("lookahead");
+    let timing_demo = detector_mode.as_deref() == Some("timing") || lookahead_demo;
     let detector_demo = match detector_mode.as_deref() {
         None => false,
-        Some("timing") if demo == 2 || demo == 4 => false,
+        Some("timing" | "lookahead") if demo == 2 || demo == 4 => false,
         Some("detector" | "listen" | "peak" | "rms") if demo == 2 || demo == 4 => true,
         _ => return Err("Detector/listen panel demo requires audio detector".into()),
     };
@@ -118,6 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             blend_ms: 5.0,
         };
     }
+    if lookahead_demo {
+        config.lookahead = true;
+        config.trigger_timing.audio_delay_ms = -2.0;
+    }
     config.msegs[1] = MsegData {
         play_mode: PlayMode::Cyclic,
         sync_mode: SyncMode::Time,
@@ -158,6 +163,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = [0.0; 960];
     let mut auxiliary = [0.0; 960];
     let block_samples = input.len();
+    let mut ahead = tract_effects::lookahead::LookaheadDelay::new(
+        tract_effects::lookahead::lookahead_samples(48000.0),
+    );
+    ahead.prepare(config.lookahead_samples(48000.0));
     for block in 0..if detector_demo { 138 } else { 145 } {
         for (index, sample) in input.iter_mut().enumerate() {
             let time = (block * block_samples + index) as f32 / 48000.0;
@@ -243,18 +252,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     48000.0,
                 );
             }
-            state.process_smoothing_sample(&config, &mut effect);
-            let wet = effect.process_sample(sample, -sample * 0.8);
+            let frame = ahead.next(tract_effects::lookahead::LookaheadFrame {
+                signal: [sample, -sample * 0.8],
+                main: [sample, -sample * 0.8],
+                sidechain: [auxiliary[index], auxiliary[index] * 0.8],
+            });
+            state.process_modulation_sample(&config, &mut effect, frame.main, frame.sidechain);
+            let wet = effect.process_sample(frame.signal[0], frame.signal[1]);
             let mix = state.next_mix(track.mix);
             let output = [
-                sample * (1.0 - mix) + wet.0 * mix * state.amplitude(),
-                -sample * 0.8 * (1.0 - mix) + wet.1 * mix * state.amplitude(),
+                frame.signal[0] * (1.0 - mix) + wet.0 * mix * state.amplitude(),
+                frame.signal[1] * (1.0 - mix) + wet.1 * mix * state.amplitude(),
             ];
             audio.record_sample_with_sidechain(
                 &shared.waveform,
-                [sample, -sample * 0.8],
+                frame.signal,
                 output,
-                [auxiliary[index], auxiliary[index] * 0.8],
+                frame.sidechain,
                 state.precise_phase(1),
             );
             if trace.tick() {

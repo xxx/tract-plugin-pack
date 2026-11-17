@@ -233,7 +233,7 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                     ),
                     animated(
                         "Trigger > Timing...",
-                        "Keep the current source and set Audio delay (0–4 ms for Transient (sample)) or Retrigger blend (0–20 ms). Blend starts from the delivered value after a reset, after follower/Smooth, and skips enums, Follow-only and DAW position. Both default Off. Right-click to type ms; Reset restores Off.",
+                        "Keep the current source and set Audio shift or Retrigger blend. For Transient (sample), optional 4 ms Lookahead enables -4..+4 ms shifts and adds reported latency; Off permits 0..+4 ms. Existing FX latency stays separate. Blend (0–20 ms) skips enums, Follow-only and DAW position. Right-click ms; Reset restores all Off.",
                     ),
                     animated(
                         "Detector Algorithm / Detail",

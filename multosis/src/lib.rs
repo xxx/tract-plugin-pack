@@ -199,6 +199,17 @@ impl Default for Multosis {
     }
 }
 
+impl Multosis {
+    fn process_status(&self) -> ProcessStatus {
+        if self.engine.has_lookahead() {
+            // Include effect latency so Listen's aligned delay also drains.
+            ProcessStatus::Tail(self.engine.chain_latency_samples() as u32)
+        } else {
+            ProcessStatus::Normal
+        }
+    }
+}
+
 impl Plugin for Multosis {
     fn filter_state(state: &mut PluginState) {
         tiny_skia_widgets::mseg::prepare_wave_palette_state(&mut state.fields);
@@ -276,6 +287,7 @@ impl Plugin for Multosis {
         if let Ok(m) = self.params.track_modulation.lock() {
             self.engine.set_modulation(&m);
         }
+        self.engine.prepare_lookahead();
         self.was_playing = false;
         // Report the initial chain latency to the host (sum of every
         // effect that adds latency in non-muted rows — today: only
@@ -463,7 +475,7 @@ impl Plugin for Multosis {
             right[i] *= gain;
         }
 
-        ProcessStatus::Normal
+        self.process_status()
     }
 }
 
@@ -486,6 +498,9 @@ impl Vst3Plugin for Multosis {
 
 nih_export_clap!(Multosis);
 nih_export_vst3!(Multosis);
+
+#[cfg(test)]
+mod lookahead_tail_tests;
 
 #[cfg(test)]
 mod palette_tests {

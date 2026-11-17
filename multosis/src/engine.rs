@@ -10,6 +10,7 @@ use crate::grid::{Grid, ROWS};
 use crate::modulation::{Modulation, TrackModulation};
 use crate::propagation::{Playhead, active_rows};
 use std::sync::Arc;
+use tract_effects::lookahead::{LookaheadDelay, LookaheadFrame, lookahead_samples};
 use tract_effects::modulation::AuditionRuntime;
 use tract_effects::modulation::{MidiCursor, MidiNoteOn};
 use tract_effects::modulation_telemetry::{ModulationTelemetry, TraceClock, TraceRequest};
@@ -52,6 +53,8 @@ pub struct AudioEngine {
     span_bpm: f64,
     skip_precise_sample: bool,
     audition: AuditionRuntime,
+    lookahead: [LookaheadDelay; ROWS],
+    lookahead_mask: u16,
 }
 
 impl AudioEngine {
@@ -95,7 +98,9 @@ impl AudioEngine {
             waveform: WaveformClock::default(),
             span_bpm: 120.0,
             skip_precise_sample: false,
-            audition: AuditionRuntime::new(16 * 4096),
+            audition: AuditionRuntime::new(16 * (4096 + lookahead_samples(48000.0))),
+            lookahead: std::array::from_fn(|_| LookaheadDelay::new(lookahead_samples(48000.0))),
+            lookahead_mask: 0,
         }
     }
 
@@ -160,6 +165,13 @@ impl AudioEngine {
         self.effects.swap(a, b);
         self.track_effects.swap(a, b);
         self.modulation.swap_rows(a, b);
+        if self.lookahead_mask != 0 {
+            for (row, line) in self.lookahead.iter_mut().enumerate() {
+                line.reset();
+                self.modulation.invalidate_lookahead_capture(row);
+                self.modulation.discard_lookahead_cues(row);
+            }
+        }
         self.telemetry.invalidate();
     }
 
@@ -170,6 +182,12 @@ impl AudioEngine {
             self.telemetry.audition.invalidate();
         }
         self.sample_rate = sample_rate;
+        let reserve = lookahead_samples(sample_rate as f64);
+        for line in &mut self.lookahead {
+            line.reserve(reserve);
+            line.reset();
+        }
+        self.audition.reserve(16 * (4096 + reserve));
         for e in &mut self.effects {
             e.set_sample_rate(sample_rate);
         }
@@ -207,6 +225,14 @@ impl AudioEngine {
     }
     /// Clear audio history and smoothing seeds while preserving modulation clocks.
     pub fn flush_dsp(&mut self) {
+        if self.lookahead_mask != 0 {
+            for row in 0..ROWS {
+                self.modulation.invalidate_lookahead_capture(row);
+            }
+        }
+        for line in &mut self.lookahead {
+            line.reset();
+        }
         self.audition.reset();
         self.telemetry.audition.invalidate();
         self.flush_effects();
@@ -214,6 +240,7 @@ impl AudioEngine {
     }
     /// Restart sequence/modulation clocks while retaining smoothed source levels.
     pub fn restart_transport(&mut self) {
+        self.prepare_lookahead();
         self.skip_precise_sample = false;
         self.playhead.reset();
         self.step = 0;
@@ -268,7 +295,7 @@ impl AudioEngine {
         active: u16,
         span_remaining: usize,
         within_span: bool,
-    ) -> (f32, f32) {
+    ) -> (f32, f32, f32, f32) {
         if self.skip_precise_sample {
             self.skip_precise_sample = false;
         } else {
@@ -302,11 +329,32 @@ impl AudioEngine {
             span_remaining,
             &mut self.waveform,
         );
-        self.modulation
-            .process_smoothing_sample(&mut self.effects, [dry_l, dry_r], sidechain);
+        if self.lookahead_mask == 0 {
+            self.modulation
+                .process_smoothing_sample(&mut self.effects, [dry_l, dry_r], sidechain);
+        }
         let mut cur_l = dry_l;
         let mut cur_r = dry_r;
+        let mut original = [dry_l, dry_r];
+        let mut aligned_sidechain = sidechain;
         for r in 0..ROWS {
+            if self.lookahead_mask != 0 {
+                let frame = self.lookahead[r].next(LookaheadFrame {
+                    signal: [cur_l, cur_r],
+                    main: original,
+                    sidechain: aligned_sidechain,
+                });
+                cur_l = frame.signal[0];
+                cur_r = frame.signal[1];
+                original = frame.main;
+                aligned_sidechain = frame.sidechain;
+                self.modulation.process_lookahead_row(
+                    r,
+                    &mut self.effects[r],
+                    original,
+                    aligned_sidechain,
+                );
+            }
             let input = [cur_l, cur_r];
             if active & (1 << r) != 0
                 && self.track_effects[r].kind != crate::effects::EffectKind::None
@@ -335,7 +383,7 @@ impl AudioEngine {
                     &self.telemetry.waveform,
                     input,
                     [cur_l, cur_r],
-                    sidechain,
+                    aligned_sidechain,
                     self.modulation
                         .precise_phase(r, self.waveform.request().slot),
                 );
@@ -351,7 +399,7 @@ impl AudioEngine {
             let frame = self.modulation.frame(row, self.track_effects[row].kind);
             self.trace_clock.record(&self.telemetry, row, &frame);
         }
-        (cur_l, cur_r)
+        (cur_l, cur_r, original[0], original[1])
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -367,7 +415,7 @@ impl AudioEngine {
     ) {
         for (i, (left, right)) in left.iter_mut().zip(right).enumerate() {
             let (dry_l, dry_r) = (*left, *right);
-            let (wet_l, wet_r) = self.process_sample::<MODULATE_MIX>(
+            let (wet_l, wet_r, mix_dry_l, mix_dry_r) = self.process_sample::<MODULATE_MIX>(
                 dry_l,
                 dry_r,
                 sidechain.sample(i),
@@ -376,7 +424,10 @@ impl AudioEngine {
                 within_span || i > 0,
             );
             let (cw_l, cw_r) = self.compressor.process_sample(wet_l, wet_r);
-            let ordinary = [dry_l + (cw_l - dry_l) * mix, dry_r + (cw_r - dry_r) * mix];
+            let ordinary = [
+                mix_dry_l + (cw_l - mix_dry_l) * mix,
+                mix_dry_r + (cw_r - mix_dry_r) * mix,
+            ];
             let latency = if self.audition.needs_processing() {
                 self.chain_latency_samples()
             } else {
@@ -474,6 +525,7 @@ impl AudioEngine {
         self.skip_precise_sample = false;
         let sr = self.sample_rate as f64;
         if n > 0 {
+            self.prepare_lookahead();
             let request = self.modulation.audition_request(
                 &self.telemetry.audition,
                 self.telemetry.waveform.generation(),
@@ -645,6 +697,11 @@ impl AudioEngine {
         self.last_active = active & !mute_mask;
     }
 
+    /// Whether the currently adopted audio path contains lookahead windows.
+    pub fn has_lookahead(&self) -> bool {
+        self.lookahead_mask != 0
+    }
+
     /// Sum of per-effect latency samples across rows that are reachable
     /// in the audio chain — i.e. not effectively muted (own mute or
     /// solo-cancelled) and not `EffectKind::None`. This is what multosis
@@ -660,7 +717,7 @@ impl AudioEngine {
     /// without re-arranging the track lanes.
     pub fn chain_latency_samples(&self) -> usize {
         let mute_mask = self.effective_mute_mask();
-        let mut total = 0;
+        let mut total = self.lookahead.iter().map(LookaheadDelay::delay).sum();
         for (r, te) in self.track_effects.iter().enumerate() {
             if te.kind == crate::effects::EffectKind::None {
                 continue;
@@ -671,6 +728,34 @@ impl AudioEngine {
             total += self.effects[r].latency_samples();
         }
         total
+    }
+    /// Also used during initialization and explicit transport restart.
+    pub fn prepare_lookahead(&mut self) {
+        let muted = self.effective_mute_mask();
+        let mut path = 0_u16;
+        let mut changed = false;
+        for row in 0..ROWS {
+            let delay = if muted & (1 << row) == 0 {
+                self.modulation
+                    .lookahead_for_row(row, self.sample_rate as f64)
+            } else {
+                0
+            };
+            if delay > 0 {
+                path |= 1 << row;
+            }
+            let row_changed = self.lookahead[row].prepare_path(delay, path);
+            changed |= row_changed;
+            if row_changed {
+                self.modulation.invalidate_lookahead_capture(row);
+            }
+            self.modulation.set_lookahead_path(row, path);
+        }
+        if changed {
+            self.audition.reset();
+            self.telemetry.audition.invalidate();
+        }
+        self.lookahead_mask = path;
     }
 
     /// Build the per-block mute mask: bit `r` set when row `r` is
@@ -701,6 +786,8 @@ mod audition_tests;
 mod detector_response_tests;
 #[cfg(test)]
 mod follower_tests;
+#[cfg(test)]
+mod lookahead_tests;
 #[cfg(test)]
 mod pitch_tests;
 #[cfg(test)]
