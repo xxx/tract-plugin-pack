@@ -1,4 +1,4 @@
-//! Preview: cargo run -p tiny-skia-widgets --example mseg_browser -- /tmp/mseg-browser.png [full|static] [factory|favorites|project] [scale]
+//! Preview: cargo run -p tiny-skia-widgets --example mseg_browser -- /tmp/mseg-browser.png [full|static] [factory|favorites|project|user] [scale] [browse|save|rename|delete|last]
 
 use keyboard_types::{Key, KeyState, KeyboardEvent};
 use tiny_skia_widgets::mseg::library::CurveLibrary;
@@ -19,12 +19,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None | Some("factory") => 0,
         Some("favorites") => 1,
         Some("project") => 2,
-        _ => return Err("Page must be factory, favorites or project".into()),
+        Some("user") => 3,
+        _ => return Err("Page must be factory, favorites, project or user".into()),
     };
     let scale = args.next().map_or(Ok(1.0), |value| value.parse::<f32>())?;
     if !scale.is_finite() || !(0.5..=2.0).contains(&scale) {
         return Err("Scale must be between 0.5 and 2".into());
     }
+    let mode = args.next().unwrap_or_else(|| "browse".into());
     let root = std::env::temp_dir().join(format!(
         "tract-browser-preview-{}-{}",
         std::process::id(),
@@ -41,6 +43,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     data.nodes[0].tension = -0.5;
     data.nodes[1].weight = PointWeight::Soft;
     library.store_favorite(5, &CurveShape::capture(&data))?;
+    for (i, name) in [
+        "Airy rise",
+        "Bright pulse",
+        "Curved descent",
+        "Deep duck",
+        "Early gate",
+        "Falling stairs",
+        "Gentle swell",
+        "Hard chop",
+        "Irregular motion",
+        "Late dip",
+        "Long fade",
+        "Midrange bounce",
+        "Narrow peak",
+        "Open ramp",
+        "Rounded wave",
+        "Soft S-curve",
+        "Wide envelope with a longer descriptive name",
+    ]
+    .iter()
+    .enumerate()
+    {
+        library.save_user_preset(name, &factory_shape(FactoryShape::ALL[i % 8]))?;
+    }
     let mut palette = WavePalette::default();
     palette.store(0, &CurveShape::capture(&data))?;
     palette.store(3, &factory_shape(FactoryShape::Duck))?;
@@ -73,6 +99,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             scale,
         );
     }
+    let key = match mode.as_str() {
+        "browse" => None,
+        "save" => Some(Key::Character("s".into())),
+        "rename" => Some(Key::F2),
+        "delete" => Some(Key::Delete),
+        "last" => Some(Key::End),
+        _ => return Err("Mode must be browse, save, rename, delete or last".into()),
+    };
+    if let Some(key) = key {
+        if turns != 3 {
+            return Err("Dialog/page modes require the User tab".into());
+        }
+        state.on_key(
+            &KeyboardEvent {
+                key,
+                state: KeyState::Down,
+                ..KeyboardEvent::default()
+            },
+            &mut data,
+            rect,
+            scale,
+        );
+    }
     pm.fill(color_bg());
     tr.draw_text(
         &mut pm,
@@ -86,7 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut pm,
         24.0 * scale,
         52.0 * scale,
-        "Factory, global Favorites and Project waves. Load or Fit applies the selected curve.",
+        "Factory, Favorites, Project waves and named User presets. Load or Fit recalls geometry.",
         14.0 * scale,
         color_text(),
     );

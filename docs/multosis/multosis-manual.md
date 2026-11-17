@@ -252,6 +252,10 @@ shared slots. See [browsing thumbnails](../mseg-editor.md#browsing-thumbnails).
 The browser's **Project** tab adds eight waves saved with this instance and
 shared across all rows. See [project waves](../mseg-editor.md#project-waves).
 
+The **User** tab saves named curves shared across plugins, with paging, Rename
+and confirmed Delete. Management leaves playback and local curve undo intact.
+See [named user presets](../mseg-editor.md#named-user-presets).
+
 Each row's **Waves...** control beside curve playback configures Project-wave
 switching for Amp/1/2/3. Its note range/channel are independent of Trigger.
 The destination displays the playing wave with geometry editing paused;

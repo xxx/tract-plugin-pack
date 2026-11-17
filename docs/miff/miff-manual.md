@@ -94,6 +94,10 @@ The browser's **Project** tab adds eight waves saved with this instance.
 Store/Clear leaves the kernel intact; Load/Fit rebakes it. See
 [project waves](../mseg-editor.md#project-waves).
 
+The **User** tab saves named curves shared across plugins, with paging, Rename
+and confirmed Delete. Management leaves the kernel intact; Load/Fit rebakes it.
+See [named user presets](../mseg-editor.md#named-user-presets).
+
 Hover for footer hints, or click **?** beside Point for the gesture guide.
 **F1 / ?** and **View → Editing guide...** also open it. Help leaves the curve
 and kernel intact; see [context help](../mseg-editor.md#context-help-and-gesture-guide).

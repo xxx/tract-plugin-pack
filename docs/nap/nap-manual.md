@@ -61,6 +61,10 @@ or clearing favorites leaves the tail unchanged. See
 The browser's **Project** tab adds eight waves saved with this instance and
 shared across the three panes. See [project waves](../mseg-editor.md#project-waves).
 
+The **User** tab saves named curves shared across plugins, with paging, Rename
+and confirmed Delete. Management leaves the tail intact; Load/Fit regenerates it.
+See [named user presets](../mseg-editor.md#named-user-presets).
+
 Each pane provides hover hints and a **?** gesture guide beside Point. Point at
 a pane and press **F1 / ?**, or use **View → Editing guide...**. The guide keeps
 its pane's input ownership and leaves the tail unchanged; see

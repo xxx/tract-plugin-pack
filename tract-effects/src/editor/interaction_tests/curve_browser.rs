@@ -168,3 +168,98 @@ fn shapes_entry_finalizes_numeric_input_and_browser_closes_on_focus_loss_or_resi
     assert!(!h.editor.dropdown_open());
     assert_eq!((h.effect, h.modulation), before);
 }
+
+#[test]
+fn named_user_management_preserves_audio_config_and_frozen_view_at_each_scale() {
+    use widgets::mseg::library::CurveLibrary;
+    use widgets::mseg::{CurveShape, WavePalette};
+    for scale in [0.5, 1.0, 2.0] {
+        let mut h = at_scale(scale);
+        let root =
+            std::env::temp_dir().join(format!("tract-effect-user-{}-{scale}", std::process::id()));
+        let library = CurveLibrary::at(root.clone());
+        h.editor.mseg_edit.set_curve_library_directory(root.clone());
+        h.editor
+            .bind_wave_palette(std::sync::Arc::new(std::sync::Mutex::new(
+                WavePalette::default(),
+            )));
+        h.editor.set_audio_view(AudioView::Both);
+        h.editor.set_audio_frozen(true);
+        let before = (h.effect, h.modulation.clone());
+        assert!(
+            h.editor
+                .mseg_edit
+                .open_curve_browser(h.geometry.layout.mseg_pane, scale)
+        );
+        for _ in 0..3 {
+            assert!(!h.key(Key::Tab).changed);
+        }
+        for value in [
+            Key::Character("s".into()),
+            Key::Character("Named curve".into()),
+            Key::Enter,
+            Key::F2,
+            Key::Character("Renamed curve".into()),
+            Key::Enter,
+            Key::Delete,
+            Key::Escape,
+        ] {
+            let response = h.key(value);
+            assert!(response.captured && !response.changed);
+            assert_eq!((h.effect, h.modulation.clone()), before);
+            assert!(h.editor.audio_frozen());
+        }
+        let saved = library.user_presets().unwrap().remove(0);
+        assert_eq!(saved.name, "Renamed curve");
+        assert_eq!(
+            saved.shape,
+            CurveShape::capture(&before.1.msegs[h.editor.selected_mseg])
+        );
+        assert!(!h.key(Key::Character("s".into())).changed);
+        assert!(
+            !h.key(Key::Character("Discard on focus loss".into()))
+                .changed
+        );
+        h.send(Event::Window(baseview::WindowEvent::Unfocused));
+        assert!(!h.editor.dropdown_open());
+        assert!(!h.key(Key::Enter).changed);
+        assert_eq!(library.user_presets().unwrap(), [saved]);
+        assert_eq!((h.effect, h.modulation.clone()), before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn named_user_recall_reports_one_selected_curve_edit_and_keeps_the_library() {
+    use widgets::mseg::library::CurveLibrary;
+    let mut h = at_scale(1.0);
+    let root =
+        std::env::temp_dir().join(format!("tract-effect-user-recall-{}", std::process::id()));
+    let library = CurveLibrary::at(root.clone());
+    let shape = widgets::mseg::factory_shape(widgets::mseg::FactoryShape::Duck);
+    let saved = library.save_user_preset("Duck", &shape).unwrap();
+    h.editor.mseg_edit.set_curve_library_directory(root.clone());
+    let before = (h.effect, h.modulation.clone());
+    let mut expected = h.modulation.clone();
+    shape
+        .apply(&mut expected.msegs[h.editor.selected_mseg], false)
+        .unwrap();
+    for changed in [true, false] {
+        assert!(
+            h.editor
+                .mseg_edit
+                .open_curve_browser(h.geometry.layout.mseg_pane, 1.0)
+        );
+        for _ in 0..2 {
+            assert!(!h.key(Key::Tab).changed);
+        }
+        let response = h.key(Key::Enter);
+        assert!(response.captured);
+        assert_eq!(response.changed, changed);
+        assert_eq!(h.effect, before.0);
+        assert_eq!(h.modulation, expected);
+        assert!(!h.release().changed);
+    }
+    assert_eq!(library.user_presets().unwrap(), [saved]);
+    std::fs::remove_dir_all(root).unwrap();
+}

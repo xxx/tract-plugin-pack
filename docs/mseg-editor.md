@@ -116,7 +116,8 @@ provides the separate live lag control.
 
 Choose **Shapes → Browse shapes...** to see the eight **Factory** curves and
 eight shared **Favorites** as thumbnails. Each plugin also provides eight
-instance-local waves on the **Project** tab. Click a thumbnail to select it, use
+instance-local waves on the **Project** tab, plus named shared curves on **User**.
+Click a thumbnail to select it, use
 the arrow keys or Home/End to navigate, and use Tab/Shift+Tab to switch pages.
 Selection leaves the current curve, viewport, tool, and remembered pen placement intact.
 
@@ -163,6 +164,43 @@ Entering Project reads its current slots. If a restored preset or another pane
 replaces the bank while the page is open, the first recall or storage action
 refreshes the thumbnails without applying that action. Check the updated slots and choose
 again. An unavailable bank reports an error and leaves the curve intact.
+
+### Named user presets
+
+The browser's **User** tab keeps up to 256 named curves, shared across all four
+plugins, instances and host processes. It lives in the application-data library
+alongside Favorites and the curve clipboard. User presets survive closing the
+plugin and remain separate from plugin presets, DAW projects and Project waves.
+
+**Save** or S captures the current curve and opens a name field. Enter or Save
+creates a new preset. Names contain 1–64 Unicode characters, with surrounding
+spaces trimmed. Names compare using Unicode lowercase; an existing name asks
+you to choose another. **Rename** or F2 edits the selected preset's name while
+retaining its curve. The field supports arrows, Home/End, Shift-selection,
+Ctrl/Cmd+A, Backspace and Delete. Tab moves between the field and action buttons.
+Escape cancels the draft before closing the browser.
+
+**Delete** or Delete/Backspace opens a confirmation showing the selected name.
+Enter or the Delete button confirms; Escape or Cancel returns to browsing. Save, Rename
+and Delete preserve the current curve, viewport, selection, pen repeat, local
+undo and frozen capture. Long confirmation names wrap; Up/Down, Home/End,
+Page Up/Down or the wheel reveals overflow, with a scrollbar when needed.
+**Load**/Enter, **Fit**/Shift+Enter and a thumbnail
+double-click use the same geometry recall and bake/undo rules as the other tabs.
+
+Entries sort by name. Header arrows or Page Up/Down browse eight thumbnails at
+a time; arrow keys and Home/End keep the selected entry visible. Long card
+labels fit their card, with the selected name repeated below the thumbnails.
+Renaming follows the selected entry to its new sorted page.
+
+Entering User or **Refresh**/R rereads shared storage. Other card/page navigation
+and drawing use the snapshot. Load, Rename and Delete check that the selected
+entry still matches it; if another instance changes that entry, the browser
+refreshes and asks you to choose again. Concurrent unrelated saves are retained.
+A busy library reports an error for retry. Corrupt, unsupported, oversized or
+unreadable storage reports an error until a successful Refresh. Failed actions
+preserve stored curves. Pending drafts/confirmations cancel with the browser on
+outside/right press, focus loss, resize or source/preset replacement.
 
 ### Shape menu and files
 

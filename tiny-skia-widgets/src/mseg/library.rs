@@ -1,4 +1,4 @@
-//! Shared, GUI-only curve clipboard and favorite storage.
+//! Shared, GUI-only curve clipboard, favorites and named user presets.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{CurveShape, MAX_SHAPE_BYTES};
+
+mod user;
+pub use user::{MAX_USER_PRESET_NAME_CHARS, MAX_USER_PRESETS, UserPreset};
 
 pub const FAVORITE_COUNT: usize = 8;
 static NEXT_WRITE: AtomicU64 = AtomicU64::new(0);

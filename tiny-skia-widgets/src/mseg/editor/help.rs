@@ -174,7 +174,11 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                     ),
                     entry(
                         "Shapes menu",
-                        "Browse shapes... previews factory curves, shared Favorites and saved Project waves. Enter loads; Shift+Enter fits. Favorites/Project: S stores, Delete clears, R refreshes. Import/export transfers curve files.",
+                        "Browse shapes... previews Factory, Favorites, Project waves and named User presets. Enter loads; Shift+Enter fits. Favorites/Project: S stores, Delete clears, R refreshes. Import/export transfers curve files.",
+                    ),
+                    entry(
+                        "User presets",
+                        "User: S saves a new named curve; F2 renames; Delete asks to remove; R refreshes. Header arrows or Page Up/Down browse pages. Name fields: Enter applies, Escape cancels, Tab moves focus. Delete confirmation: arrows/wheel scroll a long name. Management leaves the current curve intact.",
                     ),
                     entry(
                         "Ctrl/Cmd+C / V",
@@ -299,9 +303,13 @@ impl MsegEditState {
 
     /// Supply native bounds for shared help and curve-browser overlays.
     pub fn set_overlay_bounds(&mut self, bounds: (f32, f32)) {
-        self.help.bounds =
+        let bounds =
             (bounds.0.is_finite() && bounds.1.is_finite() && bounds.0 > 0.0 && bounds.1 > 0.0)
                 .then_some(bounds);
+        if self.help.bounds.is_some() && self.help.bounds != bounds {
+            self.close_curve_browser();
+        }
+        self.help.bounds = bounds;
     }
 
     /// Supply native bounds so a guide can span its owning pane.
@@ -326,7 +334,7 @@ impl MsegEditState {
     pub fn context_hint(&self, data: &MsegData, rect: Rect, scale: f32) -> Option<&'static str> {
         use crate::mseg::render::MsegHit;
         if self.curve_browser_open() {
-            return Some("Browser: select a thumbnail; Enter loads; Shift+Enter fits; Esc closes");
+            return Some(self.browser_hint());
         }
         if self.help_open() {
             return Some("Guide: wheel scrolls; left/right changes page; Esc closes");

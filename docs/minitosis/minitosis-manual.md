@@ -50,6 +50,10 @@ Load/Fit applies the selected thumbnail; Store/Clear manages shared slots. See
 The browser's **Project** tab adds eight waves saved with this instance and
 shared across its effects. See [project waves](../mseg-editor.md#project-waves).
 
+The **User** tab saves named curves shared across plugins, with paging, Rename
+and confirmed Delete. Management leaves playback and local curve undo intact.
+See [named user presets](../mseg-editor.md#named-user-presets).
+
 **Waves...** beside the curve's playback control configures MIDI switching of
 those Project waves for Amp/1/2/3. Notes select waves at their sample offsets
 while the clock keeps running; Trigger still controls restarts. The chosen

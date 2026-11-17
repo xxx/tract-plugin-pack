@@ -31,7 +31,7 @@ fn project(state: &mut MsegEditState, data: &mut MsegData) {
     state.on_key(&key(Key::Tab), data, RECT, 1.0);
     state.on_key(&key(Key::Tab), data, RECT, 1.0);
     assert!(state.browser.page == Page::Project);
-    assert_eq!(state.browser_layout(RECT, 1.0).unwrap().tabs.len(), 3);
+    assert_eq!(state.browser_layout(RECT, 1.0).unwrap().tabs.len(), 4);
 }
 
 #[test]
@@ -160,6 +160,8 @@ fn project_fit_double_click_and_reverse_tab_navigation_use_the_existing_browser_
         ..key(Key::Tab)
     };
     state.on_key(&backwards, &mut data, RECT, 1.0);
+    assert!(state.browser.page == Page::User);
+    state.on_key(&backwards, &mut data, RECT, 1.0);
     assert!(state.browser.page == Page::Project);
     state.on_key(&key(Key::End), &mut data, RECT, 1.0);
     let fit = KeyboardEvent {
@@ -284,12 +286,24 @@ fn entering_or_refreshing_project_reads_current_bank_and_rebinding_closes_the_ol
         Some(&factory_shape(FactoryShape::Duck))
     );
     state.on_key(&key(Key::Tab), &mut data, RECT, 1.0);
+    assert!(state.browser.page == Page::User);
+    state.on_key(&key(Key::Tab), &mut data, RECT, 1.0);
     assert!(state.browser.page == Page::Factory);
     second
         .lock()
         .unwrap()
         .store(0, &factory_shape(FactoryShape::Sine))
         .unwrap();
+    state.on_key(
+        &KeyboardEvent {
+            modifiers: Modifiers::SHIFT,
+            ..key(Key::Tab)
+        },
+        &mut data,
+        RECT,
+        1.0,
+    );
+    assert!(state.browser.page == Page::User);
     state.on_key(
         &KeyboardEvent {
             modifiers: Modifiers::SHIFT,
@@ -343,6 +357,7 @@ fn poisoned_project_storage_reports_an_error_and_does_not_prevent_factory_loadin
         assert_eq!(data, before);
     }
     state.on_key(&key(Key::Tab), &mut data, RECT, 1.0);
+    state.on_key(&key(Key::Tab), &mut data, RECT, 1.0);
     state.on_key(&key(Key::End), &mut data, RECT, 1.0);
     assert_eq!(
         state.on_key(&key(Key::Enter), &mut data, RECT, 1.0),
@@ -351,7 +366,7 @@ fn poisoned_project_storage_reports_an_error_and_does_not_prevent_factory_loadin
 }
 
 #[test]
-fn project_thumbnails_and_three_tabs_fit_supported_native_bounds() {
+fn project_thumbnails_and_four_tabs_fit_supported_native_bounds() {
     for (scale, bounds) in [
         (0.5, (570.0, 352.0)),
         (1.0, (1140.0, 704.0)),
@@ -380,7 +395,7 @@ fn project_thumbnails_and_three_tabs_fit_supported_native_bounds() {
             state.on_key(&key(Key::Tab), &mut data, rect, scale);
         }
         let layout = state.browser_layout(rect, scale).unwrap();
-        assert_eq!(layout.tabs.len(), 3);
+        assert_eq!(layout.tabs.len(), 4);
         let mut pm = Pixmap::new(bounds.0 as u32, bounds.1 as u32).unwrap();
         state.draw_curve_browser(
             &mut pm,

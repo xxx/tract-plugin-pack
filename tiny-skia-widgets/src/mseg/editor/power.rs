@@ -88,6 +88,9 @@ impl Default for PowerState {
 impl MsegEditState {
     /// Override shared curve storage for an embedded host or isolated editor.
     pub fn set_curve_library_directory(&mut self, directory: std::path::PathBuf) {
+        if self.power.library_directory.as_ref() != Some(&directory) {
+            self.close_curve_browser();
+        }
         self.power.library_directory = Some(directory);
     }
 
@@ -486,6 +489,7 @@ impl MsegEditState {
 
     pub fn on_wheel(&mut self, delta: f32, rect: (f32, f32, f32, f32)) -> bool {
         if self.curve_browser_open() {
+            self.browser_wheel(delta);
             return true;
         }
         if self.help_open() {
@@ -514,7 +518,14 @@ impl MsegEditState {
     ) -> (bool, Option<MsegEdit>) {
         self.prepare_precision(data, scale);
         if self.curve_browser_open() {
-            return (true, self.browser_key(event, data));
+            if !self.validate_browser_layout(rect, scale) {
+                return (true, None);
+            }
+            let changed = self.browser_key(event, data);
+            if self.curve_browser_open() {
+                self.validate_browser_layout(rect, scale);
+            }
+            return (true, changed);
         }
         if self.help_open() {
             self.help_key(event, rect, scale);
