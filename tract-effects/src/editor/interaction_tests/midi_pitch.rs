@@ -40,6 +40,7 @@ fn midi_pitch_selectors_keep_popup_priority_and_preserve_inactive_lengths_at_eac
         h.modulation.trigger = TriggerSource::Free;
         h.click(h.geometry.layout.trigger);
         h.key(Key::End);
+        h.key(Key::ArrowUp);
         h.key(Key::Enter);
         assert_eq!(
             h.modulation.trigger,

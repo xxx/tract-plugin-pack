@@ -7,6 +7,7 @@ mod midi_pitch;
 mod midi_wave_switch;
 mod position;
 mod semitone_grid;
+mod trigger_timing;
 mod wave_palette;
 
 use super::*;
@@ -1978,7 +1979,7 @@ mod precise_triggers {
             };
             h.click(h.geometry.layout.trigger);
             let items = dropdown_items(&h.editor, &h.effect);
-            assert_eq!(items.len(), 10);
+            assert_eq!(items.len(), 11);
             let popup = widgets::dropdown::dropdown_popup_layout(
                 &h.editor.effect_dropdown,
                 &items,

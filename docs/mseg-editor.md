@@ -580,6 +580,45 @@ restart clear the private trigger clock; a DSP flush preserves it. Sample-rate
 changes retain progress/refractory time, including same-effect Minitosis
 reinitialization. Mode/rate/Sens/Hold settings save per row/effect and are undoable.
 
+### Trigger timing
+
+Choose **Trigger → Timing...** in Multosis/Minitosis to open timing controls
+without changing the current trigger source. Settings save per row/effect;
+both default Off and add no host automation parameters or reported latency.
+
+- **Audio delay (0–4 ms):** defers phase resets from Transient (sample), rounded
+  to the nearest sample. The detector and its Threshold/Hold/meter keep their
+  original timing. Accepted hits can queue across blocks; the main/effect audio
+  remains on its normal path. Other trigger sources and MIDI wave switches keep
+  their original offsets.
+- **Retrigger blend (0–20 ms):** fades from the last delivered source value into
+  the newly running curve after a phase reset. It follows follower combination
+  and Smooth, before polarity/Depth/Target mapping. New resets during a blend
+  start from the value currently being delivered. Follow-only follower routes,
+  enum destinations and absolute DAW-position playback bypass this blend.
+
+Blend applies to explicit MIDI/cell/free-Hz/audio/transport resets; ordinary
+loop wraps and wave replacements retain their existing behavior. Positive timing
+opts into per-sample source playback, including phase zero on a reset sample.
+Amp and Mix update each sample; effect parameters retain their fixed 1 kHz
+control cadence plus immediate reset refresh. With both Off, playback keeps its
+original behavior.
+
+Positive delay edits affect future detections; already queued resets retain
+their accepted delay. Turning Delay Off, changing trigger mode/input, Reset or
+transport restart clears queued resets. Positive Blend edits affect later cues;
+Off cancels the current blend. Sample-rate adoption retains/rescales pending
+timing. Inactive/muted rows, bypass, Listen and frozen captures keep their normal
+roles. These controls do not advance triggers ahead of incoming audio.
+
+Drag or Shift-drag for fine control; double-click restores Off. Right-click to
+type milliseconds or `Off`. Enter commits; Escape cancels a field before closing
+the dialog. Outside press, another drag and focus loss commit numeric input.
+Tab/Shift-Tab or Up/Down moves focus; Left/Right adjusts, Enter edits, and
+Home/End selects the first field or Reset. **Reset** restores both Off in one
+undo step. Resize/source/preset replacement discards stale interaction; windows
+too small for readable controls show an enlargement message.
+
 ### Audio detector setup
 
 With **Transient (sample)** selected, click **Detect...** above the trigger menu.

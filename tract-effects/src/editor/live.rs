@@ -237,6 +237,7 @@ impl EffectEditor {
             self.cancel_detector();
             self.follower.close();
             self.wave_midi.close();
+            self.timing.close();
         }
         self.disconnect_live();
         self.live = Some(LiveSource {
@@ -259,6 +260,7 @@ impl EffectEditor {
         self.live = None;
     }
     pub fn invalidate_trace(&mut self) {
+        self.timing.close();
         self.stop_listening();
         self.cancel_detector();
         self.clear_modulation_trace();

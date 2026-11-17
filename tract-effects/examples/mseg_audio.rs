@@ -46,8 +46,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let midi_demo = demo == 1;
     let detector_mode = args.next();
+    let timing_demo = detector_mode.as_deref() == Some("timing");
     let detector_demo = match detector_mode.as_deref() {
         None => false,
+        Some("timing") if demo == 2 || demo == 4 => false,
         Some("detector" | "listen" | "peak" | "rms") if demo == 2 || demo == 4 => true,
         _ => return Err("Detector/listen panel demo requires audio detector".into()),
     };
@@ -109,6 +111,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if demo == 4 {
         config.audio_trigger.input = tract_effects::modulation::DetectorInput::Sidechain;
+    }
+    if timing_demo {
+        config.trigger_timing = tract_effects::modulation::TriggerTiming {
+            audio_delay_ms: 2.0,
+            blend_ms: 5.0,
+        };
     }
     config.msegs[1] = MsegData {
         play_mode: PlayMode::Cyclic,
@@ -324,6 +332,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 geometry,
             },
         );
+    }
+    if timing_demo {
+        let r = geometry.layout.trigger;
+        let point = (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
+        for event in [
+            baseview::Event::Mouse(baseview::MouseEvent::CursorMoved {
+                position: baseview::Point::new(point.0 as f64, point.1 as f64),
+                modifiers: keyboard_types::Modifiers::empty(),
+            }),
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Left,
+                modifiers: keyboard_types::Modifiers::empty(),
+            }),
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Left,
+                modifiers: keyboard_types::Modifiers::empty(),
+            }),
+            baseview::Event::Keyboard(keyboard_types::KeyboardEvent {
+                state: keyboard_types::KeyState::Down,
+                key: keyboard_types::Key::End,
+                ..keyboard_types::KeyboardEvent::default()
+            }),
+            baseview::Event::Keyboard(keyboard_types::KeyboardEvent {
+                state: keyboard_types::KeyState::Down,
+                key: keyboard_types::Key::Enter,
+                ..keyboard_types::KeyboardEvent::default()
+            }),
+        ] {
+            editor.handle_event(
+                &event,
+                tract_effects::editor::EditorContext {
+                    pointer_position: point,
+                    effect: &mut track,
+                    modulation: &mut config,
+                    text_renderer: &mut text,
+                    geometry,
+                },
+            );
+        }
     }
     editor.draw(&mut pm, &mut text, &track, &config, [0.0; 4], geometry);
     editor.draw_popup(&mut pm, &mut text, &track, geometry);

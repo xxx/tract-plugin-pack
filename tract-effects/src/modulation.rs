@@ -10,7 +10,9 @@ use tiny_skia_widgets::{
 
 mod audio_trigger;
 mod transient_response;
+mod trigger_timing;
 pub use transient_response::{TransientAlgorithm, TransientSettings};
+pub use trigger_timing::{MAX_AUDIO_DELAY_MS, MAX_RETRIGGER_BLEND_MS, TriggerTiming};
 mod audition;
 pub use audition::{
     AuditionControl, AuditionRequest, AuditionRuntime, AuditionSettings, AuditionSource,
@@ -228,6 +230,8 @@ pub struct TrackModulation {
     pub audio_trigger: AudioTriggerSettings,
     #[serde(default, skip_serializing_if = "TransientSettings::is_default")]
     pub detector_response: TransientSettings,
+    #[serde(default, skip_serializing_if = "TriggerTiming::is_default")]
+    pub trigger_timing: TriggerTiming,
     #[serde(default, skip_serializing_if = "FollowerConfig::is_default")]
     pub follower: FollowerConfig,
     /// The event that resets all four of this row's MSEG phases.
@@ -404,6 +408,7 @@ impl TrackModulation {
             wave_switch: None,
             audio_trigger: AudioTriggerSettings::default(),
             detector_response: TransientSettings::default(),
+            trigger_timing: TriggerTiming::default(),
             follower: FollowerConfig::default(),
             trigger: TriggerSource::Free,
         }
@@ -453,6 +458,8 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             #[serde(default)]
             detector_response: TransientSettings,
             #[serde(default)]
+            trigger_timing: TriggerTiming,
+            #[serde(default)]
             follower: FollowerConfig,
             #[serde(default)]
             trigger: TriggerSource,
@@ -490,6 +497,7 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             trigger: h.trigger,
             audio_trigger: h.audio_trigger.normalized(),
             detector_response: h.detector_response.normalized(),
+            trigger_timing: h.trigger_timing.normalized(),
             follower: h.follower.normalized(),
             smooth_ms: std::array::from_fn(|i| {
                 h.smooth_ms
@@ -612,6 +620,7 @@ pub struct ModulationState {
     capture_epochs: [u64; 4],
     follower: Box<follower::FollowerRuntime>,
     pitch: pitch::MidiPitchRuntime,
+    timing: Box<trigger_timing::TimingRuntime>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -649,6 +658,7 @@ impl Default for ModulationState {
             capture_epochs: [0; 4],
             follower: Box::default(),
             pitch: pitch::MidiPitchRuntime::default(),
+            timing: Box::default(),
         }
     }
 }
@@ -669,10 +679,14 @@ impl ModulationState {
         self.position.reset();
         self.follower.reset();
         self.pitch = pitch::MidiPitchRuntime::default();
+        self.timing.reset();
     }
 
     /// Restart all four envelopes and mark this block as triggered.
     pub fn trigger(&mut self) {
+        if !self.position.active {
+            self.timing.arm(self.outputs, self.output_valid);
+        }
         self.trigger_epoch = self.trigger_epoch.wrapping_add(1);
         if self.position.active || self.pitch.active() {
             for epoch in &mut self.capture_epochs {
@@ -713,6 +727,15 @@ impl ModulationState {
             self.precise.prepare(config.trigger, sample_rate);
             self.precise.configure_audio(config.audio_trigger);
             self.precise.configure_response(config.detector_response);
+            let phases = std::array::from_fn(|slot| self.precise_phase(slot));
+            self.timing.prepare(
+                config,
+                self.precise.active()
+                    && matches!(config.trigger, TriggerSource::TransientSample { .. }),
+                sample_rate,
+                self.outputs,
+                phases,
+            );
             if let Some(reset_phase) = self.pitch.prepare(config.trigger, sample_rate) {
                 if reset_phase {
                     self.phases = [0.0; 4];
@@ -758,14 +781,16 @@ impl ModulationState {
         self.precise.active()
     }
     pub fn next_precise_trigger(&mut self, input: [f32; 2]) -> bool {
-        self.precise.next_sample(input)
+        let detected = self.precise.next_sample(input);
+        self.timing.dispatch(detected)
     }
     pub fn next_precise_trigger_with_sidechain(
         &mut self,
         input: [f32; 2],
         sidechain: [f32; 2],
     ) -> bool {
-        self.precise.next_sample_with_sidechain(input, sidechain)
+        let detected = self.precise.next_sample_with_sidechain(input, sidechain);
+        self.timing.dispatch(detected)
     }
     pub fn detector_reading(&self) -> Option<DetectorReading> {
         self.precise.reading()

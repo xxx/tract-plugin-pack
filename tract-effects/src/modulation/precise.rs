@@ -182,7 +182,8 @@ impl ModulationState {
         self.position = previous.position;
         *self.follower = *previous.follower;
         self.pitch = previous.pitch;
-        if previous.pitch.active() {
+        *self.timing = *previous.timing;
+        if previous.pitch.active() || previous.timing.sample_clocked {
             self.smooth.clone_from(&previous.smooth);
             self.smooth.refresh();
             self.phases = previous.phases;

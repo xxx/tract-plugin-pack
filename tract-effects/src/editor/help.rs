@@ -57,7 +57,7 @@ impl Session<'_> {
                     Some("Scale modulation; Shift: fine; double-click resets")
                 }
                 Some(EffectHit::Trigger) => {
-                    Some("Choose a shared free, DAW or MIDI pitch clock for all four curves")
+                    Some("Choose a clock; Timing... adjusts audio reset delay and retrigger blend")
                 }
                 Some(EffectHit::TriggerRate) => Some("Adjust trigger rate or onset sensitivity"),
                 Some(EffectHit::TriggerAux) => Some("Set the time between accepted audio triggers"),

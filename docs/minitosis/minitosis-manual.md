@@ -130,6 +130,10 @@ DAW Beat clocks hold between reported positions without a tempo. One-shot
 envelopes hold their final value until retriggered; in DAW mode their origin is
 timeline zero. There are no sequencer cell triggers.
 
+**Trigger → Timing...** opens **Audio delay** (0–4 ms, Transient (sample) only)
+and **Retrigger blend** (0–20 ms) while retaining the current source. Both default
+Off, save per effect and use local undo. See [trigger timing](../mseg-editor.md#trigger-timing).
+
 ## Automation and project state
 
 Each effect's parameters have their own stable automation IDs and effect/family-prefixed names. An SVF Cutoff lane continues to control SVF Cutoff when another effect is selected. Inactive effects retain their parameter values. The selector is non-automatable, but editable in the plugin and the host's generic editor. Mix, Output, Bypass, and Retrig on play are host parameters.

@@ -706,6 +706,8 @@ mod pitch_tests;
 #[cfg(test)]
 mod position_tests;
 #[cfg(test)]
+mod trigger_timing_tests;
+#[cfg(test)]
 mod wave_tests;
 
 #[cfg(test)]

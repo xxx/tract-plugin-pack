@@ -46,7 +46,10 @@ impl TrackModulation {
         })
     }
     pub fn continuous_mask(&self, kind: EffectKind) -> u8 {
-        if self.trigger == TriggerSource::DawPosition || self.trigger.pitch_settings().is_some() {
+        if self.trigger == TriggerSource::DawPosition
+            || self.trigger.pitch_settings().is_some()
+            || self.timing_active()
+        {
             15
         } else {
             self.smoothing_mask(kind) | self.follower.mask()
@@ -257,11 +260,14 @@ impl ModulationState {
         self.telemetry_enabled = enabled;
     }
     pub fn reset_smoothing(&mut self) {
+        self.timing.cancel_blends();
         self.smooth = SmoothRuntime::default();
         self.output_valid = [false; 4];
     }
     /// Restart free clocks and refresh DAW playback without moving its phases.
     pub fn restart_clock(&mut self, config: &TrackModulation) {
+        self.timing.clear_pending();
+        self.timing.set_preferences(config);
         self.trigger_epoch = self.trigger_epoch.wrapping_add(1);
         if config.trigger == TriggerSource::DawPosition || config.trigger.pitch_settings().is_some()
         {
@@ -272,6 +278,7 @@ impl ModulationState {
         if config.trigger == TriggerSource::DawPosition {
             self.smooth.refresh();
         } else {
+            self.timing.arm(self.outputs, self.output_valid);
             self.phases = [0.0; 4];
             self.smooth.trigger();
             self.pitch.restart();
@@ -290,6 +297,8 @@ impl ModulationState {
     pub fn precise_phase(&self, slot: usize) -> f64 {
         if self.pitch.active() {
             self.pitch.phases[slot]
+        } else if self.timing.sample_clocked {
+            self.timing.phases[slot]
         } else if self.smooth.slots[slot].active {
             self.smooth.slots[slot].phase
         } else {
@@ -338,6 +347,12 @@ impl ModulationState {
         self.mix_slot = None;
         let mut legacy_mix = None;
         for k in 0..4 {
+            if !config.smoothing_supported(k, track.kind)
+                || (config.follower.routes[k].enabled
+                    && config.follower.routes[k].mode == FollowerMode::Follow)
+            {
+                self.timing.cancel_slot(k);
+            }
             let doc = self.automated.curve(self.wave.curve(config, k), k);
             let position = self.position.phase(doc);
             let route = if k > 0 {
@@ -378,6 +393,8 @@ impl ModulationState {
                 if !slot.active {
                     slot.phase = if self.pitch.active() {
                         self.pitch.phases[k]
+                    } else if self.timing.sample_clocked {
+                        self.timing.phases[k]
                     } else {
                         position.unwrap_or(self.phases[k] as f64)
                     };
@@ -548,7 +565,9 @@ impl ModulationState {
             }
             let next = if self.position.active {
                 self.position.phase(doc).unwrap_or(slot.phase)
-            } else if self.pitch.active() && (self.pitch.first_sample || !self.pitch.running()) {
+            } else if self.timing.first_sample
+                || (self.pitch.active() && (self.pitch.first_sample || !self.pitch.running()))
+            {
                 slot.phase
             } else {
                 phase_next(doc, slot.phase, slot.step)
@@ -566,11 +585,15 @@ impl ModulationState {
             }
             let wrapped = next < slot.phase;
             slot.phase = next;
+            if self.timing.sample_clocked {
+                self.timing.phases[k] = next;
+            }
             if self.pitch.active() {
                 self.pitch.phases[k] = next;
             }
             self.phases[k] = next as f32;
             if self.position.active
+                || self.timing.sample_clocked
                 || self.pitch.active()
                 || self.follower.config.routes[k].enabled
                 || tick
@@ -584,7 +607,7 @@ impl ModulationState {
                 slot.force_raw = false;
             }
             slot.value += slot.gain * (slot.raw as f64 - slot.value);
-            let source = slot.value.clamp(0.0, 1.0) as f32;
+            let source = self.timing.source(k, slot.value.clamp(0.0, 1.0) as f32);
             self.outputs[k] = source;
             self.output_valid[k] = true;
             if k == 0 {
@@ -619,6 +642,7 @@ impl ModulationState {
         }
         self.position.advance_sample();
         self.pitch.first_sample = false;
+        self.timing.first_sample = false;
     }
 }
 

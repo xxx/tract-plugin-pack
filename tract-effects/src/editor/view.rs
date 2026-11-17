@@ -634,8 +634,8 @@ pub fn target_to_item(kind: EffectKind, target: Option<ModulationTarget>) -> usi
     }
 }
 
-/// The trigger-source dropdown items, in `TriggerSource` discriminant order.
-pub fn trigger_items() -> [&'static str; 10] {
+/// Trigger sources in stable order followed by the Timing command.
+pub fn trigger_items() -> [&'static str; 11] {
     [
         "Free run",
         "Cell light",
@@ -647,6 +647,7 @@ pub fn trigger_items() -> [&'static str; 10] {
         "Transient (sample)",
         "DAW position",
         "MIDI pitch",
+        "Timing...",
     ]
 }
 
@@ -2712,7 +2713,8 @@ mod tests {
                 "Free Hz (sample)",
                 "Transient (sample)",
                 "DAW position",
-                "MIDI pitch"
+                "MIDI pitch",
+                "Timing..."
             ]
         );
         assert_eq!(

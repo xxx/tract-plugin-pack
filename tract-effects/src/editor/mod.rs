@@ -12,6 +12,7 @@ mod help;
 mod live;
 mod midi;
 mod pitch_grid;
+mod timing;
 mod wave_midi;
 pub use detector::DetectorField;
 pub use live::{AudioGain, AudioView};
@@ -34,6 +35,7 @@ pub enum TriggerChoice {
     TransientSample,
     DawPosition,
     MidiPitch,
+    Timing,
 }
 
 impl TriggerChoice {
@@ -48,6 +50,7 @@ impl TriggerChoice {
         Self::TransientSample,
         Self::DawPosition,
         Self::MidiPitch,
+        Self::Timing,
     ];
 
     fn item(self) -> usize {
@@ -62,6 +65,7 @@ impl TriggerChoice {
             Self::TransientSample => 7,
             Self::DawPosition => 8,
             Self::MidiPitch => 9,
+            Self::Timing => 10,
         }
     }
 }
@@ -120,6 +124,7 @@ pub struct EffectEditor {
     wave_automation: Option<[u8; 4]>,
     follower: follower::Panel,
     midi_filter_owner: Option<midi::Binding>,
+    timing: timing::Panel,
 }
 
 impl Default for EffectEditor {
@@ -172,6 +177,7 @@ impl EffectEditor {
             wave_automation: None,
             follower: follower::Panel::default(),
             midi_filter_owner: None,
+            timing: timing::Panel::default(),
         }
     }
 
@@ -211,6 +217,7 @@ impl EffectEditor {
 
     /// End input tied to old window geometry without discarding editor preferences.
     pub fn prepare_resize(&mut self, backing_scale: f32) {
+        self.timing.close();
         self.stop_listening();
         self.follower.close();
         self.wave_midi.close();
@@ -227,6 +234,12 @@ impl EffectEditor {
 
     /// Commit a typed value before focus moves to a host-owned control.
     pub fn finish_text_edit(&mut self, context: EditorContext<'_>) -> EditorResponse {
+        if self.check_timing_binding(context.effect, context.modulation) {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
+        }
         if self.check_detector_binding(context.effect.kind, context.modulation)
             || self.check_follower_binding(context.effect, context.modulation)
         {
@@ -236,13 +249,15 @@ impl EffectEditor {
             };
         }
         let mut session = Session::new(self, context);
+        session.commit_timing_text();
         session.commit_follower_text();
         session.finalize_dial_edit_for_press(f32::NEG_INFINITY, f32::NEG_INFINITY);
         session.response
     }
 
     pub fn captures_keyboard(&self) -> bool {
-        self.follower.open()
+        self.timing.open()
+            || self.follower.open()
             || self.wave_midi.open()
             || self.detector_open
             || self.effect_dropdown.is_open()
@@ -251,7 +266,8 @@ impl EffectEditor {
     }
 
     pub fn dropdown_open(&self) -> bool {
-        self.follower.open()
+        self.timing.open()
+            || self.follower.open()
             || self.wave_midi.open()
             || self.detector_open
             || self.effect_dropdown.is_open()
@@ -260,14 +276,16 @@ impl EffectEditor {
 
     /// Whether shared controls own an in-progress pointer gesture.
     pub fn pointer_gesture_active(&self) -> bool {
-        self.follower.dragging()
+        self.timing.dragging()
+            || self.follower.dragging()
             || self.effect_dial_drag.active_action().is_some()
             || self.mseg_edit.is_dragging()
     }
 
     /// Allows hosts to finalize their numeric fields before the shared editor starts panning.
     pub fn can_start_pan(&self, pointer: (f32, f32), geometry: EditorGeometry) -> bool {
-        !self.follower.open()
+        !self.timing.open()
+            && !self.follower.open()
             && !self.wave_midi.open()
             && !self.detector_open
             && !self.effect_dropdown.is_open()
@@ -293,6 +311,12 @@ impl EffectEditor {
             self.mseg_edit.clear_hover_hint();
         }
         if self.check_midi_filter_binding(context.effect, context.modulation) {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
+        }
+        if self.check_timing_binding(context.effect, context.modulation) {
             return EditorResponse {
                 captured: true,
                 ..EditorResponse::default()
@@ -343,6 +367,10 @@ impl EffectEditor {
         }
         self.check_wave_midi_binding(effect, modulation);
         self.check_follower_binding(effect, modulation);
+        self.check_timing_binding(effect, modulation);
+        if self.timing.open() && !timing::layout(geometry).usable {
+            self.timing.suspend();
+        }
         self.sync_listening_panels();
         self.refresh_live(effect, modulation);
         let phases = self
@@ -401,6 +429,7 @@ impl EffectEditor {
         self.draw_detector(pixmap, tr, effect, geometry);
         self.draw_wave_midi_popup(pixmap, tr, geometry);
         self.draw_follower_popup(pixmap, tr, geometry);
+        self.draw_timing_popup(pixmap, tr, geometry);
     }
 }
 
@@ -515,7 +544,8 @@ impl<'a> Session<'a> {
     fn handle_event(&mut self, event: &baseview::Event) {
         use baseview::{Event, MouseButton, MouseEvent};
         use keyboard_types::{Key, KeyState, Modifiers};
-        if self.handle_follower_event(event)
+        if self.handle_timing_event(event)
+            || self.handle_follower_event(event)
             || self.handle_wave_midi_event(event)
             || self.handle_detector_event(event)
         {
@@ -1863,6 +1893,10 @@ impl<'a> Session<'a> {
     }
 
     fn apply_trigger_selection(&mut self, idx: usize) {
+        if self.state.trigger_choices.get(idx) == Some(&TriggerChoice::Timing) {
+            self.open_timing();
+            return;
+        }
         let (carried_hz, carried_threshold, carried_hold_ms) = match self
             .modulation_config()
             .trigger
@@ -2593,6 +2627,7 @@ mod tests {
                         "Transient (sample)",
                         "DAW position",
                         "MIDI pitch",
+                        "Timing...",
                     ],
                     [0, 1, 2, 3, 4],
                 ),

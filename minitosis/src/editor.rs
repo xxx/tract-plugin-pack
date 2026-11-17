@@ -31,6 +31,7 @@ const TRIGGERS: &[TriggerChoice] = &[
     TriggerChoice::TransientSample,
     TriggerChoice::DawPosition,
     TriggerChoice::MidiPitch,
+    TriggerChoice::Timing,
 ];
 type Rect = (f32, f32, f32, f32);
 

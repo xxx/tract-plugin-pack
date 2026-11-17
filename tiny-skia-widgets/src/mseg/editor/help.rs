@@ -232,6 +232,10 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                         "Beat follows quarter notes, Time follows song seconds. Cyclic repeats; OneShot starts at timeline zero and stops at its endpoint or sustain marker. Hold loops keep their usual intro/wrap behavior. Missing positions freeze that clock. Reset/Retrig cannot move the playhead away from DAW position.",
                     ),
                     animated(
+                        "Trigger > Timing...",
+                        "Keep the current source and set Audio delay (0–4 ms for Transient (sample)) or Retrigger blend (0–20 ms). Blend starts from the delivered value after a reset, after follower/Smooth, and skips enums, Follow-only and DAW position. Both default Off. Right-click to type ms; Reset restores Off.",
+                    ),
+                    animated(
                         "Detector Algorithm / Detail",
                         "Transient (sample) offers Envelope (the original response at 50% Detail), Peak rise for distinct hits, and RMS rise for energy increases. Higher Detail shortens analysis windows; Sens sets the required rise and Hold limits retriggers. Right-click Detail to type percent. These controls keep Listen unchanged.",
                     ),
