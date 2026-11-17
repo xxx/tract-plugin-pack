@@ -788,7 +788,9 @@ impl MsegEditState {
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{phase_to_x, value_to_y};
         if self.curve_browser_open() {
-            self.browser_mouse_up();
+            if self.validate_browser_document(data) {
+                self.browser_mouse_up();
+            }
             return None;
         }
         if self.help_open() || self.curve_browser_open() {

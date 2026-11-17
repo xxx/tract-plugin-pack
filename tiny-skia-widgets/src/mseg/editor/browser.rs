@@ -15,8 +15,10 @@ use tiny_skia::{Paint, PathBuilder, Pixmap, Stroke, Transform};
 type Rect = (f32, f32, f32, f32);
 
 mod categories;
+mod search;
 mod user;
 use categories::{Categories, CategoryFilter, CategoryMenu};
+use search::BrowserSearch;
 use user::UserBrowser;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -68,6 +70,8 @@ pub(super) struct BrowserState {
     project_error: Option<&'static str>,
     user: UserBrowser,
     categories: Categories,
+    search: BrowserSearch,
+    search_close_click: Option<(Rect, Instant)>,
     message: String,
     last_click: Option<(Page, usize, Instant)>,
 }
@@ -81,6 +85,8 @@ pub(crate) struct BrowserLayout {
     pub buttons: Vec<Rect>,
     pub pager: Option<[Rect; 2]>,
     pub category: Option<Rect>,
+    pub find: Option<Rect>,
+    pub search: Option<[Rect; 3]>,
     detail: Rect,
     hint: Rect,
 }
@@ -121,6 +127,8 @@ impl MsegEditState {
         self.browser.last_click = None;
         self.browser.message.clear();
         self.browser.user.dialog = None;
+        self.browser.search = BrowserSearch::default();
+        self.browser.search_close_click = None;
         self.browser.categories.filter = CategoryFilter::All;
         self.close_category_menu();
         if page == Page::Project {
@@ -160,6 +168,17 @@ impl MsegEditState {
         self.browser.open
     }
 
+    pub(super) fn validate_browser_document(&mut self, data: &MsegData) -> bool {
+        if !self.validate_user_document(data) {
+            return false;
+        }
+        if !self.browser.search.document_matches(data) {
+            self.close_curve_browser();
+            return false;
+        }
+        true
+    }
+
     pub(super) fn browser_hint(&self) -> &'static str {
         if self.browser.categories.menu.is_open() {
             "Category: arrows choose; Enter applies; Esc cancels"
@@ -167,6 +186,10 @@ impl MsegEditState {
             "Category: F4/Alt+Down chooses; empty = Uncategorized"
         } else if self.browser.user.dialog.is_some() {
             "Preset dialog: Enter applies; Esc cancels; Tab moves focus"
+        } else if self.browser.search.focused {
+            "Search: type names/categories; Enter loads; Tab browses; Esc clears"
+        } else if self.browser.search.visible {
+            "Find: Ctrl/Cmd+F focuses; Enter loads; Esc clears search"
         } else {
             "Browser: select a thumbnail; Enter loads; Shift+Enter fits; Esc closes"
         }
@@ -181,7 +204,7 @@ impl MsegEditState {
     }
 
     pub(super) fn browser_mouse_move(&mut self, x: f32, y: f32, data: &MsegData, rect: Rect) {
-        if self.validate_user_document(data) && self.browser.categories.menu.is_open() {
+        if self.validate_browser_document(data) && self.browser.categories.menu.is_open() {
             self.category_menu_move(x, y, self.browser_window_size(rect));
         }
     }
@@ -201,6 +224,8 @@ impl MsegEditState {
             return false;
         }
         self.browser.page = Page::Factory;
+        self.browser.search = BrowserSearch::default();
+        self.browser.search_close_click = None;
         if self.browser_layout(rect, scale).is_none() {
             self.set_status_message("Enlarge the window to browse curves");
             return false;
@@ -222,6 +247,8 @@ impl MsegEditState {
         self.browser.open = false;
         self.browser.last_click = None;
         self.browser.user.dialog = None;
+        self.browser.search = BrowserSearch::default();
+        self.browser.search_close_click = None;
         self.close_category_menu();
     }
 
@@ -408,9 +435,31 @@ impl MsegEditState {
         let button_h = (28.0 * s).max(20.0);
         let line = ((12.0 * s).max(10.0) * 1.4).ceil();
         let footer_h = 3.0 * line + button_h + 3.0 * gap;
-        let body_y = y + header + tab_h + gap;
+        let search_y = y + header + tab_h + gap;
+        let search_h = (26.0 * s).max(22.0);
+        let searching = self.search_supported() && self.browser.search.visible;
+        let body_y = search_y + if searching { search_h + gap } else { 0.0 };
         let footer_y = y + h - footer_h;
         let inner_w = w - 2.0 * pad;
+        let find = self.search_supported().then_some((
+            x + pad,
+            base.close.1,
+            (80.0 * s).max(42.0),
+            base.close.3,
+        ));
+        let search = searching.then(|| {
+            let clear_w = (48.0 * s).max(40.0);
+            let close_w = (24.0 * s).max(18.0);
+            let field_w = inner_w - clear_w - close_w - 2.0 * gap;
+            [
+                (x + pad, search_y, field_w, search_h),
+                (x + pad + field_w + gap, search_y, clear_w, search_h),
+                (x + w - pad - close_w, search_y, close_w, search_h),
+            ]
+        });
+        if search.is_some_and(|rects| rects[0].2 < (40.0 * s).max(40.0)) {
+            return None;
+        }
         let card_w = (inner_w - 3.0 * gap) / 4.0;
         let card_h = (footer_y - gap - body_y - gap) / 2.0;
         let preview = thumbnail_rect((0.0, 0.0, card_w, card_h), s);
@@ -473,6 +522,8 @@ impl MsegEditState {
                 .collect(),
             pager,
             category,
+            find,
+            search,
             detail: (x + pad, footer_y, inner_w, line),
             hint: (
                 x + pad,
@@ -501,7 +552,7 @@ impl MsegEditState {
             self.set_status_message("Enlarge the window to browse curves");
             return None;
         };
-        if !self.validate_user_document(data) {
+        if !self.validate_browser_document(data) {
             return None;
         }
         if self.browser.categories.menu.is_open() {
@@ -510,6 +561,20 @@ impl MsegEditState {
         }
         if self.browser.user.dialog.is_some() {
             return self.user_dialog_mouse_down(x, y, &layout, scale);
+        }
+        // Closing the search row moves cards under its close button.
+        if let Some((control, time)) = self.browser.search_close_click {
+            if in_rect(control, x, y)
+                && Instant::now()
+                    .checked_duration_since(time)
+                    .is_some_and(|elapsed| elapsed < Duration::from_millis(400))
+            {
+                return None;
+            }
+            self.browser.search_close_click = None;
+        }
+        if self.browser_search_mouse_down(x, y, data, &layout, rect, scale) {
+            return None;
         }
         if in_rect(layout.close, x, y) || !in_rect(layout.panel, x, y) {
             self.close_curve_browser();
@@ -558,13 +623,14 @@ impl MsegEditState {
         rect: Rect,
         scale: f32,
     ) -> Option<MsegEdit> {
-        if !self.validate_user_document(data) {
+        if !self.validate_browser_document(data) {
             return None;
         }
         if event.state != KeyState::Down {
             return None;
         }
         self.browser.last_click = None;
+        self.browser.search_close_click = None;
         if self.browser.categories.menu.is_open() {
             self.category_menu_key(event, self.browser_window_size(rect));
             return None;
@@ -588,8 +654,19 @@ impl MsegEditState {
             self.user_dialog_key(event);
             return None;
         }
+        if self.is_browser_find_shortcut(event) {
+            self.open_browser_search(data, rect, scale);
+            return None;
+        }
+        if self.browser.search.focused {
+            return self.browser_search_key(event, data);
+        }
         if event.key == Key::Escape {
-            self.close_curve_browser();
+            if self.browser.search.visible {
+                self.clear_browser_search(true);
+            } else {
+                self.close_curve_browser();
+            }
             return None;
         }
         if event
@@ -687,23 +764,27 @@ impl MsegEditState {
         let (x, y, w, h) = layout.panel;
         draw_rect(pm, x, y, w, h, color_bg());
         draw_rect_outline(pm, x, y, w, h, color_accent(), 1.0);
-        draw_fitted(
-            tr,
-            pm,
-            (x + 8.0 * s, y + 22.0 * s.max(0.7)),
-            if layout.category.is_some() {
-                "Curves"
-            } else {
-                "Curve browser"
-            },
-            (16.0 * s).max(11.0),
-            layout.category.map_or_else(
-                || layout.pager.map_or(layout.close.0, |pager| pager[0].0),
-                |category| category.0,
-            ) - x
-                - 14.0 * s,
-            color_text(),
-        );
+        if layout.find.is_some() {
+            self.draw_browser_find(pm, tr, &layout);
+        } else {
+            draw_fitted(
+                tr,
+                pm,
+                (x + 8.0 * s, y + 22.0 * s.max(0.7)),
+                if layout.category.is_some() {
+                    "Curves"
+                } else {
+                    "Curve browser"
+                },
+                (16.0 * s).max(11.0),
+                layout.category.map_or_else(
+                    || layout.pager.map_or(layout.close.0, |pager| pager[0].0),
+                    |category| category.0,
+                ) - x
+                    - 14.0 * s,
+                color_text(),
+            );
+        }
         let r = layout.close;
         crate::controls::draw_button(pm, tr, r.0, r.1, r.2, r.3, "X", false, false);
         self.draw_user_pager(pm, tr, &layout);
@@ -729,6 +810,7 @@ impl MsegEditState {
                 if active { color_bg() } else { color_text() },
             );
         }
+        self.draw_browser_search(pm, tr, &layout, s);
         let font = (12.0 * s).max(10.0);
         for (i, card) in layout.cards.into_iter().enumerate() {
             let position = if self.browser.page == Page::User {
@@ -806,14 +888,15 @@ impl MsegEditState {
                 },
             );
         }
-        let detail = if !self.browser.message.is_empty() {
+        let mut detail = if !self.browser.message.is_empty() {
             self.browser.message.clone()
         } else if matches!(self.browser.page, Page::Factory | Page::User)
             && self.browser_visible_indices().is_empty()
-            && !matches!(self.browser.categories.filter, CategoryFilter::All)
-            && self.browser.user.error.is_none()
+            && (self.browser.search.has_query()
+                || !matches!(self.browser.categories.filter, CategoryFilter::All))
+            && (self.browser.page != Page::User || self.browser.user.error.is_none())
         {
-            "No curves in this category; choose All categories or save a curve".to_owned()
+            "No matching curves; clear search or choose All categories".to_owned()
         } else {
             let slot = self.browser.selected;
             match self.browser.page {
@@ -866,6 +949,15 @@ impl MsegEditState {
                 }
             }
         };
+        if self.browser.search.has_query()
+            && !self.browser_visible_indices().is_empty()
+            && self.browser.message.is_empty()
+        {
+            detail = format!(
+                "Matches: {} — {detail}",
+                self.browser_visible_indices().len()
+            );
+        }
         draw_fitted(
             tr,
             pm,
@@ -895,7 +987,13 @@ impl MsegEditState {
                 if enabled { color_text() } else { color_muted() },
             );
         }
-        let hint = if self.browser.page == Page::User {
+        let hint = if self.browser.categories.menu.is_open() {
+            "Enter: choose; Esc: cancel"
+        } else if self.browser.search.focused {
+            "Enter: load; Tab: browse; Esc: clear"
+        } else if self.browser.search.visible {
+            "Find: Ctrl/Cmd+F; Esc: clear search"
+        } else if self.browser.page == Page::User {
             "S: save; F2: rename; Del: delete; PgUp/PgDn: pages; R: refresh"
         } else if self.browser.page != Page::Factory {
             "Enter: load; Shift+Enter: fit; S: store; Del: clear; R: refresh"
@@ -933,6 +1031,8 @@ fn thumbnail_rect(card: Rect, scale: f32) -> Rect {
 mod category_tests;
 #[cfg(test)]
 mod project_tests;
+#[cfg(test)]
+mod search_tests;
 #[cfg(test)]
 mod user_tests;
 

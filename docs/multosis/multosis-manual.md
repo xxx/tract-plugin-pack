@@ -259,6 +259,9 @@ See [named user presets](../mseg-editor.md#named-user-presets).
 Factory/User category filters and the Save/Rename Category field organize curves
 without changing playback. See [categories](../mseg-editor.md#categories).
 
+**Find** or **Ctrl/Cmd+F** searches Factory/User names and categories together
+with that filter. See [searching curves](../mseg-editor.md#searching-curves).
+
 Each row's **Waves...** control beside curve playback configures Project-wave
 switching for Amp/1/2/3. Its note range/channel are independent of Trigger.
 The destination displays the playing wave with geometry editing paused;

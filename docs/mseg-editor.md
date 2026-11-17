@@ -242,6 +242,43 @@ upgraded User bank. Clearing categories retains that format. Curve files,
 Favorites and Project banks keep their existing formats. Browsing and filtering
 use cached records; Refresh and explicit metadata actions read shared storage.
 
+### Searching curves
+
+On Factory or User, click **Find**, press **Ctrl/Cmd+F**, or press **/** to focus
+search. The row has a query field, **Clear** and **X**. It matches names and
+categories using Unicode lowercase: every whitespace-separated term must occur
+in either field, in any order. For example, `bass pulse` can match a Pulse curve
+in Bass. Empty categories match `Uncategorized`. Matching uses literal substrings;
+punctuation has its ordinary meaning. The current category filter still applies.
+
+Results update as you type from the browser snapshot, with a match count below
+the thumbnails. Selection follows the same visible record when possible. Cards,
+pages, double-click and all recall/management actions use matching results;
+empty results disable record actions. Favorites and Project keep fixed-slot
+browsing without a search field.
+
+The query supports 256 Unicode characters, printable Option input, Ctrl/Cmd+A,
+Shift-selection, caret Left/Right/Home/End, Backspace and Delete. Once focused,
+`/`, S/R/C and other characters enter text. Up/Down navigate result rows; Page
+Up/Down page User results. **Enter** loads the selected match; **Shift+Enter**
+fits it. **Tab** leaves typing focus for ordinary browser shortcuts/navigation.
+Find or Ctrl/Cmd+F refocuses/selects the current query.
+
+Clear empties the query and keeps typing focus. X or Escape closes and clears
+search while retaining the category filter; another Escape closes the browser.
+Category popups and metadata/Delete dialogs keep priority above search, so
+Escape dismisses those first. Clicking another browser control leaves query
+focus. Changing tabs, reopening, resizing, losing focus or replacing the authored
+document discards the query and transient search interactions.
+
+Refresh/Delete keep the query and clamp selection within remaining matches.
+After Save/Rename, the browser follows the saved ID; if its new name/category
+would hide it, the query clears to reveal it. Search changes no stored records,
+library formats, curve undo/baking, frozen capture or audio behavior. Only
+explicit recall edits the curve, using the established geometry-only rules.
+Small windows that cannot fit the row and usable thumbnails show the enlargement
+message before hidden input can act.
+
 ### Shape menu and files
 
 Shapes includes eight factory curves: Flat high, Flat center, Ramp up, Ramp down,

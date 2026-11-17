@@ -68,6 +68,9 @@ See [named user presets](../mseg-editor.md#named-user-presets).
 Factory/User category filters and the Save/Rename Category field organize curves
 without regenerating the tail. See [categories](../mseg-editor.md#categories).
 
+**Find** or **Ctrl/Cmd+F** searches Factory/User names and categories; typing
+leaves the tail intact. See [searching curves](../mseg-editor.md#searching-curves).
+
 Each pane provides hover hints and a **?** gesture guide beside Point. Point at
 a pane and press **F1 / ?**, or use **View → Editing guide...**. The guide keeps
 its pane's input ownership and leaves the tail unchanged; see

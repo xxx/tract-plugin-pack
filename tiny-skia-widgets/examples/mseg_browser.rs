@@ -1,4 +1,4 @@
-//! Preview: cargo run -p tiny-skia-widgets --example mseg_browser -- /tmp/mseg-browser.png [full|static] [factory|favorites|project|user] [scale] [browse|save|rename|delete|last|assign|filter] [all|uncategorized|category]
+//! Preview: cargo run -p tiny-skia-widgets --example mseg_browser -- /tmp/mseg-browser.png [full|static] [factory|favorites|project|user] [scale] [browse|save|rename|delete|last|assign|filter] [all|uncategorized|category] [query]
 
 use keyboard_types::{Key, KeyState, KeyboardEvent};
 use tiny_skia_widgets::mseg::library::CurveLibrary;
@@ -28,6 +28,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mode = args.next().unwrap_or_else(|| "browse".into());
     let category = args.next().unwrap_or_else(|| "all".into());
+    let query = args.next();
+    if query.is_some() && !matches!(turns, 0 | 3) {
+        return Err("Search requires Factory or User".into());
+    }
     if !matches!(
         mode.as_str(),
         "browse" | "save" | "rename" | "delete" | "last" | "assign" | "filter"
@@ -137,6 +141,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.on_key(
                 &KeyboardEvent {
                     key,
+                    state: KeyState::Down,
+                    ..KeyboardEvent::default()
+                },
+                &mut data,
+                rect,
+                scale,
+            );
+        }
+    }
+    if let Some(query) = query {
+        for event in [
+            KeyboardEvent {
+                modifiers: keyboard_types::Modifiers::CONTROL,
+                key: Key::Character("f".into()),
+                state: KeyState::Down,
+                ..KeyboardEvent::default()
+            },
+            KeyboardEvent {
+                key: Key::Character(query),
+                state: KeyState::Down,
+                ..KeyboardEvent::default()
+            },
+        ] {
+            state.on_key(&event, &mut data, rect, scale);
+        }
+        if mode != "browse" {
+            state.on_key(
+                &KeyboardEvent {
+                    key: Key::Tab,
                     state: KeyState::Down,
                     ..KeyboardEvent::default()
                 },

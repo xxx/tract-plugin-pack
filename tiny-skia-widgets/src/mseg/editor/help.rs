@@ -185,6 +185,10 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                         "Factory/User: C or the header selector filters categories. Save/Rename: Tab reaches Category; type a label or use F4/Alt+Down/the arrow to choose. Empty means Uncategorized. Filtering and metadata edits leave the curve intact.",
                     ),
                     entry(
+                        "Find curves",
+                        "Factory/User: Find, Ctrl/Cmd+F or / opens search. Every word matches name or category, together with the category filter. Enter loads, Shift+Enter fits; Tab leaves typing. Clear keeps focus; X/Escape clears search. S/R/C and / type literally while focused.",
+                    ),
+                    entry(
                         "Ctrl/Cmd+C / V",
                         "Copy or paste the whole curve across instances and plugins. Shift+paste fits its height.",
                     ),

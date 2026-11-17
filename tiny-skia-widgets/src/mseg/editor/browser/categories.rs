@@ -87,7 +87,13 @@ impl MsegEditState {
             Page::Factory => FactoryShape::ALL
                 .iter()
                 .enumerate()
-                .filter(|(_, shape)| self.browser.categories.filter.matches(shape.category()))
+                .filter(|(index, shape)| {
+                    self.browser.categories.filter.matches(shape.category())
+                        && self
+                            .browser
+                            .search
+                            .matches(FactoryShape::LABELS[*index], shape.category())
+                })
                 .map(|(index, _)| index)
                 .collect(),
             Page::User => self
@@ -96,7 +102,10 @@ impl MsegEditState {
                 .entries
                 .iter()
                 .enumerate()
-                .filter(|(_, entry)| self.browser.categories.filter.matches(&entry.category))
+                .filter(|(_, entry)| {
+                    self.browser.categories.filter.matches(&entry.category)
+                        && self.browser.search.matches(&entry.name, &entry.category)
+                })
                 .map(|(index, _)| index)
                 .collect(),
             _ => ALL_CARDS.to_vec(),

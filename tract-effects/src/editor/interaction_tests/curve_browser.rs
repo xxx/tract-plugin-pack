@@ -332,3 +332,95 @@ fn category_filter_and_metadata_edit_preserve_frozen_config_until_actual_recall(
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[test]
+fn search_typing_preserves_frozen_config_and_enter_reports_one_native_curve_recall() {
+    use widgets::mseg::{WavePalette, library::CurveLibrary};
+    for scale in [0.5, 1.0, 2.0] {
+        let mut h = at_scale(scale);
+        let root = std::env::temp_dir().join(format!(
+            "tract-effect-search-{}-{scale}",
+            std::process::id()
+        ));
+        let library = CurveLibrary::at(root.clone());
+        let duck = widgets::mseg::factory_shape(widgets::mseg::FactoryShape::Duck);
+        library
+            .save_user_preset_with_category("Pulse", "Bass", &duck)
+            .unwrap();
+        library
+            .save_user_preset_with_category(
+                "Swell",
+                "Lead",
+                &widgets::mseg::factory_shape(widgets::mseg::FactoryShape::Sine),
+            )
+            .unwrap();
+        let bytes = std::fs::read(root.join("user-presets.json")).unwrap();
+        h.editor.mseg_edit.set_curve_library_directory(root.clone());
+        h.editor
+            .bind_wave_palette(std::sync::Arc::new(std::sync::Mutex::new(
+                WavePalette::default(),
+            )));
+        h.editor.set_audio_view(AudioView::Both);
+        h.editor.set_audio_frozen(true);
+        let before = (h.effect, h.modulation.clone());
+        assert!(
+            h.editor
+                .mseg_edit
+                .open_curve_browser(h.geometry.layout.mseg_pane, scale)
+        );
+        for _ in 0..3 {
+            assert!(!h.key(Key::Tab).changed);
+        }
+        let response = h.send(Event::Keyboard(KeyboardEvent {
+            modifiers: Modifiers::CONTROL,
+            state: KeyState::Down,
+            key: Key::Character("f".into()),
+            ..KeyboardEvent::default()
+        }));
+        assert!(response.captured && !response.changed);
+        for value in [Key::Character("pulse bass".into()), Key::ArrowDown] {
+            let response = h.key(value);
+            assert!(response.captured && !response.changed);
+            assert_eq!((h.effect, h.modulation.clone()), before);
+            assert!(h.editor.audio_frozen());
+        }
+        let response = h.key(Key::Enter);
+        assert!(response.captured && response.changed);
+        let mut expected = before.1;
+        duck.apply(&mut expected.msegs[h.editor.selected_mseg], false)
+            .unwrap();
+        assert_eq!(h.modulation, expected);
+        assert_eq!(h.effect, before.0);
+        assert!(!h.release().changed);
+        assert_eq!(
+            std::fs::read(root.join("user-presets.json")).unwrap(),
+            bytes
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn a_native_preset_replacement_cancels_search_before_its_enter_can_recall() {
+    let mut h = at_scale(1.0);
+    assert!(
+        h.editor
+            .mseg_edit
+            .open_curve_browser(h.geometry.layout.mseg_pane, 1.0)
+    );
+    h.send(Event::Keyboard(KeyboardEvent {
+        modifiers: Modifiers::META,
+        state: KeyState::Down,
+        key: Key::Character("f".into()),
+        ..KeyboardEvent::default()
+    }));
+    assert!(!h.key(Key::Character("duck".into())).changed);
+    widgets::mseg::factory_shape(widgets::mseg::FactoryShape::Square)
+        .apply(&mut h.modulation.msegs[h.editor.selected_mseg], false)
+        .unwrap();
+    let replacement = (h.effect, h.modulation.clone());
+    let response = h.key(Key::Enter);
+    assert!(response.captured && !response.changed);
+    assert!(!h.editor.mseg_edit.curve_browser_open());
+    assert_eq!((h.effect, h.modulation), replacement);
+}

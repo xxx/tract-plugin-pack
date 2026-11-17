@@ -54,19 +54,29 @@ impl Action {
     }
 }
 
-struct NameField {
-    text: String,
+pub(super) struct NameField {
+    pub text: String,
     caret: usize,
     anchor: usize,
+    limit: usize,
 }
 
 impl NameField {
-    fn new(text: String) -> Self {
+    pub(super) fn new(text: String) -> Self {
+        Self::with_limit(text, MAX_USER_PRESET_NAME_CHARS)
+    }
+    pub(super) fn with_limit(text: String, limit: usize) -> Self {
+        let text: String = text.chars().take(limit).collect();
         Self {
             caret: text.len(),
             anchor: 0,
             text,
+            limit,
         }
+    }
+    pub(super) fn select_all(&mut self) {
+        self.anchor = 0;
+        self.caret = self.text.len();
     }
     fn selection(&self) -> std::ops::Range<usize> {
         self.caret.min(self.anchor)..self.caret.max(self.anchor)
@@ -93,14 +103,13 @@ impl NameField {
         self.anchor = self.caret;
         true
     }
-    fn key(&mut self, event: &KeyboardEvent) {
+    pub(super) fn key(&mut self, event: &KeyboardEvent) {
         let command = event
             .modifiers
             .intersects(Modifiers::CONTROL | Modifiers::META);
         if command {
             if matches!(&event.key, Key::Character(text) if text.eq_ignore_ascii_case("a")) {
-                self.anchor = 0;
-                self.caret = self.text.len();
+                self.select_all();
             }
             return;
         }
@@ -150,7 +159,7 @@ impl NameField {
                     return;
                 }
                 self.erase_selection();
-                let room = MAX_USER_PRESET_NAME_CHARS.saturating_sub(self.text.chars().count());
+                let room = self.limit.saturating_sub(self.text.chars().count());
                 let text: String = text.chars().take(room).collect();
                 self.text.insert_str(self.caret, &text);
                 self.caret += text.len();
@@ -216,7 +225,7 @@ pub(super) fn dialog_fits(layout: &BrowserLayout, scale: f32) -> bool {
     lay.field.1 + font + 6.0 * font * 1.5 < lay.accept.1 - 4.0
 }
 
-fn draw_name_field(
+pub(super) fn draw_name_field(
     pm: &mut Pixmap,
     tr: &mut TextRenderer,
     rect: Rect,
@@ -490,6 +499,7 @@ impl MsegEditState {
             Ok(selected) => {
                 if let Some(entry) = &selected {
                     self.reveal_user_category(&entry.category);
+                    self.reveal_browser_search(&entry.name, &entry.category);
                 }
                 self.refresh_browser_user(selected.map(|entry| entry.id));
                 self.browser.message = format!(

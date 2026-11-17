@@ -258,6 +258,9 @@ impl MsegEditState {
         scale: f32,
     ) -> bool {
         self.prepare_precision(data, scale);
+        if self.curve_browser_open() && !self.validate_browser_document(data) {
+            return true;
+        }
         if self.has_open_menu() {
             return self.on_wheel(delta, rect);
         }
