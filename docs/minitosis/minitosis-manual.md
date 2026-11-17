@@ -54,6 +54,9 @@ The **User** tab saves named curves shared across plugins, with paging, Rename
 and confirmed Delete. Management leaves playback and local curve undo intact.
 See [named user presets](../mseg-editor.md#named-user-presets).
 
+Factory/User category filters and the Save/Rename Category field organize curves
+without changing playback. See [categories](../mseg-editor.md#categories).
+
 **Waves...** beside the curve's playback control configures MIDI switching of
 those Project waves for Amp/1/2/3. Notes select waves at their sample offsets
 while the clock keeps running; Trigger still controls restarts. The chosen

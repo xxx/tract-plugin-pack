@@ -177,7 +177,8 @@ creates a new preset. Names contain 1–64 Unicode characters, with surrounding
 spaces trimmed. Names compare using Unicode lowercase; an existing name asks
 you to choose another. **Rename** or F2 edits the selected preset's name while
 retaining its curve. The field supports arrows, Home/End, Shift-selection,
-Ctrl/Cmd+A, Backspace and Delete. Tab moves between the field and action buttons.
+Ctrl/Cmd+A, Backspace and Delete. Tab moves between Name, Category and the action
+buttons.
 Escape cancels the draft before closing the browser.
 
 **Delete** or Delete/Backspace opens a confirmation showing the selected name.
@@ -201,6 +202,45 @@ A busy library reports an error for retry. Corrupt, unsupported, oversized or
 unreadable storage reports an error until a successful Refresh. Failed actions
 preserve stored curves. Pending drafts/confirmations cancel with the browser on
 outside/right press, focus loss, resize or source/preset replacement.
+
+### Categories
+
+Factory and User have a header category selector; press **C** to open it. Choose
+**All categories**, or a group, with arrows/Home/End/Page Up/Down/wheel and Enter.
+Escape cancels the selector before closing the browser. Narrow headers shorten
+the control to **Cat**; its popup expands within the window so choices remain
+readable. Factory groups are **Basic** (the two flat shapes),
+**Ramps**, **Modulation** (Triangle/Sine), and **Rhythmic** (Square/Duck).
+
+User presets have an optional **Category** in Save/Rename. Type a custom label,
+or use the field's arrow, **F4** or **Alt+Down** to choose an existing category or
+factory group. Labels support up to 64 Unicode characters, including printable
+Option input, with surrounding spaces trimmed. Leave the field empty for
+**Uncategorized**. Labels group by Unicode lowercase; preset names remain unique
+across all categories. Custom labels appear with a `Category:` prefix, so even
+a label named “All categories” or “Uncategorized” is distinct from the special
+filter choices.
+
+Filtering changes the visible thumbnails, navigation and page count. Load/Fit,
+double-click, Rename and Delete always address the displayed record. Empty
+groups disable record actions; Save can create a curve in that category. Changing
+tabs resets the filter to All. Refresh/Delete retain the filter and clamp the
+selection; an empty selected group remains available. After Save/Rename, the
+browser follows the record's ID and reveals its new category if needed.
+
+Entering a category in Rename can change only that metadata. Applying both
+fields is one library operation and preserves the curve/ID. Filtering and
+category editing leave the current curve, undo, baking, frozen capture and
+Project/Favorites/clipboard intact. Only explicit recall edits the curve. A
+popup consumes an outside press before any card, field or action beneath it;
+right-click retains browser dismissal. Resizing or replacing the authored curve
+discards stale forms and choosers.
+
+Older libraries load as Uncategorized without an on-read migration. Assigning a
+category upgrades shared library storage; earlier plugin builds cannot open the
+upgraded User bank. Clearing categories retains that format. Curve files,
+Favorites and Project banks keep their existing formats. Browsing and filtering
+use cached records; Refresh and explicit metadata actions read shared storage.
 
 ### Shape menu and files
 

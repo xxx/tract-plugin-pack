@@ -6,13 +6,15 @@ use std::io::{self, Read};
 
 pub const MAX_USER_PRESETS: usize = 256;
 pub const MAX_USER_PRESET_NAME_CHARS: usize = 64;
-const MAX_USER_PRESET_BYTES: usize = (MAX_SHAPE_BYTES + 512) * MAX_USER_PRESETS + 4096;
+const MAX_USER_PRESET_BYTES: usize = (MAX_SHAPE_BYTES + 1024) * MAX_USER_PRESETS + 4096;
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UserPreset {
     pub id: u64,
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub category: String,
     pub shape: CurveShape,
 }
 
@@ -48,11 +50,25 @@ fn name(value: &str) -> io::Result<String> {
     Ok(trimmed.to_owned())
 }
 
+fn category(value: &str) -> io::Result<String> {
+    let trimmed = value.trim();
+    if value.chars().any(char::is_control) || trimmed.chars().count() > MAX_USER_PRESET_NAME_CHARS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Use an empty category or 1–64 characters without controls",
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
 impl UserBank {
     fn validate(&self) -> io::Result<()> {
         let mut ids = HashSet::new();
         let mut names = HashSet::new();
-        if self.version != 1 || self.next_id == 0 || self.presets.len() > MAX_USER_PRESETS {
+        if !matches!(self.version, 1 | 2)
+            || self.next_id == 0
+            || self.presets.len() > MAX_USER_PRESETS
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Invalid user preset library",
@@ -63,6 +79,8 @@ impl UserBank {
                 || preset.id >= self.next_id
                 || !ids.insert(preset.id)
                 || name(&preset.name).ok().as_deref() != Some(preset.name.as_str())
+                || category(&preset.category).ok().as_deref() != Some(preset.category.as_str())
+                || (self.version == 1 && !preset.category.is_empty())
                 || !names.insert(preset.name.to_lowercase())
             {
                 return Err(io::Error::new(
@@ -147,6 +165,13 @@ impl CurveLibrary {
         lock.try_lock().map_err(io::Error::from)?;
         let mut bank = self.read_user_bank()?;
         let result = edit(&mut bank)?;
+        if bank
+            .presets
+            .iter()
+            .any(|preset| !preset.category.is_empty())
+        {
+            bank.version = 2;
+        }
         let text = serde_json::to_string_pretty(&bank).map_err(io::Error::other)?;
         if text.len() > MAX_USER_PRESET_BYTES {
             return Err(io::Error::new(
@@ -159,7 +184,17 @@ impl CurveLibrary {
     }
 
     pub fn save_user_preset(&self, value: &str, shape: &CurveShape) -> io::Result<UserPreset> {
+        self.save_user_preset_with_category(value, "", shape)
+    }
+
+    pub fn save_user_preset_with_category(
+        &self,
+        value: &str,
+        label: &str,
+        shape: &CurveShape,
+    ) -> io::Result<UserPreset> {
         let name = name(value)?;
+        let category = category(label)?;
         crate::mseg::shape::validate_nodes(shape.nodes())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         self.update_user_bank(|bank| {
@@ -176,6 +211,7 @@ impl CurveLibrary {
             let preset = UserPreset {
                 id: bank.next_id,
                 name,
+                category,
                 shape: shape.clone(),
             };
             bank.next_id = next;
@@ -191,11 +227,22 @@ impl CurveLibrary {
     }
 
     pub fn rename_user_preset(&self, expected: &UserPreset, value: &str) -> io::Result<UserPreset> {
+        self.update_user_preset(expected, value, &expected.category)
+    }
+
+    pub fn update_user_preset(
+        &self,
+        expected: &UserPreset,
+        value: &str,
+        label: &str,
+    ) -> io::Result<UserPreset> {
         let name = name(value)?;
+        let category = category(label)?;
         self.update_user_bank(|bank| {
             let index = bank.expected(expected)?;
             bank.unique_name(&name, Some(expected.id))?;
             bank.presets[index].name = name;
+            bank.presets[index].category = category;
             Ok(bank.presets[index].clone())
         })
     }
@@ -209,5 +256,7 @@ impl CurveLibrary {
     }
 }
 
+#[cfg(test)]
+mod category_tests;
 #[cfg(test)]
 mod tests;

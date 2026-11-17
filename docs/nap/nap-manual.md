@@ -65,6 +65,9 @@ The **User** tab saves named curves shared across plugins, with paging, Rename
 and confirmed Delete. Management leaves the tail intact; Load/Fit regenerates it.
 See [named user presets](../mseg-editor.md#named-user-presets).
 
+Factory/User category filters and the Save/Rename Category field organize curves
+without regenerating the tail. See [categories](../mseg-editor.md#categories).
+
 Each pane provides hover hints and a **?** gesture guide beside Point. Point at
 a pane and press **F1 / ?**, or use **View → Editing guide...**. The guide keeps
 its pane's input ownership and leaves the tail unchanged; see

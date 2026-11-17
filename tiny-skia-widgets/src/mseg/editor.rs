@@ -700,6 +700,10 @@ impl MsegEditState {
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{MsegHit, mseg_hit_test, x_to_phase, y_to_value};
         self.track_hint_pointer(x, y, rect);
+        if self.curve_browser_open() {
+            self.browser_mouse_move(x, y, data, rect);
+            return None;
+        }
         if self.help_open() || self.curve_browser_open() {
             return None;
         }
@@ -783,6 +787,10 @@ impl MsegEditState {
         scale: f32,
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{phase_to_x, value_to_y};
+        if self.curve_browser_open() {
+            self.browser_mouse_up();
+            return None;
+        }
         if self.help_open() || self.curve_browser_open() {
             return None;
         }

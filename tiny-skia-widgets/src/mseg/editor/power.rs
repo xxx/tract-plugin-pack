@@ -489,7 +489,7 @@ impl MsegEditState {
 
     pub fn on_wheel(&mut self, delta: f32, rect: (f32, f32, f32, f32)) -> bool {
         if self.curve_browser_open() {
-            self.browser_wheel(delta);
+            self.browser_wheel(delta, rect);
             return true;
         }
         if self.help_open() {
@@ -521,7 +521,7 @@ impl MsegEditState {
             if !self.validate_browser_layout(rect, scale) {
                 return (true, None);
             }
-            let changed = self.browser_key(event, data);
+            let changed = self.browser_key(event, data, rect, scale);
             if self.curve_browser_open() {
                 self.validate_browser_layout(rect, scale);
             }

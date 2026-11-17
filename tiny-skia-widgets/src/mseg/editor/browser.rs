@@ -14,7 +14,9 @@ use tiny_skia::{Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 type Rect = (f32, f32, f32, f32);
 
+mod categories;
 mod user;
+use categories::{Categories, CategoryFilter, CategoryMenu};
 use user::UserBrowser;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -65,6 +67,7 @@ pub(super) struct BrowserState {
     project: WavePalette,
     project_error: Option<&'static str>,
     user: UserBrowser,
+    categories: Categories,
     message: String,
     last_click: Option<(Page, usize, Instant)>,
 }
@@ -77,6 +80,7 @@ pub(crate) struct BrowserLayout {
     pub cards: [Rect; FAVORITE_COUNT],
     pub buttons: Vec<Rect>,
     pub pager: Option<[Rect; 2]>,
+    pub category: Option<Rect>,
     detail: Rect,
     hint: Rect,
 }
@@ -117,10 +121,14 @@ impl MsegEditState {
         self.browser.last_click = None;
         self.browser.message.clear();
         self.browser.user.dialog = None;
+        self.browser.categories.filter = CategoryFilter::All;
+        self.close_category_menu();
         if page == Page::Project {
             self.refresh_browser_project();
         } else if page == Page::User {
             self.refresh_browser_user(None);
+        } else {
+            self.rebuild_browser_view(Some(0), 0);
         }
     }
 
@@ -153,15 +161,33 @@ impl MsegEditState {
     }
 
     pub(super) fn browser_hint(&self) -> &'static str {
-        if self.browser.user.dialog.is_some() {
+        if self.browser.categories.menu.is_open() {
+            "Category: arrows choose; Enter applies; Esc cancels"
+        } else if self.user_category_focused() {
+            "Category: F4/Alt+Down chooses; empty = Uncategorized"
+        } else if self.browser.user.dialog.is_some() {
             "Preset dialog: Enter applies; Esc cancels; Tab moves focus"
         } else {
             "Browser: select a thumbnail; Enter loads; Shift+Enter fits; Esc closes"
         }
     }
 
-    pub(super) fn browser_wheel(&mut self, delta: f32) {
-        self.scroll_user_name(delta);
+    pub(super) fn browser_wheel(&mut self, delta: f32, rect: Rect) {
+        if self.browser.categories.menu.is_open() {
+            self.category_menu_wheel(delta, self.browser_window_size(rect));
+        } else {
+            self.scroll_user_name(delta);
+        }
+    }
+
+    pub(super) fn browser_mouse_move(&mut self, x: f32, y: f32, data: &MsegData, rect: Rect) {
+        if self.validate_user_document(data) && self.browser.categories.menu.is_open() {
+            self.category_menu_move(x, y, self.browser_window_size(rect));
+        }
+    }
+
+    pub(super) fn browser_mouse_up(&mut self) {
+        self.browser.categories.menu.on_mouse_up();
     }
 
     /// Open a snapshot of factory curves and shared favorites without changing the curve.
@@ -186,6 +212,8 @@ impl MsegEditState {
         self.browser.selected = 0;
         self.browser.last_click = None;
         self.browser.factory = FactoryShape::ALL.into_iter().map(factory_shape).collect();
+        self.browser.categories.filter = CategoryFilter::All;
+        self.rebuild_browser_view(Some(0), 0);
         self.refresh_browser_favorites();
         true
     }
@@ -194,6 +222,7 @@ impl MsegEditState {
         self.browser.open = false;
         self.browser.last_click = None;
         self.browser.user.dialog = None;
+        self.close_category_menu();
     }
 
     fn refresh_browser_favorites(&mut self) {
@@ -211,6 +240,12 @@ impl MsegEditState {
     }
 
     fn browser_shape(&self) -> Option<&CurveShape> {
+        if !self
+            .browser_visible_indices()
+            .contains(&self.browser.selected)
+        {
+            return None;
+        }
         match self.browser.page {
             Page::Factory => self.browser.factory.get(self.browser.selected),
             Page::Favorites => match &self.browser.favorites[self.browser.selected] {
@@ -402,6 +437,16 @@ impl MsegEditState {
         if pager.is_some_and(|pager| pager[0].0 < x + pad + 100.0 * s.max(0.7)) {
             return None;
         }
+        let category = matches!(self.browser.page, Page::Factory | Page::User).then(|| {
+            let left = x + pad + (80.0 * s).max(42.0) + gap;
+            let right = pager.map_or(base.close.0, |pager| pager[0].0) - gap;
+            (left, base.close.1, right - left, base.close.3)
+        });
+        if category
+            .is_some_and(|rect| rect.2 < 12.0 + rect.3 * 0.6 + (rect.3 * 0.5).max(10.0) * 1.8)
+        {
+            return None;
+        }
         let layout = BrowserLayout {
             panel: base.panel,
             close: base.close,
@@ -427,6 +472,7 @@ impl MsegEditState {
                 })
                 .collect(),
             pager,
+            category,
             detail: (x + pad, footer_y, inner_w, line),
             hint: (
                 x + pad,
@@ -435,7 +481,7 @@ impl MsegEditState {
                 line * 2.0,
             ),
         };
-        if self.browser.page == Page::User && !user::dialog_fits(&layout, s) {
+        if self.browser.page == Page::User && !self.user_dialog_fits(&layout, s) {
             return None;
         }
         Some(layout)
@@ -458,11 +504,17 @@ impl MsegEditState {
         if !self.validate_user_document(data) {
             return None;
         }
+        if self.browser.categories.menu.is_open() {
+            self.category_menu_mouse_down(x, y, self.browser_window_size(rect));
+            return None;
+        }
         if self.browser.user.dialog.is_some() {
             return self.user_dialog_mouse_down(x, y, &layout, scale);
         }
         if in_rect(layout.close, x, y) || !in_rect(layout.panel, x, y) {
             self.close_curve_browser();
+        } else if let Some(anchor) = layout.category.filter(|anchor| in_rect(*anchor, x, y)) {
+            self.open_category_menu(CategoryMenu::Filter, anchor, self.browser_window_size(rect));
         } else if let Some(tab) = layout.tabs.iter().position(|r| in_rect(*r, x, y)) {
             self.select_browser_page(self.browser_pages()[tab]);
             self.validate_browser_layout(rect, scale);
@@ -472,15 +524,14 @@ impl MsegEditState {
         {
             self.move_user_page(if page == 0 { -1 } else { 1 });
         } else if let Some(card) = layout.cards.iter().position(|r| in_rect(*r, x, y)) {
-            let card = if self.browser.page == Page::User {
-                let index = self.user_page_start() + card;
-                if index >= self.browser.user.entries.len() {
-                    self.browser.last_click = None;
-                    return None;
-                }
-                index
+            let position = if self.browser.page == Page::User {
+                self.user_page_start() + card
             } else {
                 card
+            };
+            let Some(card) = self.browser_visible_indices().get(position).copied() else {
+                self.browser.last_click = None;
+                return None;
             };
             self.browser.selected = card;
             self.browser.message.clear();
@@ -489,7 +540,11 @@ impl MsegEditState {
             }
         } else if let Some(action) = layout.buttons.iter().position(|r| in_rect(*r, x, y)) {
             self.browser.last_click = None;
-            return self.browser_action(action, data);
+            let changed = self.browser_action(action, data);
+            if self.curve_browser_open() {
+                self.validate_browser_layout(rect, scale);
+            }
+            return changed;
         } else {
             self.browser.last_click = None;
         }
@@ -500,6 +555,8 @@ impl MsegEditState {
         &mut self,
         event: &KeyboardEvent,
         data: &mut MsegData,
+        rect: Rect,
+        scale: f32,
     ) -> Option<MsegEdit> {
         if !self.validate_user_document(data) {
             return None;
@@ -508,7 +565,26 @@ impl MsegEditState {
             return None;
         }
         self.browser.last_click = None;
+        if self.browser.categories.menu.is_open() {
+            self.category_menu_key(event, self.browser_window_size(rect));
+            return None;
+        }
         if self.browser.user.dialog.is_some() {
+            if self.user_category_focused()
+                && !event
+                    .modifiers
+                    .intersects(Modifiers::CONTROL | Modifiers::META)
+                && (event.key == Key::F4
+                    || (event.key == Key::ArrowDown && event.modifiers.contains(Modifiers::ALT)))
+                && let Some(layout) = self.browser_layout(rect, scale)
+            {
+                self.open_category_menu(
+                    CategoryMenu::Assign,
+                    self.user_category_anchor(&layout, scale),
+                    self.browser_window_size(rect),
+                );
+                return None;
+            }
             self.user_dialog_key(event);
             return None;
         }
@@ -522,10 +598,20 @@ impl MsegEditState {
         {
             return None;
         }
+        if matches!(self.browser.page, Page::Factory | Page::User)
+            && matches!(&event.key, Key::Character(text) if text.eq_ignore_ascii_case("c"))
+            && let Some(anchor) = self
+                .browser_layout(rect, scale)
+                .and_then(|layout| layout.category)
+        {
+            self.open_category_menu(CategoryMenu::Filter, anchor, self.browser_window_size(rect));
+            return None;
+        }
         if self.browser.page == Page::User && event.key != Key::Tab {
             return self.user_browser_key(event, data);
         }
-        let selected = self.browser.selected;
+        let selected = self.browser_selected_position();
+        let count = self.browser_visible_indices().len().max(1);
         match &event.key {
             Key::Tab => {
                 let pages = self.browser_pages();
@@ -540,13 +626,11 @@ impl MsegEditState {
                 };
                 self.select_browser_page(pages[(index + delta) % pages.len()]);
             }
-            Key::ArrowLeft => self.browser.selected = (selected + 7) % FAVORITE_COUNT,
-            Key::ArrowRight => self.browser.selected = (selected + 1) % FAVORITE_COUNT,
-            Key::ArrowUp | Key::ArrowDown => {
-                self.browser.selected = (selected + 4) % FAVORITE_COUNT
-            }
-            Key::Home => self.browser.selected = 0,
-            Key::End => self.browser.selected = FAVORITE_COUNT - 1,
+            Key::ArrowLeft => self.select_browser_position((selected + count - 1) % count),
+            Key::ArrowRight => self.select_browser_position((selected + 1) % count),
+            Key::ArrowUp | Key::ArrowDown => self.select_browser_position((selected + 4) % count),
+            Key::Home => self.select_browser_position(0),
+            Key::End => self.select_browser_position(count - 1),
             Key::Enter => {
                 return self.browser_action(
                     usize::from(event.modifiers.contains(Modifiers::SHIFT)),
@@ -607,14 +691,23 @@ impl MsegEditState {
             tr,
             pm,
             (x + 8.0 * s, y + 22.0 * s.max(0.7)),
-            "Curve browser",
+            if layout.category.is_some() {
+                "Curves"
+            } else {
+                "Curve browser"
+            },
             (16.0 * s).max(11.0),
-            layout.pager.map_or(layout.close.0, |pager| pager[0].0) - x - 14.0 * s,
+            layout.category.map_or_else(
+                || layout.pager.map_or(layout.close.0, |pager| pager[0].0),
+                |category| category.0,
+            ) - x
+                - 14.0 * s,
             color_text(),
         );
         let r = layout.close;
         crate::controls::draw_button(pm, tr, r.0, r.1, r.2, r.3, "X", false, false);
         self.draw_user_pager(pm, tr, &layout);
+        self.draw_category_header(pm, tr, &layout);
         for (page, r) in self.browser_pages().iter().zip(layout.tabs.iter().copied()) {
             let active = self.browser.page == *page;
             crate::controls::draw_button(pm, tr, r.0, r.1, r.2, r.3, "", active, false);
@@ -638,10 +731,16 @@ impl MsegEditState {
         }
         let font = (12.0 * s).max(10.0);
         for (i, card) in layout.cards.into_iter().enumerate() {
+            let position = if self.browser.page == Page::User {
+                self.user_page_start() + i
+            } else {
+                i
+            };
+            let index = self.browser_visible_indices().get(position).copied();
             let (shape, label) = match self.browser.page {
                 Page::Factory => (
-                    self.browser.factory.get(i),
-                    FactoryShape::LABELS[i].to_owned(),
+                    index.and_then(|index| self.browser.factory.get(index)),
+                    index.map_or_else(String::new, |index| FactoryShape::LABELS[index].to_owned()),
                 ),
                 Page::Favorites => match &self.browser.favorites[i] {
                     Favorite::Shape(shape) => (Some(shape), format!("Favorite {}", i + 1)),
@@ -671,7 +770,7 @@ impl MsegEditState {
                         },
                     )
                 }
-                Page::User => match self.browser.user.entries.get(self.user_page_start() + i) {
+                Page::User => match index.and_then(|index| self.browser.user.entries.get(index)) {
                     Some(entry) => (Some(&entry.shape), entry.name.clone()),
                     None => (None, String::new()),
                 },
@@ -683,13 +782,7 @@ impl MsegEditState {
                 card.1,
                 card.2,
                 card.3,
-                if self.browser.selected
-                    == i + if self.browser.page == Page::User {
-                        self.user_page_start()
-                    } else {
-                        0
-                    }
-                {
+                if index == Some(self.browser.selected) {
                     color_accent()
                 } else {
                     color_border()
@@ -715,10 +808,20 @@ impl MsegEditState {
         }
         let detail = if !self.browser.message.is_empty() {
             self.browser.message.clone()
+        } else if matches!(self.browser.page, Page::Factory | Page::User)
+            && self.browser_visible_indices().is_empty()
+            && !matches!(self.browser.categories.filter, CategoryFilter::All)
+            && self.browser.user.error.is_none()
+        {
+            "No curves in this category; choose All categories or save a curve".to_owned()
         } else {
             let slot = self.browser.selected;
             match self.browser.page {
-                Page::Factory => FactoryShape::LABELS[slot].to_owned(),
+                Page::Factory => format!(
+                    "{} — {}",
+                    FactoryShape::LABELS[slot],
+                    FactoryShape::ALL[slot].category()
+                ),
                 Page::Favorites => match &self.browser.favorites[slot] {
                     Favorite::Shape(shape) => {
                         format!("Favorite {} - {} points", slot + 1, shape.nodes().len())
@@ -747,7 +850,16 @@ impl MsegEditState {
                     if let Some(error) = &self.browser.user.error {
                         format!("User presets unavailable: {error}")
                     } else if let Some(entry) = self.browser.user.entries.get(slot) {
-                        format!("{} - {} points", entry.name, entry.shape.nodes().len())
+                        format!(
+                            "{} — {} — {} points",
+                            entry.name,
+                            if entry.category.is_empty() {
+                                "Uncategorized"
+                            } else {
+                                &entry.category
+                            },
+                            entry.shape.nodes().len()
+                        )
                     } else {
                         "No user presets; Save keeps the current curve".to_owned()
                     }
@@ -802,6 +914,7 @@ impl MsegEditState {
             );
         }
         self.draw_user_dialog(pm, tr, &layout, scale);
+        self.draw_category_menu(pm, tr);
     }
 }
 
@@ -816,6 +929,8 @@ fn thumbnail_rect(card: Rect, scale: f32) -> Rect {
     )
 }
 
+#[cfg(test)]
+mod category_tests;
 #[cfg(test)]
 mod project_tests;
 #[cfg(test)]
@@ -1417,7 +1532,7 @@ mod tests {
         state.browser.page = Page::Favorites;
         assert!(!state.browser_double_click(1, now + Duration::from_millis(801)));
         let mut data = MsegData::default();
-        state.browser_key(&key(Key::Home), &mut data);
+        state.browser_key(&key(Key::Home), &mut data, RECT, 1.0);
         assert!(!state.browser_double_click(1, now + Duration::from_millis(802)));
         assert!(!state.browser_double_click(1, now));
         state.close_curve_browser();

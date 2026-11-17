@@ -181,6 +181,10 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                         "User: S saves a new named curve; F2 renames; Delete asks to remove; R refreshes. Header arrows or Page Up/Down browse pages. Name fields: Enter applies, Escape cancels, Tab moves focus. Delete confirmation: arrows/wheel scroll a long name. Management leaves the current curve intact.",
                     ),
                     entry(
+                        "Categories",
+                        "Factory/User: C or the header selector filters categories. Save/Rename: Tab reaches Category; type a label or use F4/Alt+Down/the arrow to choose. Empty means Uncategorized. Filtering and metadata edits leave the curve intact.",
+                    ),
+                    entry(
                         "Ctrl/Cmd+C / V",
                         "Copy or paste the whole curve across instances and plugins. Shift+paste fits its height.",
                     ),
@@ -299,6 +303,11 @@ impl MsegEditState {
 
     pub(super) fn close_help(&mut self) {
         self.help.open = false;
+    }
+
+    /// Native bounds supplied to the shared overlays.
+    pub(super) fn overlay_bounds(&self) -> Option<(f32, f32)> {
+        self.help.bounds
     }
 
     /// Supply native bounds for shared help and curve-browser overlays.

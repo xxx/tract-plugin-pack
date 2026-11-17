@@ -1,4 +1,4 @@
-//! Preview: cargo run -p tiny-skia-widgets --example mseg_browser -- /tmp/mseg-browser.png [full|static] [factory|favorites|project|user] [scale] [browse|save|rename|delete|last]
+//! Preview: cargo run -p tiny-skia-widgets --example mseg_browser -- /tmp/mseg-browser.png [full|static] [factory|favorites|project|user] [scale] [browse|save|rename|delete|last|assign|filter] [all|uncategorized|category]
 
 use keyboard_types::{Key, KeyState, KeyboardEvent};
 use tiny_skia_widgets::mseg::library::CurveLibrary;
@@ -27,6 +27,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Scale must be between 0.5 and 2".into());
     }
     let mode = args.next().unwrap_or_else(|| "browse".into());
+    let category = args.next().unwrap_or_else(|| "all".into());
+    if !matches!(
+        mode.as_str(),
+        "browse" | "save" | "rename" | "delete" | "last" | "assign" | "filter"
+    ) {
+        return Err("Unknown browser mode".into());
+    }
+    if mode != "browse" && mode != "filter" && turns != 3 {
+        return Err("Dialog/page modes require the User tab".into());
+    }
     let root = std::env::temp_dir().join(format!(
         "tract-browser-preview-{}-{}",
         std::process::id(),
@@ -65,7 +75,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .iter()
     .enumerate()
     {
-        library.save_user_preset(name, &factory_shape(FactoryShape::ALL[i % 8]))?;
+        let kind = FactoryShape::ALL[i % 8];
+        library.save_user_preset_with_category(name, kind.category(), &factory_shape(kind))?;
     }
     let mut palette = WavePalette::default();
     palette.store(0, &CurveShape::capture(&data))?;
@@ -99,18 +110,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             scale,
         );
     }
+    if category != "all" {
+        if !matches!(turns, 0 | 3) {
+            return Err("Category filters require Factory or User".into());
+        }
+        let index = if category == "uncategorized" && turns == 3 {
+            1
+        } else {
+            let mut labels: Vec<_> = FactoryShape::ALL
+                .iter()
+                .map(|shape| shape.category())
+                .collect();
+            labels.sort_unstable();
+            labels.dedup();
+            labels
+                .iter()
+                .position(|label| label.eq_ignore_ascii_case(&category))
+                .ok_or("Unknown category")?
+                + if turns == 3 { 2 } else { 1 }
+        };
+        for key in std::iter::once(Key::Character("c".into()))
+            .chain(std::iter::once(Key::Home))
+            .chain(std::iter::repeat_n(Key::ArrowDown, index))
+            .chain(std::iter::once(Key::Enter))
+        {
+            state.on_key(
+                &KeyboardEvent {
+                    key,
+                    state: KeyState::Down,
+                    ..KeyboardEvent::default()
+                },
+                &mut data,
+                rect,
+                scale,
+            );
+        }
+    }
     let key = match mode.as_str() {
         "browse" => None,
-        "save" => Some(Key::Character("s".into())),
+        "save" | "assign" => Some(Key::Character("s".into())),
         "rename" => Some(Key::F2),
         "delete" => Some(Key::Delete),
         "last" => Some(Key::End),
+        "filter" => Some(Key::Character("c".into())),
         _ => return Err("Mode must be browse, save, rename, delete or last".into()),
     };
     if let Some(key) = key {
-        if turns != 3 {
-            return Err("Dialog/page modes require the User tab".into());
-        }
         state.on_key(
             &KeyboardEvent {
                 key,
@@ -121,6 +166,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rect,
             scale,
         );
+    }
+    if mode == "assign" {
+        for key in [Key::Tab, Key::F4] {
+            state.on_key(
+                &KeyboardEvent {
+                    key,
+                    state: KeyState::Down,
+                    ..KeyboardEvent::default()
+                },
+                &mut data,
+                rect,
+                scale,
+            );
+        }
     }
     pm.fill(color_bg());
     tr.draw_text(

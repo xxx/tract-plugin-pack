@@ -163,6 +163,15 @@ impl FactoryShape {
         "Square",
         "Duck",
     ];
+
+    pub const fn category(self) -> &'static str {
+        match self {
+            Self::FlatHigh | Self::FlatCenter => "Basic",
+            Self::RampUp | Self::RampDown => "Ramps",
+            Self::Triangle | Self::Sine => "Modulation",
+            Self::Square | Self::Duck => "Rhythmic",
+        }
+    }
 }
 
 pub fn factory_shape(kind: FactoryShape) -> CurveShape {

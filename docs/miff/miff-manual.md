@@ -98,6 +98,9 @@ The **User** tab saves named curves shared across plugins, with paging, Rename
 and confirmed Delete. Management leaves the kernel intact; Load/Fit rebakes it.
 See [named user presets](../mseg-editor.md#named-user-presets).
 
+Factory/User category filters and the Save/Rename Category field organize curves
+without rebaking the kernel. See [categories](../mseg-editor.md#categories).
+
 Hover for footer hints, or click **?** beside Point for the gesture guide.
 **F1 / ?** and **View → Editing guide...** also open it. Help leaves the curve
 and kernel intact; see [context help](../mseg-editor.md#context-help-and-gesture-guide).

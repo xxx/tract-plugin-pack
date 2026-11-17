@@ -158,6 +158,7 @@ fn full_library_allows_rename_delete_and_reuses_capacity_without_reusing_identit
             .map(|id| UserPreset {
                 id: id as u64,
                 name: format!("Curve {id:03}"),
+                category: String::new(),
                 shape: shape.clone(),
             })
             .collect(),

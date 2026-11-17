@@ -263,3 +263,72 @@ fn named_user_recall_reports_one_selected_curve_edit_and_keeps_the_library() {
     assert_eq!(library.user_presets().unwrap(), [saved]);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn category_filter_and_metadata_edit_preserve_frozen_config_until_actual_recall() {
+    use widgets::mseg::{WavePalette, library::CurveLibrary};
+    for scale in [0.5, 1.0, 2.0] {
+        let mut h = at_scale(scale);
+        let root = std::env::temp_dir().join(format!(
+            "tract-effect-category-{}-{scale}",
+            std::process::id()
+        ));
+        let library = CurveLibrary::at(root.clone());
+        let duck = widgets::mseg::factory_shape(widgets::mseg::FactoryShape::Duck);
+        let saved = library
+            .save_user_preset_with_category("A", "Bass", &duck)
+            .unwrap();
+        library
+            .save_user_preset_with_category(
+                "Z",
+                "Lead",
+                &widgets::mseg::factory_shape(widgets::mseg::FactoryShape::Sine),
+            )
+            .unwrap();
+        h.editor.mseg_edit.set_curve_library_directory(root.clone());
+        h.editor
+            .bind_wave_palette(std::sync::Arc::new(std::sync::Mutex::new(
+                WavePalette::default(),
+            )));
+        h.editor.set_audio_view(AudioView::Both);
+        h.editor.set_audio_frozen(true);
+        let before = (h.effect, h.modulation.clone());
+        assert!(
+            h.editor
+                .mseg_edit
+                .open_curve_browser(h.geometry.layout.mseg_pane, scale)
+        );
+        for value in [
+            Key::Tab,
+            Key::Tab,
+            Key::Tab,
+            Key::Character("c".into()),
+            Key::Home,
+            Key::ArrowDown,
+            Key::ArrowDown,
+            Key::Enter,
+            Key::F2,
+            Key::Tab,
+            Key::Character("Lead".into()),
+            Key::Enter,
+        ] {
+            let response = h.key(value);
+            assert!(response.captured && !response.changed);
+            assert_eq!((h.effect, h.modulation.clone()), before);
+            assert!(h.editor.audio_frozen());
+        }
+        let edited = library.user_presets().unwrap().remove(0);
+        assert_eq!(edited.id, saved.id);
+        assert_eq!(edited.category, "Lead");
+        assert_eq!(edited.shape, duck);
+        let response = h.key(Key::Enter);
+        assert!(response.captured && response.changed);
+        let mut expected = before.1;
+        duck.apply(&mut expected.msegs[h.editor.selected_mseg], false)
+            .unwrap();
+        assert_eq!(h.modulation, expected);
+        assert_eq!(h.effect, before.0);
+        assert!(!h.release().changed);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

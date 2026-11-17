@@ -13,6 +13,7 @@ pub(super) struct Dialog {
     action: Action,
     document: MsegData,
     field: NameField,
+    category: NameField,
     error: String,
     focus: u8,
     name_scroll: usize,
@@ -163,6 +164,8 @@ impl NameField {
 struct DialogLayout {
     panel: Rect,
     field: Rect,
+    category: Rect,
+    category_picker: Rect,
     accept: Rect,
     cancel: Rect,
 }
@@ -176,14 +179,26 @@ fn dialog_layout(layout: &BrowserLayout, scale: f32) -> DialogLayout {
     let button_h = (28.0 * s).max(22.0);
     let button_w = (100.0 * s).max(68.0);
     let button_y = panel.1 + panel.3 - button_h - pad;
+    let field = (
+        panel.0 + pad,
+        panel.1 + (40.0 * s).max(34.0),
+        panel.2 - 2.0 * pad,
+        button_h,
+    );
+    let gap = (6.0 * s).max(4.0);
+    let label_w = (70.0 * s).max(50.0);
+    let picker_w = (24.0 * s).max(20.0);
+    let category_y = field.1 + field.3 + gap;
     DialogLayout {
         panel,
-        field: (
-            panel.0 + pad,
-            panel.1 + (40.0 * s).max(34.0),
-            panel.2 - 2.0 * pad,
+        field,
+        category: (
+            field.0 + label_w + gap,
+            category_y,
+            field.2 - label_w - picker_w - 2.0 * gap,
             button_h,
         ),
+        category_picker: (field.0 + field.2 - picker_w, category_y, picker_w, button_h),
         accept: (panel.0 + pad, button_y, button_w, button_h),
         cancel: (
             panel.0 + panel.2 - button_w - pad,
@@ -201,7 +216,140 @@ pub(super) fn dialog_fits(layout: &BrowserLayout, scale: f32) -> bool {
     lay.field.1 + font + 6.0 * font * 1.5 < lay.accept.1 - 4.0
 }
 
+fn draw_name_field(
+    pm: &mut Pixmap,
+    tr: &mut TextRenderer,
+    rect: Rect,
+    field: &NameField,
+    focused: bool,
+    font: f32,
+    placeholder: &str,
+) {
+    draw_rect(pm, rect.0, rect.1, rect.2, rect.3, color_control_bg());
+    draw_rect_outline(
+        pm,
+        rect.0,
+        rect.1,
+        rect.2,
+        rect.3,
+        if focused {
+            color_accent()
+        } else {
+            color_border()
+        },
+        1.0,
+    );
+    let mut start = 0;
+    for (index, _) in field.text[..field.caret].char_indices() {
+        if tr.text_width(&field.text[start..field.caret], font) <= rect.2 - 16.0 {
+            break;
+        }
+        start = index;
+    }
+    let selection = field.selection();
+    if !selection.is_empty() && selection.end > start {
+        let left = tr
+            .text_width(&field.text[start..selection.start.max(start)], font)
+            .min(rect.2 - 10.0);
+        let right = tr
+            .text_width(&field.text[start..selection.end], font)
+            .min(rect.2 - 10.0);
+        draw_rect(
+            pm,
+            rect.0 + 5.0 + left,
+            rect.1 + 3.0,
+            (right - left).max(0.0),
+            rect.3 - 6.0,
+            color_border(),
+        );
+    }
+    let visible = if field.text.is_empty() {
+        placeholder
+    } else {
+        &field.text[start..]
+    };
+    draw_fitted(
+        tr,
+        pm,
+        (rect.0 + 5.0, rect.1 + (rect.3 + font) * 0.5 - 2.0),
+        visible,
+        font,
+        rect.2 - 10.0,
+        if field.text.is_empty() {
+            color_muted()
+        } else {
+            color_text()
+        },
+    );
+    if focused {
+        let caret = tr
+            .text_width(&field.text[start..field.caret], font)
+            .min(rect.2 - 12.0);
+        draw_rect(
+            pm,
+            rect.0 + 5.0 + caret,
+            rect.1 + 4.0,
+            1.0,
+            rect.3 - 8.0,
+            color_accent(),
+        );
+    }
+}
+
 impl MsegEditState {
+    pub(super) fn user_dialog_fits(&self, layout: &BrowserLayout, scale: f32) -> bool {
+        if !dialog_fits(layout, scale) {
+            return false;
+        }
+        if self
+            .browser
+            .user
+            .dialog
+            .as_ref()
+            .is_some_and(|dialog| !matches!(dialog.action, Action::Delete(_)))
+        {
+            let lay = dialog_layout(layout, scale);
+            let line = (12.0 * scale.max(0.01)).max(10.0) * 1.5;
+            return lay.category.1 + lay.category.3 + 4.0 * line < lay.accept.1 - 4.0;
+        }
+        true
+    }
+
+    pub(super) fn user_category_text(&self) -> Option<&str> {
+        self.browser
+            .user
+            .dialog
+            .as_ref()
+            .filter(|dialog| !matches!(dialog.action, Action::Delete(_)))
+            .map(|dialog| dialog.category.text.as_str())
+    }
+
+    pub(super) fn user_category_focused(&self) -> bool {
+        self.browser
+            .user
+            .dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.focus == 1 && !matches!(dialog.action, Action::Delete(_)))
+    }
+
+    pub(super) fn user_category_anchor(&self, layout: &BrowserLayout, scale: f32) -> Rect {
+        let lay = dialog_layout(layout, scale);
+        (
+            lay.category.0,
+            lay.category.1,
+            lay.category.2 + lay.category_picker.2,
+            lay.category.3,
+        )
+    }
+
+    pub(super) fn set_user_category_text(&mut self, category: String) {
+        if let Some(dialog) = self.browser.user.dialog.as_mut() {
+            dialog.category = NameField::new(category);
+            dialog.focus = 1;
+            dialog.error.clear();
+        }
+    }
+
     pub(super) fn validate_user_document(&mut self, data: &MsegData) -> bool {
         if self
             .browser
@@ -217,6 +365,7 @@ impl MsegEditState {
     }
 
     pub(super) fn refresh_browser_user(&mut self, selected: Option<u64>) {
+        let position = self.browser_selected_position();
         let selected = selected.or_else(|| {
             self.browser
                 .user
@@ -229,16 +378,17 @@ impl MsegEditState {
             .and_then(|library| library.user_presets())
         {
             Ok(entries) => {
-                self.browser.selected = selected
-                    .and_then(|id| entries.iter().position(|entry| entry.id == id))
-                    .unwrap_or(self.browser.selected.min(entries.len().saturating_sub(1)));
+                let preferred =
+                    selected.and_then(|id| entries.iter().position(|entry| entry.id == id));
                 self.browser.user.entries = entries;
                 self.browser.user.error = None;
+                self.rebuild_browser_view(preferred, position);
             }
             Err(error) => {
                 self.browser.user.entries.clear();
                 self.browser.selected = 0;
                 self.browser.user.error = Some(error.to_string());
+                self.rebuild_browser_view(None, 0);
             }
         }
         self.browser.last_click = None;
@@ -294,11 +444,20 @@ impl MsegEditState {
                 .expected()
                 .map_or_else(|| "New curve".to_owned(), |entry| entry.name.clone()),
         );
-        let focus = u8::from(matches!(action, Action::Delete(_)));
+        let category = NameField::new(action.expected().map_or_else(
+            || self.active_user_category(),
+            |entry| entry.category.clone(),
+        ));
+        let focus = if matches!(action, Action::Delete(_)) {
+            2
+        } else {
+            0
+        };
         self.browser.user.dialog = Some(Dialog {
             action,
             document: *data,
             field,
+            category,
             error: String::new(),
             focus,
             name_scroll: 0,
@@ -316,16 +475,23 @@ impl MsegEditState {
             .curve_library()
             .and_then(|library| match &dialog.action {
                 Action::Save(shape) => library
-                    .save_user_preset(&dialog.field.text, shape)
-                    .map(|entry| Some(entry.id)),
+                    .save_user_preset_with_category(
+                        &dialog.field.text,
+                        &dialog.category.text,
+                        shape,
+                    )
+                    .map(Some),
                 Action::Rename(expected) => library
-                    .rename_user_preset(expected, &dialog.field.text)
-                    .map(|entry| Some(entry.id)),
+                    .update_user_preset(expected, &dialog.field.text, &dialog.category.text)
+                    .map(Some),
                 Action::Delete(expected) => library.remove_user_preset(expected).map(|()| None),
             });
         match result {
             Ok(selected) => {
-                self.refresh_browser_user(selected);
+                if let Some(entry) = &selected {
+                    self.reveal_user_category(&entry.category);
+                }
+                self.refresh_browser_user(selected.map(|entry| entry.id));
                 self.browser.message = format!(
                     "User preset {}",
                     match dialog.action {
@@ -377,8 +543,12 @@ impl MsegEditState {
         if event.key == Key::Escape {
             self.browser.user.dialog = None;
         } else if event.key == Key::Tab {
-            let first = u8::from(matches!(dialog.action, Action::Delete(_)));
-            let count = 3 - first;
+            let first = if matches!(dialog.action, Action::Delete(_)) {
+                2
+            } else {
+                0
+            };
+            let count = 4 - first;
             let delta = if event.modifiers.contains(Modifiers::SHIFT) {
                 count - 1
             } else {
@@ -386,15 +556,19 @@ impl MsegEditState {
             };
             dialog.focus = first + (dialog.focus - first + delta) % count;
         } else if event.key == Key::Enter
-            || (event.key == Key::Character(" ".into()) && dialog.focus != 0)
+            || (event.key == Key::Character(" ".into()) && dialog.focus >= 2)
         {
-            if dialog.focus == 2 {
+            if dialog.focus == 3 {
                 self.browser.user.dialog = None;
             } else {
                 self.commit_user_dialog();
             }
-        } else if dialog.focus == 0 {
-            dialog.field.key(event);
+        } else if dialog.focus <= 1 {
+            if dialog.focus == 0 {
+                dialog.field.key(event);
+            } else {
+                dialog.category.key(event);
+            }
             dialog.error.clear();
         }
     }
@@ -420,7 +594,26 @@ impl MsegEditState {
             return None;
         }
         let dialog_layout = dialog_layout(layout, scale);
-        if in_rect(dialog_layout.accept, x, y) {
+        let delete = self
+            .browser
+            .user
+            .dialog
+            .as_ref()
+            .is_some_and(|dialog| matches!(dialog.action, Action::Delete(_)));
+        if !delete && in_rect(dialog_layout.category_picker, x, y) {
+            if let Some(dialog) = self.browser.user.dialog.as_mut() {
+                dialog.focus = 1;
+            }
+            self.open_category_menu(
+                CategoryMenu::Assign,
+                self.user_category_anchor(layout, scale),
+                self.browser_window_size(layout.panel),
+            );
+        } else if !delete && in_rect(dialog_layout.category, x, y) {
+            if let Some(dialog) = self.browser.user.dialog.as_mut() {
+                dialog.focus = 1;
+            }
+        } else if in_rect(dialog_layout.accept, x, y) {
             self.commit_user_dialog();
         } else if in_rect(dialog_layout.cancel, x, y) || !in_rect(dialog_layout.panel, x, y) {
             self.browser.user.dialog = None;
@@ -434,12 +627,12 @@ impl MsegEditState {
     }
 
     pub(super) fn user_page_start(&self) -> usize {
-        self.browser.selected / FAVORITE_COUNT * FAVORITE_COUNT
+        self.browser_selected_position() / FAVORITE_COUNT * FAVORITE_COUNT
     }
 
     pub(super) fn move_user_page(&mut self, delta: i32) {
-        let selected = self.browser.selected;
-        let len = self.browser.user.entries.len();
+        let selected = self.browser_selected_position();
+        let len = self.browser_visible_indices().len();
         let page = selected / FAVORITE_COUNT;
         let last = len.saturating_sub(1) / FAVORITE_COUNT;
         let next = if delta < 0 {
@@ -451,8 +644,9 @@ impl MsegEditState {
         if page == next {
             return;
         }
-        self.browser.selected =
-            (next * FAVORITE_COUNT + selected % FAVORITE_COUNT).min(len.saturating_sub(1));
+        self.select_browser_position(
+            (next * FAVORITE_COUNT + selected % FAVORITE_COUNT).min(len.saturating_sub(1)),
+        );
         self.browser.message.clear();
     }
 
@@ -461,15 +655,15 @@ impl MsegEditState {
         event: &KeyboardEvent,
         data: &mut MsegData,
     ) -> Option<MsegEdit> {
-        let selected = self.browser.selected;
-        let last = self.browser.user.entries.len().saturating_sub(1);
+        let selected = self.browser_selected_position();
+        let last = self.browser_visible_indices().len().saturating_sub(1);
         match &event.key {
-            Key::ArrowLeft => self.browser.selected = selected.saturating_sub(1),
-            Key::ArrowRight => self.browser.selected = (selected + 1).min(last),
-            Key::ArrowUp => self.browser.selected = selected.saturating_sub(4),
-            Key::ArrowDown => self.browser.selected = (selected + 4).min(last),
-            Key::Home => self.browser.selected = 0,
-            Key::End => self.browser.selected = last,
+            Key::ArrowLeft => self.select_browser_position(selected.saturating_sub(1)),
+            Key::ArrowRight => self.select_browser_position((selected + 1).min(last)),
+            Key::ArrowUp => self.select_browser_position(selected.saturating_sub(4)),
+            Key::ArrowDown => self.select_browser_position((selected + 4).min(last)),
+            Key::Home => self.select_browser_position(0),
+            Key::End => self.select_browser_position(last),
             Key::PageUp => self.move_user_page(-1),
             Key::PageDown => self.move_user_page(1),
             Key::Enter => {
@@ -506,7 +700,7 @@ impl MsegEditState {
             (
                 next,
                 ">",
-                self.user_page_start() + FAVORITE_COUNT < self.browser.user.entries.len(),
+                self.user_page_start() + FAVORITE_COUNT < self.browser_visible_indices().len(),
             ),
         ] {
             crate::controls::draw_button(pm, tr, r.0, r.1, r.2, r.3, "", false, false);
@@ -521,13 +715,15 @@ impl MsegEditState {
             );
         }
         let pages = self
-            .browser
-            .user
-            .entries
+            .browser_visible_indices()
             .len()
             .div_ceil(FAVORITE_COUNT)
             .max(1);
-        let text = format!("{}/{}", self.browser.selected / FAVORITE_COUNT + 1, pages);
+        let text = format!(
+            "{}/{}",
+            self.browser_selected_position() / FAVORITE_COUNT + 1,
+            pages
+        );
         draw_fitted(
             tr,
             pm,
@@ -574,7 +770,7 @@ impl MsegEditState {
         let info = if delete {
             "Up/Down: name; Enter: delete; Esc: cancel"
         } else {
-            "Name: 1–64 characters; Enter: apply; Esc: cancel"
+            "Name/category: Enter applies; Esc cancels; Tab: focus"
         };
         let info_lines = wrap(tr, info, font, field.2);
         let name_rows =
@@ -623,74 +819,51 @@ impl MsegEditState {
                 draw_rect(pm, field.0 + field.2 - 4.0, top, 3.0, thumb, color_accent());
             }
         } else {
-            draw_rect(pm, field.0, field.1, field.2, field.3, color_control_bg());
-            draw_rect_outline(
+            draw_name_field(
                 pm,
-                field.0,
-                field.1,
-                field.2,
-                field.3,
-                if dialog.focus == 0 {
-                    color_accent()
-                } else {
-                    color_border()
-                },
-                1.0,
+                tr,
+                field,
+                &dialog.field,
+                dialog.focus == 0,
+                font,
+                "Name",
             );
-            let mut start = 0;
-            for (index, _) in dialog.field.text[..dialog.field.caret].char_indices() {
-                if tr.text_width(&dialog.field.text[start..dialog.field.caret], font)
-                    <= field.2 - 16.0
-                {
-                    break;
-                }
-                start = index;
-            }
-            let visible = &dialog.field.text[start..];
-            let selection = dialog.field.selection();
-            if !selection.is_empty() && selection.end > start {
-                let left = tr
-                    .text_width(&dialog.field.text[start..selection.start.max(start)], font)
-                    .min(field.2 - 10.0);
-                let right = tr
-                    .text_width(&dialog.field.text[start..selection.end], font)
-                    .min(field.2 - 10.0);
-                draw_rect(
-                    pm,
-                    field.0 + 5.0 + left,
-                    field.1 + 3.0,
-                    (right - left).max(0.0),
-                    field.3 - 6.0,
-                    color_border(),
-                );
-            }
             draw_fitted(
                 tr,
                 pm,
-                (field.0 + 5.0, field.1 + (field.3 + font) * 0.5 - 2.0),
-                visible,
+                (
+                    field.0,
+                    lay.category.1 + (lay.category.3 + font) * 0.5 - 2.0,
+                ),
+                "Category",
                 font,
-                field.2 - 10.0,
-                color_text(),
+                lay.category.0 - field.0 - 4.0,
+                color_muted(),
             );
-            if dialog.focus == 0 {
-                let caret = tr
-                    .text_width(&dialog.field.text[start..dialog.field.caret], font)
-                    .min(field.2 - 12.0);
-                draw_rect(
-                    pm,
-                    field.0 + 5.0 + caret,
-                    field.1 + 4.0,
-                    1.0,
-                    field.3 - 8.0,
-                    color_accent(),
-                );
-            }
+            draw_name_field(
+                pm,
+                tr,
+                lay.category,
+                &dialog.category,
+                dialog.focus == 1,
+                font,
+                "Uncategorized",
+            );
+            crate::dropdown::draw_dropdown_trigger(
+                pm,
+                tr,
+                lay.category_picker,
+                "",
+                self.browser
+                    .categories
+                    .menu
+                    .is_open_for(CategoryMenu::Assign),
+            );
         }
         let info_y = if delete {
             field.1 + font + line * visible_name.len() as f32
         } else {
-            field.1 + field.3 + line
+            lay.category.1 + lay.category.3 + line
         };
         for (i, text) in info_lines.iter().take(2).enumerate() {
             draw_fitted(
@@ -714,8 +887,8 @@ impl MsegEditState {
             }
         }
         for (r, label, focus) in [
-            (lay.accept, dialog.action.label(), 1),
-            (lay.cancel, "Cancel", 2),
+            (lay.accept, dialog.action.label(), 2),
+            (lay.cancel, "Cancel", 3),
         ] {
             crate::controls::draw_button(
                 pm,
@@ -744,15 +917,17 @@ mod layout_tests {
         let expected = UserPreset {
             id: 1,
             name: name.to_owned(),
+            category: String::new(),
             shape: factory_shape(FactoryShape::Duck),
         };
         state.browser.user.entries.push(expected.clone());
         state.browser.user.dialog = Some(Dialog {
             field: NameField::new(expected.name.clone()),
+            category: NameField::new(String::new()),
             action: Action::Delete(expected),
             document: MsegData::default(),
             error: String::new(),
-            focus: 1,
+            focus: 2,
             name_scroll: 0,
             name_scroll_max: Cell::new(0),
             name_rows: Cell::new(1),
