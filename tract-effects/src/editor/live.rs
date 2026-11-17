@@ -381,6 +381,7 @@ impl Session<'_> {
             Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
             Some((EffectHit::Smooth(slot), text)) => self.commit_smooth_text(slot, &text),
             Some((EffectHit::Detector(field), text)) => self.commit_detector_text(field, &text),
+            Some((EffectHit::DetectorDetail, text)) => self.commit_detector_detail(&text),
             _ => {}
         }
         self.state.refresh_pitch_grid(self.effect, self.modulation);

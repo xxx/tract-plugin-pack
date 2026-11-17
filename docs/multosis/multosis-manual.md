@@ -221,6 +221,10 @@ Detect's **Input** switches each row between Main and the shared external
 **Sidechain** bus; **Audio → Sidechain** displays its raw waveform. See
 [sidechain routing](../mseg-editor.md#external-sidechain).
 
+Detect also offers Envelope, Peak rise and RMS rise algorithms with a Detail
+control for response speed. Envelope/50% keeps the original timing; Sens/Hold
+retain their roles. See [audio detector setup](../mseg-editor.md#audio-detector-setup).
+
 Rows can also use **Trigger → MIDI note**, with Note (Any/0–127) and Ch.
 (Any/1–16) filters. Route MIDI to the plugin's note input; each matching note-on
 restarts that row's four envelopes at its host offset, including inactive/muted

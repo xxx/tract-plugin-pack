@@ -50,6 +50,7 @@ impl AudioTriggerSettings {
 pub struct DetectorReading {
     pub level: f32,
     pub settings: AudioTriggerSettings,
+    pub response: super::TransientSettings,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

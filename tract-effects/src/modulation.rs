@@ -9,6 +9,8 @@ use tiny_skia_widgets::{
 };
 
 mod audio_trigger;
+mod transient_response;
+pub use transient_response::{TransientAlgorithm, TransientSettings};
 mod audition;
 pub use audition::{
     AuditionControl, AuditionRequest, AuditionRuntime, AuditionSettings, AuditionSource,
@@ -224,6 +226,8 @@ pub struct TrackModulation {
     pub wave_switch: Option<MidiWaveMapping>,
     #[serde(default, skip_serializing_if = "AudioTriggerSettings::is_default")]
     pub audio_trigger: AudioTriggerSettings,
+    #[serde(default, skip_serializing_if = "TransientSettings::is_default")]
+    pub detector_response: TransientSettings,
     #[serde(default, skip_serializing_if = "FollowerConfig::is_default")]
     pub follower: FollowerConfig,
     /// The event that resets all four of this row's MSEG phases.
@@ -399,6 +403,7 @@ impl TrackModulation {
             smooth_ms: [0.0; 4],
             wave_switch: None,
             audio_trigger: AudioTriggerSettings::default(),
+            detector_response: TransientSettings::default(),
             follower: FollowerConfig::default(),
             trigger: TriggerSource::Free,
         }
@@ -446,6 +451,8 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             #[serde(default)]
             audio_trigger: AudioTriggerSettings,
             #[serde(default)]
+            detector_response: TransientSettings,
+            #[serde(default)]
             follower: FollowerConfig,
             #[serde(default)]
             trigger: TriggerSource,
@@ -482,6 +489,7 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             depths,
             trigger: h.trigger,
             audio_trigger: h.audio_trigger.normalized(),
+            detector_response: h.detector_response.normalized(),
             follower: h.follower.normalized(),
             smooth_ms: std::array::from_fn(|i| {
                 h.smooth_ms
@@ -700,10 +708,11 @@ impl ModulationState {
         sample_rate: f64,
     ) {
         self.fired = false;
-        self.precise.prepare(config.trigger, sample_rate);
-        self.precise.configure_audio(config.audio_trigger);
         let block_len = left.len().min(right.len());
         if block_len > 0 {
+            self.precise.prepare(config.trigger, sample_rate);
+            self.precise.configure_audio(config.audio_trigger);
+            self.precise.configure_response(config.detector_response);
             if let Some(reset_phase) = self.pitch.prepare(config.trigger, sample_rate) {
                 if reset_phase {
                     self.phases = [0.0; 4];

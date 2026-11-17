@@ -6,6 +6,7 @@ use tiny_skia_widgets as widgets;
 
 mod audition;
 mod detector;
+mod detector_response;
 mod follower;
 mod help;
 mod live;
@@ -337,6 +338,9 @@ impl EffectEditor {
         self.finish_inactive_pitch_controls(modulation);
         self.check_midi_filter_binding(effect, modulation);
         self.check_detector_binding(effect.kind, modulation);
+        if self.detector_open && !detector::detector_layout(geometry).usable {
+            self.suspend_detector_controls();
+        }
         self.check_wave_midi_binding(effect, modulation);
         self.check_follower_binding(effect, modulation);
         self.sync_listening_panels();
@@ -372,7 +376,11 @@ impl EffectEditor {
         effect: &TrackEffect,
         geometry: EditorGeometry,
     ) {
-        if self.effect_dropdown.is_open() {
+        if self.effect_dropdown.is_open()
+            && !self
+                .effect_dropdown
+                .is_open_for(EffectAction::DetectorAlgorithm)
+        {
             let items = dropdown_items(self, effect);
             widgets::dropdown::draw_dropdown_popup(
                 pixmap,
@@ -473,6 +481,7 @@ impl<'a> Session<'a> {
             EffectAction::Trigger => self.apply_trigger_selection(idx),
             EffectAction::ParamDropdown(i) => self.apply_param_dropdown_selection(i, idx),
             EffectAction::MidiFilter(field) => self.apply_midi_filter(field, idx),
+            EffectAction::DetectorAlgorithm => self.apply_detector_algorithm(idx),
             EffectAction::Audio => {
                 if idx < 5 {
                     self.state.set_audio_view(
@@ -839,6 +848,9 @@ impl<'a> Session<'a> {
                 crate::modulation::smooth_to_norm(self.modulation.smooth_ms[slot])
             }
             EffectHit::Detector(field) => self.detector_norm(field),
+            EffectHit::DetectorDetail => {
+                self.modulation.detector_response.normalized().detail * 0.01
+            }
             _ => 0.5,
         }
     }
@@ -855,6 +867,7 @@ impl<'a> Session<'a> {
                 self.apply_smooth(slot, crate::modulation::smooth_from_norm(norm))
             }
             EffectHit::Detector(field) => self.apply_detector_norm(field, norm),
+            EffectHit::DetectorDetail => self.apply_detector_detail(norm.clamp(0.0, 1.0) * 100.0),
             _ => {}
         }
     }
@@ -1382,7 +1395,7 @@ impl<'a> Session<'a> {
             }
             EffectHit::MidiFilter(field) => self.open_midi_filter(field),
             EffectHit::DetectorSetup => self.open_detector(),
-            EffectHit::Detector(_) => return true,
+            EffectHit::Detector(_) | EffectHit::DetectorDetail => return true,
             EffectHit::Audio => {
                 let items = live::audio_items(self.state);
                 let font_size = (lay.audio.3 * 0.5).max(10.0);
@@ -1894,6 +1907,12 @@ impl<'a> Session<'a> {
 fn dropdown_items(state: &EffectEditor, effect: &TrackEffect) -> Vec<&'static str> {
     if state
         .effect_dropdown
+        .is_open_for(EffectAction::DetectorAlgorithm)
+    {
+        return detector_response::ALGORITHM_ITEMS.to_vec();
+    }
+    if state
+        .effect_dropdown
         .is_open_for(EffectAction::MidiFilter(MidiField::Note))
     {
         midi::NOTE_ITEMS.to_vec()
@@ -1991,6 +2010,7 @@ enum EffectAction {
     ParamDropdown(usize),
     Audio,
     MidiFilter(MidiField),
+    DetectorAlgorithm,
 }
 
 /// Format a node's position and its amplitude or routed parameter value.

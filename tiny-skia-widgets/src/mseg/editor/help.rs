@@ -232,6 +232,10 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                         "Beat follows quarter notes, Time follows song seconds. Cyclic repeats; OneShot starts at timeline zero and stops at its endpoint or sustain marker. Hold loops keep their usual intro/wrap behavior. Missing positions freeze that clock. Reset/Retrig cannot move the playhead away from DAW position.",
                     ),
                     animated(
+                        "Detector Algorithm / Detail",
+                        "Transient (sample) offers Envelope (the original response at 50% Detail), Peak rise for distinct hits, and RMS rise for energy increases. Higher Detail shortens analysis windows; Sens sets the required rise and Hold limits retriggers. Right-click Detail to type percent. These controls keep Listen unchanged.",
+                    ),
+                    animated(
                         "Trigger > MIDI pitch",
                         "The last matching MIDI note sets the rate of all four curves and restarts at phase zero. Semi transposes -36..+36 semitones; Ch. filters notes. Note-off keeps the last rate running. Before the first note or after changing channel, phase waits at zero. Saved Time/Beat lengths return when leaving this mode.",
                     ),

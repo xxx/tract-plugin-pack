@@ -385,6 +385,8 @@ impl Processor {
 #[cfg(test)]
 mod audition_tests;
 #[cfg(test)]
+mod detector_response_tests;
+#[cfg(test)]
 mod follower_tests;
 #[cfg(test)]
 mod pitch_tests;

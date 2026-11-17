@@ -583,30 +583,50 @@ reinitialization. Mode/rate/Sens/Hold settings save per row/effect and are undoa
 ### Audio detector setup
 
 With **Transient (sample)** selected, click **Detect...** above the trigger menu.
-The panel provides **Input: Main / Sidechain**, plus **Threshold**, **High-pass**,
-and **Low-pass**. Input defaults to Main; the other settings default to Off.
-Older projects and the other trigger modes keep their existing behavior.
+The panel provides **Input: Main / Sidechain**, **Algorithm**, **Detail**,
+**Threshold**, **High-pass**, and **Low-pass**. Input defaults to Main,
+Algorithm to Envelope, Detail to 50%, and threshold/filters to Off. Older
+projects and the other trigger modes keep their existing behavior.
 
-Threshold is Off or -60..0 dB, measured on the fast detector envelope after
-filtering. Sens still controls the fast/slow ratio and Hold still sets the
-refractory time. Quiet rejected candidates do not start Hold, so a louder hit
-can still retrigger immediately when its envelope qualifies.
+- **Envelope:** the original fast/slow rectified-envelope detector. At Detail
+  50%, its attack/release windows remain 0.5/5 ms (fast) and 30/200 ms (slow).
+- **Peak rise:** compares each absolute sample with the previous decaying peak
+  reference. Its reference decays over 20 ms at Detail 50%; it suits distinct hits.
+- **RMS rise:** compares fast and slow averaged energy as RMS amplitudes, with
+  2 ms and 200 ms windows at Detail 50%. It responds to energy increases.
+
+**Detail** changes window duration: 0% is four times longer, 50% uses the
+listed windows, and 100% is four times shorter. Higher Detail responds faster;
+Sens still sets the required rise ratio and Hold still sets the minimum gap
+between triggers. The modes analyze causally at the input sample rate and add
+no lookahead or reported latency. Detection can follow the physical onset as
+the analysis windows fill.
+
+Threshold is Off or -60..0 dB, tested against the displayed algorithm level:
+fast envelope, current peak, or fast RMS, after filtering. Quiet rejected
+candidates do not start Hold, so a louder hit can still retrigger when it
+qualifies. Algorithm changes clear analysis history but keep remaining Hold;
+Detail edits preserve both. Listen's input filters/history stay independent.
 
 The filters are causal one-pole (6 dB/octave) stages, each independently Off or
 20..20000 Hz. Use High-pass to reduce bass-triggered restarts or Low-pass to
 reduce high-frequency triggers. Both may be enabled, including crossed cutoffs.
-They affect detection only. The live meter shows the actual filtered detector
-envelope, with a threshold marker; Input/Output backdrops keep their normal
-signal views. Missing processor measurements show **Waiting for audio**.
+They affect detection only. The live meter shows the actual prepared detector
+level with a threshold marker; Input/Output backdrops keep their normal signal
+views. Missing or stale Algorithm/Detail measurements show **Waiting for audio**.
 
 Drag to adjust, Shift-drag for fine control, double-click for Off, or right-click
-to enter a value such as `Off`, `-24 dB`, `200 Hz`, or `5 kHz`. Numeric input is
+to enter a value such as `Off`, `-24 dB`, `200 Hz`, or `5 kHz`. Detail uses percent
+entry, such as `75%`, and double-click resets it to 50%. Numeric input is
 committed before another slider drag or outside click. Escape first cancels an
-active field, then closes the panel. **Reset** restores all three Off in one undo
-step while retaining the selected Input. Settings save per row/effect, but shape
+active field, then closes the panel. Algorithm menus support arrows, Home/End,
+wheel, Enter and Escape. **Reset** restores Envelope/50% and all three Off in one
+undo step while retaining the selected Input. Settings save per row/effect, but shape
 clipboard/files do not transfer them.
 Focus loss, resize, and native window close finalize edits; binding replacements
 discard old numeric buffers so they cannot apply to another row/effect.
+If the window cannot fit readable controls, the panel asks you to enlarge it;
+its parameter controls and Listen are inactive until there is enough room.
 
 ### External sidechain
 

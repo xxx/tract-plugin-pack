@@ -1,6 +1,7 @@
 mod audition;
 mod context_help;
 mod curve_browser;
+mod detector_response;
 mod follower;
 mod midi_pitch;
 mod midi_wave_switch;
@@ -1609,6 +1610,7 @@ mod detector_controls {
             &crate::modulation::ModulationState::default(),
         );
         frame.detector = Some(DetectorReading {
+            response: Default::default(),
             level: 0.8,
             settings: h.modulation.audio_trigger,
         });
@@ -1618,6 +1620,7 @@ mod detector_controls {
         h.click(input);
         assert_eq!(h.editor.detector_level(), None);
         frame.detector = Some(DetectorReading {
+            response: Default::default(),
             level: 0.0,
             settings: h.modulation.audio_trigger,
         });
@@ -1788,6 +1791,7 @@ mod detector_controls {
             parameters: [None; MAX_EFFECT_PARAMS],
             mix: None,
             detector: Some(DetectorReading {
+                response: Default::default(),
                 level: 0.0,
                 settings: AudioTriggerSettings::default(),
             }),
@@ -1804,6 +1808,7 @@ mod detector_controls {
         draw(&mut h);
         assert_eq!(h.editor.detector_level(), None);
         frame.detector = Some(DetectorReading {
+            response: Default::default(),
             level: 0.4,
             settings: h.modulation.audio_trigger,
         });

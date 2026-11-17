@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let detector_mode = args.next();
     let detector_demo = match detector_mode.as_deref() {
         None => false,
-        Some("detector" | "listen") if demo == 2 || demo == 4 => true,
+        Some("detector" | "listen" | "peak" | "rms") if demo == 2 || demo == 4 => true,
         _ => return Err("Detector/listen panel demo requires audio detector".into()),
     };
     let caption = format!(
@@ -95,6 +95,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             highpass_hz: Some(120.0),
             lowpass_hz: Some(6000.0),
             ..tract_effects::modulation::AudioTriggerSettings::default()
+        };
+    }
+    if let Some(algorithm) = match detector_mode.as_deref() {
+        Some("peak") => Some(tract_effects::modulation::TransientAlgorithm::Peak),
+        Some("rms") => Some(tract_effects::modulation::TransientAlgorithm::Rms),
+        _ => None,
+    } {
+        config.detector_response = tract_effects::modulation::TransientSettings {
+            algorithm,
+            detail: 75.0,
         };
     }
     if demo == 4 {

@@ -111,6 +111,9 @@ Trigger choices apply to all four envelopes:
   default to Off and save per effect; see [audio detector setup](../mseg-editor.md#audio-detector-setup).
   Detect's **Input** switches between Main and the external **Sidechain** bus;
   **Audio → Sidechain** displays its raw waveform. See [sidechain routing](../mseg-editor.md#external-sidechain).
+  Detect also offers Envelope, Peak rise and RMS rise algorithms with a Detail
+  control for response speed. Envelope/50% keeps the original timing; Sens/Hold
+  retain their roles. See [audio detector setup](../mseg-editor.md#audio-detector-setup).
 - **MIDI note:** restarts at matching note-on offsets, with Note (Any/0–127) and
   Ch. (Any/1–16) filters. Route MIDI to the plugin's note input. Note-off does not
   gate or release the envelopes; see [MIDI retriggering](../mseg-editor.md#midi-retriggering).

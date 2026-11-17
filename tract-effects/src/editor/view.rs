@@ -238,6 +238,7 @@ pub enum EffectHit {
     Audio,
     DetectorSetup,
     Detector(super::DetectorField),
+    DetectorDetail,
 }
 
 /// The MSEG-selector tab order shown to the user. The three assignable MSEGs

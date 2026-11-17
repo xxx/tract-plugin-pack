@@ -135,6 +135,7 @@ struct AtomicFrame {
     mix: AtomicU64,
     detector: [AtomicU64; 4],
     detector_input: AtomicU32,
+    detector_response: [AtomicU32; 2],
     wave: AtomicU32,
     wave_automation: AtomicU32,
     position_sync: AtomicBool,
@@ -153,6 +154,7 @@ impl Default for AtomicFrame {
             mix: AtomicU64::new(0),
             detector: std::array::from_fn(|_| AtomicU64::new(0)),
             detector_input: AtomicU32::new(0),
+            detector_response: std::array::from_fn(|_| AtomicU32::new(0)),
             wave: AtomicU32::new(0),
             wave_automation: AtomicU32::new(0),
             position_sync: AtomicBool::new(false),
@@ -190,6 +192,13 @@ impl AtomicFrame {
         }
         self.detector_input
             .store(settings.input as u32, Ordering::Release);
+        let response = frame
+            .detector
+            .map_or(crate::modulation::TransientSettings::default(), |reading| {
+                reading.response
+            });
+        self.detector_response[0].store(response.algorithm as u32, Ordering::Release);
+        self.detector_response[1].store(response.detail.to_bits(), Ordering::Release);
         self.wave.store(wave_tag(frame.wave), Ordering::Release);
         self.wave_automation
             .store(u32::from_le_bytes(frame.wave_automation), Ordering::Release);
@@ -218,6 +227,15 @@ impl AtomicFrame {
             1 => DetectorInput::Sidechain,
             _ => DetectorInput::Main,
         };
+        let response = crate::modulation::TransientSettings {
+            algorithm: match self.detector_response[0].load(Ordering::Acquire) {
+                0 => crate::modulation::TransientAlgorithm::Envelope,
+                1 => crate::modulation::TransientAlgorithm::Peak,
+                2 => crate::modulation::TransientAlgorithm::Rms,
+                _ => return None,
+            },
+            detail: f32::from_bits(self.detector_response[1].load(Ordering::Acquire)),
+        };
         let wave = read_wave_tag(self.wave.load(Ordering::Acquire));
         let wave_automation = self.wave_automation.load(Ordering::Acquire).to_le_bytes();
         let position_sync = self.position_sync.load(Ordering::Acquire);
@@ -238,6 +256,7 @@ impl AtomicFrame {
             parameters,
             mix,
             detector: detector[0].map(|level| DetectorReading {
+                response,
                 level,
                 settings: AudioTriggerSettings {
                     input: detector_input,
@@ -741,6 +760,7 @@ mod tests {
         clock.publish(&shared, 0, &value);
         assert_eq!(shared.frame(token).unwrap().detector, None);
         value.detector = Some(DetectorReading {
+            response: Default::default(),
             level: 0.0,
             settings: AudioTriggerSettings {
                 level_db: Some(0.0),
@@ -792,6 +812,14 @@ mod tests {
                 frame.phases.fill(1.0 - value);
                 frame.mix = Some((value, 1));
                 frame.detector = Some(DetectorReading {
+                    response: crate::modulation::TransientSettings {
+                        algorithm: if value < 0.5 {
+                            crate::modulation::TransientAlgorithm::Peak
+                        } else {
+                            crate::modulation::TransientAlgorithm::Rms
+                        },
+                        detail: value * 100.0,
+                    },
                     level: value,
                     settings: AudioTriggerSettings {
                         input: if value < 0.5 {
@@ -817,6 +845,14 @@ mod tests {
                 assert_eq!(
                     frame.detector,
                     Some(DetectorReading {
+                        response: crate::modulation::TransientSettings {
+                            algorithm: if value < 0.5 {
+                                crate::modulation::TransientAlgorithm::Peak
+                            } else {
+                                crate::modulation::TransientAlgorithm::Rms
+                            },
+                            detail: value * 100.0
+                        },
                         level: value,
                         settings: AudioTriggerSettings {
                             input: if value < 0.5 {

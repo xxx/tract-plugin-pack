@@ -30,6 +30,8 @@ pub(super) struct PreciseTrigger {
     coefficients: DetectorCoefficients,
     coefficient_rate: f32,
     filter: super::audio_trigger::AudioFilter,
+    response: TransientSettings,
+    response_prepared: bool,
 }
 impl PreciseTrigger {
     pub(super) fn active(&self) -> bool {
@@ -48,6 +50,7 @@ impl PreciseTrigger {
             _ => 0,
         };
         if family != self.family {
+            self.response_prepared = false;
             self.family = family;
             self.phase = 0.0;
             self.pending = false;
@@ -82,6 +85,7 @@ impl PreciseTrigger {
                     (self.detector.refractory as f64 * sr / self.sample_rate).ceil() as u32;
             }
             if self.coefficient_rate != sr as f32 {
+                self.response_prepared = false;
                 self.coefficients = DetectorCoefficients::new(sr as f32);
                 self.coefficient_rate = sr as f32;
             }
@@ -119,13 +123,14 @@ impl PreciseTrigger {
                 let filtered = self
                     .filter
                     .process(if mono.is_finite() { mono } else { 0.0 });
-                self.detector.process_cached(
+                self.detector.process_response(
                     if filtered.is_finite() { filtered } else { 0.0 },
                     threshold,
                     hold_ms,
                     self.sample_rate as f32,
                     self.coefficients,
                     self.filter.level_floor,
+                    self.response,
                 )
             }
             _ => false,
@@ -142,9 +147,32 @@ impl PreciseTrigger {
     }
     pub(super) fn reading(&self) -> Option<DetectorReading> {
         (self.active && self.family == 2).then_some(DetectorReading {
-            level: self.detector.fast_env,
+            level: if self.response.algorithm == TransientAlgorithm::Rms {
+                self.detector.fast_env.max(0.0).sqrt()
+            } else {
+                self.detector.fast_env
+            },
             settings: self.filter.settings,
+            response: self.response,
         })
+    }
+    pub(super) fn configure_response(&mut self, response: TransientSettings) {
+        let response = response.normalized();
+        if response.algorithm != self.response.algorithm {
+            let refractory = self.detector.refractory;
+            self.detector.reset();
+            self.detector.refractory = refractory;
+        }
+        if self.active && self.family == 2 {
+            if !self.response_prepared || response != self.response {
+                self.coefficients =
+                    DetectorCoefficients::for_response(self.sample_rate as f32, response);
+                self.response_prepared = true;
+            }
+        } else {
+            self.response_prepared = false;
+        }
+        self.response = response;
     }
 }
 
