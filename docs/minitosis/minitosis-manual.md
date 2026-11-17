@@ -93,6 +93,11 @@ its own Follow/Add/Multiply route and Amount; Input, filters, Gain, Threshold an
 Attack/Hold/Release are shared by the current effect's four curves. See
 [Envelope follower](../mseg-editor.md#envelope-follower).
 
+Both detector/follower panels offer **Listen** (**L**) to audition filtered
+Main/Sidechain input. It is temporary, keeps normal DSP running, and stops on
+panel close, focus loss, resize or source replacement. See
+[detector input audition](../mseg-editor.md#detector-input-audition).
+
 Trigger choices apply to all four envelopes:
 
 - **Free run:** no periodic phase reset; Cyclic envelopes loop at their own length.

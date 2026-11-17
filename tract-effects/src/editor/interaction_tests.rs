@@ -1,3 +1,4 @@
+mod audition;
 mod context_help;
 mod curve_browser;
 mod follower;

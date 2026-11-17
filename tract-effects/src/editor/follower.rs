@@ -234,6 +234,7 @@ pub(super) struct Layout {
     pub visible: usize,
     pub footer: Rect,
     pub reset: Rect,
+    pub listen: Rect,
     pub scale: f32,
 }
 pub(super) fn layout(geometry: EditorGeometry, scroll: usize) -> Option<Layout> {
@@ -278,7 +279,13 @@ pub(super) fn layout(geometry: EditorGeometry, scroll: usize) -> Option<Layout> 
         reset: (
             x + pad,
             y + h - pad - (26.0 * s).max(24.0),
-            (130.0 * s).max(110.0),
+            (130.0 * s).max(110.0).min((w - 2.0 * pad - 6.0 * s) * 0.5),
+            (26.0 * s).max(24.0),
+        ),
+        listen: (
+            x + w - pad - (130.0 * s).max(110.0).min((w - 2.0 * pad - 6.0 * s) * 0.5),
+            y + h - pad - (26.0 * s).max(24.0),
+            (130.0 * s).max(110.0).min((w - 2.0 * pad - 6.0 * s) * 0.5),
             (26.0 * s).max(24.0),
         ),
         scale: s,
@@ -317,6 +324,7 @@ impl EffectEditor {
         cfg: &TrackModulation,
     ) -> bool {
         if self.follower.open && self.follower.owner != Some(self.follower_binding(effect, cfg)) {
+            self.stop_listening_source(crate::modulation::AuditionSource::Follower);
             self.follower.close();
             true
         } else {

@@ -45,10 +45,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err("Trigger demo must be midi, audio, hz, or sidechain".into()),
     };
     let midi_demo = demo == 1;
-    let detector_demo = match args.next().as_deref() {
+    let detector_mode = args.next();
+    let detector_demo = match detector_mode.as_deref() {
         None => false,
-        Some("detector") if demo == 2 || demo == 4 => true,
-        _ => return Err("Detector panel demo requires audio detector".into()),
+        Some("detector" | "listen") if demo == 2 || demo == 4 => true,
+        _ => return Err("Detector/listen panel demo requires audio detector".into()),
     };
     let caption = format!(
         "{caption} — display gain {gain_label}{}",
@@ -297,6 +298,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
             );
         }
+    }
+    if detector_mode.as_deref() == Some("listen") {
+        editor.handle_event(
+            &baseview::Event::Keyboard(keyboard_types::KeyboardEvent {
+                state: keyboard_types::KeyState::Down,
+                key: keyboard_types::Key::Character("l".into()),
+                ..keyboard_types::KeyboardEvent::default()
+            }),
+            tract_effects::editor::EditorContext {
+                pointer_position: (0.0, 0.0),
+                effect: &mut track,
+                modulation: &mut config,
+                text_renderer: &mut text,
+                geometry,
+            },
+        );
     }
     editor.draw(&mut pm, &mut text, &track, &config, [0.0; 4], geometry);
     editor.draw_popup(&mut pm, &mut text, &track, geometry);

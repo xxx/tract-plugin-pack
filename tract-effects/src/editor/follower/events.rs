@@ -41,6 +41,7 @@ impl Session<'_> {
             self.response.changed = true;
         }
         self.state.follower.owner = Some(self.state.follower_binding(self.effect, self.modulation));
+        self.refresh_listening_settings();
     }
     fn apply_field(&mut self, field: Field, value: Option<f32>) {
         let mut cfg = self.modulation.follower;
@@ -212,6 +213,14 @@ impl Session<'_> {
                 {
                     self.state.follower.close();
                 } else if crate::editor::view::in_rect(
+                    lay.listen,
+                    self.mouse_pos.0,
+                    self.mouse_pos.1,
+                ) {
+                    self.state.follower.drag.end_drag();
+                    self.state.follower.drag_start = None;
+                    self.toggle_listening(crate::modulation::AuditionSource::Follower);
+                } else if crate::editor::view::in_rect(
                     lay.reset,
                     self.mouse_pos.0,
                     self.mouse_pos.1,
@@ -379,6 +388,9 @@ impl Session<'_> {
                 }
                 let focus = self.state.follower.focus;
                 match &key.key {
+                    Key::Character(text) if text.eq_ignore_ascii_case("l") => {
+                        self.toggle_listening(crate::modulation::AuditionSource::Follower)
+                    }
                     Key::Escape => self.state.follower.close(),
                     Key::Tab => {
                         let delta = if key.modifiers.contains(Modifiers::SHIFT) {

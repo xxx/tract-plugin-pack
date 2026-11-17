@@ -4,6 +4,7 @@ use crate::effects::{self, EffectKind, MAX_EFFECT_PARAMS, ParamSpec, TrackEffect
 use crate::modulation::{ModulationTarget, TrackModulation, TriggerSource};
 use tiny_skia_widgets as widgets;
 
+mod audition;
 mod detector;
 mod follower;
 mod help;
@@ -179,6 +180,7 @@ impl EffectEditor {
 
     /// Cancel gestures while retaining display preferences and measured history.
     pub fn cancel_interaction(&mut self) {
+        self.stop_listening();
         let selected_mseg = self.selected_mseg;
         let trace_enabled = self.trace_enabled;
         let measured_arcs_only = self.measured_arcs_only;
@@ -208,6 +210,7 @@ impl EffectEditor {
 
     /// End input tied to old window geometry without discarding editor preferences.
     pub fn prepare_resize(&mut self, backing_scale: f32) {
+        self.stop_listening();
         self.follower.close();
         self.wave_midi.close();
         self.cancel_detector();
@@ -317,6 +320,7 @@ impl EffectEditor {
         session
             .state
             .sync_wave_view(session.effect, session.modulation);
+        session.state.sync_listening_panels();
         session.response
     }
 
@@ -335,6 +339,7 @@ impl EffectEditor {
         self.check_detector_binding(effect.kind, modulation);
         self.check_wave_midi_binding(effect, modulation);
         self.check_follower_binding(effect, modulation);
+        self.sync_listening_panels();
         self.refresh_live(effect, modulation);
         let phases = self
             .live

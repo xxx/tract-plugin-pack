@@ -109,6 +109,7 @@ pub(super) struct DetectorLayout {
     pub close: (f32, f32, f32, f32),
     pub input: (f32, f32, f32, f32),
     pub reset: (f32, f32, f32, f32),
+    pub listen: (f32, f32, f32, f32),
     pub meter: (f32, f32, f32, f32),
     scale: f32,
 }
@@ -139,6 +140,7 @@ pub(super) fn detector_layout(geometry: EditorGeometry) -> DetectorLayout {
         close: (x + w - 32.0 * s, y + 8.0 * s, 24.0 * s, 20.0 * s),
         input: (x + 12.0 * s, y + 36.0 * s, w - 24.0 * s, 34.0 * s),
         reset: (x + 12.0 * s, y + 254.0 * s, 88.0 * s, 24.0 * s),
+        listen: (x + w - 100.0 * s, y + 254.0 * s, 88.0 * s, 24.0 * s),
         meter: (x + 12.0 * s, y + 220.0 * s, w - 24.0 * s, 8.0 * s),
         scale: s,
     }
@@ -163,6 +165,7 @@ impl EffectEditor {
     }
     /// Discard detector input when the host replaces its binding.
     pub fn cancel_detector(&mut self) {
+        self.stop_listening_source(crate::modulation::AuditionSource::Trigger);
         self.detector_open = false;
         self.detector_owner = None;
         if matches!(
@@ -322,12 +325,28 @@ impl EffectEditor {
             pm,
             x + 12.0 * s,
             y + 245.0 * s,
-            "Filters affect detection only",
+            if self.listen_label() == "Listen" {
+                "L: listen to filtered input"
+            } else {
+                "Audio monitoring unavailable"
+            },
             (11.0 * s).max(10.0),
             widgets::color_muted(),
         );
         let r = layout.reset;
         widgets::controls::draw_button(pm, tr, r.0, r.1, r.2, r.3, "Reset", false, false);
+        let r = layout.listen;
+        widgets::draw_button(
+            pm,
+            tr,
+            r.0,
+            r.1,
+            r.2,
+            r.3,
+            self.listen_label(),
+            self.listening(crate::modulation::AuditionSource::Trigger),
+            false,
+        );
     }
 }
 
@@ -369,6 +388,7 @@ impl Session<'_> {
                     .detector_binding(self.effect.kind, self.modulation),
             );
         }
+        self.refresh_listening_settings();
     }
     pub(super) fn detector_norm(&self, field: DetectorField) -> f32 {
         field.norm(field.value(self.modulation.audio_trigger.normalized()))
@@ -446,6 +466,9 @@ impl Session<'_> {
                     };
                     self.apply_detector_settings(settings);
                     self.state.effect_click = ClickTracker::new();
+                } else if view::in_rect(layout.listen, self.mouse_pos.0, self.mouse_pos.1) {
+                    self.state.effect_dial_drag.end_drag();
+                    self.toggle_listening(crate::modulation::AuditionSource::Trigger);
                 } else if view::in_rect(layout.reset, self.mouse_pos.0, self.mouse_pos.1) {
                     self.apply_detector_settings(AudioTriggerSettings {
                         input: self.modulation.audio_trigger.input,
@@ -508,6 +531,13 @@ impl Session<'_> {
                         Key::Escape => self.state.text_edit.cancel(),
                         _ => {}
                     }
+                } else if self.state.effect_dial_drag.active_action().is_none()
+                    && !event
+                        .modifiers
+                        .intersects(Modifiers::CONTROL | Modifiers::META | Modifiers::ALT)
+                    && matches!(&event.key, Key::Character(text) if text.eq_ignore_ascii_case("l"))
+                {
+                    self.toggle_listening(crate::modulation::AuditionSource::Trigger);
                 } else if event.key == Key::Escape {
                     self.state.cancel_detector();
                 }

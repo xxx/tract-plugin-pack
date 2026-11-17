@@ -9,6 +9,10 @@ use tiny_skia_widgets::{
 };
 
 mod audio_trigger;
+mod audition;
+pub use audition::{
+    AuditionControl, AuditionRequest, AuditionRuntime, AuditionSettings, AuditionSource,
+};
 mod follower;
 pub use follower::{
     FOLLOWER_ATTACK_MAX_MS, FOLLOWER_GAIN_DB, FOLLOWER_HOLD_MAX_MS, FOLLOWER_RELEASE_MAX_MS,

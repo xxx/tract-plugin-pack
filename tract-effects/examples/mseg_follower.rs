@@ -1,4 +1,4 @@
-//! cargo run -p tract-effects --example mseg_follower -- /tmp/mseg-follower.png [playing|panel|stopped] [scale]
+//! cargo run -p tract-effects --example mseg_follower -- /tmp/mseg-follower.png [playing|panel|audition|stopped] [scale]
 use baseview::{Event, MouseButton, MouseEvent, Point};
 use keyboard_types::Modifiers;
 use std::sync::Arc;
@@ -17,8 +17,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .next()
         .unwrap_or_else(|| "/tmp/mseg-follower.png".into());
     let mode = args.next().unwrap_or_else(|| "playing".into());
-    if !["playing", "panel", "stopped"].contains(&mode.as_str()) {
-        return Err("Mode must be playing, panel or stopped".into());
+    if !["playing", "panel", "audition", "stopped"].contains(&mode.as_str()) {
+        return Err("Mode must be playing, panel, audition or stopped".into());
     }
     let scale = args.next().map_or(Ok(1.0), |value| value.parse::<f32>())?;
     if !scale.is_finite() || !(0.5..=2.0).contains(&scale) {
@@ -136,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &ModulationFrame::capture(track.kind, &config, &state),
         );
     }
-    if mode == "panel" {
+    if mode == "panel" || mode == "audition" {
         let strip = widgets::mseg::mseg_layout(geometry.layout.mseg_pane, false, scale).strip;
         let rect = widgets::mseg::follower_button_rect(strip, scale);
         let at = (rect.0 + rect.2 * 0.5, rect.1 + rect.3 * 0.5);
@@ -161,6 +161,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
             );
         }
+    }
+    if mode == "audition" {
+        editor.handle_event(
+            &Event::Keyboard(keyboard_types::KeyboardEvent {
+                state: keyboard_types::KeyState::Down,
+                key: keyboard_types::Key::Character("l".into()),
+                ..keyboard_types::KeyboardEvent::default()
+            }),
+            EditorContext {
+                pointer_position: (0.0, 0.0),
+                effect: &mut track,
+                modulation: &mut config,
+                text_renderer: &mut text,
+                geometry,
+            },
+        );
     }
     pm.fill(widgets::color_bg());
     text.draw_text(

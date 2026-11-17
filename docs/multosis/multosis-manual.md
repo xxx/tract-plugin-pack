@@ -256,6 +256,11 @@ its own Follow/Add/Multiply route and Amount; Input, filters, Gain, Threshold an
 Attack/Hold/Release are shared across the row's four curves. See
 [Envelope follower](../mseg-editor.md#envelope-follower).
 
+Both detector/follower panels offer **Listen** (**L**) to audition filtered
+Main/Sidechain input, including muted/inactive rows. It keeps normal DSP running
+and stops on panel close, focus loss, resize or source replacement. See
+[detector input audition](../mseg-editor.md#detector-input-audition).
+
 Hover for footer hints, or click **?** beside Point for the gesture guide.
 **F1 / ?** and **View → Editing guide...** also open it; see
 [context help](../mseg-editor.md#context-help-and-gesture-guide).

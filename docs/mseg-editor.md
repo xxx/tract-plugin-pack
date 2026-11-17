@@ -446,6 +446,31 @@ the field default. No follower history is lost on retriggers or ordinary DSP
 flushes. Explicit modulation Reset starts a fresh envelope. The feature adds no
 latency and is Off in legacy presets. Miff/Nap keep static curve editing.
 
+## Detector input audition
+
+Multosis/Minitosis provide **Listen** in both **Detect...** and **Follow** panels.
+Click it, or press **L** with no numeric edit, dropdown or drag active, to hear
+that panel's filtered Main or Sidechain input. Click/press again to return to
+normal processing. Output gain still applies.
+
+The trigger detector monitors its mono sum through High-pass/Low-pass. The
+follower monitors stereo through its filters and shared Gain; routes can remain
+Off. Threshold, Attack/Hold/Release and curve amounts do not shape the preview.
+The preview is limited to +/-1 before Output gain. Filters have their own monitor
+history, so listening does not change trigger timing or the running effect.
+
+Listen replaces the processed output after Mix/compression, with a short fade.
+It follows the plugin's reported latency; normal audio plays while the monitor
+delay fills after enabling or changing its input/latency. Minitosis bypass and
+pending effect preparation return ordinary dry audio. Multosis can monitor a
+muted/inactive/None row because the detectors use original main/aux audio.
+
+Closing/dismissing the panel, losing focus, resizing, selecting another row/effect,
+loading a preset, resetting DSP, or closing the editor stops Listen. It is not
+saved or automated and adds no undo step. Filter/Gain edits keep it active as the
+audio thread adopts them; stopped requests need explicit re-enabling. Frozen
+waveforms, traces and ordinary effect state remain available throughout.
+
 ## MIDI pitch playback
 
 In Multosis/Minitosis choose **Trigger → MIDI pitch** to clock all four curves

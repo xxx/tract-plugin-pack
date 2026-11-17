@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use tract_effects::effects::{Effect, EffectInstance, EffectKind, TrackEffect};
+use tract_effects::modulation::AuditionRuntime;
 use tract_effects::modulation::{ModulationState, TrackModulation};
 use tract_effects::modulation_telemetry::ModulationTelemetry;
 use tract_effects::sidechain::SidechainInput;
@@ -58,6 +59,7 @@ pub struct Processor {
     span_track: TrackEffect,
     span_bpm: f64,
     wave_bank: tiny_skia_widgets::mseg::WavePaletteSnapshot,
+    audition: AuditionRuntime,
 }
 
 impl Processor {
@@ -87,6 +89,7 @@ impl Processor {
             span_track: *track,
             span_bpm: 120.0,
             wave_bank: tiny_skia_widgets::mseg::WavePaletteSnapshot::default(),
+            audition: AuditionRuntime::new(MAX_LATENCY),
         }
     }
 
@@ -122,6 +125,21 @@ impl Processor {
         bpm: f64,
     ) {
         if !left.is_empty() && !right.is_empty() {
+            let request = self.waveform_telemetry.as_ref().and_then(|telemetry| {
+                let request = telemetry.audition.snapshot()?;
+                if request.row != 0 {
+                    telemetry.audition.release(request.token);
+                    return None;
+                }
+                telemetry.audition.resolve(
+                    request,
+                    self.key.kind,
+                    &self.modulation,
+                    telemetry.waveform.generation(),
+                )
+            });
+            self.audition
+                .prepare(request, f32::from_bits(self.key.sample_rate_bits) as f64);
             self.state
                 .prepare_wave_bank(&self.modulation, &self.wave_bank);
         }
@@ -300,7 +318,18 @@ impl Processor {
         }
         self.span_remaining = self.span_remaining.saturating_sub(1);
         self.span_processed += 1;
-        output
+        if let Some(telemetry) = &self.waveform_telemetry {
+            self.audition.next(
+                output,
+                input,
+                sidechain,
+                &telemetry.audition,
+                self.latency,
+                !bypass,
+            )
+        } else {
+            output
+        }
     }
 
     pub fn finish_waveform_block(&self) {
@@ -310,6 +339,10 @@ impl Processor {
     }
 
     pub fn reset_modulation(&mut self) {
+        self.audition.reset();
+        if let Some(telemetry) = &self.waveform_telemetry {
+            telemetry.audition.invalidate();
+        }
         self.skip_precise_sample = false;
         self.state.reset();
     }
@@ -323,6 +356,10 @@ impl Processor {
         self.state.reset();
     }
     pub fn flush_dsp(&mut self) {
+        self.audition.reset();
+        if let Some(telemetry) = &self.waveform_telemetry {
+            telemetry.audition.invalidate();
+        }
         self.effect.reset();
         self.dry.reset();
         self.state.reset_smoothing();
@@ -345,6 +382,8 @@ impl Processor {
     }
 }
 
+#[cfg(test)]
+mod audition_tests;
 #[cfg(test)]
 mod follower_tests;
 #[cfg(test)]

@@ -97,6 +97,7 @@ pub(super) fn audio_items(state: &EffectEditor) -> Vec<&'static str> {
 }
 
 pub(super) struct LiveSource {
+    pub(super) audition: Option<super::audition::Lease>,
     telemetry: Arc<ModulationTelemetry>,
     row: usize,
     token: u64,
@@ -111,11 +112,20 @@ pub(super) struct LiveSource {
 }
 impl Drop for LiveSource {
     fn drop(&mut self) {
+        if let Some(lease) = self.audition.take() {
+            self.telemetry.audition.release(lease.token);
+        }
         self.telemetry.release(self.token);
         self.telemetry.waveform.release(self.waveform_token);
     }
 }
 impl LiveSource {
+    pub(super) fn audition_control(&self) -> &crate::modulation::AuditionControl {
+        &self.telemetry.audition
+    }
+    pub(super) fn row(&self) -> usize {
+        self.row
+    }
     pub(super) fn binding_key(&self) -> (usize, usize, u64) {
         (
             Arc::as_ptr(&self.telemetry) as usize,
@@ -230,6 +240,7 @@ impl EffectEditor {
         }
         self.disconnect_live();
         self.live = Some(LiveSource {
+            audition: None,
             telemetry: telemetry.clone(),
             row,
             token: 0,
@@ -248,6 +259,7 @@ impl EffectEditor {
         self.live = None;
     }
     pub fn invalidate_trace(&mut self) {
+        self.stop_listening();
         self.cancel_detector();
         self.clear_modulation_trace();
         if let Some(live) = &mut self.live {

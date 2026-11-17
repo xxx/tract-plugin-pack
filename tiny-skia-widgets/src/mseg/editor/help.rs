@@ -244,6 +244,10 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                         "Route audio level to Amp/1/2/3. Follow replaces the curve source; Add/Multiply combine them. Mode/Amount belong to this curve; input, filters, Gain and Attack/Hold/Release are shared. Reset response keeps routes. The white trace and meters show actual audio-driven values; geometry stays editable.",
                     ),
                     animated(
+                        "Listen / L",
+                        "Audio detector and Follower panels can audition their filtered Main/Sidechain input. Trigger monitoring is mono; Follower keeps stereo and Gain, before Threshold or response shaping, even with routes Off. Listen is temporary: close, focus loss, resize or source replacement stops it. Numeric fields and menus keep L for their own input.",
+                    ),
+                    animated(
                         "Ctrl/Cmd+Z",
                         "Undo in Multosis/Minitosis; Shift+Z or Ctrl/Cmd+Y redoes an edit.",
                     ),

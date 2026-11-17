@@ -10,6 +10,7 @@ use crate::grid::{Grid, ROWS};
 use crate::modulation::{Modulation, TrackModulation};
 use crate::propagation::{Playhead, active_rows};
 use std::sync::Arc;
+use tract_effects::modulation::AuditionRuntime;
 use tract_effects::modulation::{MidiCursor, MidiNoteOn};
 use tract_effects::modulation_telemetry::{ModulationTelemetry, TraceClock, TraceRequest};
 use tract_effects::sidechain::SidechainInput;
@@ -50,6 +51,7 @@ pub struct AudioEngine {
     waveform: WaveformClock,
     span_bpm: f64,
     skip_precise_sample: bool,
+    audition: AuditionRuntime,
 }
 
 impl AudioEngine {
@@ -93,6 +95,7 @@ impl AudioEngine {
             waveform: WaveformClock::default(),
             span_bpm: 120.0,
             skip_precise_sample: false,
+            audition: AuditionRuntime::new(16 * 4096),
         }
     }
 
@@ -162,6 +165,10 @@ impl AudioEngine {
 
     /// Recompute sample-rate-dependent effect coefficients.
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        if self.sample_rate != sample_rate {
+            self.audition.reset();
+            self.telemetry.audition.invalidate();
+        }
         self.sample_rate = sample_rate;
         for e in &mut self.effects {
             e.set_sample_rate(sample_rate);
@@ -200,6 +207,8 @@ impl AudioEngine {
     }
     /// Clear audio history and smoothing seeds while preserving modulation clocks.
     pub fn flush_dsp(&mut self) {
+        self.audition.reset();
+        self.telemetry.audition.invalidate();
         self.flush_effects();
         self.modulation.reset_smoothing();
     }
@@ -367,8 +376,22 @@ impl AudioEngine {
                 within_span || i > 0,
             );
             let (cw_l, cw_r) = self.compressor.process_sample(wet_l, wet_r);
-            *left = dry_l + (cw_l - dry_l) * mix;
-            *right = dry_r + (cw_r - dry_r) * mix;
+            let ordinary = [dry_l + (cw_l - dry_l) * mix, dry_r + (cw_r - dry_r) * mix];
+            let latency = if self.audition.needs_processing() {
+                self.chain_latency_samples()
+            } else {
+                0
+            };
+            let output = self.audition.next(
+                ordinary,
+                [dry_l, dry_r],
+                sidechain.sample(i),
+                &self.telemetry.audition,
+                latency,
+                true,
+            );
+            *left = output[0];
+            *right = output[1];
         }
     }
 
@@ -450,6 +473,14 @@ impl AudioEngine {
         self.span_bpm = bpm;
         self.skip_precise_sample = false;
         let sr = self.sample_rate as f64;
+        if n > 0 {
+            let request = self.modulation.audition_request(
+                &self.telemetry.audition,
+                self.telemetry.waveform.generation(),
+                &self.track_effects,
+            );
+            self.audition.prepare(request, sr);
+        }
         self.waveform.begin_block(&self.telemetry.waveform);
         self.trace_request = self.trace_clock.begin_block(&self.telemetry, sr);
         self.modulation
@@ -664,6 +695,8 @@ impl Default for AudioEngine {
     }
 }
 
+#[cfg(test)]
+mod audition_tests;
 #[cfg(test)]
 mod follower_tests;
 #[cfg(test)]

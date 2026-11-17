@@ -18,6 +18,20 @@ pub struct Modulation {
 }
 
 impl Modulation {
+    pub fn audition_request(
+        &self,
+        control: &tract_effects::modulation::AuditionControl,
+        generation: u64,
+        tracks: &[crate::effects::TrackEffect; ROWS],
+    ) -> Option<tract_effects::modulation::AuditionRequest> {
+        let request = control.snapshot()?;
+        control.resolve(
+            request,
+            tracks[request.row].kind,
+            &self.config[request.row],
+            generation,
+        )
+    }
     pub fn set_host_position(&mut self, position: HostPosition) {
         for state in &mut self.states {
             state.set_host_position(position);

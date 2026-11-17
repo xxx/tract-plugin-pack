@@ -35,7 +35,11 @@ impl EffectEditor {
             tr,
             pm,
             (p.0 + 8.0, p.1 + (42.0 * s).max(34.0)),
-            "Mode/Amount: this curve; response: shared",
+            if self.listen_label() == "Listen" {
+                "Mode/Amount: this curve; response: shared"
+            } else {
+                "Audio monitoring unavailable"
+            },
             (11.0 * s).max(10.0),
             p.2 - 16.0,
             widgets::color_muted(),
@@ -188,20 +192,35 @@ impl EffectEditor {
         }
         let r = lay.reset;
         widgets::draw_button(pm, tr, r.0, r.1, r.2, r.3, "Reset response", false, false);
+        let listen = lay.listen;
+        widgets::draw_button(
+            pm,
+            tr,
+            listen.0,
+            listen.1,
+            listen.2,
+            listen.3,
+            self.listen_label(),
+            self.listening(crate::modulation::AuditionSource::Follower),
+            false,
+        );
         let hint = match cfg.routes[owner.slot].mode {
             FollowerMode::Follow => "Follow replaces curve",
             FollowerMode::Add => "Curve + audio response",
             FollowerMode::Multiply => "Curve × audio response",
         };
-        bounded_text(
-            tr,
-            pm,
-            (r.0 + r.2 + 6.0, r.1 + r.3 * 0.7),
-            hint,
-            (10.0 * s).max(10.0),
-            (f.2 - r.2 - 8.0).max(0.0),
-            widgets::color_muted(),
-        );
+        let width = (listen.0 - r.0 - r.2 - 12.0).max(0.0);
+        if tr.text_width(hint, (10.0 * s).max(10.0)) <= width {
+            bounded_text(
+                tr,
+                pm,
+                (r.0 + r.2 + 6.0, r.1 + r.3 * 0.7),
+                hint,
+                (10.0 * s).max(10.0),
+                width,
+                widgets::color_muted(),
+            );
+        }
         if let Some(choice) = self.follower.choice() {
             widgets::dropdown::draw_dropdown_popup(
                 pm,
