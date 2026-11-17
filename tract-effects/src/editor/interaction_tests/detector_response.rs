@@ -196,3 +196,47 @@ fn short_detector_popup_draw_does_not_paint_its_previous_algorithm_menu() {
 
     assert!(actual.pixels() == expected.pixels());
 }
+
+#[test]
+fn detector_panel_places_controls_below_the_trigger_or_above_it_near_the_window_edge() {
+    let mut geometry = EditorGeometry {
+        layout: view::effect_layout((0.0, 0.0, 1000.0, 800.0), 1.0),
+        scale: 1.0,
+        window_size: (1000.0, 800.0),
+    };
+    geometry.layout.detector_setup = (80.0, 90.0, 40.0, 20.0);
+    let below = detector::detector_layout(geometry);
+    assert!(below.usable);
+    assert_eq!(below.rect, (80.0, 114.0, 392.0, 370.0));
+    assert_eq!(below.close, (440.0, 122.0, 24.0, 20.0));
+    assert_eq!(below.input, (92.0, 150.0, 368.0, 34.0));
+    assert_eq!(below.algorithm, (92.0, 192.0, 368.0, 34.0));
+    assert_eq!(
+        below.fields,
+        [
+            (92.0, 234.0, 368.0, 34.0),
+            (92.0, 276.0, 368.0, 34.0),
+            (92.0, 318.0, 368.0, 34.0),
+        ]
+    );
+    assert_eq!(below.detail, (92.0, 360.0, 368.0, 34.0));
+    assert_eq!(below.meter, (92.0, 418.0, 368.0, 8.0));
+    assert_eq!(below.reset, (92.0, 452.0, 88.0, 24.0));
+    assert_eq!(below.listen, (372.0, 452.0, 88.0, 24.0));
+
+    geometry.layout.detector_setup = (700.0, 520.0, 40.0, 20.0);
+    let above = detector::detector_layout(geometry);
+    assert!(above.usable);
+    assert_eq!(above.rect, (604.0, 146.0, 392.0, 370.0));
+
+    geometry.scale = 0.5;
+    geometry.layout.detector_setup = (80.0, 90.0, 40.0, 20.0);
+    geometry.window_size = (204.0, 193.0);
+    let compact = detector::detector_layout(geometry);
+    assert!(compact.usable);
+    assert_eq!(compact.rect, (6.0, 2.0, 196.0, 185.0));
+    for size in [(203.0, 193.0), (204.0, 192.0), (6.0, 6.0)] {
+        geometry.window_size = size;
+        assert!(!detector::detector_layout(geometry).usable);
+    }
+}

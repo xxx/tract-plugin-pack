@@ -668,3 +668,62 @@ impl Session<'_> {
         );
     }
 }
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn assert_rect(actual: Rect, expected: Rect) {
+        let components = |(x, y, w, h)| [x, y, w, h];
+        for (actual, expected) in components(actual).into_iter().zip(components(expected)) {
+            assert!((actual - expected).abs() < 0.0001, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn wave_setup_keeps_labels_and_click_targets_aligned_at_normal_and_compact_sizes() {
+        let pane = (100.0, 90.0, 800.0, 620.0);
+        let full = layout((1000.0, 800.0), pane, 1.0).unwrap();
+        assert_rect(full.panel, (290.0, 246.0, 420.0, 308.0));
+        assert_rect(full.close, (680.0, 250.0, 22.0, 20.0));
+        assert_rect(full.footer, (298.0, 494.0, 404.0, 60.0));
+        for ((value, label), y) in full
+            .values
+            .into_iter()
+            .zip(full.labels)
+            .zip([280.0, 322.8, 365.6, 408.4, 451.2])
+        {
+            assert_rect(value, (428.0, y, 274.0, 34.0));
+            assert_rect(label, (298.0, y, 126.0, 34.0));
+        }
+
+        let compact = layout((248.0, 228.0), pane, 0.5).unwrap();
+        assert_rect(compact.panel, (4.0, 4.0, 240.0, 220.0));
+        assert_rect(compact.close, (226.0, 6.0, 14.0, 14.0));
+        assert_rect(compact.footer, (8.0, 174.0, 232.0, 50.0));
+        for ((value, label), y) in compact
+            .values
+            .into_iter()
+            .zip(compact.labels)
+            .zip([30.0, 58.8, 87.6, 116.4, 145.2])
+        {
+            assert_rect(value, (73.0, y, 167.0, 20.0));
+            assert_rect(label, (8.0, y, 61.0, 20.0));
+        }
+
+        // A clipped 1x dialog uses narrower labels and shorter rows.
+        let clipped = layout((330.0, 260.0), pane, 1.0).unwrap();
+        assert_rect(clipped.panel, (8.0, 8.0, 314.0, 244.0));
+        for ((value, label), y) in clipped
+            .values
+            .into_iter()
+            .zip(clipped.labels)
+            .zip([42.0, 72.0, 102.0, 132.0, 162.0])
+        {
+            assert_rect(value, (135.2, y, 178.8, 26.0));
+            assert_rect(label, (16.0, y, 115.2, 26.0));
+        }
+        assert!(layout((223.0, 260.0), pane, 0.5).is_none());
+        assert!(layout((330.0, 229.0), pane, 1.0).is_none());
+    }
+}

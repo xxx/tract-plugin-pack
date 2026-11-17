@@ -6,7 +6,7 @@ pub(crate) fn is_off(value: &bool) -> bool {
     !*value
 }
 pub fn lookahead_samples(sr: f64) -> usize {
-    if sr.is_finite() && sr > 0.0 {
+    if sr.is_finite() {
         (LOOKAHEAD_MS * sr * 0.001)
             .ceil()
             .clamp(0.0, MAX_LOOKAHEAD_SAMPLES as f64) as usize
@@ -154,5 +154,50 @@ mod tests {
         assert_eq!(line.next(frame(104)), frame(100));
         assert!(!line.prepare_path(4, 2));
         assert_eq!(line.next(frame(105)), frame(101));
+    }
+
+    #[test]
+    fn reserve_grows_for_a_new_sample_rate_and_preserves_history_without_growth() {
+        let mut line = LookaheadDelay::new(2);
+        assert!(line.prepare(20));
+        assert_eq!(line.delay(), 2);
+        assert_eq!(line.next(frame(1)), LookaheadFrame::default());
+        assert_eq!(line.next(frame(2)), LookaheadFrame::default());
+        line.reserve(2);
+        assert_eq!(line.next(frame(3)), frame(1));
+        line.reserve(1);
+        assert_eq!(line.next(frame(4)), frame(2));
+
+        line.reserve(5);
+        assert!(line.prepare(20));
+        assert_eq!(line.delay(), 5);
+        for i in 0..5 {
+            assert_eq!(line.next(frame(10 + i)), LookaheadFrame::default());
+        }
+        assert_eq!(line.next(frame(15)), frame(10));
+
+        line.reserve(8192);
+        assert!(line.prepare(8192));
+        assert_eq!(line.delay(), MAX_LOOKAHEAD_SAMPLES);
+        for i in 0..MAX_LOOKAHEAD_SAMPLES {
+            assert_eq!(line.next(frame(i)), LookaheadFrame::default());
+        }
+        assert_eq!(line.next(frame(MAX_LOOKAHEAD_SAMPLES)), frame(0));
+    }
+
+    #[test]
+    fn invalid_sample_rates_use_no_lookahead_and_extreme_finite_rates_are_capped() {
+        for rate in [
+            0.0,
+            -48000.0,
+            -f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ] {
+            assert_eq!(lookahead_samples(rate), 0);
+        }
+        assert_eq!(lookahead_samples(1.0), 1);
+        assert_eq!(lookahead_samples(f64::MAX), MAX_LOOKAHEAD_SAMPLES);
     }
 }

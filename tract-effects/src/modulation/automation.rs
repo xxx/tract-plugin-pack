@@ -67,3 +67,40 @@ impl super::ModulationState {
         self.automated.requested
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiny_skia_widgets::mseg::{FactoryShape, WavePalette, factory_shape};
+
+    #[test]
+    fn handoff_inherits_the_audible_waves_and_pending_automation_in_each_lane() {
+        let mut palette = WavePalette::default();
+        let duck = factory_shape(FactoryShape::Duck);
+        let square = factory_shape(FactoryShape::Square);
+        palette.store(0, &duck).unwrap();
+        palette.store(1, &square).unwrap();
+        let mut bank = WavePaletteSnapshot::default();
+        bank.refresh(&palette);
+        let cfg = TrackModulation::default();
+        let midi = MidiWaveRuntime::default();
+        let mut old = AutomatedWaves {
+            requested: [1, 0, 2, 0],
+            ..AutomatedWaves::default()
+        };
+        assert_eq!(old.prepare(&cfg, &midi, &bank), 0b0101);
+        old.requested = [1, 2, 0, 0];
+
+        let mut next = AutomatedWaves::default();
+        next.inherit(&old);
+        assert_eq!(next.curve(&cfg.msegs[0], 0).active(), duck.nodes());
+        assert_eq!(next.curve(&cfg.msegs[2], 2).active(), square.nodes());
+        assert_eq!(next.prepare(&cfg, &midi, &bank), 0b0110);
+        assert_eq!(next.curve(&cfg.msegs[1], 1).active(), square.nodes());
+        assert!(!next.active(2));
+
+        next.reset();
+        assert!((0..4).all(|slot| !next.active(slot)));
+        assert_eq!(next.prepare(&cfg, &midi, &bank), 0b0011);
+    }
+}

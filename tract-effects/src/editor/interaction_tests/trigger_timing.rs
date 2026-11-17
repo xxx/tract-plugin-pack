@@ -219,3 +219,39 @@ fn timing_draft_survives_a_redraw_with_room_for_the_panel() {
     assert!(response.captured && response.changed);
     assert_eq!(h.modulation.trigger_timing.audio_delay_ms, 3.0);
 }
+
+#[test]
+fn timing_panel_centers_its_hit_regions_and_admits_the_minimum_scale() {
+    let mut geometry = EditorGeometry {
+        layout: view::effect_layout((0.0, 0.0, 1000.0, 800.0), 1.0),
+        scale: 1.0,
+        window_size: (1000.0, 800.0),
+    };
+    let full = timing_ui::layout(geometry);
+    assert!(full.usable);
+    assert_eq!(full.rect, (304.0, 240.0, 392.0, 320.0));
+    assert_eq!(full.close, (664.0, 248.0, 24.0, 20.0));
+    assert_eq!(full.lookahead, (316.0, 294.0, 368.0, 34.0));
+    assert_eq!(
+        full.fields,
+        [(316.0, 338.0, 368.0, 34.0), (316.0, 382.0, 368.0, 34.0)]
+    );
+    assert_eq!(full.reset, (316.0, 526.0, 88.0, 24.0));
+
+    geometry.scale = 0.5;
+    geometry.window_size = (204.0, 168.0);
+    let compact = timing_ui::layout(geometry);
+    assert!(compact.usable);
+    assert_eq!(compact.rect, (4.0, 4.0, 196.0, 160.0));
+    assert_eq!(compact.close, (184.0, 8.0, 12.0, 10.0));
+    assert_eq!(compact.lookahead, (10.0, 31.0, 184.0, 17.0));
+    assert_eq!(
+        compact.fields,
+        [(10.0, 53.0, 184.0, 17.0), (10.0, 75.0, 184.0, 17.0)]
+    );
+    assert_eq!(compact.reset, (10.0, 147.0, 44.0, 12.0));
+    for size in [(203.0, 168.0), (204.0, 167.0), (6.0, 6.0)] {
+        geometry.window_size = size;
+        assert!(!timing_ui::layout(geometry).usable);
+    }
+}

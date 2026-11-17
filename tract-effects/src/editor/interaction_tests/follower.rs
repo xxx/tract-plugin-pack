@@ -196,6 +196,64 @@ fn host_focus_transfer_consumes_a_stale_follower_edit() {
     assert!(!h.editor.follower_panel_open());
     assert_eq!(h.modulation, replacement);
 }
+
+#[test]
+fn follower_panel_places_every_hit_region_inside_the_full_and_scrolled_layouts() {
+    let mut h = setup(1.0);
+    h.geometry.window_size = (1000.0, 800.0);
+    h.geometry.layout.mseg_pane = (100.0, 90.0, 800.0, 620.0);
+    let full = follower_ui::layout(h.geometry, 10).unwrap();
+    assert_eq!(full.panel, (260.0, 120.0, 480.0, 560.0));
+    assert_eq!(full.close, (710.0, 128.0, 22.0, 22.0));
+    assert_eq!(full.body, (268.0, 170.0, 464.0, 396.0));
+    assert_eq!(full.footer, (268.0, 590.0, 464.0, 90.0));
+    assert_eq!(full.reset, (268.0, 646.0, 130.0, 26.0));
+    assert_eq!(full.listen, (602.0, 646.0, 130.0, 26.0));
+    assert_eq!(full.visible, 11);
+    for (row, y) in full.rows.into_iter().zip([
+        170.0, 206.0, 242.0, 278.0, 314.0, 350.0, 386.0, 422.0, 458.0, 494.0, 530.0,
+    ]) {
+        assert_eq!(row, Some((268.0, y, 456.0, 32.0)));
+    }
+
+    h.geometry.scale = 0.5;
+    h.geometry.window_size = (300.0, 236.0);
+    h.geometry.layout.mseg_pane = (50.0, 55.0, 200.0, 100.0);
+    let compact = follower_ui::layout(h.geometry, usize::MAX).unwrap();
+    assert_eq!(compact.panel, (10.0, 4.0, 280.0, 228.0));
+    assert_eq!(compact.close, (268.0, 8.0, 18.0, 18.0));
+    assert_eq!(compact.body, (14.0, 44.0, 272.0, 84.0));
+    assert_eq!(compact.footer, (14.0, 144.0, 272.0, 88.0));
+    assert_eq!(compact.reset, (14.0, 204.0, 110.0, 24.0));
+    assert_eq!(compact.listen, (176.0, 204.0, 110.0, 24.0));
+    assert_eq!(compact.visible, 3);
+    assert!(compact.rows[..8].iter().all(Option::is_none));
+    assert_eq!(
+        compact.rows[8..],
+        [
+            Some((14.0, 44.0, 264.0, 24.0)),
+            Some((14.0, 72.0, 264.0, 24.0)),
+            Some((14.0, 100.0, 264.0, 24.0)),
+        ]
+    );
+
+    h.geometry.window_size = (224.0, 164.0);
+    h.geometry.layout.mseg_pane = (500.0, 500.0, 200.0, 100.0);
+    let minimum = follower_ui::layout(h.geometry, usize::MAX).unwrap();
+    assert_eq!(minimum.panel, (4.0, 4.0, 216.0, 156.0));
+    assert_eq!(minimum.body, (8.0, 44.0, 208.0, 28.0));
+    assert_eq!(minimum.footer, (8.0, 72.0, 208.0, 88.0));
+    assert_eq!(minimum.reset, (8.0, 132.0, 102.5, 24.0));
+    assert_eq!(minimum.listen, (113.5, 132.0, 102.5, 24.0));
+    assert_eq!(minimum.visible, 1);
+    assert!(minimum.rows[..10].iter().all(Option::is_none));
+    assert_eq!(minimum.rows[10], Some((8.0, 44.0, 200.0, 24.0)));
+
+    for size in [(223.0, 164.0), (224.0, 163.0)] {
+        h.geometry.window_size = size;
+        assert!(follower_ui::layout(h.geometry, 0).is_none());
+    }
+}
 #[test]
 fn follower_panel_rejects_too_short_layout_and_keeps_valid_rows_inside_its_body() {
     let mut h = setup(1.0);

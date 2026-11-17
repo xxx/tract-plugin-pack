@@ -165,9 +165,10 @@ impl TimingRuntime {
             let cursor = self.cursor;
             self.clear_pending();
             for (i, mut word) in pending.into_iter().enumerate() {
-                while word != 0 {
+                // Bound the scan by the number of queued cues in this word.
+                for _ in 0..word.count_ones() {
                     let bit = word.trailing_zeros() as usize;
-                    word &= word - 1;
+                    word ^= 1_u64 << bit;
                     let distance = (i * 64 + bit + PENDING_SIZE - cursor) % PENDING_SIZE;
                     let next = (distance as f64 * sr / self.sample_rate)
                         .ceil()
@@ -269,6 +270,205 @@ impl TimingRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sample_rate_changes_rescale_each_pending_cue_across_ring_wrap_and_word_boundaries() {
+        let cfg = TrackModulation {
+            trigger: TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 5.0,
+            },
+            trigger_timing: TriggerTiming {
+                audio_delay_ms: 4.0,
+                blend_ms: 0.0,
+            },
+            ..TrackModulation::default()
+        };
+        let mut timing = TimingRuntime::default();
+        timing.prepare(&cfg, true, 32000.0, [0.0; 4], [0.0; 4]);
+        for _ in 0..PENDING_SIZE - 140 {
+            assert!(!timing.dispatch(false));
+        }
+        for sample in 0..20 {
+            assert!(!timing.dispatch(matches!(sample, 0 | 2 | 17)));
+        }
+        timing.prepare(&cfg, true, 16000.0, [0.0; 4], [0.0; 4]);
+        for sample in 0..80 {
+            assert_eq!(
+                timing.dispatch(false),
+                matches!(sample, 54 | 55 | 63),
+                "sample {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn downsampling_a_full_word_merges_colliding_cues_and_preserves_the_cue_due_now() {
+        let cfg = TrackModulation {
+            trigger: TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 5.0,
+            },
+            trigger_timing: TriggerTiming {
+                audio_delay_ms: 4.0,
+                blend_ms: 0.0,
+            },
+            ..TrackModulation::default()
+        };
+        let mut timing = TimingRuntime::default();
+        timing.prepare(&cfg, true, 32000.0, [0.0; 4], [0.0; 4]);
+        for _ in 0..64 {
+            assert!(!timing.dispatch(true));
+        }
+        for _ in 0..64 {
+            assert!(!timing.dispatch(false));
+        }
+
+        timing.prepare(&cfg, true, 16000.0, [0.0; 4], [0.0; 4]);
+
+        for frame in 0..40 {
+            assert_eq!(timing.dispatch(false), frame <= 32, "frame {frame}");
+        }
+    }
+
+    #[test]
+    fn maximum_lookahead_cue_delay_stays_inside_the_ring() {
+        let cfg = TrackModulation {
+            trigger: TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 5.0,
+            },
+            lookahead: true,
+            trigger_timing: TriggerTiming {
+                audio_delay_ms: 4.0,
+                blend_ms: 0.0,
+            },
+            ..TrackModulation::default()
+        };
+        let mut timing = TimingRuntime {
+            requested_path: Some(u16::MAX),
+            ..TimingRuntime::default()
+        };
+        timing.prepare(&cfg, true, 1_024_000.0, [0.0; 4], [0.0; 4]);
+        for i in 0..PENDING_SIZE + 1 {
+            assert_eq!(timing.dispatch(i == 0), i == PENDING_SIZE - 1, "sample {i}");
+        }
+    }
+
+    #[test]
+    fn only_audio_trigger_modes_use_lookahead_windows_and_shift_without_a_blend() {
+        let audio = TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 5.0,
+        };
+        for trigger in [audio, TriggerSource::Free, TriggerSource::DawPosition] {
+            for lookahead in [false, true] {
+                for shift in [0.0, 2.0] {
+                    let cfg = TrackModulation {
+                        trigger,
+                        lookahead,
+                        trigger_timing: TriggerTiming {
+                            audio_delay_ms: shift,
+                            blend_ms: 0.0,
+                        },
+                        ..TrackModulation::default()
+                    };
+                    assert_eq!(
+                        cfg.lookahead_samples(48000.0),
+                        if trigger == audio && lookahead {
+                            192
+                        } else {
+                            0
+                        }
+                    );
+                    let mut runtime = TimingRuntime::default();
+                    runtime.prepare(&cfg, trigger == audio, 48000.0, [0.0; 4], [0.2; 4]);
+                    let expected = trigger == audio && (lookahead || shift != 0.0);
+                    assert_eq!(
+                        runtime.sample_clocked, expected,
+                        "{trigger:?}, {lookahead}, {shift}"
+                    );
+                    assert_eq!(runtime.phases, if expected { [0.2; 4] } else { [0.0; 4] });
+                    runtime.prepare(&cfg, trigger == audio, 48000.0, [0.0; 4], [0.8; 4]);
+                    assert_eq!(runtime.phases, if expected { [0.2; 4] } else { [0.0; 4] });
+                    if trigger != audio {
+                        runtime.requested_path = Some(1);
+                        runtime.prepare(&cfg, false, 48000.0, [0.0; 4], [0.0; 4]);
+                        assert!(!runtime.sample_clocked);
+                        assert!(runtime.dispatch(true));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_sample_rates_and_audio_mode_changes_discard_pending_cues() {
+        let cfg = TrackModulation {
+            trigger: TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 5.0,
+            },
+            trigger_timing: TriggerTiming {
+                audio_delay_ms: 4.0,
+                blend_ms: 4.0,
+            },
+            ..TrackModulation::default()
+        };
+        for (audio, rate) in [
+            (false, 1000.0),
+            (true, 0.0),
+            (true, -1000.0),
+            (true, f64::INFINITY),
+            (true, f64::MAX),
+            (true, f64::MIN_POSITIVE),
+            (true, f64::NAN),
+        ] {
+            let mut timing = TimingRuntime::default();
+            timing.prepare(&cfg, true, 1000.0, [0.0; 4], [0.0; 4]);
+            assert!(!timing.dispatch(true));
+            timing.arm([1.0; 4], [true; 4]);
+            assert_eq!(timing.source(0, 0.0), 0.75);
+            timing.prepare(&cfg, audio, rate, [0.0; 4], [0.0; 4]);
+            if audio {
+                assert_eq!(timing.source(0, 0.0), 0.0, "rate {rate}");
+            }
+            assert!(!timing.audio);
+            timing.prepare(&cfg, true, 1000.0, [0.0; 4], [0.0; 4]);
+            for _ in 0..8 {
+                assert!(!timing.dispatch(false));
+            }
+        }
+    }
+
+    #[test]
+    fn disabling_a_blend_or_entering_daw_position_cancels_the_previous_transition() {
+        for change in [0, 1, 2] {
+            let mut cfg = TrackModulation {
+                trigger_timing: TriggerTiming {
+                    audio_delay_ms: 0.0,
+                    blend_ms: 4.0,
+                },
+                ..TrackModulation::default()
+            };
+            let mut timing = TimingRuntime::default();
+            timing.prepare(&cfg, false, 1000.0, [0.0; 4], [0.0; 4]);
+            timing.arm([1.0; 4], [true; 4]);
+            assert_eq!(timing.source(0, 0.0), 0.75);
+            match change {
+                0 => timing.reset(),
+                1 => {
+                    cfg.trigger_timing.blend_ms = 0.0;
+                    timing.set_preferences(&cfg);
+                }
+                _ => {
+                    cfg.trigger = TriggerSource::DawPosition;
+                    timing.set_preferences(&cfg);
+                }
+            }
+            assert_eq!(timing.source(0, 0.0), 0.0);
+        }
+    }
     #[test]
     fn signed_shift_compensates_logical_lookahead_paths_and_old_positive_states_stay_compatible() {
         for shift in [-4.0, 0.0, 4.0] {
