@@ -64,6 +64,8 @@ fn follower_modal_routes_the_selected_curve_and_scrolls_keyboard_focus_at_each_s
         let response = h.click(button(&h));
         assert!(response.captured && !response.changed);
         assert!(h.editor.follower_panel_open());
+        assert!(h.editor.captures_keyboard());
+        assert!(h.editor.dropdown_open());
         assert!(h.key(Key::Enter).changed);
         assert!(h.modulation.follower.routes[1].enabled);
         assert!(!h.modulation.follower.routes[0].enabled);
@@ -98,6 +100,7 @@ fn follower_numeric_commit_cancel_and_reset_preserve_route_scope_and_modal_prior
     let row = lay.rows[4].unwrap();
     h.move_to(row.0 + row.2 * 0.5, row.1 + row.3 * 0.5, Modifiers::empty());
     h.press(MouseButton::Left);
+    assert!(h.editor.pointer_gesture_active());
     h.move_to(
         row.0 + row.2 * 0.5,
         row.1 + row.3 * 0.5 - 20.0,
@@ -105,6 +108,7 @@ fn follower_numeric_commit_cancel_and_reset_preserve_route_scope_and_modal_prior
     );
     h.key(Key::Escape);
     h.release();
+    assert!(!h.editor.pointer_gesture_active());
     assert_eq!(h.modulation.follower, before);
     h.key(Key::Home);
     for _ in 0..4 {
@@ -164,8 +168,33 @@ fn follower_meters_show_prepared_audio_and_trace_tokens_reject_the_previous_curv
         Some(frame)
     );
     h.modulation.follower.gain_db = 6.0;
-    h.key(Key::Enter);
+    let before = h.modulation.clone();
+    let response = h.key(Key::Enter);
+    assert!(response.captured && !response.changed);
+    assert_eq!(h.modulation, before);
     assert!(!h.editor.follower_panel_open());
+}
+
+#[test]
+fn host_focus_transfer_consumes_a_stale_follower_edit() {
+    let mut h = setup(1.0);
+    h.click(button(&h));
+    let attack = layout(&h).rows[4].unwrap();
+    h.move_to(
+        attack.0 + attack.2 * 0.5,
+        attack.1 + attack.3 * 0.5,
+        Modifiers::empty(),
+    );
+    h.press(MouseButton::Right);
+    h.type_replacement("10 ms");
+    h.modulation.follower.gain_db = 6.0;
+    let replacement = h.modulation.clone();
+
+    let response = h.finish_text_edit();
+
+    assert!(response.captured && !response.changed);
+    assert!(!h.editor.follower_panel_open());
+    assert_eq!(h.modulation, replacement);
 }
 #[test]
 fn follower_panel_rejects_too_short_layout_and_keeps_valid_rows_inside_its_body() {

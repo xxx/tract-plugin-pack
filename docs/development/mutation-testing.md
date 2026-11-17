@@ -63,8 +63,15 @@ The [Mutation testing workflow](../../.github/workflows/mutation-testing.yml)
 runs separate jobs for each registered package. Pull requests use `--in-diff`
 against the PR's merge base, selecting only mutations that intersect changed
 production code within a registered scope. Manual dispatch runs the full scopes.
-Both modes fail on survivors or timeouts and upload per-package report artifacts;
-PR artifacts also include `pr.diff`.
+
+CI counts the selected mutants before scheduling round-robin shards. It targets
+64 mutants per job with caps of 3 shards for `tract-dsp` and 16 for
+`tract-effects`. Including planning, the workflow can schedule up to 20 jobs
+and run up to 16 mutation jobs at once. Mutation jobs have a five-hour budget
+for larger batches. Each job reuses incremental builds and runs two tests at a
+time within each mutation scenario. All shards must pass. Survivors and timeouts
+fail the job. The log prints each outcome, and each shard uploads its own report
+with `pr.diff` on PR runs.
 
 To reproduce the committed diff locally:
 

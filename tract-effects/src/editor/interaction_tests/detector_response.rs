@@ -17,6 +17,7 @@ fn setup(scale: f32) -> (Harness, Arc<ModulationTelemetry>) {
     let shared = Arc::new(ModulationTelemetry::default());
     h.editor.connect_live(&shared, 0);
     h.click(h.geometry.layout.detector_setup);
+    assert!(h.editor.dropdown_open());
     (h, shared)
 }
 fn draw(h: &mut Harness) -> tiny_skia::Pixmap {
@@ -169,4 +170,29 @@ fn too_short_detector_layout_has_no_active_controls_and_stops_existing_listen() 
             assert!(!h.editor.detector_panel_open());
         }
     }
+}
+
+#[test]
+fn short_detector_popup_draw_does_not_paint_its_previous_algorithm_menu() {
+    let (mut h, _) = setup(1.0);
+    let small = EditorGeometry {
+        window_size: (h.geometry.window_size.0, 270.0),
+        ..h.geometry
+    };
+    assert!(!detector::detector_layout(small).usable);
+    let mut expected = tiny_skia::Pixmap::new(small.window_size.0 as u32, 270).unwrap();
+    h.editor
+        .draw_popup(&mut expected, &mut h.tr, &h.effect, small);
+
+    h.click(detector::detector_layout(h.geometry).algorithm);
+    assert!(
+        h.editor
+            .effect_dropdown
+            .is_open_for(EffectAction::DetectorAlgorithm)
+    );
+    let mut actual = tiny_skia::Pixmap::new(small.window_size.0 as u32, 270).unwrap();
+    h.editor
+        .draw_popup(&mut actual, &mut h.tr, &h.effect, small);
+
+    assert!(actual.pixels() == expected.pixels());
 }

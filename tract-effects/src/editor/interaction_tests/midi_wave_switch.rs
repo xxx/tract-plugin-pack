@@ -191,6 +191,7 @@ fn wave_setup_changes_only_mapping_and_its_controls_have_keyboard_priority() {
     let response = h.click(button(&h));
     assert!(response.captured && !response.changed);
     assert!(h.editor.wave_midi_panel_open() && h.editor.captures_keyboard());
+    assert!(h.editor.dropdown_open());
     assert!(!h.press(MouseButton::Middle).changed);
     let response = h.key(Key::Enter);
     assert!(response.captured && response.changed);
@@ -409,11 +410,35 @@ fn setup_finalizes_numeric_fields_and_focus_resize_or_external_changes_dismiss_s
         first_note: 40,
         channel: Some(2),
     });
-    h.move_to(
+    let before = h.modulation.clone();
+    let response = h.move_to(
         dial.0 + dial.2 * 0.5,
         dial.1 + dial.3 * 0.5,
         Modifiers::empty(),
     );
+    assert!(response.captured && !response.changed);
+    assert_eq!(h.modulation, before);
     assert!(!h.editor.wave_midi_panel_open());
     assert!(!h.editor.text_edit.is_active());
+}
+
+#[test]
+fn wave_panel_closes_only_when_the_palette_binding_changes() {
+    let mut h = setup(1.0);
+    let palette = h.editor.mseg_edit.wave_palette().unwrap().clone();
+    h.click(button(&h));
+    assert!(h.editor.wave_midi_panel_open());
+
+    h.editor.bind_wave_palette(palette.clone());
+    assert!(h.editor.wave_midi_panel_open());
+    let replacement = Arc::new(Mutex::new(palette.lock().unwrap().clone()));
+    h.editor.bind_wave_palette(replacement.clone());
+
+    assert!(!h.editor.wave_midi_panel_open());
+    assert!(Arc::ptr_eq(
+        h.editor.mseg_edit.wave_palette().unwrap(),
+        &replacement
+    ));
+    assert!(!h.key(Key::Enter).changed);
+    assert!(h.modulation.wave_switch.is_none());
 }

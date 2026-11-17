@@ -128,6 +128,16 @@ impl Harness {
         }
         self.key(Key::Character(text.into()));
     }
+
+    fn finish_text_edit(&mut self) -> EditorResponse {
+        self.editor.finish_text_edit(EditorContext {
+            pointer_position: self.pointer,
+            effect: &mut self.effect,
+            modulation: &mut self.modulation,
+            text_renderer: &mut self.tr,
+            geometry: self.geometry,
+        })
+    }
 }
 
 mod mseg_popup_regressions {
@@ -2358,6 +2368,35 @@ mod audio_backdrop {
         assert!(h.press(MouseButton::Right).captured);
         assert!(!h.editor.dropdown_open());
         assert!(!h.editor.text_edit.is_active());
+        assert_eq!((h.effect, h.modulation), before);
+    }
+
+    #[test]
+    fn first_display_and_gain_choices_apply_from_the_audio_menu() {
+        let mut h = Harness::new();
+        h.editor.set_audio_display(AudioDisplay::Stereo);
+        h.editor.set_audio_gain(AudioGain::Plus12);
+        let before = (h.effect, h.modulation.clone());
+
+        h.click(h.geometry.layout.audio);
+        h.key(Key::Home);
+        for _ in 0..5 {
+            h.key(Key::ArrowDown);
+        }
+        let response = h.key(Key::Enter);
+        assert!(response.captured && !response.changed);
+        assert_eq!(h.editor.audio_display(), AudioDisplay::Magnitude);
+        assert_eq!(h.editor.audio_gain(), AudioGain::Plus12);
+
+        h.click(h.geometry.layout.audio);
+        h.key(Key::End);
+        for _ in 0..3 {
+            h.key(Key::ArrowUp);
+        }
+        let response = h.key(Key::Enter);
+        assert!(response.captured && !response.changed);
+        assert_eq!(h.editor.audio_display(), AudioDisplay::Magnitude);
+        assert_eq!(h.editor.audio_gain(), AudioGain::Minus12);
         assert_eq!((h.effect, h.modulation), before);
     }
 
