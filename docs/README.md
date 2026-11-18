@@ -10,6 +10,7 @@ Each plugin keeps its user manual under `docs/<plugin>/`:
 | Imagine | [imagine/imagine-manual.md](imagine/imagine-manual.md) | [imagine/imagine-manual.pdf](imagine/imagine-manual.pdf) |
 | Miff | [miff-manual.md](miff/miff-manual.md) | [miff-manual.pdf](miff/miff-manual.pdf) |
 | Minitosis | [minitosis-manual.md](minitosis/minitosis-manual.md) | [minitosis-manual.pdf](minitosis/minitosis-manual.pdf) |
+| Multosis | [multosis-manual.md](multosis/multosis-manual.md) | [multosis-manual.pdf](multosis/multosis-manual.pdf) |
 | Nap | [nap-manual.md](nap/nap-manual.md) | [nap-manual.pdf](nap/nap-manual.pdf) |
 | Pope Scope | [pope-scope-manual.md](pope-scope/pope-scope-manual.md) | [pope-scope-manual.pdf](pope-scope/pope-scope-manual.pdf) |
 | Satch | [satch/satch-manual.md](satch/satch-manual.md) | [satch/satch-manual.pdf](satch/satch-manual.pdf) |
@@ -17,6 +18,9 @@ Each plugin keeps its user manual under `docs/<plugin>/`:
 | Tinylimit | [tinylimit/tinylimit-manual.md](tinylimit/tinylimit-manual.md) | [tinylimit/tinylimit-manual.pdf](tinylimit/tinylimit-manual.pdf) |
 | Warp Zone | [warp-zone/warp-zone-manual.md](warp-zone/warp-zone-manual.md) | [warp-zone/warp-zone-manual.pdf](warp-zone/warp-zone-manual.pdf) |
 | Wavetable Filter | [wavetable-filter/wavetable-filter-manual.md](wavetable-filter/wavetable-filter-manual.md) | [wavetable-filter/wavetable-filter-manual.pdf](wavetable-filter/wavetable-filter-manual.pdf) |
+
+[Illustrated MSEG editor guide](mseg-editor.md) for Multosis, Minitosis, Miff,
+and Nap.
 
 ## Development
 

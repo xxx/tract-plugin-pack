@@ -53,17 +53,17 @@ selection handles, reusable curves/favorites, cross-plugin copy/paste, mutation,
 transforms, and triplet grids. Find them in **Tool**, **Shapes**, and **Edit**.
 In Efficient mode, curve gestures defer IR baking until release.
 
-**Shapes → Browse shapes...** previews factory curves and shared favorites for
-the opening pane. Load/Fit replaces its curve and regenerates the tail; storing
-or clearing favorites leaves the tail unchanged. See
-[browsing thumbnails](../mseg-editor.md#browsing-thumbnails).
+To keep the shape you drew, open **Shapes → Browse shapes...** and choose a tab.
 
-The browser's **Project** tab adds eight waves saved with this instance and
-shared across the three panes. See [project waves](../mseg-editor.md#project-waves).
+- **User** → **Save** opens a name field. Enter a name and click **Save** to add
+  the curve to your shared library.
+- **Favorites** → choose a slot → **Store** saves the curve to one of eight
+  shared slots. **Store** replaces the previous occupant.
+- **Project** → choose a slot → **Store** keeps the curve with this instance
+  and its DAW project or plugin preset.
 
-The **User** tab saves named curves shared across plugins, with paging, Rename
-and confirmed Delete. Management leaves the tail intact; Load/Fit regenerates it.
-See [named user presets](../mseg-editor.md#named-user-presets).
+Choose a thumbnail and click **Load** to recall it. **Fit** uses the current
+curve's level range. [Save and recall shapes](../mseg-editor.md#save-the-current-shape)
 
 Factory/User category filters and the Save/Rename Category field organize curves
 without regenerating the tail. See [categories](../mseg-editor.md#categories).
