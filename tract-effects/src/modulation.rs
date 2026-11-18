@@ -200,7 +200,7 @@ pub enum TriggerSource {
 }
 
 mod midi;
-pub use midi::{MidiCursor, MidiNoteOn};
+pub use midi::{MidiCursor, MidiNoteOn, MidiPlaybackResult};
 mod pitch;
 pub use pitch::{MIDI_PITCH_TRANSPOSE_MAX, MidiPitchReading, MidiPitchSettings};
 mod wave;
@@ -609,6 +609,7 @@ pub struct ModulationState {
     hz_phase: f32,
     transient: TransientDetector,
     precise: precise::PreciseTrigger,
+    precise_sample_prepared: bool,
     fired: bool,
     mix: Option<MixRamp>,
     smooth: smoothing::SmoothRuntime,
@@ -647,6 +648,7 @@ impl Default for ModulationState {
             hz_phase: 0.0,
             transient: TransientDetector::default(),
             precise: precise::PreciseTrigger::default(),
+            precise_sample_prepared: false,
             fired: false,
             mix: None,
             smooth: smoothing::SmoothRuntime::default(),
@@ -677,6 +679,7 @@ impl ModulationState {
         self.hz_phase = 0.0;
         self.transient.reset();
         self.precise.reset();
+        self.precise_sample_prepared = false;
         self.fired = false;
         self.reset_smoothing();
         self.wave.reset();
@@ -728,6 +731,7 @@ impl ModulationState {
         sample_rate: f64,
     ) {
         self.fired = false;
+        self.precise_sample_prepared = false;
         let block_len = left.len().min(right.len());
         if block_len > 0 {
             self.precise.prepare(config.trigger, sample_rate);
@@ -786,6 +790,49 @@ impl ModulationState {
     pub fn precise_trigger_active(&self) -> bool {
         self.precise.active()
     }
+
+    /// Consume the first detector sample before preparing its span.
+    pub fn preflight_precise_sample(&mut self, input: [f32; 2], sidechain: [f32; 2]) {
+        if self.precise_trigger_active() && !self.precise_sample_prepared {
+            self.apply_precise_reset(input, sidechain, false);
+            self.precise_sample_prepared = true;
+        }
+    }
+
+    /// Consume a detector sample and report whether the adapter must reprepare its span.
+    #[inline]
+    pub fn consume_precise_sample(
+        &mut self,
+        input: [f32; 2],
+        sidechain: [f32; 2],
+        span_remaining: usize,
+        within_span: bool,
+    ) -> bool {
+        if self.precise_sample_prepared {
+            self.precise_sample_prepared = false;
+            return false;
+        }
+        span_remaining != 0 && self.apply_precise_reset(input, sidechain, within_span)
+    }
+
+    #[inline]
+    fn apply_precise_reset(
+        &mut self,
+        input: [f32; 2],
+        sidechain: [f32; 2],
+        within_span: bool,
+    ) -> bool {
+        if !self.next_precise_trigger_with_sidechain(input, sidechain) {
+            return false;
+        }
+        if within_span {
+            self.trigger_in_span();
+        } else {
+            self.trigger();
+        }
+        true
+    }
+
     pub fn set_lookahead_path(&mut self, path: u16) {
         self.timing.requested_path = Some(path);
     }
@@ -966,6 +1013,87 @@ impl ModulationState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn precise_preflight_and_render_consume_one_sample_and_preserve_the_cue_deadline() {
+        let mut config = TrackModulation {
+            trigger: TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 5.0,
+            },
+            detector_response: TransientSettings {
+                algorithm: TransientAlgorithm::Peak,
+                detail: 100.0,
+            },
+            trigger_timing: TriggerTiming {
+                audio_delay_ms: 2.0,
+                blend_ms: 0.0,
+            },
+            ..TrackModulation::default()
+        };
+        config.audio_trigger.input = DetectorInput::Sidechain;
+        let mut state = ModulationState::default();
+        let silence = [0.0; 2];
+        state.begin_block(&config, &silence, &silence, 1000.0);
+        state.preflight_precise_sample(silence, [1.0; 2]);
+        state.preflight_precise_sample(silence, silence);
+        assert!(!state.consume_precise_sample(silence, silence, 3, false));
+        assert!(!state.consume_precise_sample(silence, silence, 0, true));
+        assert!(!state.consume_precise_sample(silence, silence, 2, true));
+        assert!(state.consume_precise_sample(silence, silence, 1, true));
+        assert_eq!(state.trigger_epoch(), 1);
+        assert!(!state.consume_precise_sample(silence, silence, 1, true));
+    }
+
+    #[test]
+    fn next_block_and_clock_resets_discard_the_previous_preflight_marker() {
+        let config = TrackModulation {
+            trigger: TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 5.0,
+            },
+            ..TrackModulation::default()
+        };
+        let silence = [0.0; 2];
+        let next_block = |state: &mut ModulationState| state.begin_block(&config, &[], &[], 1000.0);
+        let transport_restart = |state: &mut ModulationState| state.restart_clock(&config);
+        let clear: [&dyn Fn(&mut ModulationState); 3] =
+            [&next_block, &ModulationState::reset, &transport_restart];
+        for clear in clear {
+            let mut state = ModulationState::default();
+            state.begin_block(&config, &silence, &silence, 1000.0);
+            state.preflight_precise_sample(silence, silence);
+            clear(&mut state);
+            state.preflight_precise_sample([1.0; 2], silence);
+            assert!(state.fired());
+            assert!(!state.consume_precise_sample([1.0; 2], silence, 1, false));
+        }
+    }
+
+    #[test]
+    fn precise_reset_holds_delivered_mix_only_when_interrupting_a_span() {
+        let config = TrackModulation {
+            trigger: TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 5.0,
+            },
+            ..TrackModulation::default()
+        };
+        let silence = [0.0; 2];
+        for (within_span, expected_mix) in [(false, 0.75), (true, 0.25)] {
+            let mut state = ModulationState::default();
+            state.begin_block(&config, &silence, &silence, 1000.0);
+            state.mix = Some(MixRamp {
+                current: 0.25,
+                target: 0.75,
+                step: 0.5,
+                remaining: 1,
+                release: false,
+            });
+            assert!(state.consume_precise_sample([1.0; 2], silence, 1, within_span));
+            assert_eq!(state.next_mix(0.0), expected_mix);
+        }
+    }
 
     #[test]
     fn lookahead_capture_and_pending_sidechain_cues_follow_the_requested_path() {

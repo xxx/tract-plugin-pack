@@ -202,6 +202,105 @@ fn automation_release_batches_with_boundary_midi_before_any_smoothing_refresh() 
 }
 
 #[test]
+fn delayed_sidechain_reset_commits_the_midi_wave_across_host_and_grid_boundaries() {
+    use crate::modulation::{
+        DetectorInput, ModulationTarget, TransientAlgorithm, TransientSettings, TriggerTiming,
+    };
+
+    const CUE: usize = 144;
+    const FRAMES: usize = CUE + 16;
+    let mut aux = [0.0; FRAMES];
+    aux[0] = 0.8;
+    let sidechain = SidechainInput::new(&aux, &aux);
+    let render = |playing: bool, split: bool| {
+        let (mut engine, grid, mut config, mut palette) = setup();
+        let mut tracks = engine.track_effects;
+        tracks[0].mix = 0.35;
+        engine.set_effects(&tracks);
+        let row = &mut config[0];
+        row.trigger = TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 5.0,
+        };
+        row.audio_trigger.input = DetectorInput::Sidechain;
+        row.detector_response = TransientSettings {
+            algorithm: TransientAlgorithm::Peak,
+            detail: 100.0,
+        };
+        row.trigger_timing = TriggerTiming {
+            audio_delay_ms: 3.0,
+            blend_ms: 1.0,
+        };
+        row.msegs[0].time_seconds = 0.01;
+        row.msegs[1].time_seconds = 0.01;
+        row.targets[0] = Some(ModulationTarget::Mix);
+        row.depths[0] = 0.5;
+        config[15].smooth_ms[0] = 1.0;
+        engine.set_modulation(&config);
+        palette
+            .store(0, &factory_shape(FactoryShape::FlatCenter))
+            .unwrap();
+        palette
+            .store(1, &factory_shape(FactoryShape::RampDown))
+            .unwrap();
+        engine.set_wave_palette(&palette);
+        let token = engine.telemetry.waveform.request(0, 0, tracks[0].kind);
+        let mut automation = [[0; 4]; ROWS];
+        automation[0][0] = u8::from(split);
+        engine.set_wave_automation(automation);
+        let mut left = [0.37; FRAMES];
+        left[CUE] = 0.81;
+        let mut right = left;
+        let ends: &[usize] = if split { &[CUE, FRAMES] } else { &[FRAMES] };
+        assert_no_alloc::assert_no_alloc(|| {
+            let mut start = 0;
+            for &end in ends {
+                if start == CUE {
+                    engine.set_wave_automation([[0; 4]; ROWS]);
+                    engine.process(&mut [], &mut [], false, CUE as f64, 120.0, 1.0, &grid);
+                }
+                let events = [(0, 36), (CUE, 37)]
+                    .into_iter()
+                    .filter(|(offset, _)| (start..end).contains(offset))
+                    .map(|(offset, note)| MidiNoteOn {
+                        timing: offset - start,
+                        note,
+                        channel: 2,
+                    });
+                engine.process_with_inputs(
+                    &mut left[start..end],
+                    &mut right[start..end],
+                    sidechain.offset(start),
+                    playing,
+                    CUE as f64,
+                    120.0,
+                    1.0,
+                    &grid,
+                    events,
+                );
+                start = end;
+            }
+        });
+        let frame = engine.modulation.frame(0, tracks[0].kind);
+        assert_eq!(engine.modulation.capture_epoch(0, 0), 1);
+        assert_eq!(frame.wave.unwrap().1, Some(1));
+        assert!(frame.mix.is_some());
+        let capture = &engine.telemetry.waveform;
+        let point = (0..capture.head())
+            .filter_map(|index| capture.point(index, token))
+            .find(|point| point.input == 0.81)
+            .unwrap();
+        assert_eq!(point.bin, 0);
+        assert_eq!(point.output, left[CUE].abs());
+        let peer_phase = engine.modulation.precise_phase(15, 0);
+        (left, right, frame, peer_phase)
+    };
+    let interior = render(false, false);
+    assert_eq!(render(false, true), interior);
+    assert_eq!(render(true, false), interior);
+}
+
+#[test]
 fn smoothed_automation_on_a_subblock_boundary_matches_a_sample_timed_midi_switch() {
     let (mut actual, grid, mut config, _) = setup();
     let (mut reference, _, _, _) = setup();

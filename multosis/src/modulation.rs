@@ -228,30 +228,31 @@ impl Modulation {
         }
     }
 
-    pub fn precise_triggers(&mut self, input: [f32; 2]) -> u16 {
-        self.precise_triggers_with_sidechain(input, [0.0; 2])
+    pub fn preflight_precise_samples(&mut self, input: [f32; 2], sidechain: [f32; 2]) {
+        for &row in &self.precise_rows[..self.precise_count] {
+            self.states[row].preflight_precise_sample(input, sidechain);
+        }
     }
 
-    pub fn precise_triggers_with_sidechain(&mut self, input: [f32; 2], sidechain: [f32; 2]) -> u16 {
+    pub fn consume_precise_samples(
+        &mut self,
+        input: [f32; 2],
+        sidechain: [f32; 2],
+        span_remaining: usize,
+        within_span: bool,
+    ) -> u16 {
         let mut mask = 0;
-        for i in 0..self.precise_count {
-            let row = self.precise_rows[i];
-            if self.states[row].next_precise_trigger_with_sidechain(input, sidechain) {
+        for &row in &self.precise_rows[..self.precise_count] {
+            if self.states[row].consume_precise_sample(
+                input,
+                sidechain,
+                span_remaining,
+                within_span,
+            ) {
                 mask |= 1 << row;
             }
         }
         mask
-    }
-    pub fn fire_precise(&mut self, rows: u16, within_span: bool) {
-        for (row, state) in self.states.iter_mut().enumerate() {
-            if rows & (1 << row) != 0 {
-                if within_span {
-                    state.trigger_in_span();
-                } else {
-                    state.trigger();
-                }
-            }
-        }
     }
 
     pub fn midi_mask(&self, event: MidiNoteOn) -> u16 {
@@ -259,26 +260,23 @@ impl Modulation {
             .iter()
             .enumerate()
             .fold(0, |mask, (row, config)| {
-                mask | if config.trigger.accepts_midi(event)
-                    || config
-                        .wave_switch
-                        .and_then(|mapping| mapping.slot(event))
-                        .is_some_and(|slot| self.wave_bank.get(slot).is_some())
-                {
-                    1 << row
-                } else {
-                    0
-                }
+                mask | (u16::from(config.accepts_playback_note(&self.wave_bank, event)) << row)
             })
     }
 
     pub fn fire_midi(&mut self, event: MidiNoteOn, within_span: bool) -> u16 {
         let mut mask = 0;
         for (row, state) in self.states.iter_mut().enumerate() {
-            if state.select_midi_wave(&self.config[row], &self.wave_bank, event) {
+            let result = state.dispatch_playback_note(
+                &self.config[row],
+                &self.wave_bank,
+                event,
+                within_span,
+            );
+            if result.wave_staged {
                 self.pending_wave_rows |= 1 << row;
             }
-            if state.midi_note_on(&self.config[row], event, within_span) {
+            if result.retriggered {
                 mask |= 1 << row;
             }
         }

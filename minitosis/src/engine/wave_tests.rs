@@ -235,6 +235,115 @@ fn simultaneous_notes_apply_only_the_final_wave_and_invalid_slots_do_not_match()
 }
 
 #[test]
+fn delayed_sidechain_reset_commits_the_midi_wave_at_the_same_sample_across_host_splits() {
+    use tract_effects::modulation::{
+        DetectorInput, ModulationTarget, TransientAlgorithm, TransientSettings, TriggerTiming,
+    };
+
+    const CUE: usize = 144;
+    const FRAMES: usize = CUE + 16;
+    let mut input = [0.37; FRAMES];
+    input[CUE] = 0.81;
+    let mut aux = [0.0; FRAMES];
+    aux[0] = 0.8;
+    let sidechain = SidechainInput::new(&aux, &aux);
+    let render = |split: bool| {
+        let (mut processor, mut track, mut palette) = setup();
+        track.mix = 0.35;
+        let config = &mut processor.modulation;
+        config.trigger = TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 5.0,
+        };
+        config.audio_trigger.input = DetectorInput::Sidechain;
+        config.detector_response = TransientSettings {
+            algorithm: TransientAlgorithm::Peak,
+            detail: 100.0,
+        };
+        config.trigger_timing = TriggerTiming {
+            audio_delay_ms: 3.0,
+            blend_ms: 1.0,
+        };
+        config.msegs[0].time_seconds = 0.01;
+        config.msegs[1] = MsegData {
+            play_mode: PlayMode::Cyclic,
+            sync_mode: SyncMode::Time,
+            time_seconds: 0.01,
+            ..MsegData::default()
+        };
+        config.targets[0] = Some(ModulationTarget::Mix);
+        config.depths[0] = 0.5;
+        palette
+            .store(0, &factory_shape(FactoryShape::FlatCenter))
+            .unwrap();
+        palette
+            .store(1, &factory_shape(FactoryShape::RampDown))
+            .unwrap();
+        processor.set_wave_palette(&palette);
+        let telemetry = Arc::new(ModulationTelemetry::default());
+        let token = telemetry.waveform.request(0, 0, track.kind);
+        processor.connect_waveform(&telemetry);
+        processor.set_wave_automation([u8::from(split), 0, 0, 0]);
+        let note = |timing, note| MidiNoteOn {
+            timing,
+            note,
+            channel: 2,
+        };
+        let mut output = [[0.0; 2]; FRAMES];
+        let ends: &[usize] = if split { &[CUE, FRAMES] } else { &[FRAMES] };
+        assert_no_alloc::assert_no_alloc(|| {
+            let mut start = 0;
+            for &end in ends {
+                if start == CUE {
+                    processor.set_wave_automation([0; 4]);
+                    processor.prepare_block(&track, &[], &[], 120.0);
+                }
+                let block = &input[start..end];
+                processor.prepare_block_with_sidechain(
+                    &track,
+                    block,
+                    block,
+                    sidechain.offset(start),
+                    120.0,
+                );
+                assert!(!processor.midi_note_on(note(0, if start == 0 { 36 } else { 37 }), false));
+                processor.advance_segment(&track, end - start, 120.0);
+                for index in start..end {
+                    if index == CUE && start == 0 {
+                        assert!(!processor.midi_note_on(note(CUE, 37), true));
+                    }
+                    output[index] = processor.process_sample_with_sidechain(
+                        [input[index]; 2],
+                        sidechain.sample(index),
+                        track.mix,
+                        false,
+                    );
+                    assert_eq!(processor.state.trigger_epoch(), u64::from(index >= CUE));
+                    if index == CUE {
+                        let frame = processor.modulation_frame();
+                        assert_eq!(frame.phases[0], 0.0);
+                        assert_eq!(frame.wave.unwrap().1, Some(1));
+                        assert!((0.49..0.5).contains(&frame.mix.unwrap().0));
+                    }
+                }
+                processor.finish_waveform_block();
+                start = end;
+            }
+        });
+        let frame = processor.modulation_frame();
+        assert!(frame.mix.is_some());
+        let point = (0..telemetry.waveform.head())
+            .filter_map(|index| telemetry.waveform.point(index, token))
+            .find(|point| point.input == input[CUE])
+            .unwrap();
+        assert_eq!(point.bin, 0);
+        assert_eq!(point.output, output[CUE][0].abs());
+        (output, frame)
+    };
+    assert_eq!(render(false), render(true));
+}
+
+#[test]
 fn same_sample_audio_trigger_uses_the_final_wave_without_erasing_fft_history() {
     use tract_effects::modulation::ModulationTarget;
     let kind = EffectKind::SpectralShift;
