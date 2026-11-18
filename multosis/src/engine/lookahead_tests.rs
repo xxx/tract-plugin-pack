@@ -57,14 +57,21 @@ fn inactive_none_rows_delay_global_dry_and_wet_and_compensate_downstream_cues() 
     }
 }
 #[test]
-fn mute_and_solo_paths_adopt_only_with_real_samples() {
+fn mute_and_solo_update_effect_latency_before_adopting_the_lookahead_path() {
     let (mut engine, grid, mut tracks) = setup();
+    for row in [0, 3] {
+        tracks[row].kind = EffectKind::WarpZone;
+        tracks[row].params = crate::effects::default_params_for_kind(EffectKind::WarpZone);
+    }
+    engine.set_effects(&tracks);
     engine.prepare_lookahead();
-    assert_eq!(engine.chain_latency_samples(), 12);
+    assert_eq!(engine.chain_latency_samples(), 12 + 2 * 4096);
     tracks[3].muted = true;
     engine.set_effects(&tracks);
-    engine.process(&mut [], &mut [], false, 100.0, 120.0, 1.0, &grid);
-    assert_eq!(engine.chain_latency_samples(), 12);
+    assert_no_alloc::assert_no_alloc(|| {
+        engine.process(&mut [], &mut [], false, 100.0, 120.0, 1.0, &grid);
+    });
+    assert_eq!(engine.chain_latency_samples(), 12 + 4096);
     assert_no_alloc::assert_no_alloc(|| {
         engine.process(
             &mut [0.0; 16],
@@ -76,9 +83,13 @@ fn mute_and_solo_paths_adopt_only_with_real_samples() {
             &grid,
         );
     });
-    assert_eq!(engine.chain_latency_samples(), 8);
+    assert_eq!(engine.chain_latency_samples(), 8 + 4096);
     tracks[7].soloed = true;
     engine.set_effects(&tracks);
+    assert_no_alloc::assert_no_alloc(|| {
+        engine.process(&mut [], &mut [], false, 100.0, 120.0, 1.0, &grid);
+    });
+    assert_eq!(engine.chain_latency_samples(), 8);
     engine.process(
         &mut [0.0; 16],
         &mut [0.0; 16],

@@ -4,7 +4,9 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use multosis::effects::{EffectKind, TrackEffect, default_params_for_kind};
 use multosis::engine::AudioEngine;
 use multosis::grid::Grid;
-use multosis::modulation::{ModulationTarget, TrackModulation, TriggerSource};
+use multosis::modulation::{
+    AuditionSettings, AuditionSource, ModulationTarget, TrackModulation, TriggerSource,
+};
 use tiny_skia_widgets::mseg::{MAX_NODES, MsegNode, SyncMode};
 
 /// Build an engine with the default modulation on every row and `kind`
@@ -176,6 +178,36 @@ fn bench_process(c: &mut Criterion) {
             format!("process_512samp_sample_timed_{node_count}_nodes{suffix}"),
             |b| b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid)),
         );
+    }
+
+    for (listen, name) in [
+        (false, "process_512samp_lookahead_listen_off"),
+        (true, "process_512samp_lookahead_listen_on"),
+    ] {
+        let mut engine = engine_mixed();
+        let mut modulation = std::array::from_fn(TrackModulation::default_for_row);
+        modulation[0].trigger = TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 50.0,
+        };
+        modulation[0].lookahead = true;
+        engine.set_modulation(&modulation);
+        engine.prepare_lookahead();
+        if listen {
+            let source = AuditionSource::Trigger;
+            engine.telemetry.audition.begin(
+                0,
+                EffectKind::Svf,
+                source,
+                AuditionSettings::for_source(&modulation[0], source).unwrap(),
+                engine.telemetry.waveform.generation(),
+            );
+        }
+        let mut left = [0.0; 512];
+        let mut right = [0.0; 512];
+        group.bench_function(name, |b| {
+            b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid));
+        });
     }
 
     // Structural baseline: every row's effect is `None` (silence). The
