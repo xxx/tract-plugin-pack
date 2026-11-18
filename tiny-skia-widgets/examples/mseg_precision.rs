@@ -57,7 +57,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     factory_shape(FactoryShape::Sine).apply(&mut data, false)?;
     let mut state = MsegEditState::new();
-    select(&mut state, &mut data, first, 12, false);
+    let point = 1;
+    select(&mut state, &mut data, first, point, false);
     let layout = state.layout(first, 1.0);
     state.on_scroll(
         phase_to_x(&layout, 0.4),
@@ -71,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.open_point_inspector(&data);
     state.set_inspector_readout(&format!(
         "Amplitude: {:.2} dB",
-        20.0 * data.nodes[12].value.log10()
+        20.0 * data.nodes[point].value.log10()
     ));
     draw_mseg(
         &mut pm,

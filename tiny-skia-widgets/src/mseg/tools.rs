@@ -370,6 +370,19 @@ mod tests {
         data
     }
 
+    fn dense_curve() -> MsegData {
+        let mut data = MsegData {
+            node_count: 33,
+            ..MsegData::default()
+        };
+        for (i, node) in data.nodes[..data.node_count].iter_mut().enumerate() {
+            let phase = i as f32 / 32.0;
+            node.time = phase;
+            node.value = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
+        }
+        data
+    }
+
     #[test]
     fn weighted_native_reversal_matches_the_reflected_sampled_shape() {
         let mut data = shape(FactoryShape::Triangle);
@@ -459,7 +472,7 @@ mod tests {
 
     #[test]
     fn selection_clipboard_normalizes_only_time_and_preserves_segment_geometry() {
-        let mut data = shape(FactoryShape::Sine);
+        let mut data = dense_curve();
         data.nodes[4].tension = 0.7;
         data.nodes[5].stepped = true;
         let clip = capture_selection(&data, 0b1111 << 4).unwrap();
@@ -476,7 +489,7 @@ mod tests {
 
     #[test]
     fn paste_into_selection_supports_replace_merge_and_preserves_the_tail() {
-        let mut base = shape(FactoryShape::Sine);
+        let mut base = dense_curve();
         base.nodes[24].tension = 0.6;
         base.nodes[24].stepped = true;
         let clip = crate::mseg::factory_shape(FactoryShape::Triangle);
@@ -501,11 +514,11 @@ mod tests {
 
     #[test]
     fn selection_paste_overflow_is_atomic() {
-        let mut data = shape(FactoryShape::Sine);
+        let mut data = dense_curve();
         repeat(&mut data, 0, 3).unwrap();
         data.insert_node(0.001, 0.5).unwrap();
         let before = data;
-        let clip = crate::mseg::factory_shape(FactoryShape::Sine);
+        let clip = crate::mseg::CurveShape::capture(&dense_curve());
         assert_eq!(
             paste_selection(&mut data, &clip, 0b11, true),
             Err(ShapeError::Capacity)
@@ -556,7 +569,7 @@ mod tests {
 
     #[test]
     fn rejection_never_partially_modifies_a_document() {
-        let mut data = shape(FactoryShape::Sine);
+        let mut data = dense_curve();
         let original = data;
         assert_eq!(repeat(&mut data, 0, 3).unwrap().0, true);
         let full = data;
@@ -571,7 +584,7 @@ mod tests {
 
     #[test]
     fn mutation_preserves_rhythm_count_and_unselected_points() {
-        let mut data = shape(FactoryShape::Sine);
+        let mut data = dense_curve();
         let before = data;
         assert!(mutate(&mut data, 0b11100, 19, true, None));
         assert_eq!(data.node_count, before.node_count);

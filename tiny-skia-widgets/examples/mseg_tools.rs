@@ -35,8 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     factory_shape(FactoryShape::Sine).apply(&mut data, false)?;
     let mut selection = MsegEditState::new();
     let layout = mseg_layout(first, false, 1.0);
-    let start = (phase_to_x(&layout, 0.18), value_to_y(&layout, 0.97));
-    let end = (phase_to_x(&layout, 0.7), value_to_y(&layout, 0.03));
+    let start = (phase_to_x(&layout, 0.1), value_to_y(&layout, 1.0));
+    let end = (phase_to_x(&layout, 0.9), value_to_y(&layout, 0.0));
     selection.on_mouse_down(start.0, start.1, &mut data, first, 1.0, false);
     selection.on_mouse_move(end.0, end.1, &mut data, first, 1.0, false);
     selection.on_mouse_up(&mut data, first, 1.0);
