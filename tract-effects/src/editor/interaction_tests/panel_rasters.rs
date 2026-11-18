@@ -51,7 +51,7 @@ fn midi_filter_rows_render_the_selected_values_and_use_scaled_geometry() {
                 note: Some(79),
                 channel: Some(12),
             },
-            [(rate, "Note", "79"), (aux, "Ch.", "13")],
+            [(rate, "Note", "G5"), (aux, "Ch.", "13")],
         ),
         (
             TriggerSource::MidiPitch {
@@ -112,9 +112,11 @@ fn midi_filter_rows_render_the_selected_values_and_use_scaled_geometry() {
     .unwrap();
     let rect = MidiField::Note.rect(&h.geometry.layout, scale);
     assert_eq!(rect, (50.0, 75.0, 17.0, 42.5));
-    let longest_label =
-        h.tr.text_width("127", 21.25)
-            .max(h.tr.text_width("Any", 21.25));
+    let longest_label = MidiField::Note
+        .items()
+        .iter()
+        .map(|label| h.tr.text_width(label, 21.25))
+        .fold(0.0_f32, f32::max);
     assert!((list.popup_rect.2 - (longest_label + 19.0)).abs() < 1e-5);
 }
 
@@ -729,7 +731,7 @@ fn wave_popup_rasters_cover_route_controls_and_project_override_at_compact_scale
         .bind_wave_palette(Arc::new(Mutex::new(widgets::mseg::WavePalette::default())));
     h.click(widgets::mseg::wave_midi_button_rect(strip(&h), 1.0));
     assert!(h.editor.wave_midi_panel_open());
-    assert_raster("waves-off", popup(&mut h), &[0x63ab_552c_9fff_2d68]);
+    assert_raster("waves-off", popup(&mut h), &[0x5ba2_7363_8001_253b]);
 
     h.resize(0.5);
     h.editor.selected_mseg = 3;
@@ -744,7 +746,7 @@ fn wave_popup_rasters_cover_route_controls_and_project_override_at_compact_scale
     for _ in 0..4 {
         h.key(Key::ArrowDown);
     }
-    assert_raster("waves-project", popup(&mut h), &[0xb629_e0ab_2b15_affe]);
+    assert_raster("waves-project", popup(&mut h), &[0x9a7c_5a22_a90a_1449]);
     h.key(Key::Enter);
     assert_raster("waves-picker", popup(&mut h), &[0x35fe_6550_4a8f_e5ec]);
 
@@ -753,7 +755,7 @@ fn wave_popup_rasters_cover_route_controls_and_project_override_at_compact_scale
     h.editor.set_wave_automation([0; 4]);
     with_session(&mut h, |session| session.open_wave_midi());
     assert!(h.editor.wave_midi_panel_open());
-    assert_raster("waves-narrow", popup(&mut h), &[0xaa47_0087_ed8f_113d]);
+    assert_raster("waves-narrow", popup(&mut h), &[0x83eb_f690_037b_eed9]);
 }
 
 fn wave_button(h: &mut Harness) -> Pixmap {

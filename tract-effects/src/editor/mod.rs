@@ -2577,10 +2577,7 @@ mod tests {
             editor.effect_dropdown.open(
                 action,
                 (20.0, 20.0, 140.0, 30.0),
-                widgets::dropdown::DropdownList {
-                    items: &["one", "two"],
-                    sections: &[],
-                },
+                widgets::dropdown::DropdownList::flat(&["one", "two"]),
                 0,
                 true,
                 (800.0, 600.0),

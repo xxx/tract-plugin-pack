@@ -423,10 +423,16 @@ impl Session<'_> {
             .iter()
             .position(|value| *value == field)
             .unwrap_or(0);
+        let items = DropdownList::flat(field.items());
+        let items = if field == Field::FirstNote {
+            items.with_filter(super::midi::note_matches)
+        } else {
+            items
+        };
         self.state.wave_midi.dropdown.open(
             field,
             lay.values[index],
-            DropdownList::flat(field.items()),
+            items,
             self.state.wave_midi.index(field),
             field == Field::FirstNote,
             (self.physical_width, self.physical_height),

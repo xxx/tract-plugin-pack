@@ -2448,6 +2448,26 @@ mod midi_retrigger {
     }
 
     #[test]
+    fn searching_by_pitch_name_or_number_selects_the_corresponding_note() {
+        let mut h = Harness::new();
+        select_source(&mut h);
+        let note = MidiField::Note.rect(&h.geometry.layout, 1.0);
+        assert_eq!(MidiField::Note.items()[62], "C#4 (61)");
+        for (query, number) in [("c#4", 61), ("1", 1)] {
+            h.click(note);
+            h.key(Key::Character(query.into()));
+            assert!(h.key(Key::Enter).changed);
+            assert_eq!(
+                h.modulation.trigger,
+                TriggerSource::MidiNote {
+                    note: Some(number),
+                    channel: None,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn midi_filters_are_stepped_saved_and_undoable_without_changing_curves() {
         let mut h = Harness::new();
         select_source(&mut h);
