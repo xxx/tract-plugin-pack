@@ -722,6 +722,8 @@ Click it, or press **L** with no numeric edit, dropdown or drag active, to hear
 that panel's filtered Main or Sidechain input. Click/press again to return to
 normal processing. Output gain still applies.
 
+![Audio detector set to Main, with the Listen button highlighted below the detector meter.](mseg/detector-listen.png)
+
 The trigger detector monitors its mono sum through High-pass/Low-pass. The
 follower monitors stereo through its filters and shared Gain; routes can remain
 Off. Threshold, Attack/Hold/Release and curve amounts do not shape the preview.
@@ -755,6 +757,8 @@ The old Time/Beat controls show the measured note and Hz/kHz, **Waiting**, or
 **No data** when there is no matching measurement yet. Saved Time/Beat lengths
 return when leaving MIDI pitch; they do not change its rate or tempo response.
 
+![MIDI pitch controls before and after a note. The top row reads Waiting. The bottom row shows Note 33 at 27.5 Hz with transpose set to −12 semitones.](mseg/midi-pitch-readout.png)
+
 Cyclic, OneShot and hold markers retain their traversal behavior. A shorter
 hold loop naturally repeats faster than the full-curve Hz rate. Every new note
 restarts a completed OneShot. MIDI/Project waves and envelope-follower routes
@@ -776,6 +780,8 @@ timeline. Every curve keeps its own length: **Beat** divides the host's quarter
 note position by its beat length; **Time** uses song seconds and its time length.
 The first sample plays the supplied position, including after a seek or restart.
 Active host loops also wrap within a processing block when their ranges are known.
+
+![The trigger reads DAW, Beat is selected, and Length is one bar. The playhead is partway across the envelope plot, which also shows the captured input waveform.](mseg/daw-position.png)
 
 **Cyclic** repeats across the timeline, including negative pre-roll positions.
 **OneShot** starts at timeline zero and stops at its endpoint or sustain marker.
@@ -821,6 +827,8 @@ paused; the strip shows **Wave P1–P8**. Hold markers are ignored during Projec
 playback. Choose Drawn/MIDI and turn MIDI Off to restore normal geometry editing
 and saved hold markers. View/Help and timing/routing controls remain available.
 
+![Project wave 2 supplies the displayed shape. The strip reads Wave P2 and the geometry editing controls are dimmed.](mseg/automated-wave.png)
+
 Wave values and the Project bank save with host state; older presets default
 to Drawn/MIDI. Reset reapplies host Wave values while clearing runtime MIDI
 selection; transport retrigger retains both. Multosis Wave lanes remain attached
@@ -834,6 +842,8 @@ Both trigger modes restart all four envelopes on the row or effect at the
 **Rate** setting of 0.05–20 Hz, independently of DAW tempo. At **5 Hz**, the
 restart interval is 200 ms. **Time/Beat** and **Length** still set how quickly
 each curve moves between its points.
+
+![The trigger menu lists both Free Hz and Free Hz (sample). After selecting the sample mode, the closed control reads Hz exact beside the Rate dial.](mseg/free-hz-menu.png)
 
 | Trigger mode | When it restarts | When to choose it |
 |---|---|---|
@@ -851,7 +861,11 @@ progress.
 
 ### Transient (sample)
 
-The closed button reads **Audio** and uses the existing Sens/Hold dials.
+The closed button reads **Audio**. The **Detect...** button sits just above it,
+with **Sens** and **Hold** to the right.
+
+![Transient (sample) controls. Detect opens the detector panel, and the adjacent Sens and Hold dials show 80% and 50 ms.](mseg/transient-controls.png)
+
 Transient (sample) uses the same dual-envelope detection
 and Hold rules as Transient, but restarts on each qualifying sample, including
 multiple detections in one buffer. By default it listens to the plugin's original
@@ -872,6 +886,8 @@ Choose **Trigger → Timing...** in Multosis/Minitosis to open timing controls
 without changing the current trigger source. Settings save per row/effect and
 add no host automation parameters. Lookahead, Audio shift and Retrigger blend
 default Off; only enabled audio lookahead adds reported latency.
+
+![Trigger timing with Lookahead Off, Audio shift at 2.00 ms, and Retrigger blend at 5.00 ms.](mseg/trigger-timing.png)
 
 - **Audio shift (0–4 ms, or -4–+4 ms with Lookahead):** offsets phase resets from
   Transient (sample), rounded to the nearest sample. The detector and its
@@ -917,6 +933,9 @@ still reads live original Main/Sidechain. **Audio shift** can then be -4..+4 ms.
 A negative shift moves resets earlier relative to the detector's cue on the
 delayed input; zero retains alignment against the added lookahead. Detection
 itself still follows the selected algorithm's causal response.
+
+![Trigger timing with Lookahead enabled at 4 ms. Audio shift is set to −2.00 ms, which moves the reset earlier relative to the delayed input.](mseg/trigger-lookahead.png)
+
 Existing effect/FFT latency keeps its prior relationship to modulation and is
 separate from this shift. MIDI/free/DAW clocks and wave-note offsets retain their
 normal processing-time definitions, as with other latency-adding effects.
@@ -954,6 +973,8 @@ The panel provides **Input: Main / Sidechain**, **Algorithm**, **Detail**,
 **Threshold**, **High-pass**, and **Low-pass**. Input defaults to Main,
 Algorithm to Envelope, Detail to 50%, and threshold/filters to Off. Older
 projects and the other trigger modes keep their existing behavior.
+
+![Audio detector showing Peak rise with 75% Detail. The detector meter is below the Threshold and filter sliders.](mseg/audio-detector.png)
 
 - **Envelope:** the original fast/slow rectified-envelope detector. At Detail
   50%, its attack/release windows remain 0.5/5 ms (fast) and 30/200 ms (slow).
@@ -1015,7 +1036,11 @@ Use **Audio → Sidechain** to align curves against the unfiltered source. This
 view is independent of Detect's Input choice. A stereo-only layout also remains
 available for hosts choosing the previous audio configuration.
 
+![The sidechain channel waveforms appear behind the curve. Frozen: SC in the Audio control identifies the held sidechain capture.](mseg/sidechain-backdrop.png)
+
 ## Edit commands
+
+![The Edit menu open over selected points, showing Compress and Expand, Copy and Paste, Flip, Reverse, Nudge, and Quantize.](mseg/edit-commands.png)
 
 - **Compress/Expand values/times** retain their existing behavior and require a
   selection. Each invocation scales the selected axis by 0.75 or 1.25 around
@@ -1058,8 +1083,12 @@ or overlap points are rejected as a whole. The grid menu adds **6 / 8**,
 | Shift+Left / Right | Nudge by 1/16 of a cell |
 | Delete / Backspace | Delete selected interior points |
 | Escape | Close a menu or cancel a curve gesture |
+| Ctrl/Cmd+Z | Undo in Multosis or Minitosis |
+| Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y | Redo in Multosis or Minitosis |
 
 Menus accept arrows, Home/End, Page Up/Down, Enter, Escape, and wheel scrolling.
 Active text fields retain keyboard priority. Multosis/Minitosis record each
 curve gesture or command as one undo step. Miff rebakes on changes. Nap defers
 Efficient-engine IR baking during a gesture and bakes on release.
+
+![In Minitosis, dragging the gold triangle's peak lowers it to 0.50 on the left. Ctrl+Z restores the peak to 1.00 on the right.](mseg/undo-curve-edit.png)
