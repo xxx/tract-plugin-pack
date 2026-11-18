@@ -86,8 +86,10 @@ marks identify playback wrap jumps, including stepped tails. See
 The **1 / 2 / 3 / Amp** tabs, curve gestures, snapping, ghost curves, target/depth routing, and curve randomization match [Multosis's MSEG editor](../multosis/multosis-manual.md#msegs-per-row-modulation). The amplitude curve defaults to full level; assignable depths default to zero.
 
 **Smooth** adds a saved per-envelope lag (Off–1000 ms) before Depth/Target
-mapping. **Trace** displays measured source output, while dial arcs display
-the delivered target values. See [live smoothing and trace](../mseg-editor.md#live-smoothing-and-trace)
+mapping. **Trace** is off by default. When enabled, it shows where the measured
+source visibly differs from the drawn curve. Dial arcs display the delivered
+target values. See
+[live smoothing and trace](../mseg-editor.md#live-smoothing-and-trace)
 for timing, reset behavior, and numeric controls.
 
 **Audio** adds a phase-aligned input/output magnitude backdrop beneath the

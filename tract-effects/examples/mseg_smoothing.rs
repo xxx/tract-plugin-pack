@@ -46,6 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut clock = TraceClock::default();
     let mut editor = EffectEditor::default();
     editor.connect_live(&telemetry, 0);
+    editor.set_trace_enabled(true);
     let geometry = EditorGeometry {
         layout: effect_layout((16.0, 60.0, 1304.0, 640.0), 1.0),
         scale: 1.0,
@@ -54,7 +55,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     editor.draw(&mut pm, &mut text, &track, &config, [0.0; 4], geometry);
     let input = [0.1; 960];
     for _ in 0..145 {
-        clock.begin_block(&telemetry, 48000.0);
+        clock.begin_block_for_curve(&telemetry, 48000.0, |request| {
+            config.msegs.get(request.slot)
+        });
         state.begin_block(&config, &input, &input, 48000.0);
         state.advance_segment(&config, &track, &mut effect, input.len(), 120.0, 48000.0);
         for _ in &input {
@@ -79,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut pm,
             24.0,
             30.0,
-            "75 ms source smoothing — measured audio output",
+            "75 ms source smoothing — measured modulation",
             20.0,
             color_text(),
         );

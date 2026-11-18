@@ -3092,6 +3092,7 @@ mod smoothing_controls {
     #[test]
     fn smooth_numeric_entry_is_saved_per_slot_and_trace_toggle_is_view_only() {
         let mut h = Harness::new();
+        assert!(!h.editor.trace_enabled());
         let before = h.modulation.clone();
         let slot = h.editor.selected_mseg;
         let smooth = h.geometry.layout.smooth;
@@ -3110,9 +3111,12 @@ mod smoothing_controls {
         let trace = h.geometry.layout.trace;
         let response = h.click(trace);
         assert!(response.captured && !response.changed);
-        assert!(!h.editor.trace_enabled());
+        assert!(h.editor.trace_enabled());
         assert_eq!(h.modulation, config);
         h.editor.cancel_interaction();
+        assert!(h.editor.trace_enabled());
+        let response = h.click(trace);
+        assert!(response.captured && !response.changed);
         assert!(!h.editor.trace_enabled());
     }
 

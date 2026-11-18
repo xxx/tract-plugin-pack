@@ -138,6 +138,11 @@ impl MsegEditState {
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
     }
+
+    pub fn is_editing_curve(&self) -> bool {
+        self.drag
+            .is_some_and(|target| !matches!(target, DragTarget::Marquee | DragTarget::Pan))
+    }
     pub fn set_transform_modifiers(&mut self, alt: bool, control: bool) {
         self.power.alt = alt;
         self.power.control = control;

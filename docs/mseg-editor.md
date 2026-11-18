@@ -403,12 +403,15 @@ Explicit Reset clears it; a DSP flush clears it while preserving phase. Amp and
 Mix update each sample; continuous effect targets update on a 1 kHz control
 clock. Existing Free Hz and Transient triggers still align to processing blocks.
 
-Trace toggles the white measured source history. It shows actual envelope
-output before Depth/Target mapping; colored dial arcs show values delivered to
-their destinations, including Mix transitions. Trace follows zoom/pan and
-clears when switching envelopes, rows, or effects. It fills as audio is processed
-and hides while Minitosis prepares a newly selected effect. Toggling Trace does
-not change the sound or project state.
+Trace is off by default. Turn it on to see where the white measured envelope
+output visibly differs from the drawn curve, for example when Smooth or an
+envelope follower changes the source. Trace draws beneath the curve and measures
+the source before Depth and Target mapping. Colored dial arcs show values
+delivered to their destinations, including Mix transitions. Trace follows zoom
+and pan, pauses during curve drags, and starts fresh after curve edits or when
+switching envelopes, rows, effects, or active MIDI waves. It fills as audio is
+processed and hides while Minitosis prepares a newly selected effect. The toggle
+is a display preference.
 
 ### Audio waveform backdrop
 

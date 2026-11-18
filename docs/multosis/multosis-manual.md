@@ -296,8 +296,10 @@ marks identify playback wrap jumps, including stepped tails. Commands use the
 hold-loop region when configured. See [loop seam tools](../mseg-editor.md#loop-seam-tools).
 
 **Smooth** adds a saved per-envelope lag (Off–1000 ms) before Depth/Target
-mapping. **Trace** displays measured source output, while dial arcs show the
-delivered target values. See [live smoothing and trace](../mseg-editor.md#live-smoothing-and-trace)
+mapping. **Trace** is off by default. When enabled, it shows where the measured
+source visibly differs from the drawn curve. Dial arcs display the delivered
+target values. See
+[live smoothing and trace](../mseg-editor.md#live-smoothing-and-trace)
 for timing, reset behavior, and numeric controls.
 
 **Audio** adds an input/output magnitude backdrop for the selected row, with

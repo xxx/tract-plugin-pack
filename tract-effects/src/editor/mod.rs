@@ -164,7 +164,7 @@ impl EffectEditor {
             mouse_pos: (0.0, 0.0),
             trigger_choices,
             live: None,
-            trace_enabled: true,
+            trace_enabled: false,
             measured_arcs_only: false,
             audio_view: AudioView::Off,
             audio_frozen: false,
@@ -1153,6 +1153,8 @@ impl<'a> Session<'a> {
                 if let Some(bins) = audio_bins {
                     widgets::mseg::draw_mseg_audio(pm, layout, bins, audio_style);
                 }
+                self.state
+                    .draw_live_trace(pm, layout, &modu.msegs[sel], self.scale_factor);
             },
         );
         for (m, mseg) in modu.msegs.iter().enumerate() {
@@ -1187,8 +1189,6 @@ impl<'a> Session<'a> {
             phase,
             self.scale_factor,
         );
-        self.state
-            .draw_live_trace(pixmap, lay.mseg_pane, self.scale_factor);
         // Selector + target + depth (when on an assignable MSEG).
         let (target, depth) = if sel == 0 {
             (None, 0.0)
@@ -1421,7 +1421,7 @@ impl<'a> Session<'a> {
                 }
             }
             EffectHit::Trace => {
-                self.state.trace_enabled = !self.state.trace_enabled;
+                self.state.set_trace_enabled(!self.state.trace_enabled());
             }
             EffectHit::MidiFilter(field) => self.open_midi_filter(field),
             EffectHit::DetectorSetup => self.open_detector(),

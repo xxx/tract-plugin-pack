@@ -55,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let telemetry = Arc::new(ModulationTelemetry::default());
     let mut editor = EffectEditor::default();
     editor.connect_live(&telemetry, 0);
+    editor.set_trace_enabled(true);
     editor.set_audio_view(AudioView::Input);
     editor.draw(&mut pm, &mut text, &track, &config, [0.0; 4], geometry);
     let mut state = ModulationState::default();
@@ -83,7 +84,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             0.6 * (std::f32::consts::TAU * 70.0 * t).sin()
                 * (0.65 + 0.35 * (std::f32::consts::TAU * 2.0 * t).sin())
         });
-        trace.begin_block(&telemetry, 48000.0);
+        trace.begin_block_for_curve(&telemetry, 48000.0, |request| {
+            config.msegs.get(request.slot)
+        });
         state.set_host_position(frame);
         state.begin_block(&config, &input, &input, 48000.0);
         waveform.begin_block(&telemetry.waveform);

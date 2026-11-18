@@ -78,10 +78,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     editor.bind_wave_palette(Arc::new(Mutex::new(palette)));
     editor.set_wave_automation(wave_values);
     editor.connect_live(&telemetry, 0);
+    editor.set_trace_enabled(true);
     editor.draw(&mut pm, &mut text, &track, &config, [0.0; 4], geometry);
     let input = [0.1; 960];
     for block in 0..145 {
-        trace.begin_block(&telemetry, 48000.0);
+        trace.begin_block_for_curve(&telemetry, 48000.0, |request| {
+            config.msegs.get(request.slot)
+        });
         state.prepare_wave_bank(&config, &bank);
         state.begin_block(&config, &input, &input, 48000.0);
         state.advance_segment(&config, &track, &mut effect, input.len(), 120.0, 48000.0);

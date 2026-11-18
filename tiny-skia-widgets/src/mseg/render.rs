@@ -1704,6 +1704,7 @@ mod tests {
             draw_mseg_trace(
                 &mut pm,
                 &layout,
+                &MsegData::default(),
                 &[
                     Some((0.25, 0.75)),
                     Some((0.5, 0.5)),
@@ -1728,6 +1729,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn measured_trace_draws_only_visible_deviations_without_bridging_overlap() {
+        let mut pm = Pixmap::new(400, 280).unwrap();
+        let layout = mseg_layout((0.0, 0.0, 400.0, 280.0), true, 1.0);
+        let curve = MsegData::default();
+        draw_mseg_trace(
+            &mut pm,
+            &layout,
+            &curve,
+            &[Some((0.25, 0.25)), Some((0.30, 0.3001)), Some((0.35, 0.35))],
+            1.0,
+            color_text(),
+        );
+        assert!(pm.pixels().iter().all(|pixel| pixel.alpha() == 0));
+
+        draw_mseg_trace(
+            &mut pm,
+            &layout,
+            &curve,
+            &[Some((0.25, 0.75)), Some((0.30, 0.30)), Some((0.35, 0.70))],
+            1.0,
+            color_text(),
+        );
+        assert!(pm.pixels().iter().any(|pixel| pixel.alpha() > 0));
+        let column = phase_to_x(&layout, 0.30) as usize;
+        assert!(
+            pm.pixels()
+                .chunks_exact(400)
+                .all(|row| row[column].alpha() == 0)
+        );
     }
 
     #[test]
@@ -1806,14 +1839,17 @@ mod tests {
     }
 }
 
-/// Overlay measured normalized output, leaving large unmeasured phase gaps disconnected.
+/// Draw measured output where it visibly diverges from the displayed curve.
 pub fn draw_mseg_trace(
     pixmap: &mut Pixmap,
     layout: &MsegLayout,
+    curve: &MsegData,
     points: &[Option<(f32, f32)>],
     scale: f32,
     color: tiny_skia::Color,
 ) {
+    let mut curve = CurveSampler::new(curve);
+    let radius = scale.max(1.0) * 0.75;
     let mut previous: Option<(f32, f32)> = None;
     for &(phase, value) in points.iter().flatten() {
         if !phase.is_finite() || !value.is_finite() {
@@ -1821,6 +1857,10 @@ pub fn draw_mseg_trace(
         }
         let x = phase_to_x(layout, phase);
         let y = value_to_y(layout, value);
+        if (y - value_to_y(layout, curve.sample(phase))).abs() <= 2.0 * radius {
+            previous = None;
+            continue;
+        }
         if let Some((p, v)) = previous
             && (0.0..=0.125).contains(&(phase - p))
         {
@@ -1835,7 +1875,6 @@ pub fn draw_mseg_trace(
             );
         }
         if layout.viewport.contains(phase, value) {
-            let radius = scale.max(1.0) * 0.75;
             let (px, py, pw, ph) = layout.plot;
             let (left, top) = ((x - radius).max(px), (y - radius).max(py));
             let (right, bottom) = ((x + radius).min(px + pw), (y + radius).min(py + ph));
