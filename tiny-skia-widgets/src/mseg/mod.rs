@@ -184,6 +184,11 @@ impl MsegData {
         &self.nodes[..self.node_count]
     }
 
+    /// Compare the authored nodes used to sample the curve's raw shape.
+    pub fn same_geometry(&self, other: &Self) -> bool {
+        self.active() == other.active()
+    }
+
     /// `true` iff the document satisfies every structural invariant. Slots
     /// `>= node_count` are not constrained.
     ///

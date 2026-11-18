@@ -8,7 +8,7 @@ use crate::coloration::Q;
 use crate::rng::Rng;
 
 /// Inputs to a generation pass.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct GenParams {
     pub sample_rate: f32,
     /// Tail length, seconds.

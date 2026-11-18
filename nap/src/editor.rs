@@ -6,7 +6,7 @@
 //! - A fixed-height bottom strip with a mode selector (Zero Latency / Efficient)
 //!   plus dials (Size / Density / Width / Pre-Delay / Mix / Output) and a Seed stepper.
 //!
-//! Any curve edit, or any change to a design-time param (Size/Density/Width/
+//! Any curve geometry edit, or any change to a design-time param (Size/Density/Width/
 //! Seed), regenerates the velvet sequence and publishes it through the
 //! `SequenceHandoff` — the exact GUI→audio pattern miff uses for `rebake()`.
 //! When the mode is Efficient, curve/dial edits also bake and publish the IR
@@ -22,13 +22,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tiny_skia;
 use tiny_skia_widgets as widgets;
-use tiny_skia_widgets::mseg::{MsegData, MsegEdit, MsegEditState};
+use tiny_skia_widgets::mseg::{MsegData, MsegEditState};
 
 use crate::handoff::{IrHandoff, SequenceHandoff};
 use crate::ir::{IrBaker, IrSpectra};
 use crate::sequence::VelvetSequence;
 use crate::theme::pane_colors;
-use crate::{NapMode, NapParams};
+use crate::{NapMode, NapParams, SequenceInputs};
 
 // 880 matches miff (the other curve-only MSEG consumer): each full-width pane
 // gives the shared MSEG control strip enough room (it needs ≥ 676 px at scale
@@ -230,13 +230,8 @@ struct NapWindow {
     last_click_time: std::time::Instant,
     last_click_pos: (f32, f32),
 
-    // ── Per-frame param-change guard ────────────────────────────────────────
-    /// Last-seen design-time param values; if any drift (host/preset
-    /// automation while the editor is open) we regenerate at the top of frame.
-    last_design: (f32, f32, f32, i32),
-    /// Last-seen curve documents; a curve changed underneath us (preset load)
-    /// also triggers a regenerate.
-    last_curves: [MsegData; 3],
+    /// Sequence inputs cached for event and preset change detection.
+    last_inputs: Option<SequenceInputs>,
 
     // ── Drag-deferred IR bake ───────────────────────────────────────────────
     /// `true` while a left-button press is being held down inside an MSEG pane
@@ -291,8 +286,7 @@ impl NapWindow {
 
         // Seed the guard caches with the current state so the first frame does
         // not spuriously regenerate.
-        let last_design = current_design(&params);
-        let last_curves = read_curves(&curves);
+        let last_inputs = SequenceInputs::read(&params, sample_rate);
 
         Self {
             gui_context,
@@ -321,28 +315,31 @@ impl NapWindow {
             shift_held: false,
             last_click_time: std::time::Instant::now(),
             last_click_pos: (-999.0, -999.0),
-            last_design,
-            last_curves,
+            last_inputs,
             mseg_dragging: false,
             ir_needs_bake: false,
         }
     }
 
-    /// Regenerate the velvet sequence from the current params + curves and
-    /// publish it to the audio thread. GUI-thread only. Mirrors miff's
-    /// `rebake()`. Refreshes the per-frame guard caches so they stay in sync,
-    /// and copies the freshly-generated sequence into `snapshot` for the tail
-    /// overlay (so the overlay always matches what was published).
     fn regenerate(&mut self) {
-        crate::Nap::regenerate(
-            &self.handoff,
-            &self.params,
-            self.baker_sr,
-            &mut self.scratch,
-        );
+        if let Some(inputs) = SequenceInputs::read(&self.params, self.baker_sr) {
+            self.publish_sequence(inputs);
+        }
+    }
+
+    fn edit_curve<R>(
+        &mut self,
+        pane: usize,
+        edit: impl FnOnce(&mut MsegEditState, &mut MsegData) -> R,
+    ) -> Option<(R, bool)> {
+        let mut curve = self.curves[pane].lock().ok()?;
+        Some(self.states[pane].edit_geometry(&mut curve, edit))
+    }
+
+    fn publish_sequence(&mut self, inputs: SequenceInputs) {
+        inputs.publish(&self.handoff, &mut self.scratch);
         self.snapshot.copy_from(&self.scratch);
-        self.last_design = current_design(&self.params);
-        self.last_curves = read_curves(&self.curves);
+        self.last_inputs = Some(inputs);
     }
 
     /// Bake and publish the IR if the mode is Efficient. GUI-thread only.
@@ -404,12 +401,24 @@ impl NapWindow {
     /// (host/preset automation while the editor is open), regenerate and (if
     /// Efficient mode) bake the IR.
     fn check_external_changes(&mut self) {
-        let design = current_design(&self.params);
-        let curves = read_curves(&self.curves);
-        if design != self.last_design || curves != self.last_curves {
-            self.regenerate();
-            // External change (preset load, host automation): bake immediately.
-            self.bake_ir_if_efficient();
+        let Some(inputs) = SequenceInputs::read(&self.params, self.baker_sr) else {
+            return;
+        };
+        if self
+            .last_inputs
+            .as_ref()
+            .is_none_or(|previous| !previous.same_design(&inputs))
+        {
+            self.publish_sequence(inputs);
+            if self.params.mode.value() == NapMode::Efficient {
+                crate::Nap::bake_sequence_ir(
+                    &self.ir_handoff,
+                    &self.scratch,
+                    &mut self.baker,
+                    &mut self.scratch_ir_l,
+                    &mut self.scratch_ir_r,
+                );
+            }
         }
     }
 
@@ -801,26 +810,6 @@ impl NapWindow {
     }
 }
 
-/// Snapshot of the design-time params for the change guard. Seed is stored as
-/// its raw int (exact compare); the floats are exact since they don't change
-/// except via the setter.
-fn current_design(params: &NapParams) -> (f32, f32, f32, i32) {
-    (
-        params.size.value(),
-        params.density.value(),
-        params.width.value(),
-        params.seed.value(),
-    )
-}
-
-fn read_curves(curves: &[Arc<Mutex<MsegData>>; 3]) -> [MsegData; 3] {
-    [
-        curves[0].lock().map(|c| *c).unwrap_or_default(),
-        curves[1].lock().map(|c| *c).unwrap_or_default(),
-        curves[2].lock().map(|c| *c).unwrap_or_default(),
-    ]
-}
-
 impl widgets::PhysicalEditor for NapWindow {
     fn prepare_resize(&mut self, window: &mut baseview::Window<'_>, backing_scale: f32) {
         baseview::WindowHandler::on_event(
@@ -932,20 +921,13 @@ impl baseview::WindowHandler for NapWindow {
                 } else if let Some(p) = curve_input_pane(&self.states, y, h, s) {
                     // Route the move to whichever pane the cursor is in.
                     let rect = pane_rects(w, h, s)[p];
-                    let changed = {
-                        match self.curves[p].lock() {
-                            Ok(mut curve) => self.states[p].on_mouse_move(
-                                x,
-                                y,
-                                &mut curve,
-                                rect,
-                                s,
-                                self.shift_held,
-                            ),
-                            _ => None,
-                        }
-                    };
-                    if changed == Some(MsegEdit::Changed) {
+                    let shift = self.shift_held;
+                    let geometry_changed = self
+                        .edit_curve(p, |state, curve| {
+                            state.on_mouse_move(x, y, curve, rect, s, shift)
+                        })
+                        .is_some_and(|(_, changed)| changed);
+                    if geometry_changed {
                         self.regenerate();
                         // During a node drag, defer IR bake to mouse-up.
                         if self.mseg_dragging {
@@ -963,20 +945,13 @@ impl baseview::WindowHandler for NapWindow {
                     // forwarding (miff/src/editor.rs ~666–683).
                     for p in 0..3 {
                         let rect = pane_rects(w, h, s)[p];
-                        let changed = {
-                            match self.curves[p].lock() {
-                                Ok(mut curve) => self.states[p].on_mouse_move(
-                                    x,
-                                    y,
-                                    &mut curve,
-                                    rect,
-                                    s,
-                                    self.shift_held,
-                                ),
-                                _ => None,
-                            }
-                        };
-                        if changed == Some(MsegEdit::Changed) {
+                        let shift = self.shift_held;
+                        let geometry_changed = self
+                            .edit_curve(p, |state, curve| {
+                                state.on_mouse_move(x, y, curve, rect, s, shift)
+                            })
+                            .is_some_and(|(_, changed)| changed);
+                        if geometry_changed {
                             self.regenerate();
                             // During a node drag, defer IR bake to mouse-up.
                             if self.mseg_dragging {
@@ -1017,22 +992,18 @@ impl baseview::WindowHandler for NapWindow {
                     let is_double = !on_strip
                         && !self.states[p].has_open_menu()
                         && self.double_click_check(x, y);
-                    let changed = {
-                        match self.curves[p].lock() {
-                            Ok(mut curve) => {
-                                if is_double {
-                                    self.states[p].on_double_click(x, y, &mut curve, rect, s)
-                                } else {
-                                    let ctrl =
-                                        modifiers.contains(keyboard_types::Modifiers::CONTROL);
-                                    self.states[p].on_mouse_down(x, y, &mut curve, rect, s, ctrl)
-                                }
+                    let geometry_changed = self
+                        .edit_curve(p, |state, curve| {
+                            if is_double {
+                                state.on_double_click(x, y, curve, rect, s)
+                            } else {
+                                let ctrl = modifiers.contains(keyboard_types::Modifiers::CONTROL);
+                                state.on_mouse_down(x, y, curve, rect, s, ctrl)
                             }
-                            _ => None,
-                        }
-                    };
+                        })
+                        .is_some_and(|(_, changed)| changed);
                     self.mseg_dragging = self.states[p].is_dragging();
-                    if changed == Some(MsegEdit::Changed) {
+                    if geometry_changed {
                         self.regenerate();
                         if self.mseg_dragging {
                             self.ir_needs_bake = true;
@@ -1089,13 +1060,10 @@ impl baseview::WindowHandler for NapWindow {
                 // A release always ends any in-flight MSEG drag in every pane.
                 for p in 0..3 {
                     let rect = pane_rects(w, h, s)[p];
-                    let changed = {
-                        match self.curves[p].lock() {
-                            Ok(mut curve) => self.states[p].on_mouse_up(&mut curve, rect, s),
-                            _ => None,
-                        }
-                    };
-                    if changed == Some(MsegEdit::Changed) {
+                    let geometry_changed = self
+                        .edit_curve(p, |state, curve| state.on_mouse_up(curve, rect, s))
+                        .is_some_and(|(_, changed)| changed);
+                    if geometry_changed {
                         self.regenerate();
                         self.ir_needs_bake = true;
                     }
@@ -1134,15 +1102,10 @@ impl baseview::WindowHandler for NapWindow {
                 }
                 if let Some(p) = curve_input_pane(&self.states, y, h, s) {
                     let rect = pane_rects(w, h, s)[p];
-                    let changed = {
-                        match self.curves[p].lock() {
-                            Ok(mut curve) => {
-                                self.states[p].on_right_click(x, y, &mut curve, rect, s)
-                            }
-                            _ => None,
-                        }
-                    };
-                    if changed == Some(MsegEdit::Changed) {
+                    let geometry_changed = self
+                        .edit_curve(p, |state, curve| state.on_right_click(x, y, curve, rect, s))
+                        .is_some_and(|(_, changed)| changed);
+                    if geometry_changed {
                         self.regenerate();
                         // Right-click curve edit is discrete — bake immediately.
                         self.bake_ir_if_efficient();
@@ -1234,11 +1197,10 @@ impl baseview::WindowHandler for NapWindow {
                     return baseview::EventStatus::Ignored;
                 };
                 let rect = pane_rects(w, h, s)[p];
-                let (captured, changed) = match self.curves[p].lock() {
-                    Ok(mut curve) => self.states[p].on_key(ev, &mut curve, rect, s),
-                    _ => (false, None),
-                };
-                if changed == Some(MsegEdit::Changed) {
+                let ((captured, _), geometry_changed) = self
+                    .edit_curve(p, |state, curve| state.on_key(ev, curve, rect, s))
+                    .unwrap_or_default();
+                if geometry_changed {
                     self.regenerate();
                     if self.mseg_dragging {
                         self.ir_needs_bake = true;
@@ -1365,6 +1327,28 @@ impl Editor for NapEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use widgets::mseg::MsegEdit;
+
+    #[test]
+    fn preset_changes_compare_sequence_design_and_node_geometry() {
+        let params = NapParams::new();
+        let original = SequenceInputs::read(&params, 48_000.0).unwrap();
+        let mut curve = *params.decay_curve.lock().unwrap();
+        curve.snap = !curve.snap;
+        curve.time_divisions = 32;
+        curve.value_steps = 16;
+        curve.time_seconds = 2.0;
+        *params.decay_curve.lock().unwrap() = curve;
+        let settings_edit = SequenceInputs::read(&params, 48_000.0).unwrap();
+        assert!(original.same_design(&settings_edit));
+
+        curve.insert_node(0.5, 0.25).unwrap();
+        *params.decay_curve.lock().unwrap() = curve;
+        let new_geometry = SequenceInputs::read(&params, 48_000.0).unwrap();
+        assert!(!original.same_design(&new_geometry));
+        assert!(!settings_edit.same_design(&new_geometry));
+        assert!(!new_geometry.same_design(&SequenceInputs::read(&params, 96_000.0).unwrap()));
+    }
 
     #[test]
     fn tail_overlay_skips_collapsed_or_too_narrow_plots_at_every_scale() {

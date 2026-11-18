@@ -13,7 +13,7 @@ use nih_plug::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tiny_skia_widgets as widgets;
-use tiny_skia_widgets::mseg::{MsegEdit, MsegEditState};
+use tiny_skia_widgets::mseg::{MsegData, MsegEditState};
 
 use crate::MiffParams;
 
@@ -342,6 +342,20 @@ impl MiffWindow {
         }
     }
 
+    fn edit_curve<R>(
+        &mut self,
+        edit: impl FnOnce(&mut MsegEditState, &mut MsegData) -> R,
+    ) -> Option<R> {
+        let (result, geometry_changed) = {
+            let mut curve = self.params.curve.lock().ok()?;
+            self.mseg_state.edit_geometry(&mut curve, edit)
+        };
+        if geometry_changed {
+            self.rebake();
+        }
+        Some(result)
+    }
+
     /// Commit any active text-edit, applying the value to the appropriate param.
     fn commit_text_edit(&mut self) {
         use nih_plug::prelude::Param;
@@ -624,22 +638,10 @@ impl baseview::WindowHandler for MiffWindow {
                         // MSEG drag-move (if a drag is active the MSEG tracks it
                         // even outside the rect, which matches the node-drag
                         // intention; for controls there's no drag into MSEG).
-                        let changed = {
-                            match self.params.curve.lock() {
-                                Ok(mut curve) => self.mseg_state.on_mouse_move(
-                                    x,
-                                    y,
-                                    &mut curve,
-                                    mseg_rect,
-                                    s,
-                                    self.shift_held,
-                                ),
-                                _ => None,
-                            }
-                        };
-                        if changed == Some(MsegEdit::Changed) {
-                            self.rebake();
-                        }
+                        let shift = self.shift_held;
+                        let _ = self.edit_curve(|state, curve| {
+                            state.on_mouse_move(x, y, curve, mseg_rect, s, shift)
+                        });
                     }
                     EventTarget::Controls => {
                         // Dial drag — only if a drag is active.
@@ -693,22 +695,10 @@ impl baseview::WindowHandler for MiffWindow {
                 {
                     // No controls drag active — forward pointer move to MSEG state
                     // so node drags that stray outside the MSEG rect keep tracking.
-                    let changed = {
-                        match self.params.curve.lock() {
-                            Ok(mut curve) => self.mseg_state.on_mouse_move(
-                                x,
-                                y,
-                                &mut curve,
-                                mseg_rect,
-                                s,
-                                self.shift_held,
-                            ),
-                            _ => None,
-                        }
-                    };
-                    if changed == Some(MsegEdit::Changed) {
-                        self.rebake();
-                    }
+                    let shift = self.shift_held;
+                    let _ = self.edit_curve(|state, curve| {
+                        state.on_mouse_move(x, y, curve, mseg_rect, s, shift)
+                    });
                 }
             }
 
@@ -746,36 +736,14 @@ impl baseview::WindowHandler for MiffWindow {
                         let is_double = !on_strip
                             && !self.mseg_state.has_open_menu()
                             && self.mseg_double_click_check(x, y);
-                        if is_double {
-                            let changed = {
-                                match self.params.curve.lock() {
-                                    Ok(mut curve) => self
-                                        .mseg_state
-                                        .on_double_click(x, y, &mut curve, mseg_rect, s),
-                                    _ => None,
-                                }
-                            };
-                            if changed == Some(MsegEdit::Changed) {
-                                self.rebake();
+                        let _ = self.edit_curve(|state, curve| {
+                            if is_double {
+                                state.on_double_click(x, y, curve, mseg_rect, s)
+                            } else {
+                                let ctrl = modifiers.contains(keyboard_types::Modifiers::CONTROL);
+                                state.on_mouse_down(x, y, curve, mseg_rect, s, ctrl)
                             }
-                        } else {
-                            let changed = {
-                                match self.params.curve.lock() {
-                                    Ok(mut curve) => self.mseg_state.on_mouse_down(
-                                        x,
-                                        y,
-                                        &mut curve,
-                                        mseg_rect,
-                                        s,
-                                        modifiers.contains(keyboard_types::Modifiers::CONTROL),
-                                    ),
-                                    _ => None,
-                                }
-                            };
-                            if changed == Some(MsegEdit::Changed) {
-                                self.rebake();
-                            }
-                        }
+                        });
                     }
                     EventTarget::Controls => {
                         // Commit any open text-edit first.
@@ -901,15 +869,7 @@ impl baseview::WindowHandler for MiffWindow {
                 // automation gesture must still be closed out.
 
                 // End any MSEG drag.
-                let changed = {
-                    match self.params.curve.lock() {
-                        Ok(mut curve) => self.mseg_state.on_mouse_up(&mut curve, mseg_rect, s),
-                        _ => None,
-                    }
-                };
-                if changed == Some(MsegEdit::Changed) {
-                    self.rebake();
-                }
+                let _ = self.edit_curve(|state, curve| state.on_mouse_up(curve, mseg_rect, s));
 
                 // End any controls drag and close the automation gesture.
                 if let Some(ended) = self.drag.end_drag() {
@@ -947,17 +907,9 @@ impl baseview::WindowHandler for MiffWindow {
                 } {
                     EventTarget::Mseg => {
                         // Right-click in MSEG: toggle segment stepped flag.
-                        let changed = {
-                            match self.params.curve.lock() {
-                                Ok(mut curve) => self
-                                    .mseg_state
-                                    .on_right_click(x, y, &mut curve, mseg_rect, s),
-                                _ => None,
-                            }
-                        };
-                        if changed == Some(MsegEdit::Changed) {
-                            self.rebake();
-                        }
+                        let _ = self.edit_curve(|state, curve| {
+                            state.on_right_click(x, y, curve, mseg_rect, s)
+                        });
                     }
                     EventTarget::Controls => {
                         // Right-click on a dial opens text entry.
@@ -1046,13 +998,9 @@ impl baseview::WindowHandler for MiffWindow {
                 if self.drag.active_action().is_some() && widgets::mseg::is_help_shortcut(ev) {
                     return baseview::EventStatus::Captured;
                 }
-                let (captured, changed) = match self.params.curve.lock() {
-                    Ok(mut curve) => self.mseg_state.on_key(ev, &mut curve, mseg_rect, s),
-                    _ => (false, None),
-                };
-                if changed == Some(MsegEdit::Changed) {
-                    self.rebake();
-                }
+                let captured = self
+                    .edit_curve(|state, curve| state.on_key(ev, curve, mseg_rect, s))
+                    .is_some_and(|(captured, _)| captured);
                 return if captured {
                     baseview::EventStatus::Captured
                 } else {
