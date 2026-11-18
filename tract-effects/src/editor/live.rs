@@ -363,18 +363,18 @@ impl EffectEditor {
         pm: &mut tiny_skia::Pixmap,
         layout: &widgets::mseg::MsegLayout,
         curve: &widgets::MsegData,
-        scale: f32,
     ) {
         if self.trace_visible()
             && let Some(live) = &self.live
         {
+            let (r, g, b, _) = widgets::color_to_rgba_u8(mseg_color(self.selected_mseg));
+            let tint = |channel| channel + (255 - channel) / 4;
             widgets::mseg::draw_mseg_trace(
                 pm,
                 layout,
                 self.mseg_edit.display_data(curve),
                 &live.bins,
-                scale,
-                tiny_skia::Color::from_rgba8(235, 245, 255, 210),
+                tiny_skia::Color::from_rgba8(tint(r), tint(g), tint(b), 235),
             );
         }
     }
@@ -536,7 +536,7 @@ mod tests {
         let mut raster = tiny_skia::Pixmap::new(640, 360).unwrap();
         let rect = (12.0, 12.0, 608.0, 320.0);
         let layout = editor.mseg_edit.layout(rect, 1.0);
-        editor.draw_live_trace(&mut raster, &layout, &config.msegs[request.slot], 1.0);
+        editor.draw_live_trace(&mut raster, &layout, &config.msegs[request.slot]);
         assert!(raster.data().iter().any(|byte| *byte != 0));
 
         let mut displayed = widgets::MsegData::default();
@@ -545,7 +545,7 @@ mod tests {
         displayed.insert_node(0.5, 0.75).unwrap();
         editor.mseg_edit.set_read_only_curve(Some(displayed));
         raster.fill(tiny_skia::Color::TRANSPARENT);
-        editor.draw_live_trace(&mut raster, &layout, &config.msegs[request.slot], 1.0);
+        editor.draw_live_trace(&mut raster, &layout, &config.msegs[request.slot]);
         assert!(raster.data().iter().all(|&byte| byte == 0));
 
         let live = editor.live.as_mut().unwrap();
@@ -697,7 +697,7 @@ mod tests {
         );
         assert!(editor.mseg_edit.is_editing_curve());
         let mut raster = tiny_skia::Pixmap::new(920, 360).unwrap();
-        editor.draw_live_trace(&mut raster, &layout, &config.msegs[slot], 1.0);
+        editor.draw_live_trace(&mut raster, &layout, &config.msegs[slot]);
         assert!(raster.data().iter().all(|&byte| byte == 0));
         editor.refresh_live(&effect, &config);
         let paused = clock.begin_block(&telemetry, 48000.0);

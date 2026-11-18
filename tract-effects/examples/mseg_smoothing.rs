@@ -90,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mut pm,
             24.0,
             52.0,
-            "White: DSP source trace before Depth. Colored dial arc: delivered target value.",
+            "Thin line shows the measured source. The dial arc shows the delivered target value.",
             14.0,
             color_text(),
         );
