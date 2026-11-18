@@ -16,9 +16,11 @@ type Rect = (f32, f32, f32, f32);
 
 mod categories;
 mod search;
+mod selection;
 mod user;
 use categories::{Categories, CategoryFilter, CategoryMenu};
 use search::BrowserSearch;
+use selection::BrowserView;
 use user::UserBrowser;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -62,7 +64,7 @@ enum Favorite {
 pub(super) struct BrowserState {
     open: bool,
     page: Page,
-    selected: usize,
+    view: BrowserView,
     factory: Vec<CurveShape>,
     favorites: [Favorite; FAVORITE_COUNT],
     project_binding: Option<Arc<Mutex<WavePalette>>>,
@@ -123,7 +125,7 @@ impl MsegEditState {
 
     fn select_browser_page(&mut self, page: Page) {
         self.browser.page = page;
-        self.browser.selected = 0;
+        self.browser.view = BrowserView::default();
         self.browser.last_click = None;
         self.browser.message.clear();
         self.browser.user.dialog = None;
@@ -131,12 +133,13 @@ impl MsegEditState {
         self.browser.search_close_click = None;
         self.browser.categories.filter = CategoryFilter::All;
         self.close_category_menu();
-        if page == Page::Project {
-            self.refresh_browser_project();
-        } else if page == Page::User {
+        if page == Page::User {
             self.refresh_browser_user(None);
         } else {
-            self.rebuild_browser_view(Some(0), 0);
+            self.rebuild_browser_view(None, 0);
+            if page == Page::Project {
+                self.refresh_browser_project();
+            }
         }
     }
 
@@ -234,11 +237,10 @@ impl MsegEditState {
         self.clear_hover_hint();
         self.browser.open = true;
         self.browser.page = Page::Factory;
-        self.browser.selected = 0;
         self.browser.last_click = None;
         self.browser.factory = FactoryShape::ALL.into_iter().map(factory_shape).collect();
         self.browser.categories.filter = CategoryFilter::All;
-        self.rebuild_browser_view(Some(0), 0);
+        self.rebuild_browser_view(None, 0);
         self.refresh_browser_favorites();
         true
     }
@@ -267,28 +269,23 @@ impl MsegEditState {
     }
 
     fn browser_shape(&self) -> Option<&CurveShape> {
-        if !self
-            .browser_visible_indices()
-            .contains(&self.browser.selected)
-        {
-            return None;
-        }
+        let index = self.browser.view.selected_index()?;
         match self.browser.page {
-            Page::Factory => self.browser.factory.get(self.browser.selected),
-            Page::Favorites => match &self.browser.favorites[self.browser.selected] {
+            Page::Factory => self.browser.factory.get(index),
+            Page::Favorites => match &self.browser.favorites[index] {
                 Favorite::Shape(shape) => Some(shape),
                 _ => None,
             },
             Page::Project => self
                 .browser
                 .project
-                .get(self.browser.selected)
+                .get(index)
                 .filter(|_| self.browser.project_error.is_none()),
             Page::User => self
                 .browser
                 .user
                 .entries
-                .get(self.browser.selected)
+                .get(index)
                 .map(|entry| &entry.shape)
                 .filter(|_| self.browser.user.error.is_none()),
         }
@@ -301,17 +298,13 @@ impl MsegEditState {
             return vec![selected, selected, ready, selected, selected, true];
         }
         let load = self.browser_shape().is_some();
-        let (store, clear) = match self.browser.page {
-            Page::Factory => (false, false),
-            Page::Favorites => (
+        let (store, clear) = match (self.browser.page, self.browser.view.selected_index()) {
+            (Page::Favorites, Some(slot)) => (
                 true,
-                !matches!(
-                    self.browser.favorites[self.browser.selected],
-                    Favorite::Empty
-                ),
+                !matches!(self.browser.favorites[slot], Favorite::Empty),
             ),
-            Page::Project => (self.browser.project_error.is_none(), load),
-            Page::User => (false, false),
+            (Page::Project, Some(_)) => (self.browser.project_error.is_none(), load),
+            _ => (false, false),
         };
         vec![load, load, store, clear, true]
     }
@@ -338,9 +331,8 @@ impl MsegEditState {
             let shape = self.browser_shape()?.clone();
             return self.apply_shape(data, shape, action == 1);
         }
-        let slot = self.browser.selected;
-        match action {
-            2 => {
+        match (action, self.browser.view.selected_index()) {
+            (2, Some(slot)) => {
                 match self
                     .curve_library()
                     .and_then(|library| library.store_favorite(slot, &CurveShape::capture(data)))
@@ -352,7 +344,7 @@ impl MsegEditState {
                     Err(err) => self.browser.message = format!("Store failed: {err}"),
                 }
             }
-            3 => {
+            (3, Some(slot)) => {
                 match self
                     .curve_library()
                     .and_then(|library| library.remove_favorite(slot))
@@ -364,7 +356,7 @@ impl MsegEditState {
                     Err(err) => self.browser.message = format!("Clear failed: {err}"),
                 }
             }
-            4 => self.refresh_browser_favorites(),
+            (4, _) => self.refresh_browser_favorites(),
             _ => {}
         }
         None
@@ -390,7 +382,7 @@ impl MsegEditState {
             self.browser.message = "Project waves changed; choose a slot again".to_owned();
             return None;
         }
-        let slot = self.browser.selected;
+        let slot = self.browser.view.selected_index()?;
         if action < 2 {
             let shape = live.get(slot)?.clone();
             drop(live);
@@ -589,16 +581,10 @@ impl MsegEditState {
         {
             self.move_user_page(if page == 0 { -1 } else { 1 });
         } else if let Some(card) = layout.cards.iter().position(|r| in_rect(*r, x, y)) {
-            let position = if self.browser.page == Page::User {
-                self.user_page_start() + card
-            } else {
-                card
-            };
-            let Some(card) = self.browser_visible_indices().get(position).copied() else {
+            let Some(card) = self.browser.view.select_card(card) else {
                 self.browser.last_click = None;
                 return None;
             };
-            self.browser.selected = card;
             self.browser.message.clear();
             if double || self.browser_double_click(card, Instant::now()) {
                 return self.browser_action(0, data);
@@ -687,7 +673,7 @@ impl MsegEditState {
         if self.browser.page == Page::User && event.key != Key::Tab {
             return self.user_browser_key(event, data);
         }
-        let selected = self.browser_selected_position();
+        let selected = self.browser.view.position_or_start();
         let count = self.browser_visible_indices().len().max(1);
         match &event.key {
             Key::Tab => {
@@ -703,11 +689,16 @@ impl MsegEditState {
                 };
                 self.select_browser_page(pages[(index + delta) % pages.len()]);
             }
-            Key::ArrowLeft => self.select_browser_position((selected + count - 1) % count),
-            Key::ArrowRight => self.select_browser_position((selected + 1) % count),
-            Key::ArrowUp | Key::ArrowDown => self.select_browser_position((selected + 4) % count),
-            Key::Home => self.select_browser_position(0),
-            Key::End => self.select_browser_position(count - 1),
+            Key::ArrowLeft => self
+                .browser
+                .view
+                .select_position((selected + count - 1) % count),
+            Key::ArrowRight => self.browser.view.select_position((selected + 1) % count),
+            Key::ArrowUp | Key::ArrowDown => {
+                self.browser.view.select_position((selected + 4) % count)
+            }
+            Key::Home => self.browser.view.select_position(0),
+            Key::End => self.browser.view.select_position(count - 1),
             Key::Enter => {
                 return self.browser_action(
                     usize::from(event.modifiers.contains(Modifiers::SHIFT)),
@@ -812,37 +803,34 @@ impl MsegEditState {
         }
         self.draw_browser_search(pm, tr, &layout, s);
         let font = (12.0 * s).max(10.0);
+        let visible_cards = self.browser.view.page_indices();
+        let selected = self.browser.view.selected_index();
         for (i, card) in layout.cards.into_iter().enumerate() {
-            let position = if self.browser.page == Page::User {
-                self.user_page_start() + i
-            } else {
-                i
-            };
-            let index = self.browser_visible_indices().get(position).copied();
-            let (shape, label) = match self.browser.page {
-                Page::Factory => (
-                    index.and_then(|index| self.browser.factory.get(index)),
-                    index.map_or_else(String::new, |index| FactoryShape::LABELS[index].to_owned()),
+            let index = visible_cards.get(i).copied();
+            let (shape, label) = match (self.browser.page, index) {
+                (Page::Factory, Some(index)) => (
+                    self.browser.factory.get(index),
+                    FactoryShape::LABELS[index].to_owned(),
                 ),
-                Page::Favorites => match &self.browser.favorites[i] {
-                    Favorite::Shape(shape) => (Some(shape), format!("Favorite {}", i + 1)),
-                    Favorite::Empty => (None, format!("{}: Empty", i + 1)),
-                    Favorite::Unavailable(_) => (None, format!("{}: Unavailable", i + 1)),
+                (Page::Favorites, Some(slot)) => match &self.browser.favorites[slot] {
+                    Favorite::Shape(shape) => (Some(shape), format!("Favorite {}", slot + 1)),
+                    Favorite::Empty => (None, format!("{}: Empty", slot + 1)),
+                    Favorite::Unavailable(_) => (None, format!("{}: Unavailable", slot + 1)),
                 },
-                Page::Project => {
+                (Page::Project, Some(slot)) => {
                     let shape = self
                         .browser
                         .project
-                        .get(i)
+                        .get(slot)
                         .filter(|_| self.browser.project_error.is_none());
                     (
                         shape,
                         if shape.is_some() {
-                            format!("Project {}", i + 1)
+                            format!("Project {}", slot + 1)
                         } else {
                             format!(
                                 "{}: {}",
-                                i + 1,
+                                slot + 1,
                                 if self.browser.project_error.is_some() {
                                     "Unavailable"
                                 } else {
@@ -852,10 +840,11 @@ impl MsegEditState {
                         },
                     )
                 }
-                Page::User => match index.and_then(|index| self.browser.user.entries.get(index)) {
+                (Page::User, Some(index)) => match self.browser.user.entries.get(index) {
                     Some(entry) => (Some(&entry.shape), entry.name.clone()),
                     None => (None, String::new()),
                 },
+                (_, None) => (None, String::new()),
             };
             draw_rect(pm, card.0, card.1, card.2, card.3, color_control_bg());
             draw_rect_outline(
@@ -864,7 +853,7 @@ impl MsegEditState {
                 card.1,
                 card.2,
                 card.3,
-                if index == Some(self.browser.selected) {
+                if index.is_some() && index == selected {
                     color_accent()
                 } else {
                     color_border()
@@ -898,14 +887,13 @@ impl MsegEditState {
         {
             "No matching curves; clear search or choose All categories".to_owned()
         } else {
-            let slot = self.browser.selected;
-            match self.browser.page {
-                Page::Factory => format!(
+            match (self.browser.page, selected) {
+                (Page::Factory, Some(slot)) => format!(
                     "{} — {}",
                     FactoryShape::LABELS[slot],
                     FactoryShape::ALL[slot].category()
                 ),
-                Page::Favorites => match &self.browser.favorites[slot] {
+                (Page::Favorites, Some(slot)) => match &self.browser.favorites[slot] {
                     Favorite::Shape(shape) => {
                         format!("Favorite {} - {} points", slot + 1, shape.nodes().len())
                     }
@@ -917,7 +905,7 @@ impl MsegEditState {
                         format!("Favorite {} unavailable: {err}", slot + 1)
                     }
                 },
-                Page::Project => {
+                (Page::Project, Some(slot)) => {
                     if let Some(error) = self.browser.project_error {
                         error.to_owned()
                     } else if let Some(shape) = self.browser.project.get(slot) {
@@ -929,10 +917,12 @@ impl MsegEditState {
                         )
                     }
                 }
-                Page::User => {
+                (Page::User, index) => {
                     if let Some(error) = &self.browser.user.error {
                         format!("User presets unavailable: {error}")
-                    } else if let Some(entry) = self.browser.user.entries.get(slot) {
+                    } else if let Some(entry) =
+                        index.and_then(|index| self.browser.user.entries.get(index))
+                    {
                         format!(
                             "{} — {} — {} points",
                             entry.name,
@@ -947,6 +937,7 @@ impl MsegEditState {
                         "No user presets; Save keeps the current curve".to_owned()
                     }
                 }
+                (_, None) => String::new(),
             }
         };
         if self.browser.search.has_query()

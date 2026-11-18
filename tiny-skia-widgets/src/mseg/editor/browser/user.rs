@@ -374,14 +374,8 @@ impl MsegEditState {
     }
 
     pub(super) fn refresh_browser_user(&mut self, selected: Option<u64>) {
-        let position = self.browser_selected_position();
-        let selected = selected.or_else(|| {
-            self.browser
-                .user
-                .entries
-                .get(self.browser.selected)
-                .map(|entry| entry.id)
-        });
+        let position = self.browser.view.position_or_start();
+        let selected = selected.or_else(|| self.selected_user_preset().map(|entry| entry.id));
         match self
             .curve_library()
             .and_then(|library| library.user_presets())
@@ -395,7 +389,6 @@ impl MsegEditState {
             }
             Err(error) => {
                 self.browser.user.entries.clear();
-                self.browser.selected = 0;
                 self.browser.user.error = Some(error.to_string());
                 self.rebuild_browser_view(None, 0);
             }
@@ -404,13 +397,15 @@ impl MsegEditState {
         self.browser.message.clear();
     }
 
-    fn verified_user_selection(&mut self) -> Option<UserPreset> {
-        let expected = self
-            .browser
+    fn selected_user_preset(&self) -> Option<&UserPreset> {
+        self.browser
             .user
             .entries
-            .get(self.browser.selected)?
-            .clone();
+            .get(self.browser.view.selected_index()?)
+    }
+
+    fn verified_user_selection(&mut self) -> Option<UserPreset> {
+        let expected = self.selected_user_preset()?.clone();
         match self
             .curve_library()
             .and_then(|library| library.load_user_preset(&expected))
@@ -636,28 +631,11 @@ impl MsegEditState {
         None
     }
 
-    pub(super) fn user_page_start(&self) -> usize {
-        self.browser_selected_position() / FAVORITE_COUNT * FAVORITE_COUNT
-    }
-
     pub(super) fn move_user_page(&mut self, delta: i32) {
-        let selected = self.browser_selected_position();
-        let len = self.browser_visible_indices().len();
-        let page = selected / FAVORITE_COUNT;
-        let last = len.saturating_sub(1) / FAVORITE_COUNT;
-        let next = if delta < 0 {
-            page.saturating_sub(1)
-        } else {
-            (page + 1).min(last)
-        };
         self.browser.last_click = None;
-        if page == next {
-            return;
+        if self.browser.view.move_page(delta) {
+            self.browser.message.clear();
         }
-        self.select_browser_position(
-            (next * FAVORITE_COUNT + selected % FAVORITE_COUNT).min(len.saturating_sub(1)),
-        );
-        self.browser.message.clear();
     }
 
     pub(super) fn user_browser_key(
@@ -665,15 +643,21 @@ impl MsegEditState {
         event: &KeyboardEvent,
         data: &mut MsegData,
     ) -> Option<MsegEdit> {
-        let selected = self.browser_selected_position();
+        let selected = self.browser.view.position_or_start();
         let last = self.browser_visible_indices().len().saturating_sub(1);
         match &event.key {
-            Key::ArrowLeft => self.select_browser_position(selected.saturating_sub(1)),
-            Key::ArrowRight => self.select_browser_position((selected + 1).min(last)),
-            Key::ArrowUp => self.select_browser_position(selected.saturating_sub(4)),
-            Key::ArrowDown => self.select_browser_position((selected + 4).min(last)),
-            Key::Home => self.select_browser_position(0),
-            Key::End => self.select_browser_position(last),
+            Key::ArrowLeft => self
+                .browser
+                .view
+                .select_position(selected.saturating_sub(1)),
+            Key::ArrowRight => self.browser.view.select_position(selected + 1),
+            Key::ArrowUp => self
+                .browser
+                .view
+                .select_position(selected.saturating_sub(4)),
+            Key::ArrowDown => self.browser.view.select_position(selected + 4),
+            Key::Home => self.browser.view.select_position(0),
+            Key::End => self.browser.view.select_position(last),
             Key::PageUp => self.move_user_page(-1),
             Key::PageDown => self.move_user_page(1),
             Key::Enter => {
@@ -705,12 +689,13 @@ impl MsegEditState {
         let Some([previous, next]) = layout.pager else {
             return;
         };
+        let start = self.browser.view.page_start();
         for (r, label, enabled) in [
-            (previous, "<", self.user_page_start() > 0),
+            (previous, "<", start > 0),
             (
                 next,
                 ">",
-                self.user_page_start() + FAVORITE_COUNT < self.browser_visible_indices().len(),
+                start + FAVORITE_COUNT < self.browser_visible_indices().len(),
             ),
         ] {
             crate::controls::draw_button(pm, tr, r.0, r.1, r.2, r.3, "", false, false);
@@ -729,11 +714,7 @@ impl MsegEditState {
             .len()
             .div_ceil(FAVORITE_COUNT)
             .max(1);
-        let text = format!(
-            "{}/{}",
-            self.browser_selected_position() / FAVORITE_COUNT + 1,
-            pages
-        );
+        let text = format!("{}/{}", start / FAVORITE_COUNT + 1, pages);
         draw_fitted(
             tr,
             pm,
