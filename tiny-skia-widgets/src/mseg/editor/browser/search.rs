@@ -86,10 +86,7 @@ impl MsegEditState {
     }
 
     fn update_search_view(&mut self) {
-        let selected = self
-            .browser_visible_indices()
-            .contains(&self.browser.selected)
-            .then_some(self.browser.selected);
+        let selected = self.browser.view.selected_index();
         self.browser.search.update_terms();
         self.rebuild_browser_view(selected, 0);
         self.browser.message.clear();
@@ -97,10 +94,7 @@ impl MsegEditState {
 
     pub(super) fn clear_browser_search(&mut self, close: bool) {
         self.browser.search_close_click = None;
-        let selected = self
-            .browser_visible_indices()
-            .contains(&self.browser.selected)
-            .then_some(self.browser.selected);
+        let selected = self.browser.view.selected_index();
         if close {
             self.browser.search = BrowserSearch::default();
         } else {
@@ -157,11 +151,14 @@ impl MsegEditState {
             }
             Key::Tab => self.browser.search.focused = false,
             Key::ArrowUp => {
-                self.select_browser_position(self.browser_selected_position().saturating_sub(4))
+                let selected = self.browser.view.position_or_start();
+                self.browser
+                    .view
+                    .select_position(selected.saturating_sub(4));
             }
             Key::ArrowDown => {
-                let last = self.browser_visible_indices().len().saturating_sub(1);
-                self.select_browser_position((self.browser_selected_position() + 4).min(last));
+                let selected = self.browser.view.position_or_start();
+                self.browser.view.select_position(selected + 4);
             }
             Key::PageUp | Key::PageDown if self.browser.page == Page::User => {
                 self.move_user_page(if event.key == Key::PageUp { -1 } else { 1 })

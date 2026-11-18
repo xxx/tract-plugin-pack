@@ -173,18 +173,18 @@ fn named_pages_reach_every_entry_and_clamp_after_last_page_delete() {
     let mut data = MsegData::default();
     user(&mut state, &mut data);
     state.on_key(&key(Key::PageDown), &mut data, RECT, 1.0);
-    assert_eq!(state.browser.selected, 8);
+    assert_eq!(state.browser.view.selected_index(), Some(8));
     state.on_key(&key(Key::PageDown), &mut data, RECT, 1.0);
-    assert_eq!(state.browser.selected, 16);
+    assert_eq!(state.browser.view.selected_index(), Some(16));
     state.on_key(&key(Key::Delete), &mut data, RECT, 1.0);
     state.on_key(&key(Key::Enter), &mut data, RECT, 1.0);
-    assert_eq!(state.browser.selected, 15);
+    assert_eq!(state.browser.view.selected_index(), Some(15));
     state.on_key(&key(Key::Home), &mut data, RECT, 1.0);
-    assert_eq!(state.browser.selected, 0);
+    assert_eq!(state.browser.view.selected_index(), Some(0));
     state.on_key(&key(Key::End), &mut data, RECT, 1.0);
-    assert_eq!(state.browser.selected, 15);
+    assert_eq!(state.browser.view.selected_index(), Some(15));
     state.on_key(&key(Key::PageUp), &mut data, RECT, 1.0);
-    assert_eq!(state.browser.selected, 7);
+    assert_eq!(state.browser.view.selected_index(), Some(7));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -202,7 +202,7 @@ fn page_boundary_buttons_and_keys_preserve_the_current_card_selection() {
         state.on_key(&key(Key::ArrowRight), &mut data, RECT, 1.0);
     }
     state.on_key(&key(Key::PageUp), &mut data, RECT, 1.0);
-    assert_eq!(state.browser.selected, 3);
+    assert_eq!(state.browser.view.selected_index(), Some(3));
     let previous = state.browser_layout(RECT, 1.0).unwrap().pager.unwrap()[0];
     state.on_mouse_down(
         previous.0 + 1.0,
@@ -212,17 +212,17 @@ fn page_boundary_buttons_and_keys_preserve_the_current_card_selection() {
         1.0,
         false,
     );
-    assert_eq!(state.browser.selected, 3);
+    assert_eq!(state.browser.view.selected_index(), Some(3));
     state.on_key(&key(Key::End), &mut data, RECT, 1.0);
     for _ in 0..3 {
         state.on_key(&key(Key::ArrowLeft), &mut data, RECT, 1.0);
     }
-    assert_eq!(state.browser.selected, 17);
+    assert_eq!(state.browser.view.selected_index(), Some(17));
     state.on_key(&key(Key::PageDown), &mut data, RECT, 1.0);
-    assert_eq!(state.browser.selected, 17);
+    assert_eq!(state.browser.view.selected_index(), Some(17));
     let next = state.browser_layout(RECT, 1.0).unwrap().pager.unwrap()[1];
     state.on_mouse_down(next.0 + 1.0, next.1 + 1.0, &mut data, RECT, 1.0, false);
-    assert_eq!(state.browser.selected, 17);
+    assert_eq!(state.browser.view.selected_index(), Some(17));
     std::fs::remove_dir_all(root).unwrap();
 }
 

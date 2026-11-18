@@ -48,33 +48,13 @@ struct Choice {
 #[derive(Default)]
 pub(super) struct Categories {
     pub filter: CategoryFilter,
-    pub visible: Vec<usize>,
     pub menu: DropdownState<CategoryMenu>,
     choices: Vec<Choice>,
 }
 
 impl MsegEditState {
     pub(super) fn browser_visible_indices(&self) -> &[usize] {
-        if matches!(self.browser.page, Page::Factory | Page::User) {
-            &self.browser.categories.visible
-        } else {
-            &ALL_CARDS
-        }
-    }
-
-    pub(super) fn browser_selected_position(&self) -> usize {
-        self.browser_visible_indices()
-            .iter()
-            .position(|index| *index == self.browser.selected)
-            .unwrap_or(0)
-    }
-
-    pub(super) fn select_browser_position(&mut self, position: usize) {
-        self.browser.selected = self
-            .browser_visible_indices()
-            .get(position)
-            .copied()
-            .unwrap_or(0);
+        self.browser.view.indices()
     }
 
     pub(super) fn rebuild_browser_view(
@@ -83,7 +63,7 @@ impl MsegEditState {
         fallback_position: usize,
     ) {
         self.close_category_menu();
-        self.browser.categories.visible = match self.browser.page {
+        let indices = match self.browser.page {
             Page::Factory => FactoryShape::ALL
                 .iter()
                 .enumerate()
@@ -110,26 +90,16 @@ impl MsegEditState {
                 .collect(),
             _ => ALL_CARDS.to_vec(),
         };
-        self.browser.selected = preferred
-            .filter(|index| self.browser.categories.visible.contains(index))
-            .or_else(|| {
-                self.browser
-                    .categories
-                    .visible
-                    .get(
-                        fallback_position
-                            .min(self.browser.categories.visible.len().saturating_sub(1)),
-                    )
-                    .copied()
-            })
-            .unwrap_or(0);
+        self.browser
+            .view
+            .rebuild(indices, preferred, fallback_position);
         self.browser.last_click = None;
     }
 
     pub(super) fn select_browser_category(&mut self, filter: CategoryFilter) {
-        let selected = self.browser.selected;
+        let selected = self.browser.view.selected_index();
         self.browser.categories.filter = filter;
-        self.rebuild_browser_view(Some(selected), 0);
+        self.rebuild_browser_view(selected, 0);
         self.browser.message.clear();
     }
 

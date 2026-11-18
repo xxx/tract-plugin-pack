@@ -193,9 +193,9 @@ fn sparse_user_search_pages_cards_and_double_click_follow_visible_source_indices
     state.on_key(&key(Key::Tab), &mut data, RECT, 1.0);
     assert!(state.browser.page == Page::User && !state.browser.search.focused);
     state.on_key(&key(Key::PageDown), &mut data, RECT, 1.0);
-    assert_eq!(state.browser.selected, 24);
+    assert_eq!(state.browser.view.selected_index(), Some(24));
     state.on_key(&key(Key::End), &mut data, RECT, 1.0);
-    assert_eq!(state.browser.selected, 27);
+    assert_eq!(state.browser.view.selected_index(), Some(27));
     let card = state.browser_layout(RECT, 1.0).unwrap().cards[0];
     let expected = state.browser.user.entries[24].clone();
     state.on_double_click(card.0 + 2.0, card.1 + 2.0, &mut data, RECT, 1.0);
@@ -242,14 +242,14 @@ fn empty_search_disables_hidden_actions_and_metadata_success_reveals_its_id() {
         1.0,
     );
     state.on_key(&key(Key::Enter), &mut data, RECT, 1.0);
-    let selected = &state.browser.user.entries[state.browser.selected];
+    let selected = &state.browser.user.entries[state.browser.view.selected_index().unwrap()];
     assert_eq!(selected.name, "/New record");
     assert!(state.browser.search.text().is_empty());
     assert!(!state.browser.search.focused);
     assert!(
         state
             .browser_visible_indices()
-            .contains(&state.browser.selected)
+            .contains(&state.browser.view.selected_index().unwrap())
     );
     assert_eq!(data, MsegData::default());
     std::fs::remove_dir_all(root).unwrap();
@@ -399,6 +399,31 @@ fn literal_slash_option_text_and_reset_paths_keep_search_limit_and_curve_state()
 }
 
 #[test]
+fn refresh_with_no_visible_selection_uses_the_first_new_match() {
+    let (mut state, library, root) = setup();
+    let mut curve = MsegData::default();
+    let shape = factory_shape(FactoryShape::Triangle);
+    let hidden = library.save_user_preset("Old curve", &shape).unwrap();
+    user(&mut state, &mut curve);
+    find(&mut state, &mut curve);
+    state.on_key(&key(Key::Character("flash".into())), &mut curve, RECT, 1.0);
+    assert!(state.browser_visible_indices().is_empty());
+    assert_eq!(state.browser.view.selected_index(), None);
+    state.on_key(&key(Key::Tab), &mut curve, RECT, 1.0);
+
+    library.rename_user_preset(&hidden, "Zulu flash").unwrap();
+    let first = library.save_user_preset("Alpha flash", &shape).unwrap();
+    state.on_key(&key(Key::Character("r".into())), &mut curve, RECT, 1.0);
+    let selected = state.browser.user.entries[state.browser.view.selected_index().unwrap()].id;
+    library.rename_user_preset(&first, "ZZZ flash").unwrap();
+    state.on_key(&key(Key::Character("r".into())), &mut curve, RECT, 1.0);
+    let after_rename = state.browser.user.entries[state.browser.view.selected_index().unwrap()].id;
+    std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(selected, first.id);
+    assert_eq!(after_rename, first.id);
+}
+
+#[test]
 fn refresh_delete_and_stale_records_retain_query_and_never_load_a_hidden_source() {
     let (mut state, library, root) = setup();
     let a = library
@@ -419,7 +444,10 @@ fn refresh_delete_and_stale_records_retain_query_and_never_load_a_hidden_source(
     }
     assert_eq!(state.browser.search.text(), "pulse");
     assert_eq!(state.browser_visible_indices().len(), 1);
-    assert_eq!(state.browser.user.entries[state.browser.selected].id, a.id);
+    assert_eq!(
+        state.browser.user.entries[state.browser.view.selected_index().unwrap()].id,
+        a.id
+    );
     library.rename_user_preset(&a, "Other A").unwrap();
     assert_eq!(
         state.on_key(&key(Key::Enter), &mut data, RECT, 1.0),
@@ -463,7 +491,7 @@ fn metadata_reveal_clears_only_a_query_that_no_longer_matches() {
         );
         assert!(!state.browser.search.focused);
         assert_eq!(
-            state.browser.user.entries[state.browser.selected].id,
+            state.browser.user.entries[state.browser.view.selected_index().unwrap()].id,
             saved.id
         );
         assert!(state.browser.categories.filter.matches("Lead"));
@@ -613,9 +641,9 @@ fn closing_search_with_a_double_click_cannot_load_the_card_reflowing_beneath_it(
     let (x, y) = (close.0 + close.2 * 0.5, close.1 + close.3 * 0.5);
     state.on_mouse_down(x, y, &mut data, RECT, 1.0, false);
     assert!(state.curve_browser_open() && !state.browser.search.visible);
-    let selected = state.browser.selected;
+    let selected = state.browser.view.selected_index();
     assert_eq!(state.on_mouse_down(x, y, &mut data, RECT, 1.0, false), None);
-    assert_eq!(state.browser.selected, selected);
+    assert_eq!(state.browser.view.selected_index(), selected);
     assert_eq!(state.on_double_click(x, y, &mut data, RECT, 1.0), None);
     assert_eq!(data, MsegData::default());
     assert!(state.curve_browser_open());

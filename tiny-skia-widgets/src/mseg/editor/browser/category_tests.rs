@@ -87,14 +87,14 @@ fn sparse_user_categories_use_visible_positions_for_pages_cards_and_recall() {
         (0..28).step_by(2).collect::<Vec<_>>()
     );
     state.on_key(&key(Key::End), &mut data, RECT, 1.0);
-    assert_eq!(state.browser.selected, 26);
+    assert_eq!(state.browser.view.selected_index(), Some(26));
     state.on_key(&key(Key::PageUp), &mut data, RECT, 1.0);
-    assert_eq!(state.browser.selected, 10);
+    assert_eq!(state.browser.view.selected_index(), Some(10));
     state.on_key(&key(Key::PageDown), &mut data, RECT, 1.0);
-    assert_eq!(state.browser.selected, 26);
+    assert_eq!(state.browser.view.selected_index(), Some(26));
     let card = state.browser_layout(RECT, 1.0).unwrap().cards[0];
     state.on_mouse_down(card.0 + 2.0, card.1 + 2.0, &mut data, RECT, 1.0, false);
-    assert_eq!(state.browser.selected, 16);
+    assert_eq!(state.browser.view.selected_index(), Some(16));
     let expected = state.browser.user.entries[16].clone();
     state.on_key(&key(Key::Enter), &mut data, RECT, 1.0);
     assert_eq!(data.active(), expected.shape.nodes());
@@ -120,7 +120,7 @@ fn recategorizing_follows_the_stable_id_and_reveals_its_new_category_without_cur
             (true, None)
         );
     }
-    let selected = &state.browser.user.entries[state.browser.selected];
+    let selected = &state.browser.user.entries[state.browser.view.selected_index().unwrap()];
     assert_eq!(selected.id, original.id);
     assert_eq!(selected.category, "Lead");
     assert_eq!(selected.shape, original.shape);
@@ -192,7 +192,7 @@ fn category_popups_consume_outside_presses_and_preserve_uncommitted_form_data() 
     );
     assert!(!state.browser.categories.menu.is_open());
     assert!(state.curve_browser_open());
-    assert_eq!(state.browser.selected, 0);
+    assert_eq!(state.browser.view.selected_index(), Some(0));
     state.on_key(&key(Key::Escape), &mut data, RECT, 1.0);
     user(&mut state, &mut data);
     for value in [Key::Character("s".into()), Key::Tab, Key::F4] {
@@ -328,8 +328,8 @@ fn filtered_rename_delete_and_external_recategorization_keep_stable_record_owner
     for value in [Key::F2, Key::Character("000 Lead".into()), Key::Enter] {
         state.on_key(&key(value), &mut data, RECT, 1.0);
     }
-    assert_eq!(state.browser.selected, 0);
-    let selected = state.browser.user.entries[state.browser.selected].clone();
+    assert_eq!(state.browser.view.selected_index(), Some(0));
+    let selected = state.browser.user.entries[state.browser.view.selected_index().unwrap()].clone();
     assert_eq!(selected.id, lead.id);
     assert_eq!(selected.category, "Lead");
     let changed = library
@@ -341,7 +341,7 @@ fn filtered_rename_delete_and_external_recategorization_keep_stable_record_owner
     assert_eq!(data, MsegData::default());
     state.select_browser_category(CategoryFilter::Category("Bass".into()));
     assert_eq!(
-        state.browser.user.entries[state.browser.selected].id,
+        state.browser.user.entries[state.browser.view.selected_index().unwrap()].id,
         changed.id
     );
     state.on_key(&key(Key::Delete), &mut data, RECT, 1.0);
