@@ -4,6 +4,20 @@ use crate::effects::{self, EffectKind, MAX_EFFECT_PARAMS, ParamSpec, TrackEffect
 use crate::modulation::{ModulationTarget, TrackModulation, TriggerSource};
 use tiny_skia_widgets as widgets;
 
+mod audition;
+mod detector;
+mod detector_response;
+mod follower;
+mod help;
+mod live;
+mod midi;
+mod pitch_grid;
+mod timing;
+mod wave_midi;
+pub use detector::DetectorField;
+pub use live::{AudioGain, AudioView};
+pub use midi::MidiField;
+pub use widgets::mseg::AudioDisplay;
 pub mod view;
 use view as effect_editor;
 use view::{EffectHit, EffectLayout};
@@ -16,6 +30,12 @@ pub enum TriggerChoice {
     CellStep,
     FreeHz,
     Transient,
+    MidiNote,
+    FreeHzSample,
+    TransientSample,
+    DawPosition,
+    MidiPitch,
+    Timing,
 }
 
 impl TriggerChoice {
@@ -25,6 +45,12 @@ impl TriggerChoice {
         Self::CellStep,
         Self::FreeHz,
         Self::Transient,
+        Self::MidiNote,
+        Self::FreeHzSample,
+        Self::TransientSample,
+        Self::DawPosition,
+        Self::MidiPitch,
+        Self::Timing,
     ];
 
     fn item(self) -> usize {
@@ -34,6 +60,12 @@ impl TriggerChoice {
             Self::CellStep => 2,
             Self::FreeHz => 3,
             Self::Transient => 4,
+            Self::MidiNote => 5,
+            Self::FreeHzSample => 6,
+            Self::TransientSample => 7,
+            Self::DawPosition => 8,
+            Self::MidiPitch => 9,
+            Self::Timing => 10,
         }
     }
 }
@@ -54,6 +86,7 @@ pub struct EditorResponse {
     pub changed: bool,
     pub back: bool,
     pub randomize: bool,
+    pub wave_automation: Option<(usize, u8)>,
 }
 
 /// Host-owned configuration and rendering context for one input event.
@@ -77,6 +110,21 @@ pub struct EffectEditor {
     effect_click: ClickTracker<EffectHit>,
     mouse_pos: (f32, f32),
     trigger_choices: &'static [TriggerChoice],
+    live: Option<live::LiveSource>,
+    trace_enabled: bool,
+    measured_arcs_only: bool,
+    audio_view: AudioView,
+    audio_frozen: bool,
+    audio_display: AudioDisplay,
+    audio_gain: AudioGain,
+    detector_open: bool,
+    detector_owner: Option<detector::DetectorBinding>,
+    pitch_grid_binding: Option<pitch_grid::PitchGridBinding>,
+    wave_midi: wave_midi::Panel,
+    wave_automation: Option<[u8; 4]>,
+    follower: follower::Panel,
+    midi_filter_owner: Option<midi::Binding>,
+    timing: timing::Panel,
 }
 
 impl Default for EffectEditor {
@@ -86,18 +134,50 @@ impl Default for EffectEditor {
 }
 
 impl EffectEditor {
+    /// Bind project waves without adding bank data to audio configuration.
+    pub fn bind_wave_palette(
+        &mut self,
+        palette: std::sync::Arc<std::sync::Mutex<widgets::mseg::WavePalette>>,
+    ) {
+        if !self
+            .mseg_edit
+            .wave_palette()
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, &palette))
+        {
+            self.wave_midi.close();
+        }
+        self.mseg_edit.bind_wave_palette(palette);
+    }
+
     pub fn new(trigger_choices: &'static [TriggerChoice]) -> Self {
+        let mut mseg_edit = widgets::mseg::MsegEditState::new();
+        mseg_edit.set_status_reserve(360.0);
         Self {
             selected_mseg: 1,
             effect_dropdown: widgets::dropdown::DropdownState::new(),
             effect_dial_drag: widgets::DragState::new(),
             text_edit: widgets::TextEditState::new(),
-            mseg_edit: widgets::mseg::MsegEditState::new(),
+            mseg_edit,
             mseg_last_click_time: std::time::Instant::now(),
             mseg_last_click_pos: (-999.0, -999.0),
             effect_click: ClickTracker::new(),
             mouse_pos: (0.0, 0.0),
             trigger_choices,
+            live: None,
+            trace_enabled: true,
+            measured_arcs_only: false,
+            audio_view: AudioView::Off,
+            audio_frozen: false,
+            audio_display: AudioDisplay::Magnitude,
+            audio_gain: AudioGain::Unity,
+            detector_open: false,
+            detector_owner: None,
+            pitch_grid_binding: None,
+            wave_midi: wave_midi::Panel::default(),
+            wave_automation: None,
+            follower: follower::Panel::default(),
+            midi_filter_owner: None,
+            timing: timing::Panel::default(),
         }
     }
 
@@ -105,17 +185,43 @@ impl EffectEditor {
         self.mseg_edit.clear_selection();
     }
 
-    /// Cancel gestures tied to configuration that the host has replaced.
+    /// Cancel gestures while retaining display preferences and measured history.
     pub fn cancel_interaction(&mut self) {
+        self.stop_listening();
         let selected_mseg = self.selected_mseg;
+        let trace_enabled = self.trace_enabled;
+        let measured_arcs_only = self.measured_arcs_only;
+        let audio_view = self.audio_view;
+        let audio_frozen = self.audio_frozen;
+        let audio_display = self.audio_display;
+        let audio_gain = self.audio_gain;
+        let live = self.live.take();
+        let wave_palette = self.mseg_edit.wave_palette().cloned();
+        let wave_automation = self.wave_automation;
         let input_scale = self.effect_dial_drag.input_scale();
         *self = Self::new(self.trigger_choices);
+        if let Some(palette) = wave_palette {
+            self.bind_wave_palette(palette);
+        }
         self.selected_mseg = selected_mseg;
+        self.trace_enabled = trace_enabled;
+        self.measured_arcs_only = measured_arcs_only;
+        self.audio_view = audio_view;
+        self.audio_frozen = audio_frozen;
+        self.audio_display = audio_display;
+        self.audio_gain = audio_gain;
+        self.live = live;
+        self.wave_automation = wave_automation;
         self.effect_dial_drag.set_input_scale(input_scale);
     }
 
     /// End input tied to old window geometry without discarding editor preferences.
     pub fn prepare_resize(&mut self, backing_scale: f32) {
+        self.timing.close();
+        self.stop_listening();
+        self.follower.close();
+        self.wave_midi.close();
+        self.cancel_detector();
         self.effect_dial_drag.end_drag();
         self.effect_dial_drag.clear_double_click();
         self.effect_dial_drag.set_input_scale(backing_scale);
@@ -128,17 +234,68 @@ impl EffectEditor {
 
     /// Commit a typed value before focus moves to a host-owned control.
     pub fn finish_text_edit(&mut self, context: EditorContext<'_>) -> EditorResponse {
+        if self.check_timing_binding(context.effect, context.modulation) {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
+        }
+        if self.check_detector_binding(context.effect.kind, context.modulation)
+            || self.check_follower_binding(context.effect, context.modulation)
+        {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
+        }
         let mut session = Session::new(self, context);
+        session.commit_timing_text();
+        session.commit_follower_text();
         session.finalize_dial_edit_for_press(f32::NEG_INFINITY, f32::NEG_INFINITY);
         session.response
     }
 
     pub fn captures_keyboard(&self) -> bool {
-        self.effect_dropdown.is_open() || self.text_edit.is_active()
+        self.timing.open()
+            || self.follower.open()
+            || self.wave_midi.open()
+            || self.detector_open
+            || self.effect_dropdown.is_open()
+            || self.text_edit.is_active()
+            || self.mseg_edit.has_open_menu()
     }
 
     pub fn dropdown_open(&self) -> bool {
-        self.effect_dropdown.is_open()
+        self.timing.open()
+            || self.follower.open()
+            || self.wave_midi.open()
+            || self.detector_open
+            || self.effect_dropdown.is_open()
+            || self.mseg_edit.has_open_menu()
+    }
+
+    /// Whether shared controls own an in-progress pointer gesture.
+    pub fn pointer_gesture_active(&self) -> bool {
+        self.timing.dragging()
+            || self.follower.dragging()
+            || self.effect_dial_drag.active_action().is_some()
+            || self.mseg_edit.is_dragging()
+    }
+
+    /// Allows hosts to finalize their numeric fields before the shared editor starts panning.
+    pub fn can_start_pan(&self, pointer: (f32, f32), geometry: EditorGeometry) -> bool {
+        !self.timing.open()
+            && !self.follower.open()
+            && !self.wave_midi.open()
+            && !self.detector_open
+            && !self.effect_dropdown.is_open()
+            && self.effect_dial_drag.active_action().is_none()
+            && self.mseg_edit.can_start_pan(
+                pointer.0,
+                pointer.1,
+                geometry.layout.mseg_pane,
+                geometry.scale,
+            )
     }
 
     pub fn handle_event(
@@ -146,8 +303,49 @@ impl EffectEditor {
         event: &baseview::Event,
         context: EditorContext<'_>,
     ) -> EditorResponse {
+        self.finish_inactive_pitch_controls(context.modulation);
+        if matches!(
+            event,
+            baseview::Event::Mouse(baseview::MouseEvent::CursorLeft)
+        ) {
+            self.mseg_edit.clear_hover_hint();
+        }
+        if self.check_midi_filter_binding(context.effect, context.modulation) {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
+        }
+        if self.check_timing_binding(context.effect, context.modulation) {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
+        }
+        if self.check_detector_binding(context.effect.kind, context.modulation) {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
+        }
+        if self.check_wave_midi_binding(context.effect, context.modulation) {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
+        }
+        if self.check_follower_binding(context.effect, context.modulation) {
+            return EditorResponse {
+                captured: true,
+                ..EditorResponse::default()
+            };
+        }
         let mut session = Session::new(self, context);
         session.handle_event(event);
+        session
+            .state
+            .sync_wave_view(session.effect, session.modulation);
+        session.state.sync_listening_panels();
         session.response
     }
 
@@ -161,6 +359,26 @@ impl EffectEditor {
         phases: [f32; 4],
         geometry: EditorGeometry,
     ) {
+        self.finish_inactive_pitch_controls(modulation);
+        self.check_midi_filter_binding(effect, modulation);
+        self.check_detector_binding(effect.kind, modulation);
+        if self.detector_open && !detector::detector_layout(geometry).usable {
+            self.suspend_detector_controls();
+        }
+        self.check_wave_midi_binding(effect, modulation);
+        self.check_follower_binding(effect, modulation);
+        self.check_timing_binding(effect, modulation);
+        if self.timing.open() && !timing::layout(geometry).usable {
+            self.timing.suspend();
+        }
+        self.sync_listening_panels();
+        self.refresh_live(effect, modulation);
+        let phases = self
+            .live
+            .as_ref()
+            .and_then(|s| s.frame)
+            .filter(|f| f.matches(effect.kind, modulation))
+            .map_or(phases, |f| f.phases);
         let mut effect = *effect;
         let mut modulation = modulation.clone();
         let pointer_position = self.mouse_pos;
@@ -178,6 +396,7 @@ impl EffectEditor {
         session.draw_effect_view(pixmap);
     }
 
+    /// Draw open menus after editor controls and host overlays.
     pub fn draw_popup(
         &self,
         pixmap: &mut tiny_skia::Pixmap,
@@ -185,7 +404,11 @@ impl EffectEditor {
         effect: &TrackEffect,
         geometry: EditorGeometry,
     ) {
-        if self.effect_dropdown.is_open() {
+        if self.effect_dropdown.is_open()
+            && !self
+                .effect_dropdown
+                .is_open_for(EffectAction::DetectorAlgorithm)
+        {
             let items = dropdown_items(self, effect);
             widgets::dropdown::draw_dropdown_popup(
                 pixmap,
@@ -195,6 +418,18 @@ impl EffectEditor {
                 geometry.window_size,
             );
         }
+        if self.mseg_edit.has_open_menu() {
+            widgets::mseg::draw_mseg_dropdown(
+                pixmap,
+                tr,
+                &self.mseg_edit,
+                geometry.layout.mseg_pane,
+            );
+        }
+        self.draw_detector(pixmap, tr, effect, geometry);
+        self.draw_wave_midi_popup(pixmap, tr, geometry);
+        self.draw_follower_popup(pixmap, tr, geometry);
+        self.draw_timing_popup(pixmap, tr, geometry);
     }
 }
 
@@ -214,6 +449,11 @@ struct Session<'a> {
 
 impl<'a> Session<'a> {
     fn new(state: &'a mut EffectEditor, context: EditorContext<'a>) -> Self {
+        state
+            .mseg_edit
+            .set_overlay_bounds(context.geometry.window_size);
+        state.refresh_pitch_grid(context.effect, context.modulation);
+        state.sync_wave_view(context.effect, context.modulation);
         state.mouse_pos = context.pointer_position;
         state
             .effect_dial_drag
@@ -269,14 +509,62 @@ impl<'a> Session<'a> {
             EffectAction::Target => self.apply_target_selection(idx),
             EffectAction::Trigger => self.apply_trigger_selection(idx),
             EffectAction::ParamDropdown(i) => self.apply_param_dropdown_selection(i, idx),
+            EffectAction::MidiFilter(field) => self.apply_midi_filter(field, idx),
+            EffectAction::DetectorAlgorithm => self.apply_detector_algorithm(idx),
+            EffectAction::Audio => {
+                if idx < 5 {
+                    self.state.set_audio_view(
+                        [
+                            AudioView::Off,
+                            AudioView::Input,
+                            AudioView::Output,
+                            AudioView::Both,
+                            AudioView::Sidechain,
+                        ][idx],
+                    );
+                } else if idx < 8 {
+                    self.state.set_audio_display(
+                        [
+                            AudioDisplay::Magnitude,
+                            AudioDisplay::Combined,
+                            AudioDisplay::Stereo,
+                        ][idx - 5],
+                    );
+                } else if idx < 11 {
+                    self.state.set_audio_gain(
+                        [AudioGain::Minus12, AudioGain::Unity, AudioGain::Plus12][idx - 8],
+                    );
+                } else if idx == 11 {
+                    self.state.set_audio_frozen(!self.state.audio_frozen);
+                }
+            }
         }
     }
 
     fn handle_event(&mut self, event: &baseview::Event) {
         use baseview::{Event, MouseButton, MouseEvent};
         use keyboard_types::{Key, KeyState, Modifiers};
+        if self.handle_timing_event(event)
+            || self.handle_follower_event(event)
+            || self.handle_wave_midi_event(event)
+            || self.handle_detector_event(event)
+        {
+            return;
+        }
         let win = (self.physical_width, self.physical_height);
         match event {
+            Event::Window(baseview::WindowEvent::Unfocused) => {
+                self.commit_pending_text();
+                let slot = self.state.selected_mseg.min(3);
+                self.response.changed |= self.state.mseg_edit.on_mouse_up(
+                    &mut self.modulation.msegs[slot],
+                    self.layout.mseg_pane,
+                    self.scale_factor,
+                ) == Some(widgets::mseg::MsegEdit::Changed);
+                let backing = self.state.effect_dial_drag.input_scale();
+                self.state.prepare_resize(backing);
+                self.response.captured = true;
+            }
             Event::Mouse(MouseEvent::CursorMoved {
                 position,
                 modifiers,
@@ -285,7 +573,27 @@ impl<'a> Session<'a> {
                 self.mouse_pos = (x, y);
                 self.state.mouse_pos = (x, y);
                 self.state.effect_dial_drag.set_mouse(x, y);
+                if self.state.mseg_edit.help_open() || self.state.mseg_edit.curve_browser_open() {
+                    let sel = self.state.selected_mseg.min(3);
+                    self.state.mseg_edit.on_mouse_move(
+                        x,
+                        y,
+                        &mut self.modulation.msegs[sel],
+                        self.layout.mseg_pane,
+                        self.scale_factor,
+                        false,
+                    );
+                    self.response.captured = true;
+                    return;
+                }
                 let shift = modifiers.contains(Modifiers::SHIFT);
+                self.state.mseg_edit.set_transform_modifiers(
+                    modifiers.contains(Modifiers::ALT),
+                    modifiers.contains(Modifiers::CONTROL),
+                );
+                self.state
+                    .mseg_edit
+                    .set_stepped_draw(modifiers.contains(Modifiers::ALT));
                 if let Some(hit) = self.state.effect_dial_drag.active_action().copied() {
                     let current = self.normalized_for_hit(hit);
                     if let Some(norm) = self.state.effect_dial_drag.update_drag(shift, current) {
@@ -308,14 +616,37 @@ impl<'a> Session<'a> {
                 {
                     self.response.changed = true;
                 }
+                self.update_mseg_hint();
             }
             Event::Mouse(MouseEvent::ButtonPressed {
                 button: MouseButton::Left,
                 modifiers,
             }) => {
                 let (x, y) = self.mouse_pos;
+                if self.state.mseg_edit.is_panning() {
+                    self.response.captured = true;
+                    return;
+                }
                 self.finalize_dial_edit_for_press(x, y);
-                if self.state.effect_dropdown.is_open() {
+                self.state.mseg_edit.set_transform_modifiers(
+                    modifiers.contains(Modifiers::ALT),
+                    modifiers.contains(Modifiers::CONTROL),
+                );
+                self.state
+                    .mseg_edit
+                    .set_stepped_draw(modifiers.contains(Modifiers::ALT));
+                if self.state.mseg_edit.has_open_menu() {
+                    let sel = self.state.selected_mseg.min(3);
+                    self.response.changed |= self.state.mseg_edit.on_mouse_down(
+                        x,
+                        y,
+                        &mut self.modulation.msegs[sel],
+                        self.layout.mseg_pane,
+                        self.scale_factor,
+                        modifiers.contains(Modifiers::CONTROL),
+                    ) == Some(widgets::MsegEdit::Changed);
+                    self.response.captured = true;
+                } else if self.state.effect_dropdown.is_open() {
                     let items = self.dropdown_items();
                     if let Some(widgets::dropdown::DropdownEvent::Selected(action, idx)) =
                         self.state.effect_dropdown.on_mouse_down(x, y, &items, win)
@@ -327,6 +658,35 @@ impl<'a> Session<'a> {
                     self.response.captured =
                         self.on_effect_press(x, y, modifiers.contains(Modifiers::CONTROL));
                 }
+            }
+            Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Middle,
+                ..
+            }) => {
+                if self.state.can_start_pan(
+                    self.mouse_pos,
+                    EditorGeometry {
+                        layout: self.layout,
+                        scale: self.scale_factor,
+                        window_size: win,
+                    },
+                ) {
+                    self.finalize_dial_edit_for_press(self.mouse_pos.0, self.mouse_pos.1);
+                }
+                self.response.captured = self.state.effect_dropdown.is_open()
+                    || self.state.effect_dial_drag.active_action().is_some()
+                    || self.state.mseg_edit.on_pan_start(
+                        self.mouse_pos.0,
+                        self.mouse_pos.1,
+                        self.layout.mseg_pane,
+                        self.scale_factor,
+                    );
+            }
+            Event::Mouse(MouseEvent::ButtonReleased {
+                button: MouseButton::Middle,
+                ..
+            }) => {
+                self.response.captured = self.state.mseg_edit.on_pan_end();
             }
             Event::Mouse(MouseEvent::ButtonPressed {
                 button: MouseButton::Right,
@@ -352,6 +712,18 @@ impl<'a> Session<'a> {
                 }
             }
             Event::Mouse(MouseEvent::WheelScrolled { delta, .. })
+                if self.state.mseg_edit.has_open_menu() =>
+            {
+                let dy = match delta {
+                    baseview::ScrollDelta::Lines { y, .. } => *y,
+                    baseview::ScrollDelta::Pixels { y, .. } => *y * 0.05,
+                };
+                self.response.captured = self.state.mseg_edit.on_wheel(
+                    dy * self.state.effect_dial_drag.input_scale(),
+                    self.layout.mseg_pane,
+                );
+            }
+            Event::Mouse(MouseEvent::WheelScrolled { delta, .. })
                 if self.state.effect_dropdown.is_open() =>
             {
                 let dy = match delta {
@@ -365,6 +737,26 @@ impl<'a> Session<'a> {
                     win,
                 );
                 self.response.captured = true;
+            }
+            Event::Mouse(MouseEvent::WheelScrolled { delta, modifiers }) => {
+                if self.state.effect_dial_drag.active_action().is_some() {
+                    self.response.captured = true;
+                    return;
+                }
+                let dy = match delta {
+                    baseview::ScrollDelta::Lines { y, .. } => *y,
+                    baseview::ScrollDelta::Pixels { y, .. } => *y * 0.05,
+                };
+                let sel = self.state.selected_mseg.min(3);
+                self.response.captured = self.state.mseg_edit.on_scroll(
+                    self.mouse_pos.0,
+                    self.mouse_pos.1,
+                    dy,
+                    modifiers.contains(Modifiers::SHIFT),
+                    &self.modulation.msegs[sel],
+                    self.layout.mseg_pane,
+                    self.scale_factor,
+                );
             }
             Event::Keyboard(ev) if self.state.effect_dropdown.is_open() => {
                 self.response.captured = true;
@@ -415,27 +807,27 @@ impl<'a> Session<'a> {
                     }
                     Key::Backspace => self.state.text_edit.backspace(),
                     Key::Escape => self.state.text_edit.cancel(),
-                    Key::Enter => match self.state.text_edit.commit() {
-                        Some((EffectHit::Dial(i), text)) => self.commit_dial_text_edit(i, &text),
-                        Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
-                        _ => {}
-                    },
+                    Key::Enter => self.commit_pending_text(),
+                    _ if widgets::mseg::is_help_shortcut(ev) => {}
                     _ => self.response.captured = false,
                 }
             }
-            Event::Keyboard(ev)
-                if ev.state == KeyState::Down && matches!(ev.key, Key::Delete | Key::Backspace) =>
-            {
-                let sel = self.state.selected_mseg.min(3);
-                if self
-                    .state
-                    .mseg_edit
-                    .delete_selection(&mut self.modulation.msegs[sel])
-                    == Some(widgets::mseg::MsegEdit::Changed)
+            Event::Keyboard(ev) => {
+                if self.state.effect_dial_drag.active_action().is_some()
+                    && widgets::mseg::is_help_shortcut(ev)
                 {
-                    self.response.changed = true;
                     self.response.captured = true;
+                    return;
                 }
+                let sel = self.state.selected_mseg.min(3);
+                let (captured, edit) = self.state.mseg_edit.on_key(
+                    ev,
+                    &mut self.modulation.msegs[sel],
+                    self.layout.mseg_pane,
+                    self.scale_factor,
+                );
+                self.response.captured = captured;
+                self.response.changed |= edit == Some(widgets::MsegEdit::Changed);
             }
             _ => {}
         }
@@ -451,13 +843,16 @@ impl<'a> Session<'a> {
                 ((self.modulation.depths[self.state.selected_mseg - 1] + 1.0) / 2.0).clamp(0.0, 1.0)
             }
             EffectHit::TriggerRate => match self.modulation.trigger {
-                TriggerSource::FreeHz { hz } => effects::value_to_norm(
-                    hz,
-                    view::TRIGGER_RATE_MIN_HZ,
-                    view::TRIGGER_RATE_MAX_HZ,
-                    effects::ParamScaling::Log,
-                ),
-                TriggerSource::Transient { threshold, .. } => {
+                TriggerSource::FreeHz { hz } | TriggerSource::FreeHzSample { hz } => {
+                    effects::value_to_norm(
+                        hz,
+                        view::TRIGGER_RATE_MIN_HZ,
+                        view::TRIGGER_RATE_MAX_HZ,
+                        effects::ParamScaling::Log,
+                    )
+                }
+                TriggerSource::Transient { threshold, .. }
+                | TriggerSource::TransientSample { threshold, .. } => {
                     1.0 - effects::value_to_norm(
                         threshold,
                         crate::modulation::TRANSIENT_THRESHOLD_MIN,
@@ -468,7 +863,8 @@ impl<'a> Session<'a> {
                 _ => 0.5,
             },
             EffectHit::TriggerAux => match self.modulation.trigger {
-                TriggerSource::Transient { hold_ms, .. } => effects::value_to_norm(
+                TriggerSource::Transient { hold_ms, .. }
+                | TriggerSource::TransientSample { hold_ms, .. } => effects::value_to_norm(
                     hold_ms,
                     crate::modulation::TRANSIENT_HOLD_MS_MIN,
                     crate::modulation::TRANSIENT_HOLD_MS_MAX,
@@ -478,6 +874,13 @@ impl<'a> Session<'a> {
             },
             EffectHit::MsegLength => self.active_mseg_length_norm(),
             EffectHit::Mix => self.effect.mix,
+            EffectHit::Smooth(slot) => {
+                crate::modulation::smooth_to_norm(self.modulation.smooth_ms[slot])
+            }
+            EffectHit::Detector(field) => self.detector_norm(field),
+            EffectHit::DetectorDetail => {
+                self.modulation.detector_response.normalized().detail * 0.01
+            }
             _ => 0.5,
         }
     }
@@ -490,11 +893,31 @@ impl<'a> Session<'a> {
             EffectHit::TriggerAux => self.apply_trigger_aux_drag(norm),
             EffectHit::MsegLength => self.apply_mseg_length_drag(norm),
             EffectHit::Mix => self.apply_mix(norm),
+            EffectHit::Smooth(slot) => {
+                self.apply_smooth(slot, crate::modulation::smooth_from_norm(norm))
+            }
+            EffectHit::Detector(field) => self.apply_detector_norm(field, norm),
+            EffectHit::DetectorDetail => self.apply_detector_detail(norm.clamp(0.0, 1.0) * 100.0),
             _ => {}
         }
     }
 
     fn compute_modulated_norms(&self) -> view::ModulationDisplay {
+        if let Some(frame) = self
+            .state
+            .live
+            .as_ref()
+            .and_then(|s| s.frame)
+            .filter(|f| f.matches(self.effect.kind, self.modulation))
+        {
+            return view::ModulationDisplay {
+                parameters: frame.parameters,
+                mix: frame.mix,
+            };
+        }
+        if self.state.measured_arcs_only || self.modulation.continuous_mask(self.effect.kind) != 0 {
+            return view::ModulationDisplay::default();
+        }
         let mut result = view::ModulationDisplay::default();
         for k in 1..4 {
             let Some(target) = self.modulation.targets[k - 1] else {
@@ -525,7 +948,24 @@ impl<'a> Session<'a> {
     }
     fn on_right_press(&mut self) -> baseview::EventStatus {
         let (px, py) = self.mouse_pos;
-        if self.state.effect_dial_drag.active_action().is_some() {
+        if self.state.effect_dropdown.is_open() {
+            self.state.effect_dropdown.close();
+            return baseview::EventStatus::Captured;
+        }
+        if self.state.mseg_edit.has_open_menu() {
+            let sel = self.state.selected_mseg.min(3);
+            self.response.changed |= self.state.mseg_edit.on_right_click(
+                px,
+                py,
+                &mut self.modulation.msegs[sel],
+                self.layout.mseg_pane,
+                self.scale_factor,
+            ) == Some(widgets::MsegEdit::Changed);
+            return baseview::EventStatus::Captured;
+        }
+        if self.state.effect_dial_drag.active_action().is_some()
+            || self.state.mseg_edit.is_dragging()
+        {
             return baseview::EventStatus::Captured;
         }
         // First, hit-test for a param dial — only `EffectHit::Dial(i)`
@@ -542,6 +982,16 @@ impl<'a> Session<'a> {
             self.state.selected_mseg,
             trigger,
         );
+        if let Some(EffectHit::Smooth(slot)) = hit {
+            if self.smooth_allowed(slot) {
+                self.commit_pending_text();
+                self.state.text_edit.begin(
+                    EffectHit::Smooth(slot),
+                    &self.modulation.smooth_ms[slot].to_string(),
+                );
+            }
+            return baseview::EventStatus::Captured;
+        }
         if let Some(EffectHit::Dial(i)) = hit {
             // Enum params are dropdowns, not editable text fields — let the
             // right-click fall through (left-click opens the dropdown).
@@ -552,11 +1002,7 @@ impl<'a> Session<'a> {
             // being edited would silently discard the prior edit if we
             // jumped straight to `begin` (which clears the buffer).
             // Commit-and-apply the prior edit first.
-            match self.state.text_edit.commit() {
-                Some((EffectHit::Dial(prev), text)) => self.commit_dial_text_edit(prev, &text),
-                Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
-                _ => {}
-            }
+            self.commit_pending_text();
             if let Some(spec) = self.param_spec(i) {
                 let value = self.effect_config().params[i];
                 self.state.text_edit.begin(
@@ -568,11 +1014,7 @@ impl<'a> Session<'a> {
         }
         if let Some(EffectHit::Mix) = hit {
             // Commit any prior edit before seeding a new one.
-            match self.state.text_edit.commit() {
-                Some((EffectHit::Dial(prev), text)) => self.commit_dial_text_edit(prev, &text),
-                Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
-                _ => {}
-            }
+            self.commit_pending_text();
             let pct = (self.effect_config().mix * 100.0).round() as i32;
             self.state
                 .text_edit
@@ -661,29 +1103,44 @@ impl<'a> Session<'a> {
         // Build the hover-node tooltip for the active MSEG. Amp (slot 0) shows
         // a dB readout; assignable MSEGs format through the target's ParamSpec
         // if one is set, or fall back to the raw 0..1 level.
+        let (spec, base, depth_polarity) = if sel == 0 {
+            (None, 0.0, None)
+        } else {
+            let k = sel - 1;
+            let target = modu.targets[k];
+            (
+                target.and_then(|t| t.spec(track.kind)),
+                target.map(|t| t.base_value(&track)).unwrap_or(0.0),
+                Some((modu.depths[k], modu.msegs[sel].polarity)),
+            )
+        };
         let tooltip: Option<(usize, String)> = self.state.mseg_edit.hovered_node().map(|idx| {
-            let (spec, base, depth_polarity) = if sel == 0 {
-                (None, 0.0, None)
-            } else {
-                let k = sel - 1;
-                let target = modu.targets[k];
-                let depth = modu.depths[k];
-                let polarity = modu.msegs[sel].polarity;
-                let spec = target.and_then(|target| target.spec(track.kind));
-                let base = target
-                    .map(|target| target.base_value(&track))
-                    .unwrap_or(0.0);
-                (spec, base, Some((depth, polarity)))
-            };
+            (
+                idx,
+                mseg_node_tooltip_text(sel, &modu.msegs[sel], idx, spec, base, depth_polarity),
+            )
+        });
+        if let Some(idx) = self.state.mseg_edit.inspector_node() {
             let text =
                 mseg_node_tooltip_text(sel, &modu.msegs[sel], idx, spec, base, depth_polarity);
-            (idx, text)
-        });
+            self.state
+                .mseg_edit
+                .set_inspector_readout(text.split_once('\n').map_or("", |(_, value)| value));
+        }
         let tooltip_ref = tooltip.as_ref().map(|(i, t)| (*i, t.as_str()));
         // Active MSEG first — `draw_mseg` opens with an opaque canvas fill
         // that would otherwise wipe the ghosts. Ghosts are then drawn on top
         // at low alpha (≈ 38%) so they read as faint context, not foreground.
-        widgets::mseg::draw_mseg(
+        let audio_view = self.state.audio_view;
+        let audio_style = widgets::mseg::AudioBackdropStyle {
+            input: audio_view.input(),
+            output: audio_view.output(),
+            display: self.state.audio_display,
+            gain: self.state.audio_gain.multiplier(),
+            output_color: mseg_color(sel),
+        };
+        let audio_bins = self.state.live.as_ref().map(|live| &live.waveform[..]);
+        widgets::mseg::draw_mseg_with_background(
             pixmap,
             self.text_renderer,
             lay.mseg_pane,
@@ -692,9 +1149,16 @@ impl<'a> Session<'a> {
             self.scale_factor,
             mseg_color(sel),
             tooltip_ref,
+            |pm, layout| {
+                if let Some(bins) = audio_bins {
+                    widgets::mseg::draw_mseg_audio(pm, layout, bins, audio_style);
+                }
+            },
         );
         for (m, mseg) in modu.msegs.iter().enumerate() {
             if m != sel {
+                let playback = self.state.wave_display_curve(&track, &modu, m);
+                let mseg = playback.as_ref().unwrap_or(mseg);
                 let c = mseg_color(m);
                 // Pack the slot colour with ghost alpha (~0x60).
                 let r = (c.red() * 255.0).round() as u32;
@@ -714,17 +1178,17 @@ impl<'a> Session<'a> {
         // Playhead overlay: a thin vertical line at the active MSEG's current
         // phase, drawn over the active curve + ghosts.
         let phase = self.phases[sel];
-        effect_editor::draw_mseg_playhead(pixmap, lay.mseg_pane, phase, self.scale_factor);
-        // Open MSEG dropdown (Grid / Style / right-click Transform menu) goes
-        // last so it sits above every preceding layer — `draw_mseg` no longer
-        // paints it inline because the ghost loop above would otherwise bury
-        // it.
-        widgets::mseg::draw_mseg_dropdown(
+        effect_editor::draw_mseg_playhead_in_layout(
             pixmap,
-            self.text_renderer,
-            &self.state.mseg_edit,
-            lay.mseg_pane,
+            &self
+                .state
+                .mseg_edit
+                .layout(lay.mseg_pane, self.scale_factor),
+            phase,
+            self.scale_factor,
         );
+        self.state
+            .draw_live_trace(pixmap, lay.mseg_pane, self.scale_factor);
         // Selector + target + depth (when on an assignable MSEG).
         let (target, depth) = if sel == 0 {
             (None, 0.0)
@@ -755,18 +1219,79 @@ impl<'a> Session<'a> {
             self.scale_factor,
             &self.layout,
         );
+        self.draw_midi_controls(pixmap);
+        if matches!(
+            self.modulation.trigger,
+            TriggerSource::TransientSample { .. }
+        ) {
+            let r = self.layout.detector_setup;
+            widgets::controls::draw_button(
+                pixmap,
+                self.text_renderer,
+                r.0,
+                r.1,
+                r.2,
+                r.3,
+                "Detect...",
+                self.state.detector_open,
+                false,
+            );
+        }
         // Active MSEG's sync/length controls (sit on the modulation row to
         // the right of the depth dial).
-        effect_editor::draw_mseg_controls(
-            pixmap,
-            self.text_renderer,
-            &modu.msegs[sel],
-            self.scale_factor,
-            &self.layout,
-        );
+        if modu.trigger.pitch_settings().is_some() {
+            self.draw_pitch_rate(pixmap);
+        } else {
+            effect_editor::draw_mseg_controls(
+                pixmap,
+                self.text_renderer,
+                &modu.msegs[sel],
+                self.scale_factor,
+                &self.layout,
+            );
+        }
+        self.draw_live_controls(pixmap);
+        self.draw_wave_midi_button(pixmap);
+        self.draw_follower_button(pixmap);
     }
 
     fn on_effect_press(&mut self, px: f32, py: f32, ctrl: bool) -> bool {
+        let strip = self
+            .state
+            .mseg_edit
+            .layout(self.layout.mseg_pane, self.scale_factor)
+            .strip;
+        if view::in_rect(
+            widgets::mseg::follower_button_rect(strip, self.scale_factor),
+            px,
+            py,
+        ) {
+            if !self.state.mseg_edit.is_dragging()
+                && self.state.effect_dial_drag.active_action().is_none()
+            {
+                self.open_follower();
+            }
+            return true;
+        }
+        if self.state.mseg_edit.wave_palette().is_some() || self.modulation.wave_switch.is_some() {
+            let strip = self
+                .state
+                .mseg_edit
+                .layout(self.layout.mseg_pane, self.scale_factor)
+                .strip;
+            if view::in_rect(
+                widgets::mseg::wave_midi_button_rect(strip, self.scale_factor),
+                px,
+                py,
+            ) {
+                if !self.state.mseg_edit.is_dragging()
+                    && self.state.effect_dial_drag.active_action().is_none()
+                {
+                    self.open_wave_midi();
+                }
+                return true;
+            }
+        }
         let params = self.effect_param_count();
         let trigger = self.modulation_config().trigger;
         let Some(hit) = effect_editor::effect_hit(
@@ -877,6 +1402,48 @@ impl<'a> Session<'a> {
                     win,
                 );
             }
+            EffectHit::Smooth(slot) => {
+                if !self.smooth_allowed(slot) {
+                    return true;
+                }
+                if self
+                    .state
+                    .effect_click
+                    .check_and_update(EffectHit::Smooth(slot))
+                {
+                    self.apply_smooth(slot, 0.0);
+                } else {
+                    self.state.effect_dial_drag.begin_drag(
+                        EffectHit::Smooth(slot),
+                        crate::modulation::smooth_to_norm(self.modulation.smooth_ms[slot]),
+                        false,
+                    );
+                }
+            }
+            EffectHit::Trace => {
+                self.state.trace_enabled = !self.state.trace_enabled;
+            }
+            EffectHit::MidiFilter(field) => self.open_midi_filter(field),
+            EffectHit::DetectorSetup => self.open_detector(),
+            EffectHit::Detector(_) | EffectHit::DetectorDetail => return true,
+            EffectHit::Audio => {
+                let items = live::audio_items(self.state);
+                let font_size = (lay.audio.3 * 0.5).max(10.0);
+                let width = items
+                    .iter()
+                    .map(|label| self.text_renderer.text_width(label, font_size))
+                    .fold(lay.audio.2, f32::max)
+                    + 14.0;
+                let anchor = (lay.audio.0, lay.audio.1, width, lay.audio.3);
+                self.state.effect_dropdown.open(
+                    EffectAction::Audio,
+                    anchor,
+                    widgets::dropdown::DropdownList::flat(&items),
+                    self.state.audio_view as usize,
+                    false,
+                    (self.physical_width, self.physical_height),
+                );
+            }
             EffectHit::Depth => {
                 if self.state.selected_mseg != 0 {
                     if self.state.effect_click.check_and_update(EffectHit::Depth) {
@@ -921,9 +1488,16 @@ impl<'a> Session<'a> {
                 let current = self.trigger_index(trigger);
                 let items = self.trigger_items();
                 let win = (self.physical_width, self.physical_height);
+                let font = (lay.trigger.3 * 0.5).max(10.0);
+                let width = (items
+                    .iter()
+                    .map(|label| self.text_renderer.text_width(label, font))
+                    .fold(0.0_f32, f32::max)
+                    + 14.0)
+                    .max(lay.trigger.2);
                 self.state.effect_dropdown.open(
                     EffectAction::Trigger,
-                    lay.trigger,
+                    (lay.trigger.0, lay.trigger.1, width, lay.trigger.3),
                     widgets::dropdown::DropdownList::flat(&items),
                     current,
                     false,
@@ -933,13 +1507,16 @@ impl<'a> Session<'a> {
             EffectHit::TriggerRate => {
                 let trigger = self.modulation_config().trigger;
                 let current_norm = match trigger {
-                    TriggerSource::FreeHz { hz } => effects::value_to_norm(
-                        hz,
-                        effect_editor::TRIGGER_RATE_MIN_HZ,
-                        effect_editor::TRIGGER_RATE_MAX_HZ,
-                        effects::ParamScaling::Log,
-                    ),
-                    TriggerSource::Transient { threshold, .. } => {
+                    TriggerSource::FreeHz { hz } | TriggerSource::FreeHzSample { hz } => {
+                        effects::value_to_norm(
+                            hz,
+                            effect_editor::TRIGGER_RATE_MIN_HZ,
+                            effect_editor::TRIGGER_RATE_MAX_HZ,
+                            effects::ParamScaling::Log,
+                        )
+                    }
+                    TriggerSource::Transient { threshold, .. }
+                    | TriggerSource::TransientSample { threshold, .. } => {
                         // Sensitivity = 1 − normalised threshold.
                         1.0 - effects::value_to_norm(
                             threshold,
@@ -966,7 +1543,9 @@ impl<'a> Session<'a> {
             }
             EffectHit::TriggerAux => {
                 let trigger = self.modulation_config().trigger;
-                let TriggerSource::Transient { hold_ms, .. } = trigger else {
+                let (TriggerSource::Transient { hold_ms, .. }
+                | TriggerSource::TransientSample { hold_ms, .. }) = trigger
+                else {
                     return false;
                 };
                 if self
@@ -1045,6 +1624,9 @@ impl<'a> Session<'a> {
     }
 
     fn apply_mseg_sync(&mut self, seg: usize) {
+        if self.modulation.trigger.pitch_settings().is_some() {
+            return;
+        }
         let new_mode = if seg == 0 {
             tiny_skia_widgets::SyncMode::Time
         } else {
@@ -1058,6 +1640,9 @@ impl<'a> Session<'a> {
     }
 
     fn apply_mseg_length_drag(&mut self, norm: f32) {
+        if self.modulation.trigger.pitch_settings().is_some() {
+            return;
+        }
         let k = self.state.selected_mseg.min(3);
 
         let mseg = &mut self.modulation.msegs[k];
@@ -1136,13 +1721,7 @@ impl<'a> Session<'a> {
             // then starts a drag.
             self.state.text_edit.cancel();
         } else {
-            match self.state.text_edit.commit() {
-                Some((EffectHit::Dial(i), text)) => self.commit_dial_text_edit(i, &text),
-                Some((EffectHit::Mix, text)) => self.commit_mix_text_edit(&text),
-                // None: no edit was active — cancel() is a no-op. A new text-editable
-                // EffectHit variant needs its own Some(...) arm above, not this.
-                _ => self.state.text_edit.cancel(),
-            }
+            self.commit_pending_text();
         }
     }
 
@@ -1255,8 +1834,9 @@ impl<'a> Session<'a> {
 
     fn reset_trigger_rate_to_default(&mut self) {
         match &mut self.modulation.trigger {
-            TriggerSource::FreeHz { hz } => *hz = 1.0,
-            TriggerSource::Transient { threshold, .. } => {
+            TriggerSource::FreeHz { hz } | TriggerSource::FreeHzSample { hz } => *hz = 1.0,
+            TriggerSource::Transient { threshold, .. }
+            | TriggerSource::TransientSample { threshold, .. } => {
                 *threshold = crate::modulation::TRANSIENT_THRESHOLD_DEFAULT;
             }
             _ => return,
@@ -1266,7 +1846,7 @@ impl<'a> Session<'a> {
 
     fn apply_trigger_rate_drag(&mut self, norm: f32) {
         match &mut self.modulation.trigger {
-            TriggerSource::FreeHz { hz } => {
+            TriggerSource::FreeHz { hz } | TriggerSource::FreeHzSample { hz } => {
                 *hz = effects::norm_to_value(
                     norm,
                     effect_editor::TRIGGER_RATE_MIN_HZ,
@@ -1274,7 +1854,8 @@ impl<'a> Session<'a> {
                     effects::ParamScaling::Log,
                 );
             }
-            TriggerSource::Transient { threshold, .. } => {
+            TriggerSource::Transient { threshold, .. }
+            | TriggerSource::TransientSample { threshold, .. } => {
                 *threshold = effects::norm_to_value(
                     1.0 - norm,
                     crate::modulation::TRANSIENT_THRESHOLD_MIN,
@@ -1288,7 +1869,9 @@ impl<'a> Session<'a> {
     }
 
     fn reset_trigger_aux_to_default(&mut self) {
-        if let TriggerSource::Transient { hold_ms, .. } = &mut self.modulation.trigger {
+        if let TriggerSource::Transient { hold_ms, .. }
+        | TriggerSource::TransientSample { hold_ms, .. } = &mut self.modulation.trigger
+        {
             *hold_ms = crate::modulation::TRANSIENT_HOLD_MS_DEFAULT;
             self.response.changed = true;
         }
@@ -1301,27 +1884,36 @@ impl<'a> Session<'a> {
             crate::modulation::TRANSIENT_HOLD_MS_MAX,
             effects::ParamScaling::Log,
         );
-        if let TriggerSource::Transient { hold_ms, .. } = &mut self.modulation.trigger {
+        if let TriggerSource::Transient { hold_ms, .. }
+        | TriggerSource::TransientSample { hold_ms, .. } = &mut self.modulation.trigger
+        {
             *hold_ms = new_hold_ms;
             self.response.changed = true;
         }
     }
 
     fn apply_trigger_selection(&mut self, idx: usize) {
-        let (carried_hz, carried_threshold, carried_hold_ms) =
-            match self.modulation_config().trigger {
-                TriggerSource::FreeHz { hz } => (
-                    hz,
-                    crate::modulation::TRANSIENT_THRESHOLD_DEFAULT,
-                    crate::modulation::TRANSIENT_HOLD_MS_DEFAULT,
-                ),
-                TriggerSource::Transient { threshold, hold_ms } => (1.0, threshold, hold_ms),
-                _ => (
-                    1.0,
-                    crate::modulation::TRANSIENT_THRESHOLD_DEFAULT,
-                    crate::modulation::TRANSIENT_HOLD_MS_DEFAULT,
-                ),
-            };
+        if self.state.trigger_choices.get(idx) == Some(&TriggerChoice::Timing) {
+            self.open_timing();
+            return;
+        }
+        let (carried_hz, carried_threshold, carried_hold_ms) = match self
+            .modulation_config()
+            .trigger
+        {
+            TriggerSource::FreeHz { hz } | TriggerSource::FreeHzSample { hz } => (
+                hz,
+                crate::modulation::TRANSIENT_THRESHOLD_DEFAULT,
+                crate::modulation::TRANSIENT_HOLD_MS_DEFAULT,
+            ),
+            TriggerSource::Transient { threshold, hold_ms }
+            | TriggerSource::TransientSample { threshold, hold_ms } => (1.0, threshold, hold_ms),
+            _ => (
+                1.0,
+                crate::modulation::TRANSIENT_THRESHOLD_DEFAULT,
+                crate::modulation::TRANSIENT_HOLD_MS_DEFAULT,
+            ),
+        };
         let new_trigger = effect_editor::trigger_from_item(
             self.state
                 .trigger_choices
@@ -1333,13 +1925,44 @@ impl<'a> Session<'a> {
             carried_hold_ms,
         );
 
-        self.modulation.trigger = new_trigger;
+        self.modulation.trigger = if matches!(new_trigger, TriggerSource::MidiNote { .. })
+            && matches!(self.modulation.trigger, TriggerSource::MidiNote { .. })
+            || matches!(new_trigger, TriggerSource::MidiPitch { .. })
+                && matches!(self.modulation.trigger, TriggerSource::MidiPitch { .. })
+        {
+            self.modulation.trigger
+        } else {
+            new_trigger
+        };
         self.response.changed = true;
     }
 }
 
 fn dropdown_items(state: &EffectEditor, effect: &TrackEffect) -> Vec<&'static str> {
-    if state.effect_dropdown.is_open_for(EffectAction::Target) {
+    if state
+        .effect_dropdown
+        .is_open_for(EffectAction::DetectorAlgorithm)
+    {
+        return detector_response::ALGORITHM_ITEMS.to_vec();
+    }
+    if state
+        .effect_dropdown
+        .is_open_for(EffectAction::MidiFilter(MidiField::Note))
+    {
+        midi::NOTE_ITEMS.to_vec()
+    } else if state
+        .effect_dropdown
+        .is_open_for(EffectAction::MidiFilter(MidiField::Transpose))
+    {
+        midi::TRANSPOSE_ITEMS.to_vec()
+    } else if state
+        .effect_dropdown
+        .is_open_for(EffectAction::MidiFilter(MidiField::Channel))
+    {
+        midi::CHANNEL_ITEMS.to_vec()
+    } else if state.effect_dropdown.is_open_for(EffectAction::Audio) {
+        live::audio_items(state)
+    } else if state.effect_dropdown.is_open_for(EffectAction::Target) {
         view::target_items(effect.kind)
     } else if state.effect_dropdown.is_open_for(EffectAction::Trigger) {
         let all = view::trigger_items();
@@ -1419,6 +2042,9 @@ enum EffectAction {
     Target,
     Trigger,
     ParamDropdown(usize),
+    Audio,
+    MidiFilter(MidiField),
+    DetectorAlgorithm,
 }
 
 /// Format a node's position and its amplitude or routed parameter value.
@@ -1607,6 +2233,23 @@ mod tests {
                 session.phases[slot],
                 session.scale_factor,
             );
+            let strip = session
+                .state
+                .mseg_edit
+                .layout(session.layout.mseg_pane, session.scale_factor)
+                .strip;
+            let rect = widgets::mseg::follower_button_rect(strip, session.scale_factor);
+            widgets::draw_button(
+                &mut pm,
+                session.text_renderer,
+                rect.0,
+                rect.1,
+                rect.2,
+                rect.3,
+                "Follow",
+                session.modulation.follower.routes[slot].enabled,
+                false,
+            );
             pm
         }
 
@@ -1717,7 +2360,12 @@ mod tests {
                     assert_region(
                         &actual,
                         &expected,
-                        session.layout.mseg_pane,
+                        (
+                            session.layout.mseg_pane.0,
+                            session.layout.mseg_pane.1,
+                            session.layout.mseg_pane.2,
+                            session.layout.smooth.1 - session.layout.mseg_pane.1,
+                        ),
                         &format!("selected slot {selection}"),
                     );
                     assert_eq!(*session.effect, effect);
@@ -1774,7 +2422,12 @@ mod tests {
                     assert_region(
                         &actual,
                         &expected,
-                        session.layout.mseg_pane,
+                        (
+                            session.layout.mseg_pane.0,
+                            session.layout.mseg_pane.1,
+                            session.layout.mseg_pane.2,
+                            session.layout.smooth.1 - session.layout.mseg_pane.1,
+                        ),
                         &format!("tooltip slot {slot}"),
                     );
                 }
@@ -1969,6 +2622,12 @@ mod tests {
                         "Cell step",
                         "Free Hz",
                         "Transient",
+                        "MIDI note",
+                        "Free Hz (sample)",
+                        "Transient (sample)",
+                        "DAW position",
+                        "MIDI pitch",
+                        "Timing...",
                     ],
                     [0, 1, 2, 3, 4],
                 ),
@@ -2621,7 +3280,7 @@ mod tests {
                     );
                     let point = (
                         layout.strip.0 + 20.0 * session.scale_factor,
-                        layout.strip.1 + layout.strip.3 / 2.0,
+                        layout.strip.1 + 18.0 * session.scale_factor,
                     );
                     session.state.mseg_last_click_pos = (-999.0, -999.0);
                     assert!(session.on_effect_press(point.0, point.1, false));

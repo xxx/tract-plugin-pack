@@ -90,6 +90,38 @@ impl<A: Clone + PartialEq> TextEditState<A> {
         }
     }
 
+    /// Opt-in numeric input with Off, Hz/kHz, dB, ms or percent suffixes.
+    pub fn insert_unit_char(&mut self, c: char) {
+        if self.active.is_some()
+            && (is_numeric_char(c)
+                || matches!(
+                    c,
+                    ' ' | 'o'
+                        | 'O'
+                        | 'f'
+                        | 'F'
+                        | 'h'
+                        | 'H'
+                        | 'z'
+                        | 'Z'
+                        | 'k'
+                        | 'K'
+                        | 'd'
+                        | 'D'
+                        | 'b'
+                        | 'B'
+                        | 'm'
+                        | 'M'
+                        | 's'
+                        | 'S'
+                        | '%'
+                ))
+            && self.buffer.len() < MAX_BUFFER_LEN
+        {
+            self.buffer.push(c);
+        }
+    }
+
     /// Remove the last character from the buffer if there's an active edit
     /// and the buffer is not empty. No-op otherwise.
     pub fn backspace(&mut self) {
@@ -204,6 +236,25 @@ mod tests {
         s.insert_char('a');
         s.insert_char(' ');
         assert_eq!(s.active_for(&A::Gain), Some("10"));
+    }
+
+    #[test]
+    fn unit_input_is_opt_in_and_keeps_the_bounded_buffer() {
+        let mut s: TextEditState<A> = TextEditState::new();
+        s.begin(A::Gain, "");
+        for c in "5 kHz".chars() {
+            s.insert_unit_char(c);
+        }
+        assert_eq!(s.active_for(&A::Gain), Some("5 kHz"));
+        s.begin(A::Gain, "");
+        for c in "Off".chars() {
+            s.insert_unit_char(c);
+        }
+        assert_eq!(s.active_for(&A::Gain), Some("Off"));
+        for _ in 0..30 {
+            s.insert_unit_char('z');
+        }
+        assert_eq!(s.active_for(&A::Gain).unwrap().len(), MAX_BUFFER_LEN);
     }
 
     #[test]

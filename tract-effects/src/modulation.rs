@@ -8,6 +8,33 @@ use tiny_skia_widgets::{
     MsegData, MsegNode, PlayMode, Polarity, SyncMode, advance, value_at_phase,
 };
 
+mod audio_trigger;
+mod transient_response;
+mod trigger_timing;
+pub use transient_response::{TransientAlgorithm, TransientSettings};
+pub use trigger_timing::{MAX_AUDIO_DELAY_MS, MAX_RETRIGGER_BLEND_MS, TriggerTiming};
+mod audition;
+pub use audition::{
+    AuditionControl, AuditionRequest, AuditionRuntime, AuditionSettings, AuditionSource,
+};
+mod follower;
+pub use follower::{
+    FOLLOWER_ATTACK_MAX_MS, FOLLOWER_GAIN_DB, FOLLOWER_HOLD_MAX_MS, FOLLOWER_RELEASE_MAX_MS,
+    FollowerConfig, FollowerMode, FollowerReading, FollowerRoute,
+};
+mod automation;
+mod position;
+mod precise;
+pub use audio_trigger::{
+    AudioTriggerSettings, DetectorInput, DetectorReading, FILTER_MAX_HZ, FILTER_MIN_HZ,
+    LEVEL_MAX_DB, LEVEL_MIN_DB,
+};
+pub use automation::WAVE_AUTOMATION_ITEMS;
+pub use position::HostPosition;
+mod smoothing;
+pub use smoothing::{MAX_SMOOTH_MS, normalized_smooth_ms, smooth_from_norm, smooth_to_norm};
+pub(crate) use smoothing::{phase_next, phase_step};
+
 /// Default threshold for a fresh `TriggerSource::Transient` (≈ +3.5 dB on the
 /// fast/slow envelope ratio — fires on clear percussive onsets without
 /// over-triggering on sustained material).
@@ -57,11 +84,32 @@ impl TransientDetector {
         hold_ms: f32,
         sample_rate: f32,
     ) -> bool {
+        self.process_cached(
+            input,
+            threshold,
+            hold_ms,
+            sample_rate,
+            precise::DetectorCoefficients::new(sample_rate),
+            0.0,
+        )
+    }
+
+    fn process_cached(
+        &mut self,
+        input: f32,
+        threshold: f32,
+        hold_ms: f32,
+        sample_rate: f32,
+        coefficients: precise::DetectorCoefficients,
+        level_floor: f32,
+    ) -> bool {
         let target = input.abs();
-        let fast_a = one_pole_coef(TRANSIENT_FAST_ATTACK_MS, sample_rate);
-        let fast_r = one_pole_coef(TRANSIENT_FAST_RELEASE_MS, sample_rate);
-        let slow_a = one_pole_coef(TRANSIENT_SLOW_ATTACK_MS, sample_rate);
-        let slow_r = one_pole_coef(TRANSIENT_SLOW_RELEASE_MS, sample_rate);
+        let precise::DetectorCoefficients {
+            fast_a,
+            fast_r,
+            slow_a,
+            slow_r,
+        } = coefficients;
         let fast_coef = if target > self.fast_env {
             fast_a
         } else {
@@ -81,7 +129,7 @@ impl TransientDetector {
         if self.slow_env < TRANSIENT_NOISE_FLOOR {
             return false;
         }
-        if self.fast_env > self.slow_env * threshold {
+        if self.fast_env > self.slow_env * threshold && self.fast_env >= level_floor {
             let hold = (hold_ms.max(0.0) * 0.001 * sample_rate) as u32;
             self.refractory = hold.max(1);
             return true;
@@ -131,7 +179,32 @@ pub enum TriggerSource {
         /// Refractory period in milliseconds.
         hold_ms: f32,
     },
+    MidiNote {
+        note: Option<u8>,
+        channel: Option<u8>,
+    },
+    FreeHzSample {
+        hz: f32,
+    },
+    TransientSample {
+        threshold: f32,
+        hold_ms: f32,
+    },
+    DawPosition,
+    MidiPitch {
+        #[serde(default)]
+        transpose: i8,
+        #[serde(default)]
+        channel: Option<u8>,
+    },
 }
+
+mod midi;
+pub use midi::{MidiCursor, MidiNoteOn};
+mod pitch;
+pub use pitch::{MIDI_PITCH_TRANSPOSE_MAX, MidiPitchReading, MidiPitchSettings};
+mod wave;
+pub use wave::MidiWaveMapping;
 
 /// One track row's modulation: four MSEGs and the three assignable MSEGs'
 /// targets and depths. `msegs[0]` is the amplitude MSEG; `msegs[1..=3]` are
@@ -149,6 +222,20 @@ pub struct TrackModulation {
     pub targets: [Option<ModulationTarget>; 3],
     /// Bipolar modulation depth (−1..1) for each assignable MSEG.
     pub depths: [f32; 3],
+    #[serde(default, skip_serializing_if = "smoothing::all_off")]
+    pub smooth_ms: [f32; 4],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wave_switch: Option<MidiWaveMapping>,
+    #[serde(default, skip_serializing_if = "AudioTriggerSettings::is_default")]
+    pub audio_trigger: AudioTriggerSettings,
+    #[serde(default, skip_serializing_if = "TransientSettings::is_default")]
+    pub detector_response: TransientSettings,
+    #[serde(default, skip_serializing_if = "TriggerTiming::is_default")]
+    pub trigger_timing: TriggerTiming,
+    #[serde(default, skip_serializing_if = "crate::lookahead::is_off")]
+    pub lookahead: bool,
+    #[serde(default, skip_serializing_if = "FollowerConfig::is_default")]
+    pub follower: FollowerConfig,
     /// The event that resets all four of this row's MSEG phases.
     #[serde(default)]
     pub trigger: TriggerSource,
@@ -284,36 +371,48 @@ impl TrackModulation {
             value: 0.5,
             tension: -0.5,
             stepped: false,
+            ..MsegNode::default()
         };
         sine.nodes[1] = MsegNode {
             time: 0.25,
             value: 1.0,
             tension: 0.5,
             stepped: false,
+            ..MsegNode::default()
         };
         sine.nodes[2] = MsegNode {
             time: 0.5,
             value: 0.5,
             tension: -0.5,
             stepped: false,
+            ..MsegNode::default()
         };
         sine.nodes[3] = MsegNode {
             time: 0.75,
             value: 0.0,
             tension: 0.5,
             stepped: false,
+            ..MsegNode::default()
         };
         sine.nodes[4] = MsegNode {
             time: 1.0,
             value: 0.5,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
 
         TrackModulation {
             msegs: [amplitude, sweep, spare, sine],
             targets: [Some(ModulationTarget::EffectParameter(0)), None, None],
             depths: [0.4, 0.0, 0.0],
+            smooth_ms: [0.0; 4],
+            wave_switch: None,
+            audio_trigger: AudioTriggerSettings::default(),
+            detector_response: TransientSettings::default(),
+            trigger_timing: TriggerTiming::default(),
+            lookahead: false,
+            follower: FollowerConfig::default(),
             trigger: TriggerSource::Free,
         }
     }
@@ -354,6 +453,20 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             targets: Vec<Option<ModulationTarget>>,
             depths: Vec<f32>,
             #[serde(default)]
+            smooth_ms: Vec<f32>,
+            #[serde(default)]
+            wave_switch: Option<MidiWaveMapping>,
+            #[serde(default)]
+            audio_trigger: AudioTriggerSettings,
+            #[serde(default)]
+            detector_response: TransientSettings,
+            #[serde(default)]
+            trigger_timing: TriggerTiming,
+            #[serde(default)]
+            lookahead: bool,
+            #[serde(default)]
+            follower: FollowerConfig,
+            #[serde(default)]
             trigger: TriggerSource,
         }
         let h = Helper::deserialize(deserializer)?;
@@ -387,6 +500,18 @@ impl<'de> serde::Deserialize<'de> for TrackModulation {
             targets,
             depths,
             trigger: h.trigger,
+            audio_trigger: h.audio_trigger.normalized(),
+            detector_response: h.detector_response.normalized(),
+            trigger_timing: h.trigger_timing.normalized_with_lookahead(h.lookahead),
+            lookahead: h.lookahead,
+            follower: h.follower.normalized(),
+            smooth_ms: std::array::from_fn(|i| {
+                h.smooth_ms
+                    .get(i)
+                    .copied()
+                    .map_or(0.0, normalized_smooth_ms)
+            }),
+            wave_switch: h.wave_switch,
         })
     }
 }
@@ -478,12 +603,30 @@ pub fn switch_effect_kind(
 /// borrowed on each update, so editing it preserves the running phases.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModulationState {
+    trigger_epoch: u64,
     phases: [f32; 4],
     amplitude: f32,
     hz_phase: f32,
     transient: TransientDetector,
+    precise: precise::PreciseTrigger,
     fired: bool,
     mix: Option<MixRamp>,
+    smooth: smoothing::SmoothRuntime,
+    outputs: [f32; 4],
+    output_valid: [bool; 4],
+    parameter_norms: [Option<(f32, u8)>; crate::effects::MAX_EFFECT_PARAMS],
+    mix_slot: Option<u8>,
+    delivered_mix: Option<(f32, u8)>,
+    telemetry_enabled: bool,
+    output_kind: Option<EffectKind>,
+    wave: wave::MidiWaveRuntime,
+    automated: automation::AutomatedWaves,
+    pending_wave: Option<usize>,
+    position: position::PositionClock,
+    capture_epochs: [u64; 4],
+    follower: Box<follower::FollowerRuntime>,
+    pitch: pitch::MidiPitchRuntime,
+    timing: Box<trigger_timing::TimingRuntime>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -498,12 +641,30 @@ struct MixRamp {
 impl Default for ModulationState {
     fn default() -> Self {
         Self {
+            trigger_epoch: 0,
             phases: [0.0; 4],
             amplitude: 1.0,
             hz_phase: 0.0,
             transient: TransientDetector::default(),
+            precise: precise::PreciseTrigger::default(),
             fired: false,
             mix: None,
+            smooth: smoothing::SmoothRuntime::default(),
+            outputs: [1.0, 0.0, 0.0, 0.0],
+            output_valid: [false; 4],
+            parameter_norms: [None; crate::effects::MAX_EFFECT_PARAMS],
+            mix_slot: None,
+            delivered_mix: None,
+            telemetry_enabled: true,
+            output_kind: None,
+            wave: wave::MidiWaveRuntime::default(),
+            automated: automation::AutomatedWaves::default(),
+            pending_wave: None,
+            position: position::PositionClock::default(),
+            capture_epochs: [0; 4],
+            follower: Box::default(),
+            pitch: pitch::MidiPitchRuntime::default(),
+            timing: Box::default(),
         }
     }
 }
@@ -511,16 +672,50 @@ impl Default for ModulationState {
 impl ModulationState {
     /// Clear clocks and trigger history, preserving the last evaluated gain.
     pub fn reset(&mut self) {
+        self.trigger_epoch = self.trigger_epoch.wrapping_add(1);
         self.phases = [0.0; 4];
         self.hz_phase = 0.0;
         self.transient.reset();
+        self.precise.reset();
         self.fired = false;
+        self.reset_smoothing();
+        self.wave.reset();
+        self.automated.reset();
+        self.pending_wave = None;
+        self.position.reset();
+        self.follower.reset();
+        self.pitch = pitch::MidiPitchRuntime::default();
+        self.timing.reset();
     }
 
     /// Restart all four envelopes and mark this block as triggered.
     pub fn trigger(&mut self) {
+        if !self.position.active {
+            self.timing.arm(self.outputs, self.output_valid);
+        }
+        self.trigger_epoch = self.trigger_epoch.wrapping_add(1);
+        if self.position.active || self.pitch.active() {
+            for epoch in &mut self.capture_epochs {
+                *epoch = epoch.wrapping_add(1);
+            }
+        }
         self.phases = [0.0; 4];
         self.fired = true;
+        self.smooth.trigger();
+        self.pitch.restart();
+    }
+
+    /// MIDI can interrupt an unfinished span; keep Mix at its consumed value.
+    pub fn trigger_midi_in_span(&mut self) {
+        self.trigger_in_span();
+    }
+
+    /// Keep an interrupted Mix ramp at its consumed value when restarting.
+    pub fn trigger_in_span(&mut self) {
+        self.trigger();
+        if let Some(ramp) = &mut self.mix {
+            ramp.target = ramp.current;
+        }
     }
 
     /// Analyze the dry input for block-aligned Free Hz or Transient triggers.
@@ -534,6 +729,39 @@ impl ModulationState {
     ) {
         self.fired = false;
         let block_len = left.len().min(right.len());
+        if block_len > 0 {
+            self.precise.prepare(config.trigger, sample_rate);
+            self.precise.configure_audio(config.audio_trigger);
+            self.precise.configure_response(config.detector_response);
+            let phases = std::array::from_fn(|slot| self.precise_phase(slot));
+            self.timing.prepare(
+                config,
+                self.precise.active()
+                    && matches!(config.trigger, TriggerSource::TransientSample { .. }),
+                sample_rate,
+                self.outputs,
+                phases,
+            );
+            if let Some(reset_phase) = self.pitch.prepare(config.trigger, sample_rate) {
+                if reset_phase {
+                    self.phases = [0.0; 4];
+                    self.smooth.trigger();
+                } else {
+                    self.smooth.refresh();
+                }
+                for epoch in &mut self.capture_epochs {
+                    *epoch = epoch.wrapping_add(1);
+                }
+            }
+            let changed = self.follower.prepare(config.follower, sample_rate);
+            for slot in 0..4 {
+                if changed & (1 << slot) != 0 {
+                    self.smooth.wave_changed(slot);
+                }
+            }
+            self.position
+                .prepare(config.trigger == TriggerSource::DawPosition, sample_rate);
+        }
         let sr = sample_rate as f32;
         match config.trigger {
             TriggerSource::FreeHz { hz } if hz > 0.0 => {
@@ -555,8 +783,40 @@ impl ModulationState {
         }
     }
 
+    pub fn precise_trigger_active(&self) -> bool {
+        self.precise.active()
+    }
+    pub fn set_lookahead_path(&mut self, path: u16) {
+        self.timing.requested_path = Some(path);
+    }
+    pub fn timing_clocked(&self) -> bool {
+        self.timing.sample_clocked
+    }
+    pub fn invalidate_lookahead_capture(&mut self) {
+        self.timing.capture_epoch = self.timing.capture_epoch.wrapping_add(1);
+    }
+    pub fn discard_lookahead_cues(&mut self) {
+        self.timing.clear_pending();
+    }
+    pub fn next_precise_trigger(&mut self, input: [f32; 2]) -> bool {
+        let detected = self.precise.next_sample(input);
+        self.timing.dispatch(detected)
+    }
+    pub fn next_precise_trigger_with_sidechain(
+        &mut self,
+        input: [f32; 2],
+        sidechain: [f32; 2],
+    ) -> bool {
+        let detected = self.precise.next_sample_with_sidechain(input, sidechain);
+        self.timing.dispatch(detected)
+    }
+    pub fn detector_reading(&self) -> Option<DetectorReading> {
+        self.precise.reading()
+    }
+
     /// Advance before evaluating, then apply Amp followed by slots 1–3.
     /// When targets overlap, the last assignable slot wins.
+    /// Pending wave refreshes remain staged until the first sample is processed.
     pub fn advance_segment(
         &mut self,
         config: &TrackModulation,
@@ -569,13 +829,34 @@ impl ModulationState {
         if seg_len == 0 {
             return;
         }
+        if self.output_kind != Some(track.kind) {
+            self.delivered_mix = None;
+            self.output_kind = Some(track.kind);
+        }
+        self.restore_released_targets(config, track, effect);
+        if config.trigger == TriggerSource::DawPosition && !self.position.active {
+            return;
+        }
+        if self.continuous_mask_for(config, track.kind) != 0
+            && sample_rate.is_finite()
+            && sample_rate > 0.0
+        {
+            self.prepare_smoothing(config, track, effect, seg_len, bpm, sample_rate);
+            return;
+        }
+        let continuous_mix = self.smooth.mix_value;
+        self.smooth.deactivate();
+        self.parameter_norms.fill(None);
+        self.mix_slot = None;
         let mut mix = None;
         for k in 0..4 {
-            let mseg = &config.msegs[k];
+            let mseg = self.automated.curve(self.wave.curve(config, k), k);
             let dt = mseg_phase_delta(mseg, seg_len, bpm, sample_rate);
             let (next, _) = advance(mseg, self.phases[k], dt, false);
             self.phases[k] = next;
             let value = value_at_phase(mseg, next);
+            self.outputs[k] = value;
+            self.output_valid[k] = true;
             if k == 0 {
                 self.amplitude = value;
             } else if let Some(target) = config.targets[k - 1] {
@@ -596,15 +877,31 @@ impl ModulationState {
                     mseg.polarity,
                 );
                 match target {
-                    ModulationTarget::EffectParameter(index) => effect.set_param(index, effective),
-                    ModulationTarget::Mix => mix = Some(effective * 0.01),
+                    ModulationTarget::EffectParameter(index) => {
+                        effect.set_param(index, effective);
+                        if self.telemetry_enabled
+                            && let Some(norm) = self.parameter_norms.get_mut(index)
+                        {
+                            *norm = Some((
+                                value_to_norm(effective, spec.min, spec.max, spec.scaling),
+                                k as u8,
+                            ));
+                        }
+                    }
+                    ModulationTarget::Mix => {
+                        mix = Some(effective * 0.01);
+                        self.mix_slot = Some(k as u8);
+                    }
                 }
             }
         }
         if mix.is_some() || self.mix.is_some() {
             let target = mix.unwrap_or(track.mix).clamp(0.0, 1.0);
             // The previous endpoint follows the clock even if the row skipped audio.
-            let current = self.mix.as_ref().map_or(track.mix, |ramp| ramp.target);
+            let current = self
+                .mix
+                .as_ref()
+                .map_or(continuous_mix.unwrap_or(track.mix), |ramp| ramp.target);
             self.mix = if mix.is_none() && current == target {
                 None
             } else {
@@ -621,7 +918,12 @@ impl ModulationState {
 
     /// Resolve one sample's blend without changing the base Mix control.
     pub fn next_mix(&mut self, base: f32) -> f32 {
+        if let Some(value) = self.smooth.mix_value {
+            self.delivered_mix = self.mix_slot.map(|slot| (value, slot));
+            return value;
+        }
         let Some(ramp) = self.mix.as_mut() else {
+            self.delivered_mix = None;
             return base;
         };
         if ramp.remaining > 0 {
@@ -633,6 +935,7 @@ impl ModulationState {
             };
         }
         let value = ramp.current.clamp(0.0, 1.0);
+        self.delivered_mix = self.mix_slot.map(|slot| (value, slot));
         if ramp.release && ramp.remaining == 0 {
             self.mix = None;
         }
@@ -640,7 +943,7 @@ impl ModulationState {
     }
 
     pub fn mix_is_active(&self) -> bool {
-        self.mix.is_some()
+        self.mix.is_some() || self.smooth.mix_value.is_some()
     }
 
     pub fn phase(&self, slot: usize) -> f32 {
@@ -663,6 +966,151 @@ impl ModulationState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lookahead_capture_and_pending_sidechain_cues_follow_the_requested_path() {
+        let mut config = TrackModulation {
+            trigger: TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 50.0,
+            },
+            ..TrackModulation::default()
+        };
+        config.audio_trigger.input = DetectorInput::Sidechain;
+        for discard in [false, true] {
+            let mut state = ModulationState::default();
+            assert!(!state.precise_trigger_active());
+            assert!(!state.timing_clocked());
+            state.set_lookahead_path(1 << 3);
+            state.begin_block(&config, &[0.0], &[0.0], 1000.0);
+            assert!(state.precise_trigger_active());
+            assert!(state.timing_clocked());
+            let epoch = state.capture_epoch(&config, 1);
+            state.invalidate_lookahead_capture();
+            assert_eq!(state.capture_epoch(&config, 1), epoch + 1);
+            assert!(!state.next_precise_trigger_with_sidechain([0.0; 2], [1.0; 2]));
+            if discard {
+                state.discard_lookahead_cues();
+            }
+            for sample in 1..=6 {
+                let fired = state.next_precise_trigger_with_sidechain([0.0; 2], [0.0; 2]);
+                assert_eq!(fired, !discard && sample == 4, "sample {sample}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_inherited_lookahead_path_does_not_delay_non_audio_sample_triggers() {
+        let config = TrackModulation {
+            trigger: TriggerSource::FreeHzSample { hz: 250.0 },
+            ..TrackModulation::default()
+        };
+        let mut state = ModulationState::default();
+        state.set_lookahead_path(1 << 2);
+        state.begin_block(&config, &[0.0; 9], &[0.0; 9], 1000.0);
+        assert!(state.precise_trigger_active());
+        assert!(!state.timing_clocked());
+        for sample in 0..9 {
+            assert_eq!(
+                state.next_precise_trigger([0.0; 2]),
+                sample == 4 || sample == 8
+            );
+        }
+    }
+
+    #[test]
+    fn mix_delivery_survives_a_segment_but_is_cleared_by_effect_kind_replacement() {
+        let mut config = TrackModulation::default();
+        config.targets[0] = Some(ModulationTarget::Mix);
+        config.depths[0] = 1.0;
+        config.msegs[1].nodes[0].value = 0.375;
+        config.msegs[1].nodes[1].value = 0.375;
+        let mut track = TrackEffect {
+            kind: EffectKind::Svf,
+            mix: 0.25,
+            ..TrackEffect::default()
+        };
+        let mut state = ModulationState::default();
+        let mut effect = crate::effects::EffectInstance::new(track.kind);
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 1000.0);
+        assert_eq!(state.next_mix(track.mix), 0.625);
+        assert_eq!(state.delivered_mix(), Some((0.625, 1)));
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 1000.0);
+        assert_eq!(state.delivered_mix(), Some((0.625, 1)));
+        track.kind = EffectKind::SallenKey;
+        let mut replacement = crate::effects::EffectInstance::new(track.kind);
+        state.advance_segment(&config, &track, &mut replacement, 1, 120.0, 1000.0);
+        assert_eq!(state.delivered_mix(), None);
+    }
+
+    #[test]
+    fn smoothing_only_uses_positive_and_finite_audio_rates() {
+        let mut config = TrackModulation::default();
+        config.targets = [None; 3];
+        config.smooth_ms[1] = 20.0;
+        let track = TrackEffect::default();
+        let mut effect = crate::effects::EffectInstance::new(track.kind);
+        let mut state = ModulationState::default();
+        for rate in [f64::NAN, f64::INFINITY, 0.0, -48000.0] {
+            state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+            assert!(state.smoothing_active());
+            state.advance_segment(&config, &track, &mut effect, 1, 120.0, rate);
+            assert!(!state.smoothing_active());
+        }
+    }
+
+    #[test]
+    fn pitch_and_daw_retriggers_each_mark_a_new_capture_epoch() {
+        for trigger in [
+            TriggerSource::DawPosition,
+            TriggerSource::MidiPitch {
+                transpose: 0,
+                channel: None,
+            },
+        ] {
+            let config = TrackModulation {
+                trigger,
+                ..TrackModulation::default()
+            };
+            let mut state = ModulationState::default();
+            state.begin_block(&config, &[0.0], &[0.0], 48000.0);
+            let epoch = state.capture_epoch(&config, 0);
+            state.trigger();
+            assert_eq!(state.capture_epoch(&config, 0), epoch + 1);
+        }
+    }
+
+    #[test]
+    fn editing_a_follower_on_an_assignable_slot_refreshes_its_held_parameter_at_the_boundary() {
+        let mut config = TrackModulation {
+            targets: [None, Some(ModulationTarget::EffectParameter(0)), None],
+            depths: [0.0, 0.5, 0.0],
+            ..TrackModulation::default()
+        };
+        config.follower.routes[2].enabled = true;
+        config.follower.attack_ms = 0.0;
+        config.follower.release_ms = 0.0;
+        let kind = EffectKind::Svf;
+        let track = TrackEffect {
+            kind,
+            params: crate::effects::default_params_for_kind(kind),
+            ..Default::default()
+        };
+        let mut state = ModulationState::default();
+        let mut effect = crate::effects::EffectInstance::new(kind);
+        let mut norms = Vec::new();
+        for (amount, expected) in [(1.0, 0.25), (0.5, 0.125)] {
+            config.follower.routes[2].amount = amount;
+            state.begin_block(&config, &[0.25], &[0.25], 48000.0);
+            state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+            state.process_modulation_sample(&config, &mut effect, [0.25; 2], [0.0; 2]);
+            assert_eq!(state.output(2), expected);
+            let (norm, slot) = state.parameter_norms()[0].unwrap();
+            assert_eq!(slot, 2);
+            norms.push(norm);
+        }
+        assert!(norms[1] < norms[0]);
+    }
 
     #[test]
     fn transient_followers_match_their_attack_and_release_time_constants() {

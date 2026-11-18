@@ -4,7 +4,7 @@
 
 use crate::dropdown::draw_dropdown_popup;
 use crate::dropdown::draw_dropdown_trigger;
-use crate::mseg::editor::{MsegEditState, StripId, style_items};
+use crate::mseg::editor::{MsegEditState, StripId};
 use crate::mseg::{HoldMode, MsegData, value_at_phase};
 use crate::primitives::{
     color_bg, color_border, color_control_bg, color_muted, color_text, draw_rect, draw_rect_outline,
@@ -15,7 +15,7 @@ use tiny_skia::Pixmap;
 /// Marker-lane height in unscaled px (full editor only).
 const MARKER_LANE_H: f32 = 16.0;
 /// Control-strip height in unscaled px.
-const STRIP_H: f32 = 42.0;
+const STRIP_H: f32 = 96.0;
 
 /// Sub-rectangles of the MSEG widget, each `(x, y, w, h)`. `marker_lane` has
 /// height 0 in curve-only mode.
@@ -30,6 +30,7 @@ pub struct MsegLayout {
     /// inside `canvas` instead of half-clipping the edge.
     pub plot: (f32, f32, f32, f32),
     pub strip: (f32, f32, f32, f32),
+    pub viewport: crate::mseg::MsegViewport,
 }
 
 /// Compute the widget's sub-rectangles. `curve_only` drops the marker lane;
@@ -46,7 +47,7 @@ pub fn mseg_layout(rect: (f32, f32, f32, f32), curve_only: bool, scale: f32) -> 
     let canvas = (x, y + lane_h, w, canvas_h);
     // Inset the plot by the largest node-dot radius (a hovered node is the
     // biggest) so node dots at the 0/1 extremes stay fully within `canvas`.
-    let m = (NODE_R + HOVER_BUMP) * scale;
+    let m = 14.0 * scale;
     let plot = (
         canvas.0 + m,
         canvas.1 + m,
@@ -58,13 +59,17 @@ pub fn mseg_layout(rect: (f32, f32, f32, f32), curve_only: bool, scale: f32) -> 
         canvas,
         plot,
         strip: (x, y + lane_h + canvas_h, w, strip_h),
+        viewport: crate::mseg::MsegViewport::default(),
     }
 }
 
 /// Normalized phase (0..1) → plot x pixel.
 pub fn phase_to_x(layout: &MsegLayout, phase: f32) -> f32 {
     // No zero-width guard needed: phase * 0.0 == 0.0 is already correct here.
-    layout.plot.0 + phase.clamp(0.0, 1.0) * layout.plot.2
+    layout.plot.0
+        + (phase.clamp(0.0, 1.0) - layout.viewport.time.0)
+            / (layout.viewport.time.1 - layout.viewport.time.0)
+            * layout.plot.2
 }
 
 /// Plot x pixel → normalized phase (0..1, clamped).
@@ -72,12 +77,18 @@ pub fn x_to_phase(layout: &MsegLayout, x: f32) -> f32 {
     if layout.plot.2 <= 0.0 {
         return 0.0;
     }
-    ((x - layout.plot.0) / layout.plot.2).clamp(0.0, 1.0)
+    layout
+        .viewport
+        .phase_at((x - layout.plot.0) / layout.plot.2)
+        .clamp(0.0, 1.0)
 }
 
 /// Normalized value (0..1) → plot y pixel (value 1.0 at the top).
 pub fn value_to_y(layout: &MsegLayout, value: f32) -> f32 {
-    layout.plot.1 + (1.0 - value.clamp(0.0, 1.0)) * layout.plot.3
+    layout.plot.1
+        + (layout.viewport.value.1 - value.clamp(0.0, 1.0))
+            / (layout.viewport.value.1 - layout.viewport.value.0)
+            * layout.plot.3
 }
 
 /// Plot y pixel → normalized value (0..1, clamped).
@@ -85,7 +96,10 @@ pub fn y_to_value(layout: &MsegLayout, y: f32) -> f32 {
     if layout.plot.3 <= 0.0 {
         return 0.0;
     }
-    (1.0 - (y - layout.plot.1) / layout.plot.3).clamp(0.0, 1.0)
+    layout
+        .viewport
+        .level_at(1.0 - (y - layout.plot.1) / layout.plot.3)
+        .clamp(0.0, 1.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -116,14 +130,45 @@ pub fn draw_mseg(
     value_color: tiny_skia::Color,
     node_tooltip: Option<(usize, &str)>,
 ) {
-    let layout = mseg_layout(rect, state.is_curve_only(), scale);
+    draw_mseg_with_background(
+        pixmap,
+        text_renderer,
+        rect,
+        data,
+        state,
+        scale,
+        value_color,
+        node_tooltip,
+        |_, _| {},
+    );
+}
+
+/// Draw a host-provided background beneath the grid, curve, and interaction marks.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_mseg_with_background(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    rect: (f32, f32, f32, f32),
+    data: &MsegData,
+    state: &MsegEditState,
+    scale: f32,
+    value_color: tiny_skia::Color,
+    node_tooltip: Option<(usize, &str)>,
+    background: impl FnOnce(&mut Pixmap, &MsegLayout),
+) {
+    let data = state.display_data(data);
+    let layout = state.layout(rect, scale);
     // The three sub-rects (marker lane / canvas / strip) are non-overlapping,
     // so draw order is immaterial — each paints only its own region.
-    draw_canvas(pixmap, &layout, data, state, scale, value_color);
+    draw_canvas(pixmap, &layout, data, state, scale, value_color, background);
     draw_marker_lane(pixmap, &layout, data, state, scale, value_color);
     draw_strip(pixmap, text_renderer, &layout, data, state, scale);
 
-    if let Some((idx, text)) = node_tooltip {
+    if !state.help_open()
+        && !state.curve_browser_open()
+        && !state.geometry_read_only()
+        && let Some((idx, text)) = node_tooltip
+    {
         draw_node_tooltip(pixmap, text_renderer, &layout, data, idx, text, scale);
     }
 }
@@ -145,33 +190,18 @@ pub fn draw_mseg_dropdown(
     rect: (f32, f32, f32, f32),
 ) {
     let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-    if state.dropdown_is_open_for(StripId::TimeGrid) {
-        let grid_refs = state.grid_label_refs();
-        draw_dropdown_popup(
-            pixmap,
-            text_renderer,
-            state.dropdown_state(),
-            &grid_refs,
-            window_size,
-        );
-    } else if state.dropdown_is_open_for(StripId::Transform) {
-        draw_dropdown_popup(
-            pixmap,
-            text_renderer,
-            state.dropdown_state(),
-            crate::mseg::editor::transform_menu_items(),
-            window_size,
-        );
-    } else {
-        // Either the style dropdown is open or nothing is; closed is a no-op.
-        draw_dropdown_popup(
-            pixmap,
-            text_renderer,
-            state.dropdown_state(),
-            style_items(),
-            window_size,
-        );
-    }
+    let labels = state.dropdown_labels();
+    let refs: Vec<_> = labels.iter().map(String::as_str).collect();
+    draw_dropdown_popup(
+        pixmap,
+        text_renderer,
+        state.dropdown_state(),
+        &refs,
+        window_size,
+    );
+    state.draw_precision_overlay(pixmap, text_renderer, rect);
+    state.draw_help(pixmap, text_renderer, rect, state.overlay_scale());
+    state.draw_curve_browser(pixmap, text_renderer, rect, state.overlay_scale());
 }
 
 /// Draw the hold marker(s) in the marker lane. No-op in curve-only mode or
@@ -191,7 +221,10 @@ fn draw_marker_lane(
     draw_rect(pixmap, lx, ly, lw, lh, color_bg());
     let a = data.active();
     let mark = |pm: &mut Pixmap, node: usize, color: tiny_skia::Color| {
-        if node < data.node_count {
+        if node < data.node_count
+            && a[node].time >= layout.viewport.time.0
+            && a[node].time <= layout.viewport.time.1
+        {
             let mx = phase_to_x(layout, a[node].time);
             draw_rect(
                 pm,
@@ -221,12 +254,14 @@ fn draw_canvas(
     state: &MsegEditState,
     scale: f32,
     value_color: tiny_skia::Color,
+    background: impl FnOnce(&mut Pixmap, &MsegLayout),
 ) {
     let (cx, cy, cw, ch) = layout.canvas;
     if cw <= 0.0 || ch <= 0.0 {
         return;
     }
     draw_rect(pixmap, cx, cy, cw, ch, color_control_bg());
+    background(pixmap, layout);
 
     // Grid lines, the curve, and nodes all live in the inset `plot` area so
     // edge nodes don't clip. Drawn via the plot-based coordinate mapping.
@@ -239,21 +274,51 @@ fn draw_canvas(
     let grid_color = tiny_skia::Color::from_rgba8(0x44, 0x47, 0x4e, 0xff);
     let tdiv = data.time_divisions.max(1);
     for i in 1..tdiv {
+        let phase = i as f32 / tdiv as f32;
+        if phase < layout.viewport.time.0 || phase > layout.viewport.time.1 {
+            continue;
+        }
         let gx = phase_to_x(layout, i as f32 / tdiv as f32);
         draw_rect(pixmap, gx, py0, 1.0, ph, grid_color);
     }
     // Horizontal value-grid lines.
-    let vsteps = data.value_steps.max(1);
-    for i in 1..vsteps {
-        let gy = value_to_y(layout, i as f32 / vsteps as f32);
-        draw_rect(pixmap, px0, gy, pw, 1.0, grid_color);
+    if data.value_grid == crate::mseg::ValueGrid::Semitones {
+        if let Some(grid) = state.pitch_grid() {
+            let mut previous = f32::NEG_INFINITY;
+            for &value in grid.levels().iter().rev() {
+                if value < layout.viewport.value.0 || value > layout.viewport.value.1 {
+                    continue;
+                }
+                let gy = value_to_y(layout, value);
+                if gy - previous >= 2.0 * scale {
+                    let height = (py0 + ph - gy).clamp(0.0, 1.0);
+                    if height > 0.0 {
+                        draw_rect(pixmap, px0, gy, pw, height, grid_color);
+                    }
+                    previous = gy;
+                }
+            }
+        }
+    } else {
+        let vsteps = data.value_steps.max(1);
+        for i in 1..vsteps {
+            let value = i as f32 / vsteps as f32;
+            if value < layout.viewport.value.0 || value > layout.viewport.value.1 {
+                continue;
+            }
+            let gy = value_to_y(layout, value);
+            draw_rect(pixmap, px0, gy, pw, 1.0, grid_color);
+        }
     }
 
     // Midline marker at value = 0.5 — only meaningful in Bipolar view (the
     // zero point for consumers that re-map via `2·value − 1`: miff's kernel
     // taps, multosis's assignable modulation). In Unipolar view the bottom
     // of the plot is "zero" and the midline would be visual noise.
-    if matches!(data.polarity, crate::mseg::Polarity::Bipolar) {
+    if matches!(data.polarity, crate::mseg::Polarity::Bipolar)
+        && layout.viewport.value.0 <= 0.5
+        && layout.viewport.value.1 >= 0.5
+    {
         let mid_color = tiny_skia::Color::from_rgba8(0x82, 0x86, 0x90, 0xff);
         let my = value_to_y(layout, 0.5);
         draw_rect(pixmap, px0, my, pw, 1.0, mid_color);
@@ -263,22 +328,82 @@ fn draw_canvas(
     let cols = pw.max(1.0) as usize;
     let mut prev: Option<(f32, f32)> = None;
     for col in 0..=cols {
-        let phase = col as f32 / cols as f32;
+        let phase = layout.viewport.phase_at(col as f32 / cols as f32);
         let x = phase_to_x(layout, phase);
         let y = value_to_y(layout, value_at_phase(data, phase));
         if let Some((px, py)) = prev {
-            draw_line(pixmap, px, py, x, y, value_color);
+            draw_plot_line(pixmap, layout, px, py, x, y, value_color);
         }
         prev = Some((x, y));
     }
 
-    draw_nodes(pixmap, layout, data, state, scale, value_color);
+    draw_loop_seam(pixmap, layout, data, state, scale);
+    if !state.geometry_read_only() {
+        draw_nodes(pixmap, layout, data, state, scale, value_color);
+    }
+
+    let handles = state.selection_handles(data, layout, scale);
+    if let (Some((_, (x0, y0))), Some((_, (x1, y1)))) = (handles.first(), handles.get(4)) {
+        for (a, b) in [
+            ((*x0, *y0), (*x1, *y0)),
+            ((*x1, *y0), (*x1, *y1)),
+            ((*x1, *y1), (*x0, *y1)),
+            ((*x0, *y1), (*x0, *y0)),
+        ] {
+            draw_clipped_line(pixmap, layout.canvas, a.0, a.1, b.0, b.1, value_color);
+        }
+        for (_, (x, y)) in handles {
+            if !in_rect(layout.canvas, x, y) {
+                continue;
+            }
+            draw_rect(
+                pixmap,
+                x - 3.0 * scale,
+                y - 3.0 * scale,
+                6.0 * scale,
+                6.0 * scale,
+                color_text(),
+            );
+        }
+    }
+    let preview = state.pen_preview();
+    if preview.len() >= 2 {
+        let mut document = *data;
+        document.nodes[..preview.len()].copy_from_slice(preview);
+        document.node_count = preview.len();
+        let start = preview[0].time.max(layout.viewport.time.0);
+        let end = preview[preview.len() - 1]
+            .time
+            .min(layout.viewport.time.1)
+            .max(start);
+        let columns = ((end - start) / (layout.viewport.time.1 - layout.viewport.time.0)
+            * layout.plot.2)
+            .max(1.0) as usize;
+        let mut previous = None;
+        for column in 0..=columns {
+            let t = start + (end - start) * column as f32 / columns as f32;
+            let point = (
+                phase_to_x(layout, t),
+                value_to_y(layout, value_at_phase(&document, t)),
+            );
+            if let Some((px, py)) = previous {
+                draw_plot_line(pixmap, layout, px, py, point.0, point.1, color_text());
+            }
+            previous = Some(point);
+        }
+    }
 
     // Marquee selection rectangle (drawn over the curve and nodes).
     if let Some((mx, my, mw, mh)) = state.marquee_rect()
         && mw > 0.0
         && mh > 0.0
     {
+        let right = (mx + mw).min(cx + cw);
+        let bottom = (my + mh).min(cy + ch);
+        let mx = mx.max(cx);
+        let my = my.max(cy);
+        let mw = (right - mx).max(0.0);
+        let mh = (bottom - my).max(0.0);
         let fill = tiny_skia::Color::from_rgba(
             value_color.red(),
             value_color.green(),
@@ -291,6 +416,46 @@ fn draw_canvas(
     }
 
     draw_rect_outline(pixmap, cx, cy, cw, ch, color_border(), 1.0);
+}
+
+fn seam_color() -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(0xff, 0xb0, 0x52, 0xff)
+}
+
+fn draw_loop_seam(
+    pixmap: &mut Pixmap,
+    layout: &MsegLayout,
+    data: &MsegData,
+    state: &MsegEditState,
+    scale: f32,
+) {
+    let Some(seam) = crate::mseg::seam::LoopSeam::visible(data, state.is_curve_only()) else {
+        return;
+    };
+    let before = value_to_y(layout, seam.before);
+    let after = value_to_y(layout, seam.after);
+    let top = before.min(after).max(layout.plot.1);
+    let bottom = before.max(after).min(layout.plot.1 + layout.plot.3);
+    for (index, offset) in [(seam.start, 3.0 * scale), (seam.end, -3.0 * scale)] {
+        let phase = data.nodes[index].time;
+        if phase < layout.viewport.time.0 || phase > layout.viewport.time.1 {
+            continue;
+        }
+        let x = phase_to_x(layout, phase) + offset;
+        let mut y = top;
+        while y < bottom {
+            draw_plot_line(
+                pixmap,
+                layout,
+                x,
+                y,
+                x,
+                (y + 4.0 * scale).min(bottom),
+                seam_color(),
+            );
+            y += (7.0 * scale).max(1.0);
+        }
+    }
 }
 
 /// Render a small floating tooltip above (or below, when the node is near
@@ -311,9 +476,12 @@ fn draw_node_tooltip(
         return;
     }
     let n = data.active()[idx];
-    let (px_, py_, pw, ph) = layout.plot;
-    let cx = px_ + n.time * pw;
-    let cy = py_ + (1.0 - n.value) * ph;
+    if !layout.viewport.contains(n.time, n.value) {
+        return;
+    }
+    let (px_, _, pw, _) = layout.plot;
+    let cx = phase_to_x(layout, n.time);
+    let cy = value_to_y(layout, n.value);
     let text_size = (10.0 * scale).max(10.0);
     let line_gap = 2.0 * scale;
     let pad_x = 6.0 * scale;
@@ -361,7 +529,7 @@ pub fn draw_mseg_ghost(
     scale: f32,
     color: u32,
 ) {
-    let layout = mseg_layout(rect, state.is_curve_only(), scale);
+    let layout = state.layout(rect, scale);
     let (_px0, _py0, pw, ph) = layout.plot;
     if pw <= 0.0 || ph <= 0.0 {
         return;
@@ -378,11 +546,11 @@ pub fn draw_mseg_ghost(
     let cols = pw.max(1.0) as usize;
     let mut prev: Option<(f32, f32)> = None;
     for col in 0..=cols {
-        let phase = col as f32 / cols as f32;
+        let phase = layout.viewport.phase_at(col as f32 / cols as f32);
         let x = phase_to_x(&layout, phase);
         let y = value_to_y(&layout, value_at_phase(data, phase));
         if let Some((px, py)) = prev {
-            draw_line(pixmap, px, py, x, y, stroke);
+            draw_plot_line(pixmap, &layout, px, py, x, y, stroke);
         }
         prev = Some((x, y));
     }
@@ -415,6 +583,12 @@ fn draw_nodes(
             continue;
         }
         let mid_phase = (w[0].time + w[1].time) * 0.5;
+        if !layout
+            .viewport
+            .contains(mid_phase, value_at_phase(data, mid_phase))
+        {
+            continue;
+        }
         let hx = phase_to_x(layout, mid_phase);
         let hy = value_to_y(layout, value_at_phase(data, mid_phase));
         // A mid-gray, visible against the dark canvas but clearly secondary
@@ -424,6 +598,9 @@ fn draw_nodes(
     // Node dots. The hovered node is drawn larger; a selected node is drawn in
     // a brighter colour so the current selection reads at a glance.
     for (i, n) in a.iter().enumerate() {
+        if !layout.viewport.contains(n.time, n.value) {
+            continue;
+        }
         let nx = phase_to_x(layout, n.time);
         let ny = value_to_y(layout, n.value);
         let hovered = state.hovered_node() == Some(i);
@@ -433,7 +610,23 @@ fn draw_nodes(
         } else {
             value_color
         };
-        draw_dot(pixmap, nx, ny, r, color);
+        if n.weight == crate::mseg::PointWeight::Hard {
+            draw_dot(pixmap, nx, ny, r, color);
+        } else {
+            draw_dot(pixmap, nx, ny, r, color_control_bg());
+            draw_rect_outline(
+                pixmap,
+                nx - r,
+                ny - r,
+                2.0 * r,
+                2.0 * r,
+                color,
+                scale.max(1.0),
+            );
+            if n.weight == crate::mseg::PointWeight::Medium {
+                draw_dot(pixmap, nx, ny, scale, color);
+            }
+        }
     }
 }
 
@@ -494,7 +687,7 @@ pub(crate) fn strip_buttons_ex(
     let gap = 4.0 * scale;
     let group_gap = 16.0 * scale;
     let by = sy + 3.0 * scale;
-    let bh = (sh - 6.0 * scale).max(0.0);
+    let bh = (sh.min(42.0 * scale) - 6.0 * scale).max(0.0);
 
     // Per-button widths (pre-scale). Short toggles get narrow rects; dropdown
     // triggers wider ones to fit their value text plus a chevron.
@@ -541,6 +734,11 @@ pub(crate) fn strip_buttons_ex(
     }
 }
 
+/// Grid trigger bounds for embedding hosts and offscreen interaction previews.
+pub fn grid_button_rect(strip: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32) {
+    strip_buttons(strip, scale, true).grid
+}
+
 /// Draw the control strip: `Snap` toggle button, `Grid` and `Style` dropdown
 /// triggers, and the `Randomize` button. Interaction is handled in
 /// `on_mouse_down`.
@@ -578,7 +776,15 @@ fn draw_strip(
     );
 
     // Grid: dropdown trigger showing the current grid setting.
-    let grid_label = format!("Grid {}/{}", data.time_divisions, data.value_steps);
+    let grid_label = if data.value_grid == crate::mseg::ValueGrid::Semitones {
+        if state.pitch_grid().is_some() {
+            format!("{}/st", data.time_divisions)
+        } else {
+            "st n/a".to_owned()
+        }
+    } else {
+        format!("Grid {}/{}", data.time_divisions, data.value_steps)
+    };
     draw_dropdown_trigger(
         pixmap,
         text_renderer,
@@ -654,6 +860,195 @@ fn draw_strip(
         false,
         false,
     );
+
+    let toolbar = power_buttons(layout.strip, scale);
+    for (rect, label, id) in [
+        (toolbar.tool, state.tool().label(), StripId::Tool),
+        (toolbar.shapes, "Shapes", StripId::Shapes),
+        (toolbar.edit, "Edit", StripId::Transform),
+        (toolbar.view, "View", StripId::View),
+    ] {
+        draw_dropdown_trigger(
+            pixmap,
+            text_renderer,
+            rect,
+            label,
+            state.dropdown_is_open_for(id),
+        );
+    }
+    draw_button(
+        pixmap,
+        text_renderer,
+        toolbar.point.0,
+        toolbar.point.1,
+        toolbar.point.2,
+        toolbar.point.3,
+        "Point",
+        state.inspector_node().is_some(),
+        false,
+    );
+    let r = toolbar.help;
+    draw_button(
+        pixmap,
+        text_renderer,
+        r.0,
+        r.1,
+        r.2,
+        r.3,
+        "?",
+        state.help_open(),
+        false,
+    );
+    let available = (sx + sw - toolbar.message_x - 6.0 * scale).max(0.0);
+    let viewport = state.viewport();
+    let (lo, hi) = viewport.time_range();
+    let (mut bottom, mut top) = viewport.value_range();
+    if data.polarity == crate::mseg::Polarity::Bipolar {
+        bottom = bottom * 2.0 - 1.0;
+        top = top * 2.0 - 1.0;
+    }
+    let view_info = format!(
+        "Time {:.1}-{:.1}%  Value {:.2}-{:.2}",
+        lo * 100.0,
+        hi * 100.0,
+        bottom,
+        top
+    );
+    let widget_rect = (
+        layout.canvas.0,
+        layout.marker_lane.1,
+        layout.canvas.2,
+        layout.strip.1 + layout.strip.3 - layout.marker_lane.1,
+    );
+    let hint = state.context_hint(data, widget_rect, scale);
+    let pitch_unavailable =
+        data.value_grid == crate::mseg::ValueGrid::Semitones && state.pitch_grid().is_none();
+    let seam_warning = hint.is_none()
+        && !state.geometry_read_only()
+        && !pitch_unavailable
+        && crate::mseg::seam::LoopSeam::visible(data, state.is_curve_only()).is_some()
+        && state.status_message().is_empty();
+    let message = if state.status_message().is_empty() {
+        if let Some(hint) = hint {
+            hint
+        } else if state.geometry_read_only() {
+            "Playback preview; geometry editing is disabled"
+        } else if pitch_unavailable {
+            "Semitone grid unavailable; choose a pitched target or numeric grid"
+        } else if seam_warning {
+            "Loop seam jump; Edit: match or smooth"
+        } else if viewport != crate::mseg::MsegViewport::default() {
+            view_info.as_str()
+        } else {
+            match state.tool() {
+                crate::mseg::MsegTool::Pointer => {
+                    "Select points to stretch; Alt: centered; Ctrl: skew"
+                }
+                _ => "Drag endpoints; click again to repeat; Esc: pointer",
+            }
+        }
+    } else {
+        state.status_message()
+    };
+    let mut visible = String::new();
+    for ch in message.chars() {
+        visible.push(ch);
+        if text_renderer.text_width(&visible, 11.0 * scale) > available {
+            visible.pop();
+            break;
+        }
+    }
+    text_renderer.draw_text(
+        pixmap,
+        toolbar.message_x,
+        sy + sh - 7.0 * scale,
+        &visible,
+        11.0 * scale,
+        if seam_warning {
+            seam_color()
+        } else {
+            color_muted()
+        },
+    );
+    if state.geometry_read_only() {
+        let dim = tiny_skia::Color::from_rgba8(0x1a, 0x1c, 0x22, 160);
+        for rect in [
+            toolbar.tool,
+            toolbar.shapes,
+            toolbar.edit,
+            toolbar.point,
+            b.style,
+            b.randomize,
+        ] {
+            draw_rect(pixmap, rect.0, rect.1, rect.2, rect.3, dim);
+        }
+    }
+}
+
+pub(crate) struct PowerButtons {
+    pub tool: (f32, f32, f32, f32),
+    pub shapes: (f32, f32, f32, f32),
+    pub edit: (f32, f32, f32, f32),
+    pub view: (f32, f32, f32, f32),
+    pub point: (f32, f32, f32, f32),
+    pub help: (f32, f32, f32, f32),
+    pub message_x: f32,
+}
+
+pub(crate) fn power_buttons(strip: (f32, f32, f32, f32), scale: f32) -> PowerButtons {
+    let width = (strip.2 - 20.0 * scale).max(0.0).min(440.0 * scale) / 3.0;
+    let height = 26.0 * scale;
+    let y = strip.1 + 44.0 * scale;
+    let x = strip.0 + 6.0 * scale;
+    PowerButtons {
+        tool: (x, y, width, height),
+        shapes: (x + width + 4.0 * scale, y, width, height),
+        edit: (x + 2.0 * (width + 4.0 * scale), y, width, height),
+        view: (x + 3.0 * (width + 4.0 * scale), y, 80.0 * scale, height),
+        point: (
+            x + 3.0 * (width + 4.0 * scale) + 84.0 * scale,
+            y,
+            70.0 * scale,
+            height,
+        ),
+        help: (
+            x + 3.0 * (width + 4.0 * scale) + 158.0 * scale,
+            y,
+            26.0 * scale,
+            height,
+        ),
+        message_x: x,
+    }
+}
+
+/// Gesture-guide trigger bounds for embedding hosts and offscreen previews.
+pub fn help_button_rect(strip: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32) {
+    power_buttons(strip, scale).help
+}
+
+/// Host MIDI setup fits between playback controls and the randomizer group.
+pub fn wave_midi_button_rect(strip: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32) {
+    let buttons = strip_buttons_ex(strip, scale, true, true);
+    let x = buttons.play_mode.0 + buttons.play_mode.2 + 12.0 * scale;
+    (
+        x,
+        buttons.play_mode.1,
+        (110.0 * scale).min((buttons.style.0 - x - 6.0 * scale).max(0.0)),
+        buttons.play_mode.3,
+    )
+}
+
+/// Shared effect follower setup, beside the Project-wave control.
+pub fn follower_button_rect(strip: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32) {
+    let wave = wave_midi_button_rect(strip, scale);
+    let buttons = strip_buttons_ex(strip, scale, true, true);
+    let x = wave.0 + wave.2 + 6.0 * scale;
+    (
+        x,
+        wave.1,
+        (110.0 * scale).min((buttons.style.0 - x - 6.0 * scale).max(0.0)),
+        wave.3,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -707,6 +1102,9 @@ pub fn mseg_hit_test(
     if in_rect(layout.canvas, x, y) {
         // Nodes first.
         for (i, n) in a.iter().enumerate() {
+            if !layout.viewport.contains(n.time, n.value) {
+                continue;
+            }
             let nx = phase_to_x(layout, n.time);
             let ny = value_to_y(layout, n.value);
             if (x - nx).abs() <= hit_r && (y - ny).abs() <= hit_r {
@@ -719,6 +1117,9 @@ pub fn mseg_hit_test(
                 continue;
             }
             let mid = (a[i].time + a[i + 1].time) * 0.5;
+            if !layout.viewport.contains(mid, value_at_phase(data, mid)) {
+                continue;
+            }
             let hx = phase_to_x(layout, mid);
             let hy = value_to_y(layout, value_at_phase(data, mid));
             if (x - hx).abs() <= hit_r && (y - hy).abs() <= hit_r {
@@ -767,15 +1168,68 @@ pub fn mseg_hit_test_with_selection(
     }
 }
 
-/// Draw a 1px line by sampling points along it (sufficient for the curve;
-/// stepped segments produce near-vertical jumps which this still renders).
-fn draw_line(pixmap: &mut Pixmap, x0: f32, y0: f32, x1: f32, y1: f32, color: tiny_skia::Color) {
-    let dx = x1 - x0;
-    let dy = y1 - y0;
+pub(crate) fn draw_plot_line(
+    pixmap: &mut Pixmap,
+    layout: &MsegLayout,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    color: tiny_skia::Color,
+) {
+    draw_clipped_line(pixmap, layout.plot, x0, y0, x1, y1, color);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_clipped_line(
+    pixmap: &mut Pixmap,
+    clip: (f32, f32, f32, f32),
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    color: tiny_skia::Color,
+) {
+    if clip.2 <= 0.0 || clip.3 <= 0.0 {
+        return;
+    }
+    let (dx, dy) = (x1 - x0, y1 - y0);
+    let (mut begin, mut end) = (0.0_f32, 1.0_f32);
+    for (p, q) in [
+        (-dx, x0 - clip.0),
+        (dx, clip.0 + clip.2 - x0),
+        (-dy, y0 - clip.1),
+        (dy, clip.1 + clip.3 - y0),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return;
+            }
+        } else {
+            let ratio = q / p;
+            if p < 0.0 {
+                begin = begin.max(ratio);
+            } else {
+                end = end.min(ratio);
+            }
+            if begin > end {
+                return;
+            }
+        }
+    }
+    let (x, y) = (x0 + dx * begin, y0 + dy * begin);
+    let (dx, dy) = (dx * (end - begin), dy * (end - begin));
     let steps = dx.abs().max(dy.abs()).ceil().max(1.0) as usize;
     for s in 0..=steps {
         let t = s as f32 / steps as f32;
-        draw_rect(pixmap, x0 + dx * t, y0 + dy * t, 1.0, 1.0, color);
+        let (left, top) = ((x + dx * t).max(clip.0), (y + dy * t).max(clip.1));
+        let (right, bottom) = (
+            (x + dx * t + 1.0).min(clip.0 + clip.2),
+            (y + dy * t + 1.0).min(clip.1 + clip.3),
+        );
+        if right > left && bottom > top {
+            draw_rect(pixmap, left, top, right - left, bottom - top, color);
+        }
     }
 }
 
@@ -783,6 +1237,7 @@ fn draw_line(pixmap: &mut Pixmap, x0: f32, y0: f32, x1: f32, y1: f32, color: tin
 mod tests {
     use super::*;
     use crate::mseg::MsegData;
+    use crate::mseg::{AudioBackdropStyle, AudioBin, draw_mseg_audio};
     use crate::primitives::color_accent;
     use crate::test_font::test_font_data;
     use crate::text::TextRenderer;
@@ -792,6 +1247,116 @@ mod tests {
 
     fn px_alpha(pm: &Pixmap, x: u32, y: u32) -> u8 {
         pm.pixels()[(y * pm.width() + x) as usize].alpha()
+    }
+
+    #[test]
+    fn footer_renders_complete_context_hints_at_minitosis_default_size_and_zoom() {
+        for scale in [0.5, 1.0, 2.0] {
+            let rect = (30.0 * scale, 288.0 * scale, 1094.0 * scale, 390.0 * scale);
+            let mut state = MsegEditState::new();
+            state.set_status_reserve(360.0);
+            let mut data = MsegData::default();
+            let layout = state.layout(rect, scale);
+            let help = help_button_rect(layout.strip, scale);
+            state.on_mouse_move(
+                help.0 + help.2 * 0.5,
+                help.1 + help.3 * 0.5,
+                &mut data,
+                rect,
+                scale,
+                false,
+            );
+            for hint in [
+                state.context_hint(&data, rect, scale).unwrap(),
+                "Stretch; Alt: centered; Ctrl: skew; Shift: fine",
+            ] {
+                state.set_external_hint(Some(hint));
+                let mut actual =
+                    Pixmap::new((1140.0 * scale) as u32, (704.0 * scale) as u32).unwrap();
+                let mut text = TextRenderer::new(crate::DEFAULT_FONT);
+                draw_strip(&mut actual, &mut text, &layout, &data, &state, scale);
+                state.set_status_message(" ");
+                let mut blank = Pixmap::new(actual.width(), actual.height()).unwrap();
+                draw_strip(&mut blank, &mut text, &layout, &data, &state, scale);
+                let actual_ink = actual
+                    .pixels()
+                    .iter()
+                    .zip(blank.pixels())
+                    .filter(|(a, b)| a != b)
+                    .count();
+                let font = 11.0 * scale;
+                let mut reference = Pixmap::new(
+                    text.text_width(hint, font).ceil() as u32 + 4,
+                    (font * 3.0).ceil() as u32 + 4,
+                )
+                .unwrap();
+                reference.fill(color_bg());
+                text.draw_text(&mut reference, 2.0, font * 2.0, hint, font, color_muted());
+                let background = reference.pixels()[0];
+                let expected_ink = reference
+                    .pixels()
+                    .iter()
+                    .filter(|pixel| **pixel != background)
+                    .count();
+                assert!(expected_ink > 40);
+                assert!(
+                    actual_ink * 100 >= expected_ink * 98,
+                    "{scale}x: only {actual_ink}/{expected_ink} pixels of {hint:?}"
+                );
+                state.set_status_message("");
+            }
+        }
+    }
+
+    #[test]
+    fn musical_grid_lines_clip_to_the_plot_including_endpoint_levels_under_zoom() {
+        for scale in [0.5, 1.0, 2.0] {
+            for zoom in [false, true] {
+                let rect = (16.0 * scale, 16.0 * scale, 600.0 * scale, 320.0 * scale);
+                let mut state = MsegEditState::new();
+                let data = MsegData {
+                    value_grid: crate::mseg::ValueGrid::Semitones,
+                    ..MsegData::default()
+                };
+                state.set_pitch_grid(
+                    crate::mseg::PitchGrid::new(vec![0.0, 0.25, 0.5, 0.75, 1.0]),
+                    &data,
+                );
+                let mut layout = state.layout(rect, scale);
+                if zoom {
+                    layout.viewport.time = (0.2, 0.8);
+                    layout.viewport.value = (0.2, 0.8);
+                }
+                let mut pm = Pixmap::new((640.0 * scale) as u32, (360.0 * scale) as u32).unwrap();
+                draw_canvas(
+                    &mut pm,
+                    &layout,
+                    &data,
+                    &state,
+                    scale,
+                    tiny_skia::Color::from_rgba8(255, 0, 0, 255),
+                    |_, _| {},
+                );
+                let mut checked = 0;
+                for (index, pixel) in pm.pixels().iter().enumerate() {
+                    if [pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()]
+                        != [0x44, 0x47, 0x4e, 0xff]
+                    {
+                        continue;
+                    }
+                    let x = (index as u32 % pm.width()) as f32;
+                    let y = (index as u32 / pm.width()) as f32;
+                    assert!(
+                        x >= layout.plot.0.floor() && x < (layout.plot.0 + layout.plot.2).ceil()
+                    );
+                    assert!(
+                        y >= layout.plot.1.floor() && y < (layout.plot.1 + layout.plot.3).ceil()
+                    );
+                    checked += 1;
+                }
+                assert!(checked > 20);
+            }
+        }
     }
 
     #[test]
@@ -815,6 +1380,65 @@ mod tests {
         let cx = (l.canvas.0 + l.canvas.2 * 0.5) as u32;
         let cy = (l.canvas.1 + l.canvas.3 * 0.5) as u32;
         assert!(px_alpha(&pm, cx, cy) > 0, "canvas not painted");
+    }
+
+    #[test]
+    fn loop_seam_indicators_clip_to_the_visible_plot_at_each_scale() {
+        for scale in [0.5, 1.0, 2.0] {
+            let rect = (16.0 * scale, 16.0 * scale, 600.0 * scale, 320.0 * scale);
+            let state = MsegEditState::new();
+            let mut data = MsegData {
+                play_mode: crate::mseg::PlayMode::Cyclic,
+                ..MsegData::default()
+            };
+            data.insert_node(0.2, 0.1).unwrap();
+            data.insert_node(0.8, 0.9).unwrap();
+            data.hold = HoldMode::Loop { start: 1, end: 2 };
+            let mut layout = state.layout(rect, scale);
+            layout.viewport.value = (0.25, 0.75);
+            let mut pm = Pixmap::new((640.0 * scale) as u32, (360.0 * scale) as u32).unwrap();
+            draw_loop_seam(&mut pm, &layout, &data, &state, scale);
+            assert!(pm.pixels().iter().any(|p| p.alpha() != 0));
+            let columns = [
+                phase_to_x(&layout, 0.2) + 3.0 * scale,
+                phase_to_x(&layout, 0.8) - 3.0 * scale,
+            ];
+            for (i, pixel) in pm.pixels().iter().enumerate() {
+                if pixel.alpha() == 0 {
+                    continue;
+                }
+                let x = (i as u32 % pm.width()) as f32;
+                let y = (i as u32 / pm.width()) as f32;
+                assert!(columns.iter().any(|column| (x - column).abs() <= 1.0));
+                assert!(y >= layout.plot.1.floor() && y < (layout.plot.1 + layout.plot.3).ceil());
+            }
+            pm.fill(tiny_skia::Color::TRANSPARENT);
+            layout.viewport.time = (0.3, 0.7);
+            draw_loop_seam(&mut pm, &layout, &data, &state, scale);
+            assert!(pm.pixels().iter().all(|p| p.alpha() == 0));
+        }
+    }
+
+    #[test]
+    fn seam_indicator_follows_stepped_playback_and_disappears_after_smoothing() {
+        let rect = (16.0, 16.0, 600.0, 320.0);
+        let mut state = MsegEditState::new();
+        let mut data = MsegData {
+            play_mode: crate::mseg::PlayMode::Cyclic,
+            ..MsegData::default()
+        };
+        data.insert_node(0.6, 0.8).unwrap();
+        data.nodes[1].stepped = true;
+        data.nodes[2].value = 0.0;
+        let mut pm = Pixmap::new(640, 360).unwrap();
+        let layout = state.layout(rect, 1.0);
+        draw_loop_seam(&mut pm, &layout, &data, &state, 1.0);
+        assert!(pm.pixels().iter().any(|p| p.alpha() != 0));
+        assert_eq!(state.match_loop_end_to_start(&mut data), None);
+        assert!(state.smooth_loop_seam(&mut data).is_some());
+        pm.fill(tiny_skia::Color::TRANSPARENT);
+        draw_loop_seam(&mut pm, &layout, &data, &state, 1.0);
+        assert!(pm.pixels().iter().all(|p| p.alpha() == 0));
     }
 
     #[test]
@@ -1005,10 +1629,9 @@ mod tests {
     fn hit_test_randomize_button() {
         let data = MsegData::default();
         let l = mseg_layout(RECT, false, 1.0);
-        // Centre of the Randomize button: drawn 6px from the strip's right
-        // edge, 84px wide → centre is 6 + 84/2 px in from the right.
-        let bx = l.strip.0 + l.strip.2 - 6.0 - 84.0 * 0.5;
-        let by = l.strip.1 + l.strip.3 * 0.5;
+        let button = strip_buttons(l.strip, 1.0, true).randomize;
+        let bx = button.0 + button.2 * 0.5;
+        let by = button.1 + button.3 * 0.5;
         assert_eq!(
             mseg_hit_test(&l, &data, false, 1.0, bx, by),
             MsegHit::Randomize
@@ -1067,13 +1690,166 @@ mod tests {
 
     #[test]
     fn ghost_curve_draws_some_pixels() {
-        let mut pm = Pixmap::new(200, 120).unwrap();
+        let mut pm = Pixmap::new(200, 160).unwrap();
         let data = MsegData::default(); // a 0->1 ramp
         let state = MsegEditState::new();
-        let rect = (0.0, 0.0, 200.0, 120.0);
+        let rect = (0.0, 0.0, 200.0, 160.0);
         draw_mseg_ghost(&mut pm, rect, &data, &state, 1.0, 0x5A5040FF);
         // The ghost curve strokes a polyline — some pixels are non-transparent.
         let any_drawn = pm.pixels().iter().any(|p| p.alpha() != 0);
         assert!(any_drawn, "the ghost curve should draw some pixels");
+    }
+
+    #[test]
+    fn measured_trace_points_at_zoom_boundaries_stay_inside_the_plot() {
+        for scale in [0.5, 1.0, 2.0] {
+            let mut pm = Pixmap::new(180, 120).unwrap();
+            let mut layout = mseg_layout((0.0, 0.0, 180.0, 120.0), true, scale);
+            layout.plot = (20.0, 20.0, 120.0, 70.0);
+            layout.viewport.time = (0.25, 0.75);
+            layout.viewport.value = (0.25, 0.75);
+            draw_mseg_trace(
+                &mut pm,
+                &layout,
+                &[
+                    Some((0.25, 0.75)),
+                    Some((0.5, 0.5)),
+                    Some((0.70, 0.30)),
+                    Some((0.75, 0.25)),
+                ],
+                scale,
+                color_text(),
+            );
+            assert!(pm.pixels().iter().any(|pixel| pixel.alpha() > 0));
+            for (index, pixel) in pm
+                .pixels()
+                .iter()
+                .enumerate()
+                .filter(|(_, pixel)| pixel.alpha() > 0)
+            {
+                let (x, y) = (index % 180, index / 180);
+                assert!(
+                    (20..140).contains(&x) && (20..90).contains(&y),
+                    "trace escaped at ({x}, {y}), scale {scale}, alpha {}",
+                    pixel.alpha()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn audio_backdrop_clips_both_axes_and_leaves_grid_and_curve_in_front() {
+        let mut pm = Pixmap::new(180, 140).unwrap();
+        let mut layout = mseg_layout((0.0, 0.0, 180.0, 140.0), true, 1.0);
+        layout.plot = (20.0, 20.0, 120.0, 90.0);
+        layout.viewport.time = (0.25, 0.75);
+        layout.viewport.value = (0.25, 0.75);
+        let mut bin = AudioBin::default();
+        bin.include([1.5; 2], [0.9; 2]);
+        let bins = [Some(bin); 4];
+        draw_mseg_audio(&mut pm, &layout, &bins, AudioBackdropStyle::default());
+        assert!(pm.pixels().iter().any(|p| p.alpha() > 0));
+        for (index, pixel) in pm
+            .pixels()
+            .iter()
+            .enumerate()
+            .filter(|(_, pixel)| pixel.alpha() > 0)
+        {
+            let (x, y) = (index % 180, index / 180);
+            assert!(
+                (20..140).contains(&x) && (20..110).contains(&y),
+                "backdrop escaped at ({x},{y}): {pixel:?}"
+            );
+        }
+        let data = MsegData::default();
+        let state = MsegEditState::new();
+        let mut text = TextRenderer::new(&test_font_data());
+        let mut plain = Pixmap::new(400, 300).unwrap();
+        let mut audio = Pixmap::new(400, 300).unwrap();
+        let curve_color = tiny_skia::Color::from_rgba8(245, 160, 80, 255);
+        draw_mseg(
+            &mut plain,
+            &mut text,
+            RECT,
+            &data,
+            &state,
+            1.0,
+            curve_color,
+            None,
+        );
+        draw_mseg_with_background(
+            &mut audio,
+            &mut text,
+            RECT,
+            &data,
+            &state,
+            1.0,
+            curve_color,
+            None,
+            |pm, layout| {
+                draw_mseg_audio(pm, layout, &bins, AudioBackdropStyle::default());
+            },
+        );
+        let mut compared = 0;
+        for (expected, actual) in plain.pixels().iter().zip(audio.pixels()) {
+            if (
+                expected.red(),
+                expected.green(),
+                expected.blue(),
+                expected.alpha(),
+            ) == (245, 160, 80, 255)
+                || (
+                    expected.red(),
+                    expected.green(),
+                    expected.blue(),
+                    expected.alpha(),
+                ) == (68, 71, 78, 255)
+            {
+                compared += 1;
+                assert_eq!(actual, expected);
+            }
+        }
+        assert!(compared > 100);
+    }
+}
+
+/// Overlay measured normalized output, leaving large unmeasured phase gaps disconnected.
+pub fn draw_mseg_trace(
+    pixmap: &mut Pixmap,
+    layout: &MsegLayout,
+    points: &[Option<(f32, f32)>],
+    scale: f32,
+    color: tiny_skia::Color,
+) {
+    let mut previous: Option<(f32, f32)> = None;
+    for &(phase, value) in points.iter().flatten() {
+        if !phase.is_finite() || !value.is_finite() {
+            continue;
+        }
+        let x = phase_to_x(layout, phase);
+        let y = value_to_y(layout, value);
+        if let Some((p, v)) = previous
+            && (0.0..=0.125).contains(&(phase - p))
+        {
+            draw_plot_line(
+                pixmap,
+                layout,
+                phase_to_x(layout, p),
+                value_to_y(layout, v),
+                x,
+                y,
+                color,
+            );
+        }
+        if layout.viewport.contains(phase, value) {
+            let radius = scale.max(1.0) * 0.75;
+            let (px, py, pw, ph) = layout.plot;
+            let (left, top) = ((x - radius).max(px), (y - radius).max(py));
+            let (right, bottom) = ((x + radius).min(px + pw), (y + radius).min(py + ph));
+            if right > left && bottom > top {
+                draw_rect(pixmap, left, top, right - left, bottom - top, color);
+            }
+        }
+        previous = Some((phase, value));
     }
 }

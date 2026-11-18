@@ -70,10 +70,10 @@ fn triple32(mut x: u32) -> u32 {
 }
 
 /// Deterministic xorshift32 PRNG — no dependency, seeded per `randomize` call.
-struct Rng(u32);
+pub(super) struct Rng(u32);
 
 impl Rng {
-    fn new(seed: u32) -> Self {
+    pub(super) fn new(seed: u32) -> Self {
         // Scramble the seed before using it as the xorshift32 state. The
         // Randomize button feeds seed = 1, 2, 3, …; seeded directly, such tiny
         // sequential seeds give xorshift a tiny, correlated FIRST output, so
@@ -98,7 +98,7 @@ impl Rng {
         (self.next_u32() >> 8) as f32 / (1u32 << 24) as f32
     }
     /// Uniform f32 in `lo..hi`.
-    fn range(&mut self, lo: f32, hi: f32) -> f32 {
+    pub(super) fn range(&mut self, lo: f32, hi: f32) -> f32 {
         lo + (hi - lo) * self.next_f32()
     }
     /// Uniform usize in `lo..=hi`.
@@ -199,7 +199,10 @@ pub fn randomize(data: &mut MsegData, style: RandomStyle, seed: u32) {
             RandomStyle::Chaos => (rng.next_f32(), rng.range(-1.0, 1.0), rng.bool()),
         };
 
-        if data.snap && matches!(style, RandomStyle::Stepped | RandomStyle::Spiky) {
+        if data.snap
+            && data.value_grid == super::ValueGrid::Divisions
+            && matches!(style, RandomStyle::Stepped | RandomStyle::Spiky)
+        {
             value = snap_value(value, data.value_steps);
         }
         prev_value = value;
@@ -209,6 +212,7 @@ pub fn randomize(data: &mut MsegData, style: RandomStyle, seed: u32) {
             value,
             tension,
             stepped,
+            ..MsegNode::default()
         };
     }
     data.node_count = count;

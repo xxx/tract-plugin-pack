@@ -118,6 +118,8 @@ pub struct NapParams {
     pub width_curve: Arc<Mutex<MsegData>>,
     #[persist = "tone-curve"]
     pub tone_curve: Arc<Mutex<MsegData>>,
+    #[persist = "wave-palette"]
+    pub wave_palette: Arc<Mutex<tiny_skia_widgets::mseg::WavePalette>>,
     #[persist = "editor-state"]
     pub editor_state: Arc<editor::EditorState>,
 
@@ -186,6 +188,7 @@ impl NapParams {
             decay_curve: Arc::new(Mutex::new(default_decay_curve())),
             width_curve: Arc::new(Mutex::new(default_width_curve())),
             tone_curve: Arc::new(Mutex::new(default_tone_curve())),
+            wave_palette: Arc::new(Mutex::new(tiny_skia_widgets::mseg::WavePalette::default())),
             editor_state: editor::default_editor_state(),
 
             mode: EnumParam::new("Engine", NapMode::ZeroLatency).non_automatable(),
@@ -341,6 +344,10 @@ impl Nap {
 }
 
 impl Plugin for Nap {
+    fn filter_state(state: &mut PluginState) {
+        tiny_skia_widgets::mseg::prepare_wave_palette_state(&mut state.fields);
+    }
+
     const NAME: &'static str = "Nap";
     const VENDOR: &'static str = "mpd";
     const URL: &'static str = "";
@@ -664,6 +671,62 @@ nih_export_vst3!(Nap);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_wave_palette_persists_without_editing_tail_curves() {
+        use tiny_skia_widgets::mseg::{CurveShape, WavePalette};
+        let params = NapParams::new();
+        let before = [
+            *params.decay_curve.lock().unwrap(),
+            *params.width_curve.lock().unwrap(),
+            *params.tone_curve.lock().unwrap(),
+        ];
+        params
+            .wave_palette
+            .lock()
+            .unwrap()
+            .store(5, &CurveShape::capture(&before[1]))
+            .unwrap();
+        let saved = params.serialize_fields();
+        let restored = NapParams::new();
+        restored.deserialize_fields(&saved);
+        assert_eq!(
+            *restored.wave_palette.lock().unwrap(),
+            *params.wave_palette.lock().unwrap()
+        );
+        restored.wave_palette.lock().unwrap().clear(5).unwrap();
+        assert!(params.wave_palette.lock().unwrap().get(5).is_some());
+        assert_eq!(
+            [
+                *params.decay_curve.lock().unwrap(),
+                *params.width_curve.lock().unwrap(),
+                *params.tone_curve.lock().unwrap()
+            ],
+            before
+        );
+        let mut legacy = saved;
+        legacy.remove("wave-palette");
+        let fresh = NapParams::new();
+        fresh.deserialize_fields(&legacy);
+        assert_eq!(*fresh.wave_palette.lock().unwrap(), WavePalette::default());
+        restored
+            .wave_palette
+            .lock()
+            .unwrap()
+            .store(0, &CurveShape::capture(&before[0]))
+            .unwrap();
+        let mut old_state = PluginState {
+            version: String::new(),
+            params: Default::default(),
+            fields: legacy,
+        };
+        Nap::filter_state(&mut old_state);
+        restored.deserialize_fields(&old_state.fields);
+        assert_eq!(
+            *restored.wave_palette.lock().unwrap(),
+            WavePalette::default()
+        );
+    }
 
     #[test]
     fn mix_zero_is_dry_passthrough() {

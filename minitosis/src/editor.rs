@@ -26,6 +26,12 @@ const TRIGGERS: &[TriggerChoice] = &[
     TriggerChoice::Free,
     TriggerChoice::FreeHz,
     TriggerChoice::Transient,
+    TriggerChoice::MidiNote,
+    TriggerChoice::FreeHzSample,
+    TriggerChoice::TransientSample,
+    TriggerChoice::DawPosition,
+    TriggerChoice::MidiPitch,
+    TriggerChoice::Timing,
 ];
 type Rect = (f32, f32, f32, f32);
 
@@ -125,9 +131,18 @@ pub fn draw_frame(
         widgets::color_control_bg(),
     );
     let kind = frame.kind.unwrap_or_else(|| params.selected_kind());
+    let preparing = kind != params.selected_kind()
+        || shared.active_generation.load(Ordering::Acquire)
+            != params.selection_generation.load(Ordering::Acquire);
+    if preparing {
+        editor.disconnect_live();
+    } else {
+        editor.connect_live(&shared.telemetry, 0);
+    }
     let track = params
         .controls_for(kind)
         .track(params.mix.unmodulated_normalized_value(), true);
+    editor.set_wave_automation(params.waves_for(kind).values());
     let modulation = params
         .modulation
         .lock()
@@ -230,6 +245,8 @@ impl MinitosisWindow {
             .map(|d| d.subsec_nanos())
             .unwrap_or(1)
             .max(1);
+        let mut editor = effect_editor();
+        editor.bind_wave_palette(params.wave_palette.clone());
         Self {
             surface: widgets::SoftbufferSurface::new(window, width, height),
             width,
@@ -240,7 +257,7 @@ impl MinitosisWindow {
             executor,
             gui_context,
             renderer: widgets::TextRenderer::new(widgets::DEFAULT_FONT),
-            editor: effect_editor(),
+            editor,
             pointer: (0.0, 0.0),
             selection: SelectionState::new(last_kind),
             undo: UndoHistory::new(),
@@ -272,6 +289,7 @@ impl MinitosisWindow {
         self.shared.modulation_dirty.store(true, Ordering::Release);
         self.select_kind(snapshot.kind);
         self.editor.cancel_interaction();
+        self.editor.invalidate_trace();
     }
 
     fn select_kind(&mut self, kind: EffectKind) {
@@ -284,6 +302,16 @@ impl MinitosisWindow {
             self.editor.cancel_interaction();
             self.sync_selection();
         }
+    }
+
+    fn finish_input(&mut self) {
+        self.undo.begin_capture(self.snapshot());
+        self.end_effect_gestures();
+        self.end_output_drag();
+        self.commit_output_text();
+        self.handle_effect(&Event::Window(WindowEvent::Unfocused), false);
+        let after = self.snapshot();
+        self.undo.commit_capture(&after);
     }
 
     fn end_effect_gestures(&mut self) {
@@ -365,6 +393,8 @@ impl MinitosisWindow {
     }
 
     fn handle_effect(&mut self, event: &Event, finish_text: bool) -> bool {
+        self.editor
+            .set_wave_automation(self.params.waves_for(self.selection.displayed()).values());
         let before = self
             .params
             .controls_for(self.selection.displayed())
@@ -384,6 +414,13 @@ impl MinitosisWindow {
         } else {
             self.editor.handle_event(event, context)
         };
+        if let Some((slot, value)) = response.wave_automation {
+            let param = self.params.waves_for(before.kind).controls()[slot];
+            let setter = ParamSetter::new(self.gui_context.as_ref());
+            setter.begin_set_parameter(param);
+            setter.set_parameter(param, value as i32);
+            setter.end_set_parameter(param);
+        }
         if response.randomize {
             self.rng_seed = self.rng_seed.wrapping_add(1);
             tract_effects::randomize::randomize_track_effect(
@@ -526,13 +563,31 @@ impl baseview::WindowHandler for MinitosisWindow {
                 self.surface.resize(self.width, self.height);
             }
             Event::Window(WindowEvent::Unfocused) => {
-                self.end_effect_gestures();
-                self.end_output_drag();
-                self.commit_output_text();
-                self.handle_effect(&event, true);
-                self.editor.cancel_interaction();
-                let after = self.snapshot();
-                self.undo.commit_capture(&after);
+                self.finish_input();
+            }
+            Event::Mouse(
+                MouseEvent::WheelScrolled { .. }
+                | MouseEvent::ButtonPressed {
+                    button: MouseButton::Middle,
+                    ..
+                },
+            ) if self.output_drag.active_action().is_some() => return EventStatus::Captured,
+            Event::Mouse(MouseEvent::ButtonPressed {
+                button: MouseButton::Middle,
+                ..
+            }) => {
+                let opened = self.undo.begin_capture(self.snapshot());
+                if self
+                    .editor
+                    .can_start_pan(self.pointer, geometry(self.scale, self.width, self.height))
+                {
+                    self.commit_output_text();
+                }
+                self.handle_effect(&event, false);
+                if opened {
+                    let after = self.snapshot();
+                    self.undo.commit_capture(&after);
+                }
             }
             Event::Mouse(MouseEvent::CursorMoved {
                 position,
@@ -572,7 +627,9 @@ impl baseview::WindowHandler for MinitosisWindow {
                 ..
             }) => {
                 let opened = self.undo.begin_capture(self.snapshot());
-                if view::in_rect(output_rect(self.scale), self.pointer.0, self.pointer.1) {
+                if self.editor.dropdown_open() || self.editor.pointer_gesture_active() {
+                    self.handle_effect(&event, false);
+                } else if view::in_rect(output_rect(self.scale), self.pointer.0, self.pointer.1) {
                     if self.output_drag.active_action().is_none() {
                         self.handle_effect(&event, true);
                         self.commit_output_text();
@@ -600,6 +657,12 @@ impl baseview::WindowHandler for MinitosisWindow {
                 let after = self.snapshot();
                 self.undo.commit_capture(&after);
             }
+            Event::Keyboard(ev)
+                if self.output_drag.active_action().is_some()
+                    && widgets::mseg::is_help_shortcut(ev) =>
+            {
+                return EventStatus::Captured;
+            }
             Event::Keyboard(ev) if self.output_text.is_active() => {
                 if ev.state != KeyState::Down {
                     return EventStatus::Captured;
@@ -613,13 +676,16 @@ impl baseview::WindowHandler for MinitosisWindow {
                     Key::Backspace => self.output_text.backspace(),
                     Key::Escape => self.output_text.cancel(),
                     Key::Enter => self.commit_output_text(),
+                    _ if widgets::mseg::is_help_shortcut(ev) => {}
                     _ => return EventStatus::Ignored,
                 }
             }
             Event::Keyboard(ev)
                 if !self.editor.captures_keyboard()
                     && ev.state == KeyState::Down
-                    && ev.modifiers.contains(Modifiers::CONTROL) =>
+                    && ev
+                        .modifiers
+                        .intersects(Modifiers::CONTROL | Modifiers::META) =>
             {
                 let is_z = matches!(&ev.key, Key::Character(s) if s.eq_ignore_ascii_case("z"));
                 let is_y = matches!(&ev.key, Key::Character(s) if s.eq_ignore_ascii_case("y"));
@@ -634,7 +700,15 @@ impl baseview::WindowHandler for MinitosisWindow {
                         self.restore(snapshot);
                     }
                 } else if !is_z && !is_y {
-                    return EventStatus::Ignored;
+                    let opened = self.undo.begin_capture(self.snapshot());
+                    let captured = self.handle_effect(&event, false);
+                    if opened {
+                        let after = self.snapshot();
+                        self.undo.commit_capture(&after);
+                    }
+                    if !captured {
+                        return EventStatus::Ignored;
+                    }
                 }
             }
             Event::Keyboard(_) => {
@@ -658,8 +732,8 @@ impl baseview::WindowHandler for MinitosisWindow {
 
 impl Drop for MinitosisWindow {
     fn drop(&mut self) {
-        self.end_effect_gestures();
-        self.end_output_drag();
+        self.finish_input();
+        self.editor.disconnect_live();
     }
 }
 

@@ -203,6 +203,7 @@ impl MiffWindow {
                 })
                 .unwrap_or_default()
         };
+        let wave_palette = params.wave_palette.clone();
 
         Self {
             gui_context,
@@ -219,7 +220,8 @@ impl MiffWindow {
             // miff owns this grid list — adjust here to change available presets.
             mseg_state: {
                 let mut s = MsegEditState::new_curve_only();
-                s.set_grid_options(&[(4, 4), (8, 8), (16, 8), (32, 16)]);
+                s.bind_wave_palette(wave_palette);
+                s.set_grid_options(&[(4, 4), (8, 8), (16, 8), (32, 16), (6, 8), (12, 8), (24, 16)]);
                 s
             },
             input_spectrum,
@@ -236,6 +238,7 @@ impl MiffWindow {
         let w = self.physical_width as f32;
         let h = self.physical_height as f32;
 
+        self.mseg_state.set_overlay_bounds((w, h));
         self.drag.clear_regions();
         self.surface.pixmap.fill(widgets::color_bg());
 
@@ -245,6 +248,14 @@ impl MiffWindow {
         // Lock the curve, copy the `Copy` value out, then release before drawing.
         let curve = self.params.curve.lock().map(|c| *c).unwrap_or_default();
 
+        if let Some(node) = self
+            .mseg_state
+            .inspector_node()
+            .filter(|&i| i < curve.node_count)
+        {
+            self.mseg_state
+                .set_inspector_readout(&format!("Tap {:+.6}", curve.nodes[node].value * 2.0 - 1.0));
+        }
         widgets::mseg::draw_mseg(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
@@ -255,17 +266,6 @@ impl MiffWindow {
             widgets::color_accent(),
             None,
         );
-        // Dropdown popup is no longer inline in draw_mseg — paint it
-        // explicitly. miff has no layered ghosts, so the position is
-        // immediately after the curve; the result is identical to the
-        // pre-extract behaviour.
-        widgets::mseg::draw_mseg_dropdown(
-            &mut self.surface.pixmap,
-            &mut self.text_renderer,
-            &self.mseg_state,
-            mseg_rect,
-        );
-
         // ── Response region (middle ~29%) — frequency-response view ────────
         {
             // Read the latest input spectrum from the audio thread (non-blocking).
@@ -287,6 +287,12 @@ impl MiffWindow {
 
         // ── Bottom strip (~16%) ────────────────────────────────────────────
         self.draw_strip(strip_rect, s);
+        widgets::mseg::draw_mseg_dropdown(
+            &mut self.surface.pixmap,
+            &mut self.text_renderer,
+            &self.mseg_state,
+            mseg_rect,
+        );
     }
 
     fn resize_buffers(&mut self) {
@@ -317,6 +323,10 @@ impl MiffWindow {
             self.alt_held = new_alt;
             self.mseg_state.set_stepped_draw(new_alt);
         }
+        self.mseg_state.set_transform_modifiers(
+            new_alt,
+            modifiers.contains(keyboard_types::Modifiers::CONTROL),
+        );
         self.shift_held = new_shift;
     }
 
@@ -563,15 +573,20 @@ impl baseview::WindowHandler for MiffWindow {
 
     fn on_event(
         &mut self,
-        _window: &mut baseview::Window,
+        window: &mut baseview::Window,
         event: baseview::Event,
     ) -> baseview::EventStatus {
         let w = self.physical_width as f32;
         let h = self.physical_height as f32;
         let s = self.scale_factor;
         let (mseg_rect, _response_rect, strip_rect) = layout(w, h);
+        self.mseg_state.set_overlay_bounds((w, h));
 
         match &event {
+            baseview::Event::Window(baseview::WindowEvent::Unfocused) => {
+                let backing = self.drag.input_scale();
+                widgets::PhysicalEditor::prepare_resize(self, window, backing);
+            }
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
@@ -586,6 +601,7 @@ impl baseview::WindowHandler for MiffWindow {
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorLeft) => {
                 self.drag.on_cursor_left();
+                self.mseg_state.clear_hover_hint();
             }
 
             // ── CursorMoved ─────────────────────────────────────────────────
@@ -596,9 +612,14 @@ impl baseview::WindowHandler for MiffWindow {
                 let x = position.x as f32;
                 let y = position.y as f32;
                 self.drag.set_mouse(x, y);
+                self.mseg_state.clear_hover_hint();
                 self.update_modifiers(modifiers);
 
-                match event_target(mseg_rect, x, y) {
+                match if self.mseg_state.has_open_menu() {
+                    EventTarget::Mseg
+                } else {
+                    event_target(mseg_rect, x, y)
+                } {
                     EventTarget::Mseg => {
                         // MSEG drag-move (if a drag is active the MSEG tracks it
                         // even outside the rect, which matches the node-drag
@@ -696,10 +717,17 @@ impl baseview::WindowHandler for MiffWindow {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
+                if self.mseg_state.is_panning() {
+                    return baseview::EventStatus::Captured;
+                }
                 let (x, y) = self.drag.mouse_pos();
                 self.update_modifiers(modifiers);
 
-                match event_target(mseg_rect, x, y) {
+                match if self.mseg_state.has_open_menu() {
+                    EventTarget::Mseg
+                } else {
+                    event_target(mseg_rect, x, y)
+                } {
                     EventTarget::Mseg => {
                         // Commit any open text-edit before a new click.
                         self.commit_text_edit();
@@ -715,7 +743,9 @@ impl baseview::WindowHandler for MiffWindow {
                             && x < strip.0 + strip.2
                             && y >= strip.1
                             && y < strip.1 + strip.3;
-                        let is_double = !on_strip && self.mseg_double_click_check(x, y);
+                        let is_double = !on_strip
+                            && !self.mseg_state.has_open_menu()
+                            && self.mseg_double_click_check(x, y);
                         if is_double {
                             let changed = {
                                 match self.params.curve.lock() {
@@ -906,11 +936,15 @@ impl baseview::WindowHandler for MiffWindow {
             }) => {
                 let (x, y) = self.drag.mouse_pos();
                 // Right-click during a controls drag: ignore (as wavetable-filter does).
-                if self.drag.active_action().is_some() {
+                if self.drag.active_action().is_some() || self.mseg_state.is_dragging() {
                     return baseview::EventStatus::Captured;
                 }
 
-                match event_target(mseg_rect, x, y) {
+                match if self.mseg_state.has_open_menu() {
+                    EventTarget::Mseg
+                } else {
+                    event_target(mseg_rect, x, y)
+                } {
                     EventTarget::Mseg => {
                         // Right-click in MSEG: toggle segment stepped flag.
                         let changed = {
@@ -945,6 +979,46 @@ impl baseview::WindowHandler for MiffWindow {
                 }
             }
 
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Middle,
+                ..
+            }) => {
+                if self.drag.active_action().is_none() {
+                    let (x, y) = self.drag.mouse_pos();
+                    if self.mseg_state.can_start_pan(x, y, mseg_rect, s) {
+                        self.commit_text_edit();
+                    }
+                    self.mseg_state.on_pan_start(x, y, mseg_rect, s);
+                }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Middle,
+                ..
+            }) => {
+                self.mseg_state.on_pan_end();
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::WheelScrolled { delta, modifiers }) => {
+                if self.drag.active_action().is_some() {
+                    return baseview::EventStatus::Captured;
+                }
+                let dy = match delta {
+                    baseview::ScrollDelta::Lines { y, .. } => *y,
+                    baseview::ScrollDelta::Pixels { y, .. } => *y * 0.05,
+                };
+                let (x, y) = self.drag.mouse_pos();
+                if let Ok(curve) = self.params.curve.lock() {
+                    self.mseg_state.on_scroll(
+                        x,
+                        y,
+                        dy,
+                        modifiers.contains(keyboard_types::Modifiers::SHIFT),
+                        &curve,
+                        mseg_rect,
+                        s,
+                    );
+                }
+            }
+
             // ── Keyboard ────────────────────────────────────────────────────
             baseview::Event::Keyboard(ev) if self.text_edit.is_active() => {
                 // Key-up events are swallowed while editing so host shortcuts
@@ -963,28 +1037,27 @@ impl baseview::WindowHandler for MiffWindow {
                     keyboard_types::Key::Enter => {
                         self.commit_text_edit();
                     }
+                    _ if widgets::mseg::is_help_shortcut(ev) => {}
                     _ => return baseview::EventStatus::Ignored,
                 }
                 return baseview::EventStatus::Captured;
             }
             baseview::Event::Keyboard(ev) => {
-                if ev.state != keyboard_types::KeyState::Down {
-                    return baseview::EventStatus::Ignored;
+                if self.drag.active_action().is_some() && widgets::mseg::is_help_shortcut(ev) {
+                    return baseview::EventStatus::Captured;
                 }
-                match &ev.key {
-                    keyboard_types::Key::Delete | keyboard_types::Key::Backspace => {
-                        let changed = match self.params.curve.lock() {
-                            Ok(mut curve) => self.mseg_state.delete_selection(&mut curve),
-                            _ => None,
-                        };
-                        if changed == Some(MsegEdit::Changed) {
-                            self.rebake();
-                            return baseview::EventStatus::Captured;
-                        }
-                        return baseview::EventStatus::Ignored;
-                    }
-                    _ => return baseview::EventStatus::Ignored,
+                let (captured, changed) = match self.params.curve.lock() {
+                    Ok(mut curve) => self.mseg_state.on_key(ev, &mut curve, mseg_rect, s),
+                    _ => (false, None),
+                };
+                if changed == Some(MsegEdit::Changed) {
+                    self.rebake();
                 }
+                return if captured {
+                    baseview::EventStatus::Captured
+                } else {
+                    baseview::EventStatus::Ignored
+                };
             }
 
             _ => {}

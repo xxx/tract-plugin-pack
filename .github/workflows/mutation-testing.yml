@@ -18,25 +18,71 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  MUTATION_BASE_SHA: ${{ github.event.pull_request.base.sha }}
 
 jobs:
-  mutation-testing:
-    name: ${{ matrix.package }}
+  plan:
+    name: Plan mutation shards
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    outputs:
+      matrix: ${{ steps.shards.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+
+      - name: Count mutants and plan shards
+        id: shards
+        run: |
+          scope=()
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            comparison_base=$(git merge-base "$MUTATION_BASE_SHA" HEAD)
+            git diff --no-ext-diff --no-textconv --no-color --unified=0 "$comparison_base" HEAD -- > "$RUNNER_TEMP/pr.diff"
+            scope=(--in-diff "$RUNNER_TEMP/pr.diff")
+          fi
+          for package in tract-dsp tract-effects; do
+            config=.cargo/mutants.toml
+            max_shards=3
+            if [[ "$package" == tract-effects ]]; then
+              config=.cargo/mutants-tract-effects.toml
+              max_shards=16
+            fi
+            cargo mutants -p "$package" --config "$config" "${scope[@]}" --list --json > "$RUNNER_TEMP/$package-mutants.json"
+            count=$(jq -s '.[0] // [] | length' "$RUNNER_TEMP/$package-mutants.json")
+            # Allow at most 19 mutation jobs plus this planning job.
+            shards=$(( (count + 63) / 64 ))
+            shards=$(( shards < 1 ? 1 : (shards > max_shards ? max_shards : shards) ))
+            echo "$package selected $count mutants across $shards shard(s)" >&2
+            jq -cn --arg package "$package" --arg config "$config" --argjson count "$shards" \
+              'range(0; $count) | {package: $package, config: $config, shard: "\(.)/\($count)", part: (. + 1), total: $count}'
+          done > "$RUNNER_TEMP/mutation-plan.jsonl"
+          matrix=$(jq -cs '{include: .}' "$RUNNER_TEMP/mutation-plan.jsonl")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  mutation-testing:
+    name: ${{ matrix.total == 1 && matrix.package || format('{0} ({1}/{2})', matrix.package, matrix.part, matrix.total) }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - package: tract-dsp
-            config: .cargo/mutants.toml
-          - package: tract-effects
-            config: .cargo/mutants-tract-effects.toml
+      max-parallel: 16
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       MUTATION_PACKAGE: ${{ matrix.package }}
       MUTATION_CONFIG: ${{ matrix.config }}
       MUTATION_REPORT_DIR: mutation-reports/${{ matrix.package }}
-      MUTATION_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      MUTATION_SHARD: ${{ matrix.shard }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -76,19 +122,23 @@ jobs:
           comparison_base=$(git merge-base "$MUTATION_BASE_SHA" HEAD)
           git diff --no-ext-diff --no-textconv --no-color --unified=0 "$comparison_base" HEAD -- > "$MUTATION_REPORT_DIR/pr.diff"
 
-      - name: Mutate changed code
-        if: github.event_name == 'pull_request'
-        run: cargo mutants -p "$MUTATION_PACKAGE" --config "$MUTATION_CONFIG" --in-place --in-diff "$MUTATION_REPORT_DIR/pr.diff" --output "$MUTATION_REPORT_DIR"
-
-      - name: Mutate full registered scope
-        if: github.event_name == 'workflow_dispatch'
-        run: cargo mutants -p "$MUTATION_PACKAGE" --config "$MUTATION_CONFIG" --in-place --output "$MUTATION_REPORT_DIR"
+      - name: Test mutation shard
+        env:
+          CARGO_INCREMENTAL: 1
+        run: |
+          scope=()
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            scope=(--in-diff "$MUTATION_REPORT_DIR/pr.diff")
+          fi
+          cargo mutants -p "$MUTATION_PACKAGE" --config "$MUTATION_CONFIG" --in-place \
+            "${scope[@]}" --shard "$MUTATION_SHARD" --sharding round-robin \
+            --caught --unviable --output "$MUTATION_REPORT_DIR" -- --test-threads 2
 
       - name: Upload mutation results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.package }}-mutants
+          name: ${{ matrix.total == 1 && format('{0}-mutants', matrix.package) || format('{0}-mutants-{1}', matrix.package, matrix.part) }}
           path: ${{ env.MUTATION_REPORT_DIR }}/
           if-no-files-found: warn
           retention-days: 14

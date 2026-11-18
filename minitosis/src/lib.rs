@@ -12,6 +12,7 @@ use nih_plug::prelude::*;
 use params::MinitosisParams;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use tract_effects::sidechain::SidechainInput;
 
 pub struct Shared {
     pub handoff: ProcessorHandoff,
@@ -21,6 +22,7 @@ pub struct Shared {
     pub reset_modulation: AtomicBool,
     pub modulation_dirty: AtomicBool,
     pub phases: [AtomicU32; 4],
+    pub telemetry: Arc<tract_effects::modulation_telemetry::ModulationTelemetry>,
 }
 
 impl Default for Shared {
@@ -33,6 +35,9 @@ impl Default for Shared {
             reset_modulation: AtomicBool::new(false),
             modulation_dirty: AtomicBool::new(true),
             phases: std::array::from_fn(|_| AtomicU32::new(0)),
+            telemetry: Arc::new(
+                tract_effects::modulation_telemetry::ModulationTelemetry::default(),
+            ),
         }
     }
 }
@@ -62,7 +67,8 @@ pub fn prepare_processor(params: &MinitosisParams, shared: &Shared, key: Prepare
         .lock()
         .map(|bank| bank.get(key.kind).clone())
         .unwrap_or_else(|_| state::neutral_modulation());
-    let processor = Box::new(Processor::new(key, &track, modulation));
+    let mut processor = Box::new(Processor::new(key, &track, modulation));
+    processor.connect_waveform(&shared.telemetry);
     if prepare_key(params, shared) == key
         && shared.active_generation.load(Ordering::Acquire) != key.generation
     {
@@ -82,6 +88,8 @@ pub struct Minitosis {
     retry_samples: usize,
     was_playing: bool,
     reported_latency: u32,
+    trace_clock: tract_effects::modulation_telemetry::TraceClock,
+    host_position: tract_effects::modulation::HostPosition,
 }
 
 impl Default for Minitosis {
@@ -89,11 +97,12 @@ impl Default for Minitosis {
         let params = Arc::new(MinitosisParams::default());
         let shared = Arc::new(Shared::default());
         let key = prepare_key(&params, &shared);
-        let processor = Box::new(Processor::new(
+        let mut processor = Box::new(Processor::new(
             key,
             &params.selected_track(),
             state::neutral_modulation(),
         ));
+        processor.connect_waveform(&shared.telemetry);
         Self {
             params,
             shared,
@@ -102,23 +111,75 @@ impl Default for Minitosis {
             retry_samples: 0,
             was_playing: false,
             reported_latency: 0,
+            trace_clock: tract_effects::modulation_telemetry::TraceClock::default(),
+            host_position: tract_effects::modulation::HostPosition::default(),
         }
     }
 }
 
 impl Minitosis {
+    fn next_midi(
+        context: &mut impl ProcessContext<Self>,
+        midi: &mut tract_effects::modulation::MidiCursor,
+        processor: &Processor,
+        samples: usize,
+    ) -> Option<tract_effects::modulation::MidiNoteOn> {
+        if samples == 0 && processor.modulation.trigger.pitch_settings().is_some() {
+            return None;
+        }
+        let mut events = std::iter::from_fn(|| {
+            loop {
+                if let NoteEvent::NoteOn {
+                    timing,
+                    channel,
+                    note,
+                    velocity,
+                    ..
+                } = context.next_event()?
+                    && let Some(event) =
+                        tract_effects::modulation::MidiNoteOn::new(timing, channel, note, velocity)
+                {
+                    return Some(event);
+                }
+            }
+        });
+        midi.next_matching(&mut events, samples, |event| processor.accepts_midi(event))
+    }
+
+    #[cfg(test)]
     fn render(
         &mut self,
         left: &mut [f32],
         right: &mut [f32],
         playing: bool,
         bpm: f64,
-        context: &impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
+    ) -> ProcessStatus {
+        self.render_with_sidechain(
+            left,
+            right,
+            SidechainInput::default(),
+            playing,
+            bpm,
+            context,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_sidechain(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        sidechain: SidechainInput<'_>,
+        playing: bool,
+        bpm: f64,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let samples = left.len().min(right.len());
         let key = prepare_key(&self.params, &self.shared);
         if self.processor.key != key {
             if self.shared.handoff.try_install(key, &mut self.processor) {
+                self.shared.telemetry.invalidate();
                 self.shared
                     .active_generation
                     .store(key.generation, Ordering::Release);
@@ -138,6 +199,7 @@ impl Minitosis {
             }
         }
         let kind = self.processor.key.kind;
+        self.processor.set_host_position(self.host_position);
         if self.shared.modulation_dirty.swap(false, Ordering::AcqRel) {
             if let Ok(bank) = self.params.modulation.try_lock() {
                 self.processor.modulation = bank.get(kind).clone();
@@ -145,35 +207,91 @@ impl Minitosis {
                 self.shared.modulation_dirty.store(true, Ordering::Release);
             }
         }
-        if self.shared.reset_modulation.swap(false, Ordering::AcqRel)
-            || (playing && !self.was_playing && self.params.retrig_on_play.value())
-        {
+        if self.shared.reset_modulation.swap(false, Ordering::AcqRel) {
             self.processor.reset_modulation();
+        } else if playing && !self.was_playing && self.params.retrig_on_play.value() {
+            self.processor.retrigger_modulation();
         }
         self.was_playing = playing;
+        self.processor
+            .set_wave_automation(self.params.waves_for(kind).values());
+        if self.processor.uses_project_waves()
+            && let Ok(palette) = self.params.wave_palette.try_lock()
+        {
+            self.processor.set_wave_palette(&palette);
+        }
         let track = self
             .params
             .controls_for(kind)
             .track(self.params.mix.value(), false);
-        self.processor.begin_block(&track, left, right, bpm);
+        let request = self.trace_clock.begin_block(
+            &self.shared.telemetry,
+            f32::from_bits(self.processor.key.sample_rate_bits) as f64,
+        );
+        self.processor
+            .set_telemetry_enabled(request.matches(0, self.processor.key.kind));
+        self.processor
+            .prepare_block_with_sidechain(&track, left, right, sidechain, bpm);
+        let pending = self.processor.key != key;
+        let bypass = self.params.bypass.value();
+        let mut midi = tract_effects::modulation::MidiCursor::default();
+        let mut note = Self::next_midi(context, &mut midi, &self.processor, samples);
+        let mut cursor = 0;
+        let mut prepared = false;
+        while cursor < samples {
+            let mut triggered = false;
+            while let Some(event) = note.filter(|event| event.timing == cursor) {
+                triggered |= self.processor.midi_note_on(event, prepared);
+                note = Self::next_midi(context, &mut midi, &self.processor, samples);
+            }
+            let end = note.map_or(samples, |event| event.timing);
+            if triggered || !prepared {
+                self.processor
+                    .advance_segment(&track, samples - cursor, bpm);
+                prepared = true;
+                let latency = self.processor.latency() as u32;
+                if latency != self.reported_latency {
+                    context.set_latency_samples(latency);
+                    self.reported_latency = latency;
+                }
+            }
+            for i in cursor..end {
+                let wet = self.processor.process_sample_with_sidechain(
+                    [left[i], right[i]],
+                    sidechain.sample(i),
+                    self.params.mix.value(),
+                    bypass || pending,
+                );
+                let latency = self.processor.latency() as u32;
+                if latency != self.reported_latency {
+                    context.set_latency_samples(latency);
+                    self.reported_latency = latency;
+                }
+                if self.trace_clock.tick() {
+                    self.trace_clock.record(
+                        &self.shared.telemetry,
+                        0,
+                        &self.processor.modulation_frame(),
+                    );
+                }
+                let gain = self.params.output.smoothed.next();
+                let gain = if bypass { 1.0 } else { gain };
+                left[i] = wet[0] * gain;
+                right[i] = wet[1] * gain;
+            }
+            cursor = end;
+        }
         let latency = self.processor.latency() as u32;
         if latency != self.reported_latency {
             context.set_latency_samples(latency);
             self.reported_latency = latency;
         }
-        let pending = self.processor.key != key;
-        let bypass = self.params.bypass.value();
-        for i in 0..samples {
-            let wet = self.processor.process_sample(
-                [left[i], right[i]],
-                self.params.mix.value(),
-                bypass || pending,
-            );
-            let gain = self.params.output.smoothed.next();
-            let gain = if bypass { 1.0 } else { gain };
-            left[i] = wet[0] * gain;
-            right[i] = wet[1] * gain;
-        }
+        self.processor.finish_waveform_block();
+        self.trace_clock.publish(
+            &self.shared.telemetry,
+            0,
+            &self.processor.modulation_frame(),
+        );
         for (k, phase) in self.shared.phases.iter().enumerate() {
             phase.store(self.processor.phase(k).to_bits(), Ordering::Relaxed);
         }
@@ -182,16 +300,34 @@ impl Minitosis {
 }
 
 impl Plugin for Minitosis {
+    fn filter_state(state: &mut PluginState) {
+        tiny_skia_widgets::mseg::prepare_wave_palette_state(&mut state.fields);
+        tiny_skia_widgets::mseg::WaveControls::prepare_state(state, state::bank_kinds().len());
+    }
+
     const NAME: &'static str = "Minitosis";
     const VENDOR: &'static str = "mpd";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
-    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
-        main_input_channels: std::num::NonZeroU32::new(2),
-        main_output_channels: std::num::NonZeroU32::new(2),
-        ..AudioIOLayout::const_default()
-    }];
+    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
+        AudioIOLayout {
+            main_input_channels: std::num::NonZeroU32::new(2),
+            main_output_channels: std::num::NonZeroU32::new(2),
+            aux_input_ports: &[new_nonzero_u32(2)],
+            names: PortNames {
+                aux_inputs: &["Sidechain"],
+                ..PortNames::const_default()
+            },
+            ..AudioIOLayout::const_default()
+        },
+        AudioIOLayout {
+            main_input_channels: std::num::NonZeroU32::new(2),
+            main_output_channels: std::num::NonZeroU32::new(2),
+            ..AudioIOLayout::const_default()
+        },
+    ];
     const SAMPLE_ACCURATE_AUTOMATION: bool = true;
     type SysExMessage = ();
     type BackgroundTask = PrepareKey;
@@ -229,7 +365,7 @@ impl Plugin for Minitosis {
             .lock()
             .map(|bank| bank.get(key.kind).clone())
             .unwrap_or_else(|_| state::neutral_modulation());
-        *self.processor = Processor::new(
+        let mut processor = Processor::new(
             key,
             &self
                 .params
@@ -237,6 +373,10 @@ impl Plugin for Minitosis {
                 .track(self.params.mix.value(), false),
             modulation,
         );
+        processor.inherit_precise_timing(&self.processor);
+        *self.processor = processor;
+        self.processor.connect_waveform(&self.shared.telemetry);
+        self.shared.telemetry.invalidate();
         self.shared
             .active_generation
             .store(key.generation, Ordering::Release);
@@ -255,7 +395,7 @@ impl Plugin for Minitosis {
     fn process(
         &mut self,
         buffer: &mut Buffer,
-        _aux: &mut AuxiliaryBuffers,
+        aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let transport = context.transport();
@@ -264,12 +404,28 @@ impl Plugin for Minitosis {
             .tempo
             .filter(|b| b.is_finite() && *b > 0.0)
             .unwrap_or(120.0);
+        self.host_position = tract_effects::modulation::HostPosition {
+            playing,
+            beats: transport.pos_beats(),
+            seconds: transport.pos_seconds(),
+            bpm: transport
+                .tempo
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(0.0),
+            loop_beats: transport.loop_range_beats(),
+            loop_seconds: transport.loop_range_seconds(),
+        };
         let channels = buffer.as_slice();
         if channels.len() < 2 {
             return ProcessStatus::Normal;
         }
         let (left, right) = channels.split_at_mut(1);
-        self.render(left[0], right[0], playing, bpm, context)
+        let sidechain = aux
+            .inputs
+            .first()
+            .map(|input| SidechainInput::from_channels(input.as_slice_immutable()))
+            .unwrap_or_default();
+        self.render_with_sidechain(left[0], right[0], sidechain, playing, bpm, context)
     }
 }
 

@@ -173,12 +173,14 @@ While editing one slot, the other three are drawn faintly behind it as ghost cur
 
 These controls appear in a strip above the curve canvas; some appear only conditionally:
 
-- **Trigger** — dropdown to the left of the slot selector. Picks what resets the MSEG's phase to zero. The setting is per-track and applies to all four MSEGs on the row at once:
-    - **Free run** (default) — phases never reset. The MSEGs cycle continuously, locked to the host transport (Beat sync) or to a fixed wall-clock rate (Time sync).
+- **Trigger** — dropdown to the left of the slot selector. Choose a restart source or follow DAW position. The setting is per-track and applies to all four MSEGs on the row at once:
+    - **Free run** (default) — phases never reset. Beat uses the host tempo; Time uses seconds.
     - **Cell light** — phases reset on the row's inactive → active edge: when the playhead enters an active cell on this row after a stretch of inactive cells. Use for one-shot envelope behaviour that re-arms per gesture.
     - **Cell step** — phases reset on every step boundary where the row's cell is lit. Use when you want the same envelope shape to fire fresh on every active step.
     - **Free Hz** — phases reset at a fixed rate, independent of the host transport. The rate is set by the **Rate** dial (see below).
     - **Transient** — phases reset when an onset is detected in the plugin's input audio. Detection is a fast/slow envelope-follower ratio crossing a threshold; the **Sens** and **Hold** dials below tune it.
+    - **DAW position** — every curve follows the song timeline using its own Time/Beat length. Seeks and loops relocate the phase; stopped or unavailable clocks pause capture. Geometry stays editable. See [DAW-position playback](../mseg-editor.md#daw-position-playback).
+    - **MIDI pitch** — the last matching note sets all four curves' rate and restarts them at its sample offset. Semi transposes -36..+36 semitones; Ch. filters the channel. Note-off keeps running. Saved Time/Beat lengths return when leaving this mode. See [MIDI pitch playback](../mseg-editor.md#midi-pitch-playback).
 - **Rate** (Free Hz trigger) — appears beside the Trigger dropdown only when **Free Hz** is selected. Sets the re-fire frequency in Hz.
 - **Sens** (Transient trigger) — appears beside the Trigger dropdown only when **Transient** is selected. Sets the onset detection threshold; right = more sensitive (lower threshold).
 - **Hold** (Transient trigger) — appears to the right of **Sens** when **Transient** is selected. Sets the post-fire refractory period (in ms) during which further onsets are ignored, so the transient's tail doesn't trigger repeated re-fires.
@@ -192,7 +194,7 @@ To make a unipolar curve control the full dry/wet range, select **Mix**, set the
 A strip of mode controls runs along the bottom of the MSEG editor, beneath the curve canvas. Left to right:
 
 - **Snap On / Snap Off** button — toggles node snapping to the Time Grid. When Snap is on, dragging or inserting a node snaps its time to the nearest grid column and its value to the nearest grid row; with Snap off, nodes land on whatever continuous (time, value) coordinate the cursor was at. **Hold Shift while dragging to temporarily bypass Snap and place the node at the exact cursor position** — useful for nudging a snapped node off-grid without flipping the global Snap state.
-- **Grid `T/V`** dropdown — sets the snap grid, shown as `Grid T/V` where `T` is the number of time columns and `V` is the number of value rows. Multosis ships four presets, listed in the dropdown as `4 / 4`, `8 / 8`, `16 / 8`, `32 / 16`. Finer grids let you place nodes more precisely and feed the Randomizer more cells to fill.
+- **Grid `T/V`** dropdown — sets the snap grid, shown as `Grid T/V` where `T` is the number of time columns and `V` is the number of value rows. The four straight-grid presets are listed in the dropdown as `4 / 4`, `8 / 8`, `16 / 8`, `32 / 16`. Finer grids let you place nodes more precisely and feed the Randomizer more cells to fill.
 - **Unipolar / Bipolar** button (Polarity) — chooses where the MSEG's no-modulation reference sits, which determines how the curve drives the target parameter. The canvas draws to match: **Unipolar** shows the curve as 0..1 with the bottom as the zero reference; **Bipolar** shows it as -1..+1 with a midline marker at value 0.5.
     - In **Unipolar** mode, value 0 leaves the target parameter at its base setting and the curve pushes the parameter in one direction (determined by the sign of the MSEG's Depth). At value 1 the parameter sits at `base + depth × range`. Useful when you want the dial to be your starting point and the MSEG to add to or subtract from it.
     - In **Bipolar** mode, the midline (value 0.5) leaves the target parameter at its base and the curve sweeps the parameter symmetrically above and below it — value 1 hits `base + depth × range`, value 0 hits `base − depth × range`. Useful when you want the dial to be the centre of a swing.
@@ -207,6 +209,103 @@ A strip of mode controls runs along the bottom of the MSEG editor, beneath the c
 - **Randomize** button — re-rolls every node's time, value, tension, and stepped flag using the current Style and Time Grid. The current Time Grid drives the **node count**: denser grids generate more nodes (Stepped and Spiky styles fill the grid exactly, one node per cell; Smooth and Chaos take 60-100 % of the grid count; Ramps stays a little sparser at 35-60 %). Re-clicking with the same settings produces a different curve each time (seeded fresh). The curve's play mode, sync mode, length, hold mode, and grid settings are left alone — only the node shape changes.
 
 ### Drawing and editing curves
+
+**Free Hz (sample)** and **Transient (sample)** add opt-in sample-timed restarts
+without changing other rows' modulation cadence. They reuse Rate or Sens/Hold;
+existing Free Hz/Transient settings keep their block-aligned behavior. See
+[sample-timed triggers](../mseg-editor.md#sample-timed-hz-and-audio-triggers).
+Transient (sample) also exposes **Detect...** for an absolute level threshold,
+detector-only High-pass/Low-pass, and a measured level meter. Settings default
+to Off and save per row; see [audio detector setup](../mseg-editor.md#audio-detector-setup).
+Detect's **Input** switches each row between Main and the shared external
+**Sidechain** bus; **Audio → Sidechain** displays its raw waveform. See
+[sidechain routing](../mseg-editor.md#external-sidechain).
+
+Detect also offers Envelope, Peak rise and RMS rise algorithms with a Detail
+control for response speed. Envelope/50% keeps the original timing; Sens/Hold
+retain their roles. See [audio detector setup](../mseg-editor.md#audio-detector-setup).
+
+**Trigger → Timing...** opens **Audio shift** (0–4 ms, Transient (sample) only)
+and **Retrigger blend** (0–20 ms) while retaining the current source. Both default
+Off, save per row and use local undo. See [trigger timing](../mseg-editor.md#trigger-timing).
+
+Timing also offers opt-in **4 ms Lookahead** for Transient (sample), enabling
+signed **Audio shift** (-4..+4 ms). Unmuted rows add their windows to reported
+latency, including while inactive/None. See [lookahead](../mseg-editor.md#lookahead-and-negative-shifts).
+
+Rows can also use **Trigger → MIDI note**, with Note (Any/0–127) and Ch.
+(Any/1–16) filters. Route MIDI to the plugin's note input; each matching note-on
+restarts that row's four envelopes at its host offset, including inactive/muted
+rows. Note-off does not gate or release envelopes. See
+[MIDI retriggering](../mseg-editor.md#midi-retriggering) for playback and Smooth behavior.
+
+The shared [curve tools](../mseg-editor.md) add shape pens, selection handles,
+factory curves and favorites, cross-plugin copy/paste, mutation, and transforms.
+They are available from the **Tool**, **Shapes**, and **Edit** menus below the
+existing controls. Triplet grids `6 / 8`, `12 / 8`, and `24 / 16` supplement the
+four straight grid presets described above.
+
+**Shapes → Browse shapes...** previews factory curves and shared favorites.
+Load/Fit applies the selected thumbnail in one undo step; Store/Clear manages
+shared slots. See [browsing thumbnails](../mseg-editor.md#browsing-thumbnails).
+
+The browser's **Project** tab adds eight waves saved with this instance and
+shared across all rows. See [project waves](../mseg-editor.md#project-waves).
+
+The **User** tab saves named curves shared across plugins, with paging, Rename
+and confirmed Delete. Management leaves playback and local curve undo intact.
+See [named user presets](../mseg-editor.md#named-user-presets).
+
+Factory/User category filters and the Save/Rename Category field organize curves
+without changing playback. See [categories](../mseg-editor.md#categories).
+
+**Find** or **Ctrl/Cmd+F** searches Factory/User names and categories together
+with that filter. See [searching curves](../mseg-editor.md#searching-curves).
+
+Each row's **Waves...** control beside curve playback configures Project-wave
+switching for Amp/1/2/3. Its note range/channel are independent of Trigger.
+The destination displays the playing wave with geometry editing paused;
+turn switching Off to edit its authored shape. See
+[MIDI wave switching](../mseg-editor.md#midi-wave-switching).
+
+The same panel's **Wave Amp/1/2/3** field selects Drawn/MIDI or Project 1–8 for
+the displayed curve. Each fixed row has four independent host automation lanes;
+a Project value overrides MIDI while preserving phase and smoothing. See
+[Wave automation](../mseg-editor.md#wave-automation).
+
+**Follow** beside Waves adds an audio-level envelope follower. Each curve has
+its own Follow/Add/Multiply route and Amount; Input, filters, Gain, Threshold and
+Attack/Hold/Release are shared across the row's four curves. See
+[Envelope follower](../mseg-editor.md#envelope-follower).
+
+Both detector/follower panels offer **Listen** (**L**) to audition filtered
+Main/Sidechain input, including muted/inactive rows. It keeps normal DSP running
+and stops on panel close, focus loss, resize or source replacement. See
+[detector input audition](../mseg-editor.md#detector-input-audition).
+
+Hover for footer hints, or click **?** beside Point for the gesture guide.
+**F1 / ?** and **View → Editing guide...** also open it; see
+[context help](../mseg-editor.md#context-help-and-gesture-guide).
+
+Grid also offers **Semitones** for routed pitch and logarithmic frequency
+targets, following base value, Depth, and polarity. See
+[semitone grids](../mseg-editor.md#semitone-grids).
+
+Edit also provides endpoint matching and **Smooth loop seam (10%)**; amber
+marks identify playback wrap jumps, including stepped tails. Commands use the
+hold-loop region when configured. See [loop seam tools](../mseg-editor.md#loop-seam-tools).
+
+**Smooth** adds a saved per-envelope lag (Off–1000 ms) before Depth/Target
+mapping. **Trace** displays measured source output, while dial arcs show the
+delivered target values. See [live smoothing and trace](../mseg-editor.md#live-smoothing-and-trace)
+for timing, reset behavior, and numeric controls.
+
+**Audio** adds an input/output magnitude backdrop for the selected row, with
+**Freeze** for editing against the captured sound. It includes that row's Mix
+and Amp, before the wet-bus compressor/master blend. See
+[audio waveform backdrop](../mseg-editor.md#audio-waveform-backdrop).
+The Audio menu also provides Magnitude/Combined/Stereo views and -12/0/+12 dB
+display gain. These work on frozen captures and affect only the display.
 
 The curve canvas is the large area beneath the routing controls.
 

@@ -30,6 +30,8 @@ struct MiffParams {
     /// `PersistentField` shape. The GUI edits it; the GUI thread bakes from it.
     #[persist = "curve"]
     pub curve: Arc<Mutex<MsegData>>,
+    #[persist = "wave-palette"]
+    pub wave_palette: Arc<Mutex<tiny_skia_widgets::mseg::WavePalette>>,
 
     /// Persisted window size (width × height in physical pixels).
     #[persist = "editor-state"]
@@ -49,6 +51,7 @@ impl Default for MiffParams {
     fn default() -> Self {
         Self {
             curve: Arc::new(Mutex::new(crate::kernel::default_flat_curve())),
+            wave_palette: Arc::new(Mutex::new(tiny_skia_widgets::mseg::WavePalette::default())),
             editor_state: editor::default_editor_state(),
             mode: EnumParam::new("Mode", MiffMode::Raw),
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
@@ -195,6 +198,10 @@ impl Miff {
 }
 
 impl Plugin for Miff {
+    fn filter_state(state: &mut PluginState) {
+        tiny_skia_widgets::mseg::prepare_wave_palette_state(&mut state.fields);
+    }
+
     const NAME: &'static str = "Miff";
     const VENDOR: &'static str = "Michael Dungan";
     const URL: &'static str = "https://github.com/xxx/miff";
@@ -375,11 +382,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn project_wave_palette_persists_independently_of_the_kernel_and_other_instances() {
+        use tiny_skia_widgets::mseg::{CurveShape, WavePalette};
+        let params = MiffParams::default();
+        let before = *params.curve.lock().unwrap();
+        params
+            .wave_palette
+            .lock()
+            .unwrap()
+            .store(2, &CurveShape::capture(&before))
+            .unwrap();
+        let saved = params.serialize_fields();
+        let restored = MiffParams::default();
+        restored.deserialize_fields(&saved);
+        assert_eq!(
+            *restored.wave_palette.lock().unwrap(),
+            *params.wave_palette.lock().unwrap()
+        );
+        restored.wave_palette.lock().unwrap().clear(2).unwrap();
+        assert!(params.wave_palette.lock().unwrap().get(2).is_some());
+        assert_eq!(*params.curve.lock().unwrap(), before);
+        let mut legacy = saved;
+        legacy.remove("wave-palette");
+        let fresh = MiffParams::default();
+        fresh.deserialize_fields(&legacy);
+        assert_eq!(*fresh.wave_palette.lock().unwrap(), WavePalette::default());
+    }
+
+    #[test]
     fn default_curve_is_the_flat_passthrough() {
         let p = MiffParams::default();
         let curve = p.curve.lock().unwrap();
         let k = kernel::bake(&curve, 256);
         assert!(k.is_zero, "fresh miff must be a clean passthrough");
+    }
+
+    #[test]
+    fn legacy_presets_clear_project_waves_in_an_existing_instance() {
+        use tiny_skia_widgets::mseg::{FactoryShape, WavePalette, factory_shape};
+        let params = MiffParams::default();
+        params
+            .wave_palette
+            .lock()
+            .unwrap()
+            .store(0, &factory_shape(FactoryShape::Duck))
+            .unwrap();
+        let mut legacy = params.serialize_fields();
+        legacy.remove("wave-palette");
+        let mut state = PluginState {
+            version: String::new(),
+            params: Default::default(),
+            fields: legacy,
+        };
+        Miff::filter_state(&mut state);
+        params.deserialize_fields(&state.fields);
+        assert_eq!(*params.wave_palette.lock().unwrap(), WavePalette::default());
     }
 
     #[test]

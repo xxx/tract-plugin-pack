@@ -36,7 +36,7 @@ pub enum ParamFormat {
 
 /// A modulatable parameter of an effect: its name and value range. Static per
 /// effect kind; used by the 2b modulation engine and the 2c effect editor.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ParamSpec {
     pub name: &'static str,
     pub min: f32,

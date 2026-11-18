@@ -26,6 +26,7 @@ use crate::handoff::GridHandoff;
 use nih_plug::prelude::*;
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex};
+use tract_effects::sidechain::SidechainInput;
 
 /// The Multosis plugin's parameters and persisted state.
 #[derive(Params)]
@@ -46,6 +47,8 @@ pub struct MultosisParams {
     /// Per-track modulation configuration — persisted plugin state.
     #[persist = "track-modulation"]
     pub track_modulation: Arc<Mutex<[crate::modulation::TrackModulation; 16]>>,
+    #[persist = "wave-palette"]
+    pub wave_palette: Arc<Mutex<tiny_skia_widgets::mseg::WavePalette>>,
 
     /// Tempo-synced playhead advance rate.
     #[id = "speed"]
@@ -67,6 +70,8 @@ pub struct MultosisParams {
     /// Wet-bus compressor ratio (≥ 1.0; 1.0 = bypass).
     #[id = "comp_ratio"]
     pub comp_ratio: FloatParam,
+    #[nested(array)]
+    pub waves: [tiny_skia_widgets::mseg::WaveControls; 16],
 }
 
 impl Default for MultosisParams {
@@ -80,6 +85,10 @@ impl Default for MultosisParams {
             track_modulation: Arc::new(Mutex::new(std::array::from_fn(
                 crate::modulation::TrackModulation::default_for_row,
             ))),
+            wave_palette: Arc::new(Mutex::new(tiny_skia_widgets::mseg::WavePalette::default())),
+            waves: std::array::from_fn(|row| {
+                tiny_skia_widgets::mseg::WaveControls::new(&format!("Row {}", row + 1))
+            }),
             speed: EnumParam::new("Speed", Speed::Hold),
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit("%")
@@ -190,20 +199,49 @@ impl Default for Multosis {
     }
 }
 
+impl Multosis {
+    fn process_status(&self) -> ProcessStatus {
+        if self.engine.has_lookahead() {
+            // Include effect latency so Listen's aligned delay also drains.
+            ProcessStatus::Tail(self.engine.chain_latency_samples() as u32)
+        } else {
+            ProcessStatus::Normal
+        }
+    }
+}
+
 impl Plugin for Multosis {
+    fn filter_state(state: &mut PluginState) {
+        tiny_skia_widgets::mseg::prepare_wave_palette_state(&mut state.fields);
+        tiny_skia_widgets::mseg::WaveControls::prepare_state(state, 16);
+    }
+
     const NAME: &'static str = "Multosis";
     const VENDOR: &'static str = "mpd";
     const URL: &'static str = "";
     const EMAIL: &'static str = "";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
-        main_input_channels: std::num::NonZeroU32::new(2),
-        main_output_channels: std::num::NonZeroU32::new(2),
-        ..AudioIOLayout::const_default()
-    }];
+    const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[
+        AudioIOLayout {
+            main_input_channels: std::num::NonZeroU32::new(2),
+            main_output_channels: std::num::NonZeroU32::new(2),
+            aux_input_ports: &[new_nonzero_u32(2)],
+            names: PortNames {
+                aux_inputs: &["Sidechain"],
+                ..PortNames::const_default()
+            },
+            ..AudioIOLayout::const_default()
+        },
+        AudioIOLayout {
+            main_input_channels: std::num::NonZeroU32::new(2),
+            main_output_channels: std::num::NonZeroU32::new(2),
+            ..AudioIOLayout::const_default()
+        },
+    ];
 
     const SAMPLE_ACCURATE_AUTOMATION: bool = true;
+    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
 
     type SysExMessage = ();
     type BackgroundTask = ();
@@ -221,6 +259,7 @@ impl Plugin for Multosis {
             self.reset_request.clone(),
             self.active_rows.clone(),
             self.mseg_phases.clone(),
+            self.engine.telemetry.clone(),
             self.config_dirty.clone(),
             self.pending_track_swap.clone(),
         )
@@ -232,6 +271,7 @@ impl Plugin for Multosis {
         buffer_config: &BufferConfig,
         context: &mut impl InitContext<Self>,
     ) -> bool {
+        self.engine.telemetry.invalidate();
         self.sample_rate = buffer_config.sample_rate;
         self.engine.set_sample_rate(self.sample_rate);
         // Bridge the persisted grid (possibly just restored from project
@@ -247,6 +287,7 @@ impl Plugin for Multosis {
         if let Ok(m) = self.params.track_modulation.lock() {
             self.engine.set_modulation(&m);
         }
+        self.engine.prepare_lookahead();
         self.was_playing = false;
         // Report the initial chain latency to the host (sum of every
         // effect that adds latency in non-muted rows — today: only
@@ -273,17 +314,25 @@ impl Plugin for Multosis {
     fn process(
         &mut self,
         buffer: &mut Buffer,
-        _aux: &mut AuxiliaryBuffers,
+        aux: &mut AuxiliaryBuffers,
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let transport = context.transport();
         let playing = transport.playing;
         let bpm = transport.tempo.unwrap_or(120.0);
+        let position = tract_effects::modulation::HostPosition {
+            playing,
+            beats: transport.pos_beats(),
+            seconds: transport.pos_seconds(),
+            bpm: transport
+                .tempo
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(0.0),
+            loop_beats: transport.loop_range_beats(),
+            loop_seconds: transport.loop_range_seconds(),
+        };
 
-        // Reset the sequence on the transport stopped→playing edge.
-        if playing && !self.was_playing {
-            self.engine.reset();
-        }
+        let restart_transport = playing && !self.was_playing;
         self.was_playing = playing;
 
         // A Reset request from the editor resets the sequence.
@@ -307,8 +356,8 @@ impl Plugin for Multosis {
                 self.params.track_modulation.try_lock(),
             )
         {
-            self.engine.set_effects(&eff);
             self.engine.set_modulation(&modu);
+            self.engine.set_effects(&eff);
             self.config_dirty
                 .store(false, std::sync::atomic::Ordering::Relaxed);
         }
@@ -324,6 +373,11 @@ impl Plugin for Multosis {
             let from = ((pending >> 8) & 0xFF) as usize - 1;
             let to = (pending & 0xFF) as usize - 1;
             self.engine.swap_tracks(from, to);
+        }
+
+        // Restart against the installed modes after configuration edits and row swaps.
+        if restart_transport {
+            self.engine.restart_transport();
         }
 
         // Re-report latency if the chain's total has changed (e.g. the user
@@ -347,13 +401,56 @@ impl Plugin for Multosis {
         );
 
         let n = buffer.samples();
+        self.engine.set_host_position(position);
+        self.engine
+            .set_wave_automation(std::array::from_fn(|row| self.params.waves[row].values()));
+        if self.engine.uses_project_waves()
+            && let Ok(palette) = self.params.wave_palette.try_lock()
+        {
+            self.engine.set_wave_palette(&palette);
+        }
         let channels = buffer.as_slice();
         let (first, rest) = channels.split_at_mut(1);
         let left = &mut first[0][..n];
         let right = &mut rest[0][..n];
 
-        self.engine
-            .process(&mut *left, &mut *right, playing, sps, bpm, mix, &self.grid);
+        let events = std::iter::from_fn(|| {
+            loop {
+                if let NoteEvent::NoteOn {
+                    timing,
+                    channel,
+                    note,
+                    velocity,
+                    ..
+                } = context.next_event()?
+                    && let Some(event) =
+                        tract_effects::modulation::MidiNoteOn::new(timing, channel, note, velocity)
+                {
+                    return Some(event);
+                }
+            }
+        });
+        let sidechain = aux
+            .inputs
+            .first()
+            .map(|input| SidechainInput::from_channels(input.as_slice_immutable()))
+            .unwrap_or_default();
+        self.engine.process_with_inputs(
+            &mut *left,
+            &mut *right,
+            sidechain,
+            playing,
+            sps,
+            bpm,
+            mix,
+            &self.grid,
+            events,
+        );
+        let latency = self.engine.chain_latency_samples() as u32;
+        if latency != self.last_reported_latency {
+            context.set_latency_samples(latency);
+            self.last_reported_latency = latency;
+        }
 
         // Publish the playhead column for the editor to draw.
         self.playhead_display.publish(self.engine.playhead_column());
@@ -378,7 +475,7 @@ impl Plugin for Multosis {
             right[i] *= gain;
         }
 
-        ProcessStatus::Normal
+        self.process_status()
     }
 }
 
@@ -401,3 +498,103 @@ impl Vst3Plugin for Multosis {
 
 nih_export_clap!(Multosis);
 nih_export_vst3!(Multosis);
+
+#[cfg(test)]
+mod lookahead_tail_tests;
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+    use tiny_skia_widgets::mseg::{FactoryShape, WavePalette, factory_shape};
+
+    #[test]
+    fn host_wave_lanes_append_to_existing_parameters_and_legacy_states_clear_them() {
+        let params = MultosisParams::default();
+        let map = params.param_map();
+        assert_eq!(map.len(), 69);
+        assert_eq!(
+            map[..5]
+                .iter()
+                .map(|entry| entry.0.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "speed",
+                "mix",
+                "output_gain",
+                "comp_threshold",
+                "comp_ratio"
+            ]
+        );
+        for (row, ids) in map[5..].chunks_exact(4).enumerate() {
+            assert_eq!(params.waves[row].values(), [0; 4]);
+            assert_eq!(
+                ids.iter().map(|entry| entry.0.clone()).collect::<Vec<_>>(),
+                ["wave_amp", "wave_1", "wave_2", "wave_3"].map(|id| format!("{id}_{}", row + 1))
+            );
+        }
+        let unique: std::collections::HashSet<_> = map.iter().map(|entry| &entry.0).collect();
+        assert_eq!(unique.len(), map.len());
+        let mut state = PluginState {
+            version: String::new(),
+            params: Default::default(),
+            fields: Default::default(),
+        };
+        Multosis::filter_state(&mut state);
+        assert_eq!(state.params.len(), 64);
+        assert!(state.params.contains_key("wave_3_16"));
+    }
+
+    #[test]
+    fn project_wave_palette_persists_outside_row_configuration_and_curve_undo() {
+        // Full row-array serde needs a larger debug test stack.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let params = MultosisParams::default();
+                let before = crate::undo::ConfigSnapshot::capture(&params);
+                params
+                    .wave_palette
+                    .lock()
+                    .unwrap()
+                    .store(4, &factory_shape(FactoryShape::Duck))
+                    .unwrap();
+                assert_eq!(crate::undo::ConfigSnapshot::capture(&params), before);
+                let saved = params.serialize_fields();
+                let restored = MultosisParams::default();
+                restored.deserialize_fields(&saved);
+                assert_eq!(
+                    *restored.wave_palette.lock().unwrap(),
+                    *params.wave_palette.lock().unwrap()
+                );
+                restored.wave_palette.lock().unwrap().clear(4).unwrap();
+                assert!(params.wave_palette.lock().unwrap().get(4).is_some());
+                before.restore(&params);
+                assert!(params.wave_palette.lock().unwrap().get(4).is_some());
+                let mut legacy = saved;
+                legacy.remove("wave-palette");
+                let fresh = MultosisParams::default();
+                fresh.deserialize_fields(&legacy);
+                assert_eq!(*fresh.wave_palette.lock().unwrap(), WavePalette::default());
+                restored
+                    .wave_palette
+                    .lock()
+                    .unwrap()
+                    .store(0, &factory_shape(FactoryShape::Triangle))
+                    .unwrap();
+                let mut old_state = PluginState {
+                    version: String::new(),
+                    params: Default::default(),
+                    fields: legacy,
+                };
+                Multosis::filter_state(&mut old_state);
+                restored.deserialize_fields(&old_state.fields);
+                assert_eq!(
+                    *restored.wave_palette.lock().unwrap(),
+                    WavePalette::default()
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}

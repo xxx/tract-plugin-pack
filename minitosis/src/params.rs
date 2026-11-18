@@ -111,6 +111,8 @@ pub struct MinitosisParams {
     pub editor_state: Arc<tiny_skia_widgets::EditorState>,
     #[persist = "modulation-bank"]
     pub modulation: Arc<Mutex<ModulationBank>>,
+    #[persist = "wave-palette"]
+    pub wave_palette: Arc<Mutex<tiny_skia_widgets::mseg::WavePalette>>,
     #[id = "effect"]
     pub effect: IntParam,
     #[nested(array)]
@@ -124,6 +126,8 @@ pub struct MinitosisParams {
     #[id = "retrig"]
     pub retrig_on_play: BoolParam,
     pub selection_generation: Arc<AtomicU64>,
+    #[nested(array)]
+    pub waves: Vec<tiny_skia_widgets::mseg::WaveControls>,
 }
 
 impl Default for MinitosisParams {
@@ -140,6 +144,7 @@ impl Default for MinitosisParams {
                 crate::editor::WINDOW_HEIGHT,
             ),
             modulation: Arc::new(Mutex::new(ModulationBank::default())),
+            wave_palette: Arc::new(Mutex::new(tiny_skia_widgets::mseg::WavePalette::default())),
             effect: IntParam::new(
                 "Effect",
                 0,
@@ -161,6 +166,10 @@ impl Default for MinitosisParams {
             .with_callback(Arc::new(move |_| {
                 changed.fetch_add(1, Ordering::AcqRel);
             })),
+            waves: kinds
+                .iter()
+                .map(|kind| tiny_skia_widgets::mseg::WaveControls::new(&host_effect_name(*kind)))
+                .collect(),
             effects: kinds.into_iter().map(EffectControls::new).collect(),
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit("%")
@@ -208,6 +217,9 @@ impl MinitosisParams {
         self.controls_for(self.selected_kind())
             .track(self.mix.unmodulated_normalized_value(), true)
     }
+    pub fn waves_for(&self, kind: EffectKind) -> &tiny_skia_widgets::mseg::WaveControls {
+        &self.waves[bank_index(kind)]
+    }
 }
 
 #[cfg(test)]
@@ -244,6 +256,43 @@ mod tests {
         for kind in EffectKind::ALL {
             assert_eq!(params.controls_for(kind).kind, kind);
         }
+    }
+
+    #[test]
+    fn wave_parameters_append_after_all_existing_ids_and_recall_per_effect() {
+        let mut params = MinitosisParams::default();
+        let old_len = 1 + params.effects.len() * MAX_EFFECT_PARAMS + 4;
+        let map = params.param_map();
+        assert_eq!(map.len(), old_len + params.effects.len() * 4);
+        assert_eq!(
+            map[old_len - 4..old_len]
+                .iter()
+                .map(|entry| entry.0.as_str())
+                .collect::<Vec<_>>(),
+            ["mix", "output", "bypass", "retrig"]
+        );
+        for (bank, ids) in map[old_len..].chunks_exact(4).enumerate() {
+            assert_eq!(
+                ids.iter().map(|entry| entry.0.clone()).collect::<Vec<_>>(),
+                ["wave_amp", "wave_1", "wave_2", "wave_3"].map(|id| format!("{id}_{}", bank + 1))
+            );
+        }
+        params.waves[bank_index(EffectKind::Svf)].amp =
+            IntParam::new("test", 8, IntRange::Linear { min: 0, max: 8 });
+        assert_eq!(params.waves_for(EffectKind::Svf).values(), [8, 0, 0, 0]);
+        assert_eq!(params.waves_for(EffectKind::Bitcrush).values(), [0; 4]);
+        let mut state = PluginState {
+            version: String::new(),
+            params: Default::default(),
+            fields: Default::default(),
+        };
+        crate::Minitosis::filter_state(&mut state);
+        assert_eq!(state.params.len(), params.effects.len() * 4);
+        assert!(
+            state
+                .params
+                .contains_key(&format!("wave_3_{}", params.effects.len()))
+        );
     }
 
     #[test]

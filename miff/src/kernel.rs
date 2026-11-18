@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use realfft::RealFftPlanner;
 use rustfft::num_complex::Complex;
-use tiny_skia_widgets::mseg::{MsegData, MsegNode, warp};
+use tiny_skia_widgets::mseg::{MsegData, MsegNode};
 
 /// Maximum kernel length, and the fixed Phaseless STFT frame size.
 pub const MAX_KERNEL: usize = 4096;
@@ -101,12 +101,14 @@ pub fn default_flat_curve() -> MsegData {
         value: 0.5,
         tension: 0.0,
         stepped: false,
+        ..MsegNode::default()
     };
     d.nodes[1] = MsegNode {
         time: 1.0,
         value: 0.5,
         tension: 0.0,
         stepped: false,
+        ..MsegNode::default()
     };
     d.polarity = tiny_skia_widgets::Polarity::Bipolar;
     d.debug_assert_valid();
@@ -115,8 +117,7 @@ pub fn default_flat_curve() -> MsegData {
 
 /// Sample the curve at `phase` using a forward-only segment cursor `*seg`.
 /// Callers walk `phase` monotonically increasing; `*seg` only advances. This
-/// reproduces `tiny_skia_widgets::mseg::value_at_phase` exactly (stepped hold
-/// + exponential `warp`), but without that function's rescan-from-node-0.
+/// reproduces the shared shape/weight interpolation without rescanning from node 0.
 fn curve_value(data: &MsegData, phase: f32, seg: &mut usize) -> f32 {
     let a = data.active();
     let last = data.node_count - 1;
@@ -128,18 +129,7 @@ fn curve_value(data: &MsegData, phase: f32, seg: &mut usize) -> f32 {
     while *seg < last - 1 && a[*seg + 1].time <= phase {
         *seg += 1;
     }
-    let n0 = a[*seg];
-    let n1 = a[*seg + 1];
-    if n0.stepped {
-        return n0.value;
-    }
-    let span = n1.time - n0.time;
-    let t = if span > 1e-9 {
-        (phase - n0.time) / span
-    } else {
-        0.0
-    };
-    n0.value + (n1.value - n0.value) * warp(t, n0.tension)
+    tiny_skia_widgets::mseg::segment_value(&a[*seg], &a[*seg + 1], phase)
 }
 
 /// Bake the curve into raw (un-normalized) bipolar FIR taps, into
@@ -286,12 +276,62 @@ mod tests {
     }
 
     #[test]
+    fn native_and_weighted_tap_bakes_match_the_shared_sampler_exactly() {
+        use tiny_skia_widgets::mseg::{PointWeight, SegmentShape};
+        for shape in [SegmentShape::Curve, SegmentShape::SCurve] {
+            for weight in [PointWeight::Hard, PointWeight::Medium, PointWeight::Soft] {
+                let mut data = MsegData::default();
+                data.insert_node(0.3, 0.8).unwrap();
+                data.insert_node(0.6, 0.2).unwrap();
+                data.nodes[0].shape = shape;
+                data.nodes[0].tension = -0.4;
+                data.nodes[1].weight = weight;
+                data.nodes[1].shape = shape;
+                data.nodes[2].stepped = true;
+                data.nodes[3].weight = PointWeight::Soft;
+                for len in [16, 512, MAX_KERNEL] {
+                    let mut out = [0.0; MAX_KERNEL];
+                    bake_taps(&data, len, &mut out);
+                    for (i, value) in out[..len].iter().enumerate() {
+                        let expected =
+                            2.0 * value_at_phase(&data, i as f32 / (len - 1) as f32) - 1.0;
+                        assert_eq!(
+                            value.to_bits(),
+                            expected.to_bits(),
+                            "{shape:?} {weight:?} tap {i}/{len}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn length_is_clamped_and_rounded_to_multiple_of_16() {
         let d = MsegData::default();
         let mut out = [0.0_f32; MAX_KERNEL];
         assert_eq!(bake_taps(&d, 4, &mut out), 16);
         assert_eq!(bake_taps(&d, 100, &mut out), 96);
         assert_eq!(bake_taps(&d, 99_999, &mut out), MAX_KERNEL);
+    }
+
+    #[test]
+    fn smoothed_loop_geometry_bakes_to_the_displayed_taps() {
+        use tiny_skia_widgets::mseg::MsegEditState;
+        let mut data = MsegData::default();
+        data.nodes[0].tension = -0.7;
+        let mut editor = MsegEditState::new_curve_only();
+        assert!(editor.smooth_loop_seam(&mut data).is_some());
+        for len in [16, 512, MAX_KERNEL] {
+            let mut taps = [0.0; MAX_KERNEL];
+            bake_taps(&data, len, &mut taps);
+            assert_eq!(taps[0], taps[len - 1]);
+            assert!(taps[..len].iter().any(|value| *value > 0.9));
+            for (i, value) in taps[..len].iter().enumerate() {
+                let expected = 2.0 * value_at_phase(&data, i as f32 / (len - 1) as f32) - 1.0;
+                assert_eq!(value.to_bits(), expected.to_bits());
+            }
+        }
     }
 
     #[test]

@@ -286,6 +286,7 @@ impl NapWindow {
         for (i, s) in states.iter_mut().enumerate() {
             s.set_randomize_seed(pane_seed(i));
             s.set_show_polarity(false);
+            s.bind_wave_palette(params.wave_palette.clone());
         }
 
         // Seed the guard caches with the current state so the first frame does
@@ -553,6 +554,12 @@ impl NapWindow {
                 s.set_stepped_draw(new_alt);
             }
         }
+        for state in &mut self.states {
+            state.set_transform_modifiers(
+                new_alt,
+                modifiers.contains(keyboard_types::Modifiers::CONTROL),
+            );
+        }
         self.shift_held = new_shift;
     }
 
@@ -563,6 +570,9 @@ impl NapWindow {
         let w = self.physical_width as f32;
         let h = self.physical_height as f32;
 
+        for state in &mut self.states {
+            state.set_overlay_bounds((w, h));
+        }
         self.drag.clear_regions();
         self.surface.pixmap.fill(widgets::color_bg());
 
@@ -572,6 +582,16 @@ impl NapWindow {
 
         for p in 0..3 {
             let curve = self.curves[p].lock().map(|c| *c).unwrap_or_default();
+            if let Some(node) = self.states[p]
+                .inspector_node()
+                .filter(|&i| i < curve.node_count)
+            {
+                self.states[p].set_inspector_readout(&format!(
+                    "{}: {:.2}%",
+                    labels[p],
+                    curve.nodes[node].value * 100.0
+                ));
+            }
             widgets::mseg::draw_mseg(
                 &mut self.surface.pixmap,
                 &mut self.text_renderer,
@@ -598,6 +618,8 @@ impl NapWindow {
         // `decimate` caps to `cols` columns.
         self.draw_tail_overlay(rects[0], s);
 
+        self.draw_strip(strip_rect(w, h, s), s);
+
         // Dropdown popups for the panes (drawn after every pane so an open
         // grid/style popup overlays the curve beneath it).
         for (state, rect) in self.states.iter().zip(rects.iter()) {
@@ -608,8 +630,6 @@ impl NapWindow {
                 *rect,
             );
         }
-
-        self.draw_strip(strip_rect(w, h, s), s);
     }
 
     /// Draw the tail pulse-field overlay over the Decay pane (`rect`).
@@ -620,17 +640,27 @@ impl NapWindow {
     /// horizontal offset that encodes the L/R split. All drawing uses
     /// `widgets::draw_rect` so no unsafe code is needed.
     fn draw_tail_overlay(&mut self, rect: (f32, f32, f32, f32), scale: f32) {
-        use widgets::mseg::{mseg_layout, phase_to_x, value_to_y};
+        use widgets::mseg::{phase_to_x, value_to_y};
 
-        let layout = mseg_layout(rect, true, scale);
-        let plot_w = layout.plot.2.max(1.0) as usize;
+        let layout = self.states[0].layout(rect, scale);
+        let Some((plot_w, stick_w)) = tail_overlay_geometry(&layout, scale) else {
+            return;
+        };
 
         // Decimate into the reusable column buffer.
-        tail_view::decimate(&self.snapshot, plot_w, &mut self.columns);
+        if layout.viewport == widgets::mseg::MsegViewport::default() {
+            tail_view::decimate(&self.snapshot, plot_w, &mut self.columns);
+        } else {
+            tail_view::decimate_range(
+                &self.snapshot,
+                plot_w,
+                layout.viewport.time_range(),
+                &mut self.columns,
+            );
+        }
 
         // Per-column rendering constants.
-        let stick_w = 1.0_f32.max(scale * 0.75);
-        let bottom_y = value_to_y(&layout, 0.0);
+        let bottom_y = value_to_y(&layout, 0.0).clamp(layout.plot.1, layout.plot.1 + layout.plot.3);
         let pane_colors = crate::theme::pane_colors();
         // Filter-index brightness ramp: 6 filters, index 0 = darkest, 5 = brightest.
         // Blend between the decay pane accent (warm amber) dimmed vs bright.
@@ -642,12 +672,15 @@ impl NapWindow {
             }
 
             // Phase for this column (centre of the column bucket).
-            let phase = col_idx as f32 / (plot_w - 1).max(1) as f32;
+            let phase = layout
+                .viewport
+                .phase_at(col_idx as f32 / (plot_w - 1).max(1) as f32);
             let cx = phase_to_x(&layout, phase);
 
             // Stick top: coeff_abs mapped via value_to_y (value 0 = bottom,
             // coeff_abs = height above bottom). Clamp to the plot.
-            let top_y = value_to_y(&layout, col.coeff_abs.clamp(0.0, 1.0));
+            let top_y = value_to_y(&layout, col.coeff_abs.clamp(0.0, 1.0))
+                .clamp(layout.plot.1, layout.plot.1 + layout.plot.3);
             if top_y >= bottom_y {
                 continue; // degenerate / zero height
             }
@@ -687,7 +720,8 @@ impl NapWindow {
                 let mid_y = (top_y + bottom_y) * 0.5;
                 widgets::draw_rect(
                     &mut self.surface.pixmap,
-                    cx + split_px - stick_w * 0.5,
+                    (cx + split_px - stick_w * 0.5)
+                        .clamp(layout.plot.0, layout.plot.0 + layout.plot.2 - stick_w),
                     mid_y - scale,
                     stick_w,
                     2.0 * scale,
@@ -807,6 +841,22 @@ impl widgets::PhysicalEditor for NapWindow {
     }
 }
 
+fn curve_input_pane(states: &[MsegEditState; 3], y: f32, height: f32, scale: f32) -> Option<usize> {
+    states
+        .iter()
+        .position(MsegEditState::has_open_menu)
+        .or_else(|| states.iter().position(MsegEditState::is_dragging))
+        .or_else(|| pane_at(y, height, scale))
+}
+
+fn tail_overlay_geometry(layout: &widgets::mseg::MsegLayout, scale: f32) -> Option<(usize, f32)> {
+    let stick_w = 1.0_f32.max(scale * 0.75);
+    if layout.plot.2 < stick_w || layout.plot.3 <= 0.0 {
+        return None;
+    }
+    Some((layout.plot.2 as usize, stick_w))
+}
+
 impl baseview::WindowHandler for NapWindow {
     fn on_frame(&mut self, _window: &mut baseview::Window) {
         // Rebuild the baker if the audio-thread sample rate has changed.
@@ -819,14 +869,21 @@ impl baseview::WindowHandler for NapWindow {
 
     fn on_event(
         &mut self,
-        _window: &mut baseview::Window,
+        window: &mut baseview::Window,
         event: baseview::Event,
     ) -> baseview::EventStatus {
         let w = self.physical_width as f32;
         let h = self.physical_height as f32;
         let s = self.scale_factor;
 
+        for state in &mut self.states {
+            state.set_overlay_bounds((w, h));
+        }
         match &event {
+            baseview::Event::Window(baseview::WindowEvent::Unfocused) => {
+                let backing = self.drag.input_scale();
+                widgets::PhysicalEditor::prepare_resize(self, window, backing);
+            }
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
@@ -841,6 +898,9 @@ impl baseview::WindowHandler for NapWindow {
             }
             baseview::Event::Mouse(baseview::MouseEvent::CursorLeft) => {
                 self.drag.on_cursor_left();
+                for state in &mut self.states {
+                    state.clear_hover_hint();
+                }
             }
 
             // ── CursorMoved ──────────────────────────────────────────────────
@@ -851,6 +911,9 @@ impl baseview::WindowHandler for NapWindow {
                 let x = position.x as f32;
                 let y = position.y as f32;
                 self.drag.set_mouse(x, y);
+                for state in &mut self.states {
+                    state.clear_hover_hint();
+                }
                 self.update_modifiers(modifiers);
 
                 // A live dial drag takes priority over MSEG hover/drag.
@@ -866,7 +929,7 @@ impl baseview::WindowHandler for NapWindow {
                             self.ir_needs_bake = true;
                         }
                     }
-                } else if let Some(p) = pane_at(y, h, s) {
+                } else if let Some(p) = curve_input_pane(&self.states, y, h, s) {
                     // Route the move to whichever pane the cursor is in.
                     let rect = pane_rects(w, h, s)[p];
                     let changed = {
@@ -931,11 +994,14 @@ impl baseview::WindowHandler for NapWindow {
                 button: baseview::MouseButton::Left,
                 modifiers,
             }) => {
+                if self.states.iter().any(MsegEditState::is_panning) {
+                    return baseview::EventStatus::Captured;
+                }
                 let (x, y) = self.drag.mouse_pos();
                 self.update_modifiers(modifiers);
                 self.commit_text_edit();
 
-                if let Some(p) = pane_at(y, h, s) {
+                if let Some(p) = curve_input_pane(&self.states, y, h, s) {
                     let rect = pane_rects(w, h, s)[p];
                     // Only a double-click on the canvas deletes/inserts a node;
                     // strip clicks (snap/grid/style/randomize) are immediate.
@@ -948,7 +1014,9 @@ impl baseview::WindowHandler for NapWindow {
                     // two clicks close in time AND space on the canvas insert /
                     // delete a node. (The dial reset below uses an ACTION-based
                     // double-click on the same widget — see `check_double_click`.)
-                    let is_double = !on_strip && self.double_click_check(x, y);
+                    let is_double = !on_strip
+                        && !self.states[p].has_open_menu()
+                        && self.double_click_check(x, y);
                     let changed = {
                         match self.curves[p].lock() {
                             Ok(mut curve) => {
@@ -963,20 +1031,14 @@ impl baseview::WindowHandler for NapWindow {
                             _ => None,
                         }
                     };
+                    self.mseg_dragging = self.states[p].is_dragging();
                     if changed == Some(MsegEdit::Changed) {
                         self.regenerate();
-                        if is_double {
-                            // Double-click node add/delete is a discrete edit — bake immediately.
-                            self.bake_ir_if_efficient();
-                        } else {
-                            // Mouse-down with potential drag starting: mark dragging,
-                            // defer bake. We'll bake on mouse-up if the curve changed.
-                            self.mseg_dragging = true;
+                        if self.mseg_dragging {
                             self.ir_needs_bake = true;
+                        } else {
+                            self.bake_ir_if_efficient();
                         }
-                    } else {
-                        // Mouse-down in pane: a drag may start (even if no immediate change).
-                        self.mseg_dragging = true;
                     }
                 } else {
                     // Bottom strip: mode selector, dial drag / double-click reset.
@@ -1065,10 +1127,12 @@ impl baseview::WindowHandler for NapWindow {
             }) => {
                 let (x, y) = self.drag.mouse_pos();
                 // Right-click during an active dial drag: ignore.
-                if self.drag.active_action().is_some() {
+                if self.drag.active_action().is_some()
+                    || self.states.iter().any(MsegEditState::is_dragging)
+                {
                     return baseview::EventStatus::Captured;
                 }
-                if let Some(p) = pane_at(y, h, s) {
+                if let Some(p) = curve_input_pane(&self.states, y, h, s) {
                     let rect = pane_rects(w, h, s)[p];
                     let changed = {
                         match self.curves[p].lock() {
@@ -1096,6 +1160,52 @@ impl baseview::WindowHandler for NapWindow {
                 }
             }
 
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Middle,
+                ..
+            }) => {
+                if self.drag.active_action().is_none() {
+                    let (x, y) = self.drag.mouse_pos();
+                    if let Some(p) = curve_input_pane(&self.states, y, h, s) {
+                        if self.states[p].can_start_pan(x, y, pane_rects(w, h, s)[p], s) {
+                            self.commit_text_edit();
+                        }
+                        self.states[p].on_pan_start(x, y, pane_rects(w, h, s)[p], s);
+                    }
+                }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Middle,
+                ..
+            }) => {
+                for state in &mut self.states {
+                    state.on_pan_end();
+                }
+            }
+            baseview::Event::Mouse(baseview::MouseEvent::WheelScrolled { delta, modifiers }) => {
+                if self.drag.active_action().is_some() {
+                    return baseview::EventStatus::Captured;
+                }
+                let (x, y) = self.drag.mouse_pos();
+                if let Some(p) = curve_input_pane(&self.states, y, h, s) {
+                    let dy = match delta {
+                        baseview::ScrollDelta::Lines { y, .. } => *y,
+                        baseview::ScrollDelta::Pixels { y, .. } => *y * 0.05,
+                    };
+                    if let Ok(curve) = self.curves[p].lock() {
+                        self.states[p].on_scroll(
+                            x,
+                            y,
+                            dy,
+                            modifiers.contains(keyboard_types::Modifiers::SHIFT),
+                            &curve,
+                            pane_rects(w, h, s)[p],
+                            s,
+                        );
+                    }
+                }
+            }
+
             // ── Keyboard ─────────────────────────────────────────────────────
             baseview::Event::Keyboard(ev) if self.text_edit.is_active() => {
                 if ev.state != keyboard_types::KeyState::Down {
@@ -1110,34 +1220,37 @@ impl baseview::WindowHandler for NapWindow {
                     keyboard_types::Key::Backspace => self.text_edit.backspace(),
                     keyboard_types::Key::Escape => self.text_edit.cancel(),
                     keyboard_types::Key::Enter => self.commit_text_edit(),
+                    _ if widgets::mseg::is_help_shortcut(ev) => {}
                     _ => return baseview::EventStatus::Ignored,
                 }
                 return baseview::EventStatus::Captured;
             }
             baseview::Event::Keyboard(ev) => {
-                if ev.state != keyboard_types::KeyState::Down {
+                if self.drag.active_action().is_some() && widgets::mseg::is_help_shortcut(ev) {
+                    return baseview::EventStatus::Captured;
+                }
+                let (_, y) = self.drag.mouse_pos();
+                let Some(p) = curve_input_pane(&self.states, y, h, s) else {
                     return baseview::EventStatus::Ignored;
-                }
-                match &ev.key {
-                    keyboard_types::Key::Delete | keyboard_types::Key::Backspace => {
-                        // Delete the selection in whichever pane has the cursor.
-                        let (_, y) = self.drag.mouse_pos();
-                        if let Some(p) = pane_at(y, h, s) {
-                            let changed = match self.curves[p].lock() {
-                                Ok(mut curve) => self.states[p].delete_selection(&mut curve),
-                                _ => None,
-                            };
-                            if changed == Some(MsegEdit::Changed) {
-                                self.regenerate();
-                                // Node deletion is discrete — bake IR immediately.
-                                self.bake_ir_if_efficient();
-                                return baseview::EventStatus::Captured;
-                            }
-                        }
-                        return baseview::EventStatus::Ignored;
+                };
+                let rect = pane_rects(w, h, s)[p];
+                let (captured, changed) = match self.curves[p].lock() {
+                    Ok(mut curve) => self.states[p].on_key(ev, &mut curve, rect, s),
+                    _ => (false, None),
+                };
+                if changed == Some(MsegEdit::Changed) {
+                    self.regenerate();
+                    if self.mseg_dragging {
+                        self.ir_needs_bake = true;
+                    } else {
+                        self.bake_ir_if_efficient();
                     }
-                    _ => return baseview::EventStatus::Ignored,
                 }
+                return if captured {
+                    baseview::EventStatus::Captured
+                } else {
+                    baseview::EventStatus::Ignored
+                };
             }
 
             _ => {}
@@ -1252,6 +1365,199 @@ impl Editor for NapEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tail_overlay_skips_collapsed_or_too_narrow_plots_at_every_scale() {
+        for scale in [0.5, 1.0, 2.0] {
+            let state = MsegEditState::new_curve_only();
+            for width in [1.0, 5.0, 14.0] {
+                let layout = state.layout((0.0, 0.0, width, 200.0 * scale), scale);
+                assert!(tail_overlay_geometry(&layout, scale).is_none());
+            }
+            let layout = state.layout((0.0, 0.0, 880.0 * scale, 210.0 * scale), scale);
+            let (columns, stick) = tail_overlay_geometry(&layout, scale).unwrap();
+            assert!(columns > 0 && layout.plot.2 >= stick);
+        }
+    }
+
+    #[test]
+    fn open_curve_menu_keeps_input_ownership_over_other_panes() {
+        let (w, h, s) = (880.0, 720.0, 1.0);
+        let rect = pane_rects(w, h, s)[2];
+        let mut states = std::array::from_fn(|_| MsegEditState::new_curve_only());
+        let mut data = widgets::mseg::MsegData::default();
+        let layout = widgets::mseg::mseg_layout(rect, true, s);
+        let (x, y) = (
+            widgets::mseg::phase_to_x(&layout, 0.0),
+            widgets::mseg::value_to_y(&layout, 0.0),
+        );
+        states[2].on_mouse_down(x, y, &mut data, rect, s, false);
+        states[2].on_mouse_up(&mut data, rect, s);
+        states[2].on_right_click(x, y, &mut data, rect, s);
+        assert!(states[2].has_open_menu());
+        assert_eq!(curve_input_pane(&states, 5.0, h, s), Some(2));
+        assert_eq!(curve_input_pane(&states, h - 5.0, h, s), Some(2));
+        states[2].cancel_interaction();
+        assert_eq!(curve_input_pane(&states, 5.0, h, s), Some(0));
+    }
+
+    #[test]
+    fn active_curve_drag_keeps_input_ownership_when_crossing_panes() {
+        let (w, h, s) = (880.0, 720.0, 1.0);
+        let rect = pane_rects(w, h, s)[0];
+        let mut states = std::array::from_fn(|_| MsegEditState::new_curve_only());
+        states[0].set_tool(widgets::mseg::MsegTool::Arc);
+        let mut data = widgets::mseg::MsegData::default();
+        let layout = widgets::mseg::mseg_layout(rect, true, s);
+        states[0].on_mouse_down(
+            widgets::mseg::phase_to_x(&layout, 0.2),
+            widgets::mseg::value_to_y(&layout, 0.2),
+            &mut data,
+            rect,
+            s,
+            false,
+        );
+        assert_eq!(curve_input_pane(&states, h - 95.0, h, s), Some(0));
+        states[0].on_mouse_up(&mut data, rect, s);
+        assert_eq!(curve_input_pane(&states, h - 95.0, h, s), Some(2));
+    }
+
+    #[test]
+    fn guide_keeps_its_opening_pane_and_native_bounds_without_curve_or_bake_edits() {
+        use keyboard_types::{Key, KeyState, KeyboardEvent};
+        let (w, h, s) = (880.0, 720.0, 1.0);
+        for owner in 0..3 {
+            let mut states = std::array::from_fn(|_| MsegEditState::new_curve_only());
+            let mut curves = [widgets::mseg::MsegData::default(); 3];
+            let before = curves;
+            states[owner].set_help_bounds((w, h));
+            let rect = pane_rects(w, h, s)[owner];
+            let key = |key| KeyboardEvent {
+                key,
+                state: KeyState::Down,
+                ..KeyboardEvent::default()
+            };
+            assert_eq!(
+                states[owner].on_key(&key(Key::F1), &mut curves[owner], rect, s),
+                (true, None)
+            );
+            assert!(states[owner].help_open());
+            assert_eq!(curve_input_pane(&states, 5.0, h, s), Some(owner));
+            assert_eq!(curve_input_pane(&states, h - 5.0, h, s), Some(owner));
+            assert_eq!(
+                states[owner].on_key(&key(Key::ArrowRight), &mut curves[owner], rect, s),
+                (true, None)
+            );
+            assert!(states[owner].on_wheel(-3.0, rect));
+            assert_eq!(curves, before);
+            states[owner].cancel_interaction();
+            assert!(!states[owner].help_open());
+            assert_eq!(curve_input_pane(&states, 5.0, h, s), Some(0));
+        }
+    }
+
+    #[test]
+    fn curve_browser_keeps_pane_ownership_and_only_reports_an_edit_when_loading() {
+        use keyboard_types::{Key, KeyState, KeyboardEvent};
+        let (w, h, s) = (880.0, 720.0, 1.0);
+        for owner in 0..3 {
+            let mut states = std::array::from_fn(|_| MsegEditState::new_curve_only());
+            let mut curves = [widgets::mseg::MsegData::default(); 3];
+            let before = curves;
+            states[owner].set_curve_library_directory(
+                std::env::temp_dir().join(format!("tract-nap-browser-{}", std::process::id())),
+            );
+            states[owner].set_overlay_bounds((w, h));
+            let rect = pane_rects(w, h, s)[owner];
+            assert!(states[owner].open_curve_browser(rect, s));
+            assert_eq!(curve_input_pane(&states, 5.0, h, s), Some(owner));
+            assert_eq!(curve_input_pane(&states, h - 5.0, h, s), Some(owner));
+            assert!(states[owner].on_wheel(-3.0, rect));
+            let event = |key| KeyboardEvent {
+                key,
+                state: KeyState::Down,
+                ..KeyboardEvent::default()
+            };
+            assert_eq!(
+                states[owner].on_key(&event(Key::End), &mut curves[owner], rect, s),
+                (true, None)
+            );
+            assert_eq!(curves, before);
+            assert_eq!(
+                states[owner].on_key(&event(Key::Enter), &mut curves[owner], rect, s),
+                (true, Some(MsegEdit::Changed))
+            );
+            for pane in 0..3 {
+                if pane == owner {
+                    assert_eq!(
+                        curves[pane].active(),
+                        widgets::mseg::factory_shape(widgets::mseg::FactoryShape::Duck).nodes()
+                    );
+                } else {
+                    assert_eq!(curves[pane], before[pane]);
+                }
+            }
+            assert!(!states[owner].has_open_menu() && !states[owner].is_dragging());
+            assert_eq!(curve_input_pane(&states, 5.0, h, s), Some(0));
+        }
+    }
+
+    #[test]
+    fn project_slots_share_across_nap_panes_and_storage_does_not_request_a_curve_edit() {
+        use keyboard_types::{Key, KeyState, KeyboardEvent};
+        use widgets::mseg::{CurveShape, FactoryShape, factory_shape};
+        let params = NapParams::new();
+        let mut states = std::array::from_fn(|_| MsegEditState::new_curve_only());
+        for state in &mut states {
+            state.bind_wave_palette(params.wave_palette.clone());
+            state.set_curve_library_directory(
+                std::env::temp_dir().join(format!("tract-nap-project-{}", std::process::id())),
+            );
+            state.set_overlay_bounds((880.0, 720.0));
+        }
+        let mut curves = [widgets::mseg::MsegData::default(); 3];
+        factory_shape(FactoryShape::Duck)
+            .apply(&mut curves[2], false)
+            .unwrap();
+        let before = curves;
+        let event = |key| KeyboardEvent {
+            key,
+            state: KeyState::Down,
+            ..KeyboardEvent::default()
+        };
+        let rects = pane_rects(880.0, 720.0, 1.0);
+        assert!(states[2].open_curve_browser(rects[2], 1.0));
+        for _ in 0..2 {
+            states[2].on_key(&event(Key::Tab), &mut curves[2], rects[2], 1.0);
+        }
+        assert_eq!(curve_input_pane(&states, 5.0, 720.0, 1.0), Some(2));
+        assert_eq!(
+            states[2].on_key(
+                &event(Key::Character("s".into())),
+                &mut curves[2],
+                rects[2],
+                1.0
+            ),
+            (true, None)
+        );
+        assert_eq!(curves, before);
+        assert_eq!(
+            params.wave_palette.lock().unwrap().get(0),
+            Some(&CurveShape::capture(&before[2]))
+        );
+        states[2].on_key(&event(Key::Escape), &mut curves[2], rects[2], 1.0);
+        assert!(states[0].open_curve_browser(rects[0], 1.0));
+        for _ in 0..2 {
+            states[0].on_key(&event(Key::Tab), &mut curves[0], rects[0], 1.0);
+        }
+        assert_eq!(
+            states[0].on_key(&event(Key::Enter), &mut curves[0], rects[0], 1.0),
+            (true, Some(MsegEdit::Changed))
+        );
+        assert_eq!(curves[0].active(), before[2].active());
+        assert_eq!(curves[1], before[1]);
+        assert_eq!(curves[2], before[2]);
+    }
 
     #[test]
     fn three_panes_partition_the_area_above_the_strip() {

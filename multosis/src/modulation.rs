@@ -9,13 +9,67 @@ use crate::grid::ROWS;
 pub struct Modulation {
     config: [TrackModulation; ROWS],
     states: [ModulationState; ROWS],
+    smooth_rows: [usize; ROWS],
+    smooth_count: usize,
+    precise_rows: [usize; ROWS],
+    precise_count: usize,
+    wave_bank: Box<tiny_skia_widgets::mseg::WavePaletteSnapshot>,
+    pending_wave_rows: u16,
 }
 
 impl Modulation {
+    pub fn lookahead_for_row(&self, row: usize, sr: f64) -> usize {
+        self.config[row].lookahead_samples(sr)
+    }
+    pub fn set_lookahead_path(&mut self, row: usize, path: u16) {
+        self.states[row].set_lookahead_path(path);
+    }
+    pub fn invalidate_lookahead_capture(&mut self, row: usize) {
+        self.states[row].invalidate_lookahead_capture();
+    }
+    pub fn discard_lookahead_cues(&mut self, row: usize) {
+        self.states[row].discard_lookahead_cues();
+    }
+    pub fn process_lookahead_row(
+        &mut self,
+        row: usize,
+        effect: &mut EffectInstance,
+        main: [f32; 2],
+        aux: [f32; 2],
+    ) {
+        if self.states[row].smoothing_active() {
+            self.states[row].process_modulation_sample(&self.config[row], effect, main, aux);
+        }
+    }
+    pub fn audition_request(
+        &self,
+        control: &tract_effects::modulation::AuditionControl,
+        generation: u64,
+        tracks: &[crate::effects::TrackEffect; ROWS],
+    ) -> Option<tract_effects::modulation::AuditionRequest> {
+        let request = control.snapshot()?;
+        control.resolve(
+            request,
+            tracks[request.row].kind,
+            &self.config[request.row],
+            generation,
+        )
+    }
+    pub fn set_host_position(&mut self, position: HostPosition) {
+        for state in &mut self.states {
+            state.set_host_position(position);
+        }
+    }
     pub fn new() -> Self {
         Self {
             config: std::array::from_fn(TrackModulation::default_for_row),
             states: std::array::from_fn(|_| ModulationState::default()),
+            smooth_rows: [0; ROWS],
+            smooth_count: 0,
+            precise_rows: [0; ROWS],
+            precise_count: 0,
+            wave_bank: Box::default(),
+            pending_wave_rows: 0,
         }
     }
 
@@ -28,13 +82,54 @@ impl Modulation {
         if a == b || a >= ROWS || b >= ROWS {
             return;
         }
+        let waves_a = self.states[a].wave_automation();
+        let waves_b = self.states[b].wave_automation();
         self.config.swap(a, b);
         self.states.swap(a, b);
+        // Host automation lanes stay attached to their fixed row numbers.
+        self.states[a].set_wave_automation(waves_a);
+        self.states[b].set_wave_automation(waves_b);
     }
 
     pub fn reset(&mut self) {
+        self.pending_wave_rows = 0;
         for state in &mut self.states {
             state.reset();
+        }
+    }
+    pub fn reset_smoothing(&mut self) {
+        for s in &mut self.states {
+            s.reset_smoothing();
+        }
+        self.smooth_count = 0;
+    }
+    pub fn restart_clock(&mut self) {
+        for (state, config) in self.states.iter_mut().zip(&self.config) {
+            state.restart_clock(config);
+        }
+    }
+    pub fn smoothed_parameter(
+        &self,
+        row: usize,
+        kind: crate::effects::EffectKind,
+        index: usize,
+    ) -> bool {
+        self.states[row].holds_smoothed_parameter(kind, index)
+    }
+    pub fn process_smoothing_sample(
+        &mut self,
+        effects: &mut [EffectInstance; ROWS],
+        input: [f32; 2],
+        sidechain: [f32; 2],
+    ) {
+        for i in 0..self.smooth_count {
+            let r = self.smooth_rows[i];
+            self.states[r].process_modulation_sample(
+                &self.config[r],
+                &mut effects[r],
+                input,
+                sidechain,
+            );
         }
     }
 
@@ -53,10 +148,192 @@ impl Modulation {
     pub fn phase(&self, row: usize, slot: usize) -> f32 {
         self.states[row].phase(slot)
     }
+    pub fn precise_phase(&self, row: usize, slot: usize) -> f64 {
+        self.states[row].precise_phase(slot)
+    }
+    pub fn capture_epoch(&self, row: usize, slot: usize) -> u64 {
+        self.states[row].capture_epoch(&self.config[row], slot)
+    }
+    pub fn set_telemetry_request(
+        &mut self,
+        request: tract_effects::modulation_telemetry::TraceRequest,
+        tracks: &[TrackEffect; ROWS],
+    ) {
+        for (r, state) in self.states.iter_mut().enumerate() {
+            state.set_telemetry_enabled(request.matches(r, tracks[r].kind));
+        }
+    }
+    pub fn frame(
+        &self,
+        row: usize,
+        kind: crate::effects::EffectKind,
+    ) -> tract_effects::modulation_telemetry::ModulationFrame {
+        tract_effects::modulation_telemetry::ModulationFrame::capture(
+            kind,
+            &self.config[row],
+            &self.states[row],
+        )
+    }
+
+    pub fn prepare_waveform_segment(
+        &self,
+        clock: &mut tract_effects::waveform::WaveformClock,
+        telemetry: &tract_effects::waveform::WaveformTelemetry,
+        tracks: &[TrackEffect; ROWS],
+        bpm: f64,
+        sample_rate: f64,
+    ) {
+        let request = clock.request();
+        if request.token == 0 {
+            return;
+        }
+        let row = request.row;
+        if !self.states[row].waveform_running(&self.config[row], request.slot) {
+            clock.pause();
+            return;
+        }
+        clock.prepare_segment_with_curve(
+            telemetry,
+            row,
+            tract_effects::waveform::WaveformTiming {
+                config: &self.config[row],
+                kind: tracks[row].kind,
+                phase: self.states[row].waveform_phase(&self.config[row], request.slot),
+                trigger_epoch: self.states[row].capture_epoch(&self.config[row], request.slot),
+                bpm,
+                sample_rate,
+            },
+            self.states[row].effective_mseg(&self.config[row], request.slot),
+        );
+        if self.states[row].timing_clocked() {
+            clock.follow_sample_phase();
+        }
+    }
 
     pub fn begin_block(&mut self, left: &[f32], right: &[f32], sample_rate: f64) {
-        for (state, config) in self.states.iter_mut().zip(&self.config) {
+        self.precise_count = 0;
+        self.pending_wave_rows = 0;
+        for (row, (state, config)) in self.states.iter_mut().zip(&self.config).enumerate() {
+            if !left.is_empty()
+                && !right.is_empty()
+                && state.prepare_wave_bank(config, &self.wave_bank)
+            {
+                self.pending_wave_rows |= 1 << row;
+            }
             state.begin_block(config, left, right, sample_rate);
+            if state.precise_trigger_active() {
+                self.precise_rows[self.precise_count] = row;
+                self.precise_count += 1;
+            }
+        }
+    }
+
+    pub fn precise_triggers(&mut self, input: [f32; 2]) -> u16 {
+        self.precise_triggers_with_sidechain(input, [0.0; 2])
+    }
+
+    pub fn precise_triggers_with_sidechain(&mut self, input: [f32; 2], sidechain: [f32; 2]) -> u16 {
+        let mut mask = 0;
+        for i in 0..self.precise_count {
+            let row = self.precise_rows[i];
+            if self.states[row].next_precise_trigger_with_sidechain(input, sidechain) {
+                mask |= 1 << row;
+            }
+        }
+        mask
+    }
+    pub fn fire_precise(&mut self, rows: u16, within_span: bool) {
+        for (row, state) in self.states.iter_mut().enumerate() {
+            if rows & (1 << row) != 0 {
+                if within_span {
+                    state.trigger_in_span();
+                } else {
+                    state.trigger();
+                }
+            }
+        }
+    }
+
+    pub fn midi_mask(&self, event: MidiNoteOn) -> u16 {
+        self.config
+            .iter()
+            .enumerate()
+            .fold(0, |mask, (row, config)| {
+                mask | if config.trigger.accepts_midi(event)
+                    || config
+                        .wave_switch
+                        .and_then(|mapping| mapping.slot(event))
+                        .is_some_and(|slot| self.wave_bank.get(slot).is_some())
+                {
+                    1 << row
+                } else {
+                    0
+                }
+            })
+    }
+
+    pub fn fire_midi(&mut self, event: MidiNoteOn, within_span: bool) -> u16 {
+        let mut mask = 0;
+        for (row, state) in self.states.iter_mut().enumerate() {
+            if state.select_midi_wave(&self.config[row], &self.wave_bank, event) {
+                self.pending_wave_rows |= 1 << row;
+            }
+            if state.midi_note_on(&self.config[row], event, within_span) {
+                mask |= 1 << row;
+            }
+        }
+        mask
+    }
+
+    pub fn uses_midi_waves(&self) -> bool {
+        self.config
+            .iter()
+            .any(|config| config.wave_switch.is_some())
+    }
+    pub fn uses_midi_pitch(&self) -> bool {
+        self.config
+            .iter()
+            .any(|cfg| cfg.trigger.pitch_settings().is_some())
+    }
+    pub fn uses_project_waves(&self) -> bool {
+        self.uses_midi_waves()
+            || self
+                .states
+                .iter()
+                .any(|state| state.wave_automation() != [0; 4])
+    }
+    pub fn set_wave_automation(&mut self, values: [[u8; 4]; ROWS]) {
+        for (state, values) in self.states.iter_mut().zip(values) {
+            state.set_wave_automation(values);
+        }
+    }
+    pub fn set_wave_palette(&mut self, palette: &tiny_skia_widgets::mseg::WavePalette) {
+        self.wave_bank.refresh(palette);
+    }
+    pub fn refresh_pending_waves(
+        &mut self,
+        effects: &mut [EffectInstance; ROWS],
+        tracks: &[TrackEffect; ROWS],
+        remaining: usize,
+        clock: &mut tract_effects::waveform::WaveformClock,
+    ) {
+        let rows = std::mem::take(&mut self.pending_wave_rows);
+        if rows == 0 {
+            return;
+        }
+        for row in 0..ROWS {
+            if rows & (1 << row) != 0
+                && let Some(slot) = self.states[row].refresh_pending_wave(
+                    &self.config[row],
+                    &tracks[row],
+                    &mut effects[row],
+                    remaining,
+                )
+                && clock.request().row == row
+                && clock.request().slot == slot
+            {
+                clock.update_curve(self.states[row].effective_mseg(&self.config[row], slot));
+            }
         }
     }
 
@@ -68,15 +345,34 @@ impl Modulation {
         effects: &mut [EffectInstance; ROWS],
         track_effects: &[TrackEffect; ROWS],
     ) {
+        self.advance_rows(seg_len, bpm, sample_rate, effects, track_effects, u16::MAX);
+    }
+
+    pub fn advance_rows(
+        &mut self,
+        seg_len: usize,
+        bpm: f64,
+        sample_rate: f64,
+        effects: &mut [EffectInstance; ROWS],
+        track_effects: &[TrackEffect; ROWS],
+        rows: u16,
+    ) {
+        self.smooth_count = 0;
         for row in 0..ROWS {
-            self.states[row].advance_segment(
-                &self.config[row],
-                &track_effects[row],
-                &mut effects[row],
-                seg_len,
-                bpm,
-                sample_rate,
-            );
+            if rows & (1 << row) != 0 {
+                self.states[row].advance_segment(
+                    &self.config[row],
+                    &track_effects[row],
+                    &mut effects[row],
+                    seg_len,
+                    bpm,
+                    sample_rate,
+                );
+            }
+            if self.states[row].smoothing_active() {
+                self.smooth_rows[self.smooth_count] = row;
+                self.smooth_count += 1;
+            }
         }
     }
 

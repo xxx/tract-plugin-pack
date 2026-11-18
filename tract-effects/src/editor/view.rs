@@ -58,6 +58,10 @@ pub struct EffectLayout {
     pub mseg_sync: (f32, f32, f32, f32),
     /// Active-MSEG length slider (beats or seconds, depending on sync mode).
     pub mseg_length: (f32, f32, f32, f32),
+    pub smooth: (f32, f32, f32, f32),
+    pub trace: (f32, f32, f32, f32),
+    pub audio: (f32, f32, f32, f32),
+    pub detector_setup: (f32, f32, f32, f32),
 }
 
 /// Compute the effect-editor layout at `scale`.
@@ -114,6 +118,26 @@ pub fn effect_layout(bounds: (f32, f32, f32, f32), scale: f32) -> EffectLayout {
     let mseg_sync = l(ox + 814.0, oy + 200.0, 110.0, 34.0);
     let mseg_length = l(ox + 934.0, oy + 200.0, 140.0, 34.0);
     let mseg_pane = l(ox, oy + 240.0, mw - inset, 390.0);
+    let mseg_strip = widgets::mseg::mseg_layout(mseg_pane, false, scale).strip;
+    let smooth = (
+        mseg_pane.0 + mseg_pane.2 - 234.0 * scale,
+        mseg_strip.1 + 44.0 * scale,
+        150.0 * scale,
+        26.0 * scale,
+    );
+    let trace = (
+        mseg_pane.0 + mseg_pane.2 - 78.0 * scale,
+        smooth.1,
+        72.0 * scale,
+        26.0 * scale,
+    );
+    let audio = (
+        smooth.0 - 120.0 * scale,
+        smooth.1,
+        114.0 * scale,
+        26.0 * scale,
+    );
+    let detector_setup = (trigger.0, trigger.1 - 30.0 * scale, trigger.2, 26.0 * scale);
     EffectLayout {
         back,
         effect_header,
@@ -131,6 +155,10 @@ pub fn effect_layout(bounds: (f32, f32, f32, f32), scale: f32) -> EffectLayout {
         trigger_aux,
         mseg_sync,
         mseg_length,
+        smooth,
+        trace,
+        audio,
+        detector_setup,
     }
 }
 
@@ -198,12 +226,19 @@ pub enum EffectHit {
     TriggerRate,
     /// The trigger aux dial. Hot only when the source is `Transient` (`Hold`).
     TriggerAux,
+    MidiFilter(super::MidiField),
     /// Active-MSEG sync-mode selector segment (0 = Time, 1 = Beat).
     MsegSync(usize),
     /// Active-MSEG length slider (its scale depends on the sync mode).
     MsegLength,
     /// The per-track Mix dial.
     Mix,
+    Smooth(usize),
+    Trace,
+    Audio,
+    DetectorSetup,
+    Detector(super::DetectorField),
+    DetectorDetail,
 }
 
 /// The MSEG-selector tab order shown to the user. The three assignable MSEGs
@@ -236,7 +271,7 @@ pub fn slot_to_segment(slot: usize) -> usize {
 pub fn effect_hit(
     px: f32,
     py: f32,
-    _scale: f32,
+    scale: f32,
     lay: &EffectLayout,
     param_count: usize,
     selected_mseg: usize,
@@ -263,11 +298,39 @@ pub fn effect_hit(
     if in_rect(lay.trigger, px, py) {
         return Some(EffectHit::Trigger);
     }
+    if matches!(trigger, TriggerSource::TransientSample { .. })
+        && in_rect(lay.detector_setup, px, py)
+    {
+        return Some(EffectHit::DetectorSetup);
+    }
+    if matches!(trigger, TriggerSource::MidiNote { .. }) {
+        for field in [super::MidiField::Note, super::MidiField::Channel] {
+            if in_rect(field.rect(lay, scale), px, py) {
+                return Some(EffectHit::MidiFilter(field));
+            }
+        }
+    }
+    if matches!(trigger, TriggerSource::MidiPitch { .. }) {
+        for field in [super::MidiField::Transpose, super::MidiField::Channel] {
+            if in_rect(field.rect(lay, scale), px, py) {
+                return Some(EffectHit::MidiFilter(field));
+            }
+        }
+        if in_rect(lay.mseg_sync, px, py) || in_rect(lay.mseg_length, px, py) {
+            return None;
+        }
+    }
     let trigger_has_rate = matches!(
         trigger,
-        TriggerSource::FreeHz { .. } | TriggerSource::Transient { .. }
+        TriggerSource::FreeHz { .. }
+            | TriggerSource::Transient { .. }
+            | TriggerSource::FreeHzSample { .. }
+            | TriggerSource::TransientSample { .. }
     );
-    let trigger_has_aux = matches!(trigger, TriggerSource::Transient { .. });
+    let trigger_has_aux = matches!(
+        trigger,
+        TriggerSource::Transient { .. } | TriggerSource::TransientSample { .. }
+    );
     if trigger_has_rate && in_rect(lay.trigger_rate, px, py) {
         return Some(EffectHit::TriggerRate);
     }
@@ -299,6 +362,15 @@ pub fn effect_hit(
         if in_rect(lay.depth, px, py) {
             return Some(EffectHit::Depth);
         }
+    }
+    if in_rect(lay.smooth, px, py) {
+        return Some(EffectHit::Smooth(selected_mseg.min(3)));
+    }
+    if in_rect(lay.trace, px, py) {
+        return Some(EffectHit::Trace);
+    }
+    if in_rect(lay.audio, px, py) {
+        return Some(EffectHit::Audio);
     }
     if in_rect(lay.mseg_pane, px, py) {
         return Some(EffectHit::MsegPane);
@@ -562,14 +634,20 @@ pub fn target_to_item(kind: EffectKind, target: Option<ModulationTarget>) -> usi
     }
 }
 
-/// The trigger-source dropdown items, in `TriggerSource` discriminant order.
-pub fn trigger_items() -> [&'static str; 5] {
+/// Trigger sources in stable order followed by the Timing command.
+pub fn trigger_items() -> [&'static str; 11] {
     [
         "Free run",
         "Cell light",
         "Cell step",
         "Free Hz",
         "Transient",
+        "MIDI note",
+        "Free Hz (sample)",
+        "Transient (sample)",
+        "DAW position",
+        "MIDI pitch",
+        "Timing...",
     ]
 }
 
@@ -588,6 +666,20 @@ pub fn trigger_from_item(
         1 => TriggerSource::CellLight,
         2 => TriggerSource::CellStep,
         3 => TriggerSource::FreeHz { hz: carried_hz },
+        5 => TriggerSource::MidiNote {
+            note: None,
+            channel: None,
+        },
+        6 => TriggerSource::FreeHzSample { hz: carried_hz },
+        7 => TriggerSource::TransientSample {
+            threshold: carried_threshold,
+            hold_ms: carried_hold_ms,
+        },
+        8 => TriggerSource::DawPosition,
+        9 => TriggerSource::MidiPitch {
+            transpose: 0,
+            channel: None,
+        },
         _ => TriggerSource::Transient {
             threshold: carried_threshold,
             hold_ms: carried_hold_ms,
@@ -603,6 +695,11 @@ pub fn trigger_to_item(src: TriggerSource) -> usize {
         TriggerSource::CellStep => 2,
         TriggerSource::FreeHz { .. } => 3,
         TriggerSource::Transient { .. } => 4,
+        TriggerSource::MidiNote { .. } => 5,
+        TriggerSource::FreeHzSample { .. } => 6,
+        TriggerSource::TransientSample { .. } => 7,
+        TriggerSource::DawPosition => 8,
+        TriggerSource::MidiPitch { .. } => 9,
     }
 }
 
@@ -752,11 +849,25 @@ pub fn draw_mseg_playhead(
     scale: f32,
 ) {
     let layout = widgets::mseg::mseg_layout(mseg_pane, false, scale);
+    draw_mseg_playhead_in_layout(pixmap, &layout, phase, scale);
+}
+
+pub fn draw_mseg_playhead_in_layout(
+    pixmap: &mut Pixmap,
+    layout: &widgets::mseg::MsegLayout,
+    phase: f32,
+    scale: f32,
+) {
+    let phase = phase.clamp(0.0, 1.0);
+    let (lo, hi) = layout.viewport.time_range();
+    if phase < lo || phase > hi {
+        return;
+    }
     let (px_, py_, pw_, ph_) = layout.plot;
     if pw_ <= 0.0 || ph_ <= 0.0 {
         return;
     }
-    let x = widgets::mseg::phase_to_x(&layout, phase.clamp(0.0, 1.0));
+    let x = widgets::mseg::phase_to_x(layout, phase);
     // Keep the line strictly inside the plot so it doesn't overflow at phase 1.
     let line_w = (scale).max(1.0);
     let x = x.min(px_ + pw_ - line_w);
@@ -781,10 +892,15 @@ pub fn draw_trigger_controls(
         TriggerSource::CellStep => "Cell step",
         TriggerSource::FreeHz { .. } => "Free Hz",
         TriggerSource::Transient { .. } => "Transient",
+        TriggerSource::MidiNote { .. } => "MIDI note",
+        TriggerSource::FreeHzSample { .. } => "Hz exact",
+        TriggerSource::TransientSample { .. } => "Audio",
+        TriggerSource::DawPosition => "DAW",
+        TriggerSource::MidiPitch { .. } => "MIDI pitch",
     };
     widgets::dropdown::draw_dropdown_trigger(pixmap, tr, lay.trigger, label, trigger_dropdown_open);
     match trigger {
-        TriggerSource::FreeHz { hz } => {
+        TriggerSource::FreeHz { hz } | TriggerSource::FreeHzSample { hz } => {
             let (rx, ry, rw, rh) = lay.trigger_rate;
             widgets::param_dial::draw_dial(
                 pixmap,
@@ -802,7 +918,8 @@ pub fn draw_trigger_controls(
                 ),
             );
         }
-        TriggerSource::Transient { threshold, hold_ms } => {
+        TriggerSource::Transient { threshold, hold_ms }
+        | TriggerSource::TransientSample { threshold, hold_ms } => {
             let (rx, ry, rw, rh) = lay.trigger_rate;
             // Sensitivity is the inverse of the stored threshold ratio, so
             // the dial sweep reads as "more triggers" → right.
@@ -953,6 +1070,51 @@ mod tests {
         trigger: TriggerSource,
     ) -> Option<EffectHit> {
         super::effect_hit(px, py, scale, &effect_layout(scale), count, slot, trigger)
+    }
+
+    #[test]
+    fn modulation_status_controls_keep_their_scaled_offsets_and_gaps() {
+        for scale in [0.5, 1.25, 2.0] {
+            let lay = effect_layout(scale);
+            let strip = widgets::mseg::mseg_layout(lay.mseg_pane, false, scale).strip;
+            let right = lay.mseg_pane.0 + lay.mseg_pane.2;
+            let y = strip.1 + 44.0 * scale;
+            assert_eq!(
+                lay.trace,
+                (right - 78.0 * scale, y, 72.0 * scale, 26.0 * scale)
+            );
+            assert_eq!(
+                lay.smooth,
+                (right - 234.0 * scale, y, 150.0 * scale, 26.0 * scale)
+            );
+            assert_eq!(
+                lay.audio,
+                (right - 354.0 * scale, y, 114.0 * scale, 26.0 * scale)
+            );
+            assert_eq!(
+                lay.detector_setup,
+                (150.0 * scale, 272.0 * scale, 130.0 * scale, 26.0 * scale)
+            );
+            assert!(!rects_overlap(lay.audio, lay.smooth));
+            assert!(!rects_overlap(lay.smooth, lay.trace));
+            assert!(!rects_overlap(lay.detector_setup, lay.trigger));
+        }
+    }
+
+    #[test]
+    fn pitch_mode_disables_hits_on_both_readouts() {
+        let scale = 1.25;
+        let lay = effect_layout(scale);
+        let pitch = TriggerSource::MidiPitch {
+            transpose: 0,
+            channel: None,
+        };
+        for rect in [lay.mseg_sync, lay.mseg_length] {
+            let x = rect.0 + rect.2 * 0.5;
+            let y = rect.1 + rect.3 * 0.5;
+            assert!(effect_hit(x, y, scale, 2, 1, TriggerSource::Free).is_some());
+            assert_eq!(effect_hit(x, y, scale, 2, 1, pitch), None);
+        }
     }
 
     #[test]
@@ -1167,17 +1329,17 @@ mod tests {
             for (scale, line_w) in [(0.5, 1.0), (1.0, 1.0), (2.0, 2.0)] {
                 let pane = (20.0 * scale, 30.0 * scale, 180.0 * scale, 160.0 * scale);
                 for (phase, x) in [
-                    (-2.0, 25.5 * scale),
-                    (0.0, 25.5 * scale),
-                    (0.25, 67.75 * scale),
+                    (-2.0, 34.0 * scale),
+                    (0.0, 34.0 * scale),
+                    (0.25, 72.0 * scale),
                     (0.5, 110.0 * scale),
-                    (1.0, 194.5 * scale - line_w),
-                    (3.0, 194.5 * scale - line_w),
+                    (1.0, 186.0 * scale - line_w),
+                    (3.0, 186.0 * scale - line_w),
                 ] {
                     let mut actual = canvas();
                     draw_mseg_playhead(&mut actual, pane, phase, scale);
                     let mut expected = canvas();
-                    widgets::draw_rect(&mut expected, x, 51.5 * scale, line_w, 91.0 * scale, color);
+                    widgets::draw_rect(&mut expected, x, 60.0 * scale, line_w, 20.0 * scale, color);
                     assert_pixels(
                         &actual,
                         &expected,
@@ -1185,6 +1347,20 @@ mod tests {
                     );
                 }
             }
+        }
+
+        #[test]
+        fn playhead_follows_the_viewport_and_hides_outside_it() {
+            let mut layout = widgets::mseg::mseg_layout((20.0, 30.0, 180.0, 160.0), false, 1.0);
+            layout.viewport.fit((0.4, 0.6), (0.0, 1.0));
+            let mut actual = canvas();
+            let original = actual.clone();
+            draw_mseg_playhead_in_layout(&mut actual, &layout, 0.2, 1.0);
+            assert_eq!(actual.data(), original.data());
+            draw_mseg_playhead_in_layout(&mut actual, &layout, 0.8, 1.0);
+            assert_eq!(actual.data(), original.data());
+            draw_mseg_playhead_in_layout(&mut actual, &layout, 0.5, 1.0);
+            assert_ne!(actual.data(), original.data());
         }
 
         #[test]
@@ -1212,7 +1388,7 @@ mod tests {
         }
 
         #[test]
-        fn free_and_cell_sources_draw_only_their_dropdown_label_and_open_state() {
+        fn clock_sources_without_dials_draw_only_their_dropdown_label_and_open_state() {
             let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
             for scale in [0.5, 2.0] {
                 let lay = trigger_layout(scale);
@@ -1220,6 +1396,7 @@ mod tests {
                     (TriggerSource::Free, "Free run"),
                     (TriggerSource::CellLight, "Cell light"),
                     (TriggerSource::CellStep, "Cell step"),
+                    (TriggerSource::DawPosition, "DAW"),
                 ] {
                     for open in [false, true] {
                         let mut actual = canvas();
@@ -2410,9 +2587,16 @@ mod tests {
                 );
                 assert_eq!(trigger_to_item(TriggerSource::FreeHz { hz }), 3);
                 let transient = TriggerSource::Transient { threshold, hold_ms };
-                for item in [4, 5, usize::MAX] {
+                for item in [4, 10, usize::MAX] {
                     assert_eq!(trigger_from_item(item, hz, threshold, hold_ms), transient);
                 }
+                assert_eq!(
+                    trigger_from_item(5, hz, threshold, hold_ms),
+                    TriggerSource::MidiNote {
+                        note: None,
+                        channel: None
+                    }
+                );
                 assert_eq!(trigger_to_item(transient), 4);
             }
         }
@@ -2562,7 +2746,7 @@ mod tests {
     }
 
     #[test]
-    fn trigger_items_lists_the_five_sources() {
+    fn trigger_items_preserve_existing_order_and_append_daw_position() {
         let items = trigger_items();
         assert_eq!(
             items,
@@ -2571,9 +2755,20 @@ mod tests {
                 "Cell light",
                 "Cell step",
                 "Free Hz",
-                "Transient"
+                "Transient",
+                "MIDI note",
+                "Free Hz (sample)",
+                "Transient (sample)",
+                "DAW position",
+                "MIDI pitch",
+                "Timing..."
             ]
         );
+        assert_eq!(
+            trigger_from_item(8, 1.0, 1.5, 50.0),
+            TriggerSource::DawPosition
+        );
+        assert_eq!(trigger_to_item(TriggerSource::DawPosition), 8);
     }
 
     #[test]

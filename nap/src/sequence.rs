@@ -2,7 +2,7 @@
 //! Size/Density/Width/Seed into a sparse signed pulse train with per-pulse
 //! coloration routing and per-pulse right-channel jitter.
 
-use tiny_skia_widgets::mseg::{MsegData, MsegNode, Polarity, warp};
+use tiny_skia_widgets::mseg::{MsegData, MsegNode, Polarity};
 
 use crate::coloration::Q;
 use crate::rng::Rng;
@@ -30,18 +30,7 @@ fn curve_value(data: &MsegData, phase: f32, seg: &mut usize) -> f32 {
     while *seg < last - 1 && a[*seg + 1].time <= phase {
         *seg += 1;
     }
-    let n0 = a[*seg];
-    let n1 = a[*seg + 1];
-    if n0.stepped {
-        return n0.value;
-    }
-    let span = n1.time - n0.time;
-    let t = if span > 1e-9 {
-        (phase - n0.time) / span
-    } else {
-        0.0
-    };
-    n0.value + (n1.value - n0.value) * warp(t, n0.tension)
+    tiny_skia_widgets::mseg::segment_value(&a[*seg], &a[*seg + 1], phase)
 }
 
 /// Generate the velvet sequence into `out` (pre-allocated to `MAX_PULSES`).
@@ -177,12 +166,14 @@ pub fn default_decay_curve() -> MsegData {
         value: 1.0,
         tension: 0.6,
         stepped: false,
+        ..MsegNode::default()
     };
     d.nodes[1] = MsegNode {
         time: 1.0,
         value: 0.0,
         tension: 0.0,
         stepped: false,
+        ..MsegNode::default()
     };
     d.polarity = Polarity::Unipolar;
     d.debug_assert_valid();
@@ -200,12 +191,14 @@ pub fn default_width_curve() -> MsegData {
         value: 0.15,
         tension: 0.0,
         stepped: false,
+        ..MsegNode::default()
     };
     d.nodes[1] = MsegNode {
         time: 1.0,
         value: 0.85,
         tension: 0.0,
         stepped: false,
+        ..MsegNode::default()
     };
     d.polarity = Polarity::Unipolar;
     d.debug_assert_valid();
@@ -221,12 +214,14 @@ pub fn default_tone_curve() -> MsegData {
         value: 0.85,
         tension: 0.0,
         stepped: false,
+        ..MsegNode::default()
     };
     d.nodes[1] = MsegNode {
         time: 1.0,
         value: 0.25,
         tension: 0.0,
         stepped: false,
+        ..MsegNode::default()
     };
     d.polarity = Polarity::Unipolar;
     d.debug_assert_valid();
@@ -238,6 +233,33 @@ mod tests {
     use super::*;
     use tiny_skia_widgets::mseg::value_at_phase;
 
+    #[test]
+    fn native_and_weighted_forward_walk_matches_the_shared_sampler() {
+        use tiny_skia_widgets::mseg::{PointWeight, SegmentShape};
+        for shape in [SegmentShape::Curve, SegmentShape::SCurve] {
+            for weight in [PointWeight::Hard, PointWeight::Medium, PointWeight::Soft] {
+                let mut data = MsegData::default();
+                data.insert_node(0.25, 0.8).unwrap();
+                data.insert_node(0.75, 0.2).unwrap();
+                data.nodes[0].shape = shape;
+                data.nodes[0].tension = -0.5;
+                data.nodes[1].weight = weight;
+                data.nodes[1].shape = shape;
+                data.nodes[2].stepped = true;
+                data.nodes[3].weight = PointWeight::Soft;
+                let mut segment = 0;
+                for i in 0..=4096 {
+                    let phase = i as f32 / 4096.0;
+                    assert_eq!(
+                        curve_value(&data, phase, &mut segment).to_bits(),
+                        value_at_phase(&data, phase).to_bits(),
+                        "{shape:?} {weight:?} {phase}"
+                    );
+                }
+            }
+        }
+    }
+
     fn flat(value: f32) -> MsegData {
         let mut d = MsegData::default();
         d.nodes[0] = MsegNode {
@@ -245,15 +267,34 @@ mod tests {
             value,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         d.nodes[1] = MsegNode {
             time: 1.0,
             value,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         d.debug_assert_valid();
         d
+    }
+
+    #[test]
+    fn smoothed_loop_geometry_matches_the_tail_curve_sampler() {
+        use tiny_skia_widgets::mseg::MsegEditState;
+        let mut data = MsegData::default();
+        data.insert_node(0.6, 0.8).unwrap();
+        data.nodes[1].stepped = true;
+        let mut editor = MsegEditState::new_curve_only();
+        assert!(editor.smooth_loop_seam(&mut data).is_some());
+        let mut segment = 0;
+        for i in 0..=4096 {
+            let phase = i as f32 / 4096.0;
+            let value = curve_value(&data, phase, &mut segment);
+            assert_eq!(value.to_bits(), value_at_phase(&data, phase).to_bits());
+        }
+        assert_eq!(value_at_phase(&data, 0.0), value_at_phase(&data, 1.0));
     }
 
     fn test_params() -> GenParams {
@@ -366,6 +407,7 @@ mod tests {
             value: 1.0,
             tension: 0.0,
             stepped: true,
+            ..MsegNode::default()
         };
         let mid = decay.nodes[1];
         decay.nodes[1] = MsegNode {
@@ -377,6 +419,7 @@ mod tests {
             value: 0.0,
             tension: 0.0,
             stepped: false,
+            ..MsegNode::default()
         };
         decay.debug_assert_valid();
 

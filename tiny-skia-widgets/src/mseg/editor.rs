@@ -9,10 +9,19 @@
 use crate::dropdown::{DropdownEvent, DropdownState};
 use crate::mseg::MsegData;
 use crate::mseg::randomize::RandomStyle;
-use crate::text_edit::TextEditState;
+
+mod browser;
+mod help;
+mod power;
+mod precision;
+#[cfg(test)]
+mod readonly_tests;
+pub use help::{HelpPage, is_help_shortcut};
+pub use power::SelectionHandle;
 
 /// Default grid option pairs used when no custom list is supplied.
-const DEFAULT_GRID_OPTIONS: [(u32, u32); 4] = [(4, 4), (8, 8), (16, 8), (32, 16)];
+const DEFAULT_GRID_OPTIONS: [(u32, u32); 7] =
+    [(4, 4), (8, 8), (16, 8), (32, 16), (6, 8), (12, 8), (24, 16)];
 
 /// Style display labels, matching `RandomStyle::ALL` order.
 pub const STYLE_LABELS: [&str; 5] = ["Smooth", "Ramps", "Stepped", "Spiky", "Chaos"];
@@ -30,22 +39,68 @@ pub(crate) fn transform_menu_items() -> &'static [&'static str] {
         "Expand values",
         "Compress times",
         "Expand times",
+        "Copy curve",
+        "Paste curve",
+        "Paste fitted to height",
+        "Flip values",
+        "Reverse time",
+        "Nudge points left",
+        "Nudge points right",
+        "Quantize points",
+        "Repeat 2x",
+        "Repeat 3x",
+        "Mutate values",
+        "Mutate shape",
+        "Select all",
+        "Inspect point",
+        "Copy selection",
+        "Paste replace selection",
+        "Paste merge selection",
+        "Curve segments",
+        "S-curve segments",
+        "Stepped segments",
+        "Hard points",
+        "Medium points",
+        "Soft points",
+        "Match loop end to start",
+        "Match loop start to end",
+        "Smooth loop seam (10%)",
     ]
 }
 
 /// Snap `(phase, value)` to the document's grid when `data.snap` is on, unless
 /// `fine` (the caller's fine-adjust modifier, e.g. Shift) bypasses it. `phase`
 /// snaps to the `time_divisions` columns, `value` to the `value_steps` rows.
-fn snap_point(phase: f32, value: f32, data: &MsegData, fine: bool) -> (f32, f32) {
-    if !data.snap || fine {
-        return (phase, value);
+impl MsegEditState {
+    fn snap_point(&self, phase: f32, value: f32, data: &MsegData, fine: bool) -> (f32, f32) {
+        if !data.snap || fine {
+            return (phase, value);
+        }
+        let cols = data.time_divisions.max(1) as f32;
+        (
+            ((phase * cols).round() / cols).clamp(0.0, 1.0),
+            self.snap_value(data, value),
+        )
     }
-    let cols = data.time_divisions.max(1) as f32;
-    let rows = data.value_steps.max(1) as f32;
-    (
-        ((phase * cols).round() / cols).clamp(0.0, 1.0),
-        ((value * rows).round() / rows).clamp(0.0, 1.0),
-    )
+
+    fn snap_value(&self, data: &MsegData, value: f32) -> f32 {
+        crate::mseg::grid::snap_value(data, self.pitch_grid.as_ref(), value)
+    }
+
+    /// Refresh target positions, preserving pen placement while musical snapping is inactive.
+    pub fn set_pitch_grid(&mut self, grid: Option<crate::mseg::PitchGrid>, data: &MsegData) {
+        if self.pitch_grid != grid {
+            self.pitch_grid = grid;
+            if data.snap && data.value_grid == crate::mseg::ValueGrid::Semitones {
+                self.power.preview.clear();
+                self.reset_pen_repeat();
+            }
+        }
+    }
+
+    pub fn pitch_grid(&self) -> Option<&crate::mseg::PitchGrid> {
+        self.pitch_grid.as_ref()
+    }
 }
 
 /// Returned by an event handler when the document changed and the consuming
@@ -65,6 +120,9 @@ pub enum StripId {
     ValueGrid,
     /// The right-click-on-selected-node transform menu.
     Transform,
+    Tool,
+    Shapes,
+    View,
 }
 
 /// What the pointer is currently dragging.
@@ -79,9 +137,14 @@ pub enum DragTarget {
     /// Painting stepped nodes (Alt held).
     StepDraw,
     /// Moving the whole selection; `anchor` is the node under the cursor.
-    Group { anchor: usize },
+    Group {
+        anchor: usize,
+    },
     /// Dragging a selection marquee from the press anchor.
     Marquee,
+    Transform(SelectionHandle),
+    Pen,
+    Pan,
 }
 
 /// Which hold marker is being dragged.
@@ -94,6 +157,11 @@ pub enum MarkerHandle {
 
 /// Transient editor state — not persisted.
 pub struct MsegEditState {
+    power: power::PowerState,
+    precision: precision::PrecisionState,
+    help: help::HelpState,
+    browser: browser::BrowserState,
+    read_only_curve: Option<MsegData>,
     /// When true, playback/timing controls and the marker lane are hidden.
     curve_only: bool,
     /// When false, the strip's Unipolar/Bipolar polarity toggle is hidden (and
@@ -103,6 +171,7 @@ pub struct MsegEditState {
     show_polarity: bool,
     /// Active drag, if any.
     drag: Option<DragTarget>,
+    tension_start: Option<(f32, f32)>,
     /// Hovered node index, for highlight.
     hover: Option<usize>,
     /// Selected node indices, bit `i` = node `i`. `MAX_NODES` is 128, so a
@@ -129,28 +198,48 @@ pub struct MsegEditState {
     /// at a time; the `StripId` discriminant (`TimeGrid` vs `Style`) identifies
     /// which is active.
     dropdown: DropdownState<StripId>,
-    /// Numeric strip-field text entry.
-    // reserved for a future numeric-entry follow-up
-    #[allow(dead_code)]
-    text_edit: TextEditState<StripId>,
     /// Bumped on each Randomize click so successive clicks differ.
     seed: u32,
     /// Per-plugin grid presets `(time_divisions, value_steps)`.
     grid_options: Vec<(u32, u32)>,
     /// Display labels for `grid_options`, kept in sync by `set_grid_options`.
     grid_labels: Vec<String>,
+    pitch_grid: Option<crate::mseg::PitchGrid>,
+    status_reserve: f32,
 }
 
 impl MsegEditState {
+    /// Show a playback source while retaining the authored document for later editing.
+    pub fn set_read_only_curve(&mut self, curve: Option<MsegData>) {
+        if curve.is_some() && self.read_only_curve.is_none() {
+            self.cancel_interaction();
+            self.clear_selection();
+            self.set_status_message("");
+        }
+        self.read_only_curve = curve;
+    }
+    pub fn geometry_read_only(&self) -> bool {
+        self.read_only_curve.is_some()
+    }
+    pub(crate) fn display_data<'a>(&'a self, author: &'a MsegData) -> &'a MsegData {
+        self.read_only_curve.as_ref().unwrap_or(author)
+    }
     /// Cancel transient geometry-dependent input while keeping selection and strip preferences.
     pub fn cancel_interaction(&mut self) {
         self.drag = None;
+        self.tension_start = None;
         self.hover = None;
         self.marquee = None;
         self.group_snapshot.clear();
         self.step_last_cell = None;
         self.dropdown.close();
-        self.text_edit.cancel();
+        self.cancel_precision();
+        self.close_help();
+        self.close_curve_browser();
+        self.clear_hover_hint();
+        self.power.gesture_start = None;
+        self.power.preview.clear();
+        self.reset_pen_repeat();
     }
 
     /// A full editor (playback controls + marker lane shown).
@@ -166,11 +255,17 @@ impl MsegEditState {
 
     fn with_curve_only(curve_only: bool) -> Self {
         let grid_options: Vec<(u32, u32)> = DEFAULT_GRID_OPTIONS.to_vec();
-        let grid_labels = Self::build_labels(&grid_options);
+        let grid_labels = Self::build_labels(&grid_options, curve_only);
         Self {
+            power: power::PowerState::default(),
+            precision: precision::PrecisionState::default(),
+            help: help::HelpState::default(),
+            browser: browser::BrowserState::default(),
+            read_only_curve: None,
             curve_only,
             show_polarity: true,
             drag: None,
+            tension_start: None,
             hover: None,
             selection: 0,
             group_snapshot: Vec::new(),
@@ -180,19 +275,24 @@ impl MsegEditState {
             stepped_draw_held: false,
             style: RandomStyle::Smooth,
             dropdown: DropdownState::new(),
-            text_edit: TextEditState::new(),
             seed: 0,
             grid_options,
             grid_labels,
+            pitch_grid: None,
+            status_reserve: 0.0,
         }
     }
 
     /// Build display labels from a slice of `(time_divisions, value_steps)` pairs.
-    fn build_labels(options: &[(u32, u32)]) -> Vec<String> {
-        options
+    fn build_labels(options: &[(u32, u32)], curve_only: bool) -> Vec<String> {
+        let mut labels: Vec<_> = options
             .iter()
             .map(|&(t, v)| format!("{} / {}", t, v))
-            .collect()
+            .collect();
+        if !curve_only {
+            labels.push("Semitones".to_owned());
+        }
+        labels
     }
 
     /// Replace the grid preset list. If `options` is empty the call is a no-op
@@ -206,12 +306,22 @@ impl MsegEditState {
             return;
         }
         self.grid_options = options.to_vec();
-        self.grid_labels = Self::build_labels(&self.grid_options);
+        self.grid_labels = Self::build_labels(&self.grid_options, self.curve_only);
     }
 
     /// The current grid presets `(time_divisions, value_steps)`.
     pub fn grid_options(&self) -> &[(u32, u32)] {
         &self.grid_options
+    }
+    pub fn set_status_reserve(&mut self, width: f32) {
+        self.status_reserve = if width.is_finite() {
+            width.max(0.0)
+        } else {
+            0.0
+        };
+    }
+    pub fn status_reserve(&self) -> f32 {
+        self.status_reserve
     }
 
     /// Build a `Vec<&str>` of grid label references for passing to dropdown
@@ -219,6 +329,7 @@ impl MsegEditState {
     /// — a GUI-thread allocation, fine. The stable-items invariant (same
     /// length/order while the dropdown is open) is satisfied because
     /// `set_grid_options` must not be called while the dropdown is open.
+    #[cfg(test)]
     pub(crate) fn grid_label_refs(&self) -> Vec<&str> {
         self.grid_labels.iter().map(String::as_str).collect()
     }
@@ -227,6 +338,9 @@ impl MsegEditState {
     /// pair best matches `data`. Prefers an exact match; falls back to the
     /// nearest by combined absolute deviation; returns 0 on empty list.
     pub(crate) fn current_grid_index(&self, data: &MsegData) -> usize {
+        if !self.curve_only && data.value_grid == crate::mseg::ValueGrid::Semitones {
+            return self.grid_options.len();
+        }
         // Prefer an exact match.
         for (i, &(t, v)) in self.grid_options.iter().enumerate() {
             if data.time_divisions == t && data.value_steps == v {
@@ -354,45 +468,33 @@ impl MsegEditState {
         scale: f32,
         ctrl: bool,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{MsegHit, mseg_hit_test, mseg_layout};
-        let layout = mseg_layout(rect, self.curve_only, scale);
+        use crate::mseg::render::{MsegHit, mseg_hit_test};
+        if self.curve_browser_open() {
+            return self.browser_mouse_down(x, y, data, rect, scale, false);
+        }
+        if self.help_open() {
+            self.help_mouse_down(x, y, rect, scale);
+            return None;
+        }
+        self.prepare_precision(data, scale);
+        if self.is_panning() {
+            return None;
+        }
+        let layout = self.layout(rect, scale);
+        if self.inspector_node().is_some() {
+            return self.inspector_mouse_down(x, y, data, rect);
+        }
 
         // If a dropdown is open, route the click to it first.
         let mut closed_a_dropdown = false;
         if self.dropdown.is_open() {
             let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-            let ev = if self.dropdown.is_open_for(StripId::TimeGrid) {
-                // Clone the labels so the borrow of self.grid_labels ends
-                // before the mutable self.dropdown call.
-                let owned: Vec<String> = self.grid_labels.clone();
-                let grid_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-                self.dropdown.on_mouse_down(x, y, &grid_refs, window_size)
-            } else if self.dropdown.is_open_for(StripId::Transform) {
-                self.dropdown
-                    .on_mouse_down(x, y, transform_menu_items(), window_size)
-            } else {
-                self.dropdown
-                    .on_mouse_down(x, y, style_items(), window_size)
-            };
+            let labels = self.dropdown_labels();
+            let refs: Vec<_> = labels.iter().map(String::as_str).collect();
+            let ev = self.dropdown.on_mouse_down(x, y, &refs, window_size);
             match ev {
-                Some(DropdownEvent::Selected(StripId::TimeGrid, idx)) => {
-                    let (t, v) = self.grid_options[idx];
-                    data.time_divisions = t;
-                    data.value_steps = v;
-                    return Some(MsegEdit::Changed);
-                }
-                Some(DropdownEvent::Selected(StripId::Style, idx)) => {
-                    self.set_style(RandomStyle::from_index(idx));
-                    return None;
-                }
-                Some(DropdownEvent::Selected(StripId::Transform, idx)) => {
-                    let edit = match idx {
-                        0 => self.compress_values(data),
-                        1 => self.expand_values(data),
-                        2 => self.compress_times(data),
-                        _ => self.expand_times(data),
-                    };
-                    return edit;
+                Some(DropdownEvent::Selected(id, idx)) => {
+                    return self.apply_menu(id, idx, data, rect);
                 }
                 Some(DropdownEvent::Closed(_)) => {
                     // The click landed outside the popup, closing the dropdown.
@@ -406,6 +508,37 @@ impl MsegEditState {
             }
         }
 
+        if self.geometry_read_only() {
+            let buttons = crate::mseg::render::strip_buttons_ex(
+                layout.strip,
+                scale,
+                !self.curve_only,
+                self.show_polarity,
+            );
+            let power = crate::mseg::render::power_buttons(layout.strip, scale);
+            if ![
+                buttons.snap,
+                buttons.grid,
+                buttons.polarity,
+                buttons.play_mode,
+                power.view,
+                power.help,
+            ]
+            .into_iter()
+            .any(|rect| crate::mseg::render::in_rect(rect, x, y))
+            {
+                return None;
+            }
+        }
+        if !closed_a_dropdown
+            && !self.geometry_read_only()
+            && let Some(edit) = self.begin_power_drag(x, y, data, &layout, scale)
+        {
+            return edit;
+        }
+        if crate::mseg::render::in_rect(layout.canvas, x, y) {
+            self.power.gesture_start = Some(*data);
+        }
         match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
             MsegHit::Node(i) | MsegHit::SelectedNode(i) => {
                 // Click selects: Ctrl toggles membership; a plain click on an
@@ -433,12 +566,13 @@ impl MsegEditState {
             }
             MsegHit::Tension(i) => {
                 self.drag = Some(DragTarget::Tension(i));
+                self.tension_start = Some((y, data.nodes[i].tension));
                 None
             }
             MsegHit::Canvas if self.stepped_draw_held => {
                 self.drag = Some(DragTarget::StepDraw);
                 self.step_last_cell = None;
-                self.step_draw_paint(x, y, data, &layout)
+                self.step_draw_paint(x, y, data, &layout, false)
             }
             MsegHit::Canvas => {
                 // Begin a marquee. Whether it selects (on release) or just
@@ -451,6 +585,11 @@ impl MsegEditState {
             MsegHit::Randomize => {
                 self.seed = self.seed.wrapping_add(1);
                 crate::mseg::randomize::randomize(data, self.style, self.seed);
+                if data.snap && data.value_grid == crate::mseg::ValueGrid::Semitones {
+                    for index in 0..data.node_count {
+                        data.nodes[index].value = self.snap_value(data, data.nodes[index].value);
+                    }
+                }
                 // Randomize replaces every node — any drag/hover/selection
                 // index is now stale, so clear them.
                 self.drag = None;
@@ -464,8 +603,28 @@ impl MsegEditState {
                 // a click in a gap between buttons is a no-op.
                 use crate::mseg::render::{in_rect, strip_buttons_ex};
                 let b = strip_buttons_ex(layout.strip, scale, !self.curve_only, self.show_polarity);
+                let power = crate::mseg::render::power_buttons(layout.strip, scale);
                 let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-                if in_rect(b.snap, x, y) {
+                if let Some((id, anchor)) = [
+                    (StripId::Tool, power.tool),
+                    (StripId::Shapes, power.shapes),
+                    (StripId::Transform, power.edit),
+                    (StripId::View, power.view),
+                ]
+                .into_iter()
+                .find(|(_, anchor)| in_rect(*anchor, x, y))
+                {
+                    if !closed_a_dropdown {
+                        self.open_power_menu(id, anchor, window_size);
+                    }
+                    None
+                } else if in_rect(power.help, x, y) {
+                    self.open_help(scale);
+                    None
+                } else if in_rect(power.point, x, y) {
+                    self.open_point_inspector(data);
+                    None
+                } else if in_rect(b.snap, x, y) {
                     data.snap = !data.snap;
                     Some(MsegEdit::Changed)
                 } else if self.show_polarity && in_rect(b.polarity, x, y) {
@@ -498,7 +657,7 @@ impl MsegEditState {
                         let grid_idx = self.current_grid_index(data);
                         self.dropdown.open(
                             StripId::TimeGrid,
-                            b.grid,
+                            (b.grid.0, b.grid.1, b.grid.2.max(120.0), b.grid.3),
                             crate::dropdown::DropdownList::flat(&grid_refs),
                             grid_idx,
                             false,
@@ -539,25 +698,34 @@ impl MsegEditState {
         scale: f32,
         fine: bool,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{MsegHit, mseg_hit_test, mseg_layout, x_to_phase, y_to_value};
-        let layout = mseg_layout(rect, self.curve_only, scale);
+        use crate::mseg::render::{MsegHit, mseg_hit_test, x_to_phase, y_to_value};
+        self.track_hint_pointer(x, y, rect);
+        if self.curve_browser_open() {
+            self.browser_mouse_move(x, y, data, rect);
+            return None;
+        }
+        if self.help_open() || self.curve_browser_open() {
+            return None;
+        }
+        let layout = self.layout(rect, scale);
 
+        self.prepare_precision(data, scale);
+        if self.inspector_node().is_some() {
+            return None;
+        }
+        if self.drag == Some(DragTarget::Pan) {
+            self.move_pan(x, y, rect, scale);
+            return None;
+        }
         // Route moves to the open dropdown for hover-highlight updates.
         if self.dropdown.is_open() {
             let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-            if self.dropdown.is_open_for(StripId::TimeGrid) {
-                // Clone labels so the borrow of self.grid_labels ends before
-                // the mutable self.dropdown call.
-                let owned: Vec<String> = self.grid_labels.clone();
-                let grid_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
-                self.dropdown.on_mouse_move(x, y, &grid_refs, window_size);
-            } else if self.dropdown.is_open_for(StripId::Transform) {
-                self.dropdown
-                    .on_mouse_move(x, y, transform_menu_items(), window_size);
-            } else {
-                self.dropdown
-                    .on_mouse_move(x, y, style_items(), window_size);
-            }
+            let labels = self.dropdown_labels();
+            let refs: Vec<_> = labels.iter().map(String::as_str).collect();
+            self.dropdown.on_mouse_move(x, y, &refs, window_size);
+            return None;
+        }
+        if self.geometry_read_only() {
             return None;
         }
         // Hover highlight (only when not dragging).
@@ -567,35 +735,35 @@ impl MsegEditState {
                 _ => None,
             };
         }
+        let power_edit = self.move_power_drag(x, y, data, &layout, fine);
+        if matches!(self.drag, Some(DragTarget::Pen | DragTarget::Transform(_))) {
+            return power_edit;
+        }
         match self.drag {
             Some(DragTarget::Node(i)) => {
                 let (phase, value) =
-                    snap_point(x_to_phase(&layout, x), y_to_value(&layout, y), data, fine);
+                    self.snap_point(x_to_phase(&layout, x), y_to_value(&layout, y), data, fine);
                 data.move_node(i, phase, value);
                 Some(MsegEdit::Changed)
             }
             Some(DragTarget::Tension(i)) => {
-                // Drag vertically away from the segment's straight midpoint to
-                // bend it. Map the vertical offset to tension in -1..1.
-                // Copy needed values out of `a` before the mutable write.
                 let (v_lo, v_hi) = if i + 1 < data.node_count {
                     let a = data.active();
                     (a[i].value, a[i + 1].value)
                 } else {
                     return None;
                 };
-                let straight_mid = (v_lo + v_hi) * 0.5;
-                let cur = y_to_value(&layout, y);
+                let (press_y, tension) = self.tension_start?;
+                if layout.plot.3 <= 0.0 {
+                    return None;
+                }
                 let rising = v_hi >= v_lo;
-                // Sign flip by `rising`: dragging the handle the same screen
-                // direction must bow a rising vs. a falling segment
-                // consistently in tension polarity (positive = slow-start).
-                let delta = (cur - straight_mid) * if rising { -2.0 } else { 2.0 };
-                data.nodes[i].tension = delta.clamp(-1.0, 1.0);
+                let delta = (press_y - y) / layout.plot.3 * if rising { -2.0 } else { 2.0 };
+                data.nodes[i].tension = (tension + delta).clamp(-1.0, 1.0);
                 data.debug_assert_valid();
                 Some(MsegEdit::Changed)
             }
-            Some(DragTarget::StepDraw) => self.step_draw_paint(x, y, data, &layout),
+            Some(DragTarget::StepDraw) => self.step_draw_paint(x, y, data, &layout, fine),
             Some(DragTarget::Group { anchor }) => {
                 self.apply_group_move(anchor, x, y, data, &layout, fine);
                 Some(MsegEdit::Changed)
@@ -618,7 +786,19 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{mseg_layout, phase_to_x, value_to_y};
+        use crate::mseg::render::{phase_to_x, value_to_y};
+        if self.curve_browser_open() {
+            if self.validate_browser_document(data) {
+                self.browser_mouse_up();
+            }
+            return None;
+        }
+        if self.help_open() || self.curve_browser_open() {
+            return None;
+        }
+        if self.drag == Some(DragTarget::Pan) {
+            return None;
+        }
         self.dropdown.on_mouse_up();
         if matches!(self.drag, Some(DragTarget::Marquee))
             && let Some((ax, ay, cx, cy)) = self.marquee
@@ -633,11 +813,14 @@ impl MsegEditState {
                     self.clear_selection();
                 }
             } else {
-                let layout = mseg_layout(rect, self.curve_only, scale);
+                let layout = self.layout(rect, scale);
                 if !self.marquee_ctrl {
                     self.clear_selection();
                 }
                 for (i, n) in data.active().iter().enumerate() {
+                    if !layout.viewport.contains(n.time, n.value) {
+                        continue;
+                    }
                     let nx = phase_to_x(&layout, n.time);
                     let ny = value_to_y(&layout, n.value);
                     if nx >= rx
@@ -653,8 +836,10 @@ impl MsegEditState {
         }
         self.drag = None;
         self.marquee = None;
+        self.tension_start = None;
         self.group_snapshot.clear();
         self.step_last_cell = None;
+        self.finish_power_gesture(data);
         None
     }
 
@@ -669,8 +854,24 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{MsegHit, mseg_hit_test, mseg_layout, x_to_phase, y_to_value};
-        let layout = mseg_layout(rect, self.curve_only, scale);
+        if self.curve_browser_open() {
+            return self.browser_mouse_down(x, y, data, rect, scale, true);
+        }
+        if self.help_open() {
+            self.help_mouse_down(x, y, rect, scale);
+            return None;
+        }
+        if self.geometry_read_only() {
+            return None;
+        }
+        if self.is_panning() {
+            return None;
+        }
+        if self.tool() != crate::mseg::MsegTool::Pointer {
+            return self.on_mouse_down(x, y, data, rect, scale, false);
+        }
+        use crate::mseg::render::{MsegHit, mseg_hit_test, x_to_phase, y_to_value};
+        let layout = self.layout(rect, scale);
         match mseg_hit_test(&layout, data, self.curve_only, scale, x, y) {
             MsegHit::Node(i) | MsegHit::SelectedNode(i) if data.remove_node(i) => {
                 self.drag = None;
@@ -680,7 +881,7 @@ impl MsegEditState {
             }
             MsegHit::Canvas => {
                 let (phase, value) =
-                    snap_point(x_to_phase(&layout, x), y_to_value(&layout, y), data, false);
+                    self.snap_point(x_to_phase(&layout, x), y_to_value(&layout, y), data, false);
                 if data.insert_node(phase, value).is_some() {
                     self.clear_selection();
                     return Some(MsegEdit::Changed);
@@ -702,21 +903,40 @@ impl MsegEditState {
         rect: (f32, f32, f32, f32),
         scale: f32,
     ) -> Option<MsegEdit> {
-        use crate::mseg::render::{MsegHit, mseg_hit_test_with_selection, mseg_layout, x_to_phase};
-        let layout = mseg_layout(rect, self.curve_only, scale);
+        if self.curve_browser_open() {
+            self.close_curve_browser();
+            return None;
+        }
+        if self.help_open() {
+            self.close_help();
+            return None;
+        }
+        self.prepare_precision(data, scale);
+        if self.inspector_node().is_some() {
+            self.dismiss_inspector();
+            return None;
+        }
+        if self.is_dragging() {
+            return None;
+        }
+        if self.has_open_menu() {
+            self.dropdown.close();
+            return None;
+        }
+        if self.geometry_read_only() {
+            return None;
+        }
+        use crate::mseg::render::{MsegHit, mseg_hit_test_with_selection, x_to_phase};
+        let layout = self.layout(rect, scale);
         let hit = mseg_hit_test_with_selection(&layout, data, self.curve_only, scale, x, y, self);
         // A right-click on a selected node opens the transform menu instead of
         // toggling the segment-stepped flag.
         if let MsegHit::SelectedNode(_) = hit {
             let window_size = (rect.0 + rect.2, rect.1 + rect.3);
-            // The dropdown popup widget derives both item height (`ah`) and
-            // popup width (`aw`) from the anchor rect. Use a sensible row
-            // height + a width that fits the longest label ("Compress values")
-            // with chevron + padding; anchor at the click point with the
-            // anchor's height absorbed above so the first item opens *at*
-            // the cursor rather than below it.
+            // Anchor above the click so the first row opens at the pointer;
+            // keep labels readable at small scales.
             let item_h = 22.0 * scale;
-            let popup_w = 170.0 * scale;
+            let popup_w = (240.0 * scale).max(160.0);
             self.dropdown.open(
                 StripId::Transform,
                 (x, (y - item_h).max(rect.1), popup_w, item_h),
@@ -788,7 +1008,8 @@ impl MsegEditState {
         // snapshot. Only the anchor lands on the grid; the rigid group carries
         // every other selected node off-grid by the same delta, by design.
         let (anchor_t0, anchor_v0) = self.group_snapshot[anchor];
-        let (snap_t, snap_v) = snap_point(x_to_phase(layout, x), y_to_value(layout, y), data, fine);
+        let (snap_t, snap_v) =
+            self.snap_point(x_to_phase(layout, x), y_to_value(layout, y), data, fine);
         let mut d_phase = snap_t - anchor_t0;
         let d_value = snap_v - anchor_v0;
 
@@ -836,15 +1057,19 @@ impl MsegEditState {
 
         // Write each selected node = snapshot + delta. Endpoints keep their
         // pinned time; every value is clamped to 0..1 per-node.
+        let mut candidate = *data;
         for i in 0..n {
             if !self.is_node_selected(i) {
                 continue;
             }
             let (t0, v0) = self.group_snapshot[i];
             if i != 0 && i + 1 != n {
-                data.nodes[i].time = t0 + d_phase;
+                candidate.nodes[i].time = t0 + d_phase;
             }
-            data.nodes[i].value = (v0 + d_value).clamp(0.0, 1.0);
+            candidate.nodes[i].value = (v0 + d_value).clamp(0.0, 1.0);
+        }
+        if candidate.is_valid() {
+            *data = candidate;
         }
         data.debug_assert_valid();
     }
@@ -884,6 +1109,7 @@ impl MsegEditState {
         y: f32,
         data: &mut MsegData,
         layout: &crate::mseg::render::MsegLayout,
+        fine: bool,
     ) -> Option<MsegEdit> {
         use crate::mseg::render::{x_to_phase, y_to_value};
         let phase = x_to_phase(layout, x);
@@ -897,7 +1123,11 @@ impl MsegEditState {
         }
         self.step_last_cell = Some(cell);
         let snapped_phase = (cell as f32 / tdiv as f32).clamp(0.0, 1.0);
-        let value = value.clamp(0.0, 1.0);
+        let value = if data.snap && !fine && data.value_grid == crate::mseg::ValueGrid::Semitones {
+            self.snap_value(data, value)
+        } else {
+            value.clamp(0.0, 1.0)
+        };
 
         // If an interior node already sits in this grid cell, repaint its
         // value in place instead of inserting a duplicate. Without this,
@@ -976,15 +1206,12 @@ impl MsegEditState {
         }
         let mean: f32 =
             movable.iter().map(|&i| data.nodes[i].time).sum::<f32>() / movable.len() as f32;
-        let gap = MsegData::MIN_NODE_GAP;
         // Apply per-node in ascending index order so each step sees the
         // just-written previous neighbour for its lower bound.
         for &i in &movable {
             let t = data.nodes[i].time;
             let nt_raw = mean + (t - mean) * k;
-            let lo = data.nodes[i - 1].time + gap;
-            let hi = data.nodes[i + 1].time - gap;
-            data.nodes[i].time = nt_raw.clamp(lo, hi);
+            data.move_node(i, nt_raw, data.nodes[i].value);
         }
         data.debug_assert_valid();
         Some(MsegEdit::Changed)
@@ -1457,8 +1684,9 @@ mod tests {
         let mut data = MsegData::default();
         let mut state = MsegEditState::new();
         let l = mseg_layout(RECT, false, 1.0);
-        let bx = l.strip.0 + l.strip.2 - 48.0;
-        let by = l.strip.1 + l.strip.3 * 0.5;
+        let button = crate::mseg::render::strip_buttons(l.strip, 1.0, true).randomize;
+        let bx = button.0 + button.2 * 0.5;
+        let by = button.1 + button.3 * 0.5;
         // Seed starts at 0; each Randomize click does wrapping_add(1).
         let ev = state.on_mouse_down(bx, by, &mut data, RECT, 1.0, false);
         assert_eq!(ev, Some(MsegEdit::Changed));
@@ -1716,7 +1944,10 @@ mod tests {
         let mut state = MsegEditState::new();
         state.set_grid_options(&[(2, 2), (64, 64)]);
         assert_eq!(state.grid_options(), &[(2, 2), (64, 64)]);
-        assert_eq!(state.grid_label_refs(), vec!["2 / 2", "64 / 64"]);
+        assert_eq!(
+            state.grid_label_refs(),
+            vec!["2 / 2", "64 / 64", "Semitones"]
+        );
     }
 
     #[test]

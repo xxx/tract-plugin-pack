@@ -26,6 +26,102 @@ exclude_re = [
     'replace > with >= in time_to_coef$',
     # At +/-0 BPM, division gives infinity/NaN; the finite-length guard freezes.
     '^tract-effects/src/modulation\.rs:\d+:31: replace > with >= in mseg_phase_delta$',
+    '^tract-effects/src/modulation/smoothing\.rs:\d+:31: replace > with >= in phase_step$',
+    # Each slot contributes a different bit to the smoothing mask.
+    '^tract-effects/src/modulation/smoothing\.rs:\d+:18: replace \| with \^ in TrackModulation::smoothing_mask$',
+    # Until the loop end (at most 1), the default one-shot cap preserves next.
+    '^tract-effects/src/modulation/smoothing\.rs:\d+:9: delete match arm \(PlayMode::OneShot, HoldMode::Loop\{\.\.\}\) in phase_next$',
+    # The float has 32 bits, below the presence bit.
+    '^tract-effects/src/modulation/audition\.rs:\d+:47: replace \| with \^ in AuditionControl::store_settings$',
+    # The epoch, valid bit, row, effect kind, and source occupy disjoint bits.
+    '^tract-effects/src/modulation/audition\.rs:(138|139|140|141):13: replace \| with \^ in AuditionControl::begin$',
+    # A writer clears the low bit first. Readers reject both odd and zero stamps.
+    '^tract-effects/src/modulation/audition\.rs:\d+:32: replace \| with (\^|&) in AuditionControl::(begin|update)$',
+    '^tract-effects/src/modulation_telemetry\.rs:\d+:32: replace \| with (\^|&) in AtomicFrame::store$',
+    # A present filter is clamped to 20..20000 Hz, with nonzero float bits. Level is absent.
+    '^tract-effects/src/modulation/audition\.rs:\d+:19: replace >> with << in AuditionControl::snapshot$',
+    # Packed floats occupy the low word and tags or the second float occupy the high word.
+    '^tract-effects/src/modulation_telemetry\.rs:\d+:(24|28|52): replace \| with \^ in (pair|norm|optional_float)$',
+    # Valid wave fields occupy separate bytes. Invalid envelope 255 decodes as absent either way.
+    '^tract-effects/src/modulation_telemetry\.rs:(108|109|110):13: replace \| with \^ in wave_tag$',
+    # is_valid already rejects envelope and channel overflow after decoding.
+    '^tract-effects/src/modulation_telemetry\.rs:\d+:38: replace \|\| with && in read_wave_tag$',
+    # The request key and epoch occupy disjoint bits, as do the packed key fields.
+    '^tract-effects/src/modulation_telemetry\.rs:(353|354|355|356|357|358|359):13: replace \| with \^ in ModulationTelemetry::request_for_modes$',
+    '^tract-effects/src/modulation_telemetry\.rs:\d+:44: replace \| with \^ in ModulationTelemetry::request_for_modes$',
+    # The waveform request fields and stereo range samples occupy disjoint bits.
+    '^tract-effects/src/waveform\.rs:(67|68|69|70):13: replace \| with \^ in WaveformTelemetry::request_source$',
+    '^tract-effects/src/waveform\.rs:\d+:44: replace \| with \^ in (WaveformTelemetry::request_source|WaveformTelemetry::record_stereo)$',
+    # Detector key modifiers use distinct flag bits.
+    "^tract-effects/src/editor/detector\\.rs:(671:64|685:(56|74)): replace \\| with \\^ in Session<'_>::handle_detector_event$",
+    # At zero detector level, both -80 dB and -infinity produce a zero-width bar.
+    '^tract-effects/src/editor/detector\.rs:\d+:33: replace > with >= in EffectEditor::draw_detector$',
+    # Callers provide nonnegative widths and measuring empty text returns zero.
+    '^tract-effects/src/editor/follower\.rs:\d+:15: replace > with >= in bounded_text$',
+    # DropdownState::open clamps the selection to the last row independently.
+    "^tract-effects/src/editor/midi\\.rs:\\d+:35: replace - with (\\+|/) in Session<'_>::open_midi_filter$",
+    # Timing and Waves key modifiers use distinct flag bits.
+    "^tract-effects/src/editor/timing\\.rs:507:(52|70): replace \\| with \\^ in Session<'_>::handle_timing_event$",
+    "^tract-effects/src/editor/wave_midi\\.rs:524:(52|70): replace \\| with \\^ in Session<'_>::handle_wave_midi_event$",
+    # The directional factor is always +1 or -1.
+    "^tract-effects/src/editor/timing\\.rs:575:27: replace \\* with / in Session<'_>::handle_timing_event$",
+    # Complementing the sidechain flag in every cached key preserves key equality.
+    '^tract-effects/src/editor/live\.rs:\d+:37: replace == with != in LiveSource::refresh_waveform$',
+    # The f32 projection still requires a positive rate.
+    '^tract-effects/src/modulation/precise\.rs:62:19: replace > with >= in PreciseTrigger::prepare$',
+    # Before the first valid sample rate, refractory is zero and NaN casts to zero.
+    '^tract-effects/src/modulation/precise\.rs:83:33: replace > with >= in PreciseTrigger::prepare$',
+    # Modifiers occupy distinct bits and the key direction is always +1 or -1.
+    "^tract-effects/src/editor/follower/events\\.rs:326:(52|70): replace \\| with \\^ in Session<'_>::handle_follower_event$",
+    "^tract-effects/src/editor/follower/events\\.rs:435:31: replace \\* with / in Session<'_>::handle_follower_event$",
+    # Callers pass valid row indices. focus_follower also clamps End and PageDown to the last row.
+    "^tract-effects/src/editor/follower/events\\.rs:117:50: replace - with (\\+|/) in Session<'_>::focus_follower$",
+    "^tract-effects/src/editor/follower/events\\.rs:(406:58|412:81): replace - with (\\+|/) in Session<'_>::handle_follower_event$",
+    # Both follower lists disable filtering, so Backspace leaves their selections unchanged.
+    "^tract-effects/src/editor/follower/events\\.rs:340:25: delete match arm Key::Backspace in Session<'_>::handle_follower_event$",
+    # Level zero formats as -inf dB through either branch.
+    '^tract-effects/src/editor/follower/view\.rs:\d+:34: replace > with >= in EffectEditor::draw_follower_popup$',
+    # Each route contributes a distinct bit. Mode uses bits 0 and 1, and sidechain uses bit 2.
+    '^tract-effects/src/modulation/follower\.rs:\d+:(22|14): replace \| with \^ in FollowerConfig::(mask|request_key)$',
+    # The route comparison above already marks every changed enable bit.
+    '^tract-effects/src/modulation/follower\.rs:\d+:33: replace \| with & in FollowerRuntime::prepare$',
+    # The f32 validation still rejects nonfinite and nonpositive rates.
+    '^tract-effects/src/modulation/(follower|trigger_timing)\.rs:\d+:28: replace \|\| with && in (FollowerRuntime|TimingRuntime)::prepare$',
+    # At zero rate the division is nonfinite, and the step falls back to zero.
+    '^tract-effects/src/modulation/pitch\.rs:\d+:73: replace > with >= in MidiPitchRuntime::update_rate$',
+    # Before the first valid rate, audio is inactive and no blends have been armed.
+    '^tract-effects/src/modulation/trigger_timing\.rs:(163:36|181:29): replace > with >= in TimingRuntime::prepare$',
+    # Before the first valid rate, reset has already cleared the follower hold count.
+    '^tract-effects/src/modulation/follower\.rs:\d+:29: replace > with >= in FollowerRuntime::prepare$',
+    # Active routes have a positive stored rate and recalculate the identical gain.
+    '^tract-effects/src/modulation/follower\.rs:\d+:87: replace == with != in FollowerRuntime::prepare$',
+    # Each clock domain contributes one distinct bit.
+    '^tract-effects/src/modulation/position\.rs:\d+:22: replace \| with \^ in PositionClock::jump_mask$',
+    # Float range, enable, and mode use disjoint bit fields.
+    '^tract-effects/src/modulation_telemetry/follower\.rs:\d+:(57|80): replace \| with \^ in AtomicFollower::store$',
+    # Channel and transpose occupy different words. The decoded i8 truncates a 256 difference.
+    '^tract-effects/src/modulation_telemetry/pitch\.rs:\d+:17: replace \| with \^ in AtomicPitch::store$',
+    '^tract-effects/src/modulation_telemetry/pitch\.rs:\d+:56: replace \+ with - in AtomicPitch::store$',
+    '^tract-effects/src/modulation_telemetry/pitch\.rs:\d+:53: replace - with \+ in AtomicPitch::load$',
+    # Validated mappings, list choices, and host wave values already bound every index.
+    '^tract-effects/src/editor/wave_midi\.rs:\d+:91: replace - with (\+|/) in EffectEditor::draw_wave_midi_popup$',
+    # Equality already places the focused row first, and at least one row is visible.
+    '^tract-effects/src/editor/follower\.rs:\d+:23: replace < with <= in Panel::reveal$',
+    # A zero-depth inverse yields no levels. Nonfinite endpoints fail the later guards.
+    '^tract-effects/src/editor/pitch_grid\.rs:(54|55):9: replace \|\| with && in mapped_grid$',
+    # At zero minimum, max/min is still nonfinite.
+    '^tract-effects/src/editor/pitch_grid\.rs:\d+:25: replace > with >= in mapped_grid$',
+    # A frequency ratio that overflows f32 would exceed the 512-semitone budget.
+    '^tract-effects/src/editor/pitch_grid\.rs:\d+:44: replace / with % in mapped_grid$',
+    # Span overflow already exceeds the level budget. NaN log bases yield no levels.
+    '^tract-effects/src/editor/pitch_grid\.rs:\d+:31: replace \|\| with && in mapped_grid$',
+    # A right press on an open curve menu dismisses it without changing the fresh response.
+    "^tract-effects/src/editor/mod\\.rs:957:35: replace \\|= with &= in Session<'a>::on_right_press$",
+    # The bundled font's title already fits at the minimum width and at scaled widths.
+    '^tract-effects/src/editor/follower/view\.rs:31:25: replace - with \+ in EffectEditor::draw_follower_popup$',
+    '^tract-effects/src/editor/follower/view\.rs:31:31: replace - with (\+|/) in EffectEditor::draw_follower_popup$',
+    # At the minimum width and at scaled widths, the draft's font-width cap binds before 40% of the row.
+    '^tract-effects/src/editor/follower/view\.rs:96:38: replace \* with (\+|/) in EffectEditor::draw_follower_popup$',
     # At valid audio rates, zero Hz adds zero to a phase already below 1.
     '^tract-effects/src/modulation\.rs:\d+:48: replace > with >= in ModulationState::begin_block$',
     # norm < 1 and registered enum sizes make floor(norm*n) <= n-1;

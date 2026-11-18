@@ -48,6 +48,38 @@ The bundler outputs to `target/bundled/`. Copy either the `.vst3` or `.clap` fil
 
 ### Curve Editors (top three panes)
 
+Each pane offers the shared [curve tools](../mseg-editor.md): shape pens,
+selection handles, reusable curves/favorites, cross-plugin copy/paste, mutation,
+transforms, and triplet grids. Find them in **Tool**, **Shapes**, and **Edit**.
+In Efficient mode, curve gestures defer IR baking until release.
+
+**Shapes → Browse shapes...** previews factory curves and shared favorites for
+the opening pane. Load/Fit replaces its curve and regenerates the tail; storing
+or clearing favorites leaves the tail unchanged. See
+[browsing thumbnails](../mseg-editor.md#browsing-thumbnails).
+
+The browser's **Project** tab adds eight waves saved with this instance and
+shared across the three panes. See [project waves](../mseg-editor.md#project-waves).
+
+The **User** tab saves named curves shared across plugins, with paging, Rename
+and confirmed Delete. Management leaves the tail intact; Load/Fit regenerates it.
+See [named user presets](../mseg-editor.md#named-user-presets).
+
+Factory/User category filters and the Save/Rename Category field organize curves
+without regenerating the tail. See [categories](../mseg-editor.md#categories).
+
+**Find** or **Ctrl/Cmd+F** searches Factory/User names and categories; typing
+leaves the tail intact. See [searching curves](../mseg-editor.md#searching-curves).
+
+Each pane provides hover hints and a **?** gesture guide beside Point. Point at
+a pane and press **F1 / ?**, or use **View → Editing guide...**. The guide keeps
+its pane's input ownership and leaves the tail unchanged; see
+[context help](../mseg-editor.md#context-help-and-gesture-guide).
+
+Edit includes endpoint matching and **Smooth loop seam (10%)** across the whole
+selected pane's curve. These modify its saved shape and regenerate the tail;
+see [loop seam tools](../mseg-editor.md#loop-seam-tools).
+
 The three stacked MSEG editors share a **tail-position x-axis** running from 0 % (attack of the tail) to 100 % (end of the tail). All three drive the velvet sequence generation together; any edit triggers an immediate re-generation.
 
 **Reading the curves.** Every curve runs left-to-right along the same axis — the *left edge is the start of the tail* (just after the dry hit) and the *right edge is the end of the tail* (where it fades out). The y-axis is "more of that quality": higher = louder (Decay), wider (Width), or brighter (Tone). The factory defaults are deliberately shaped to read as one **natural room**: the tail **decays** to silence, **widens** from a centred onset into a diffuse stereo bloom, and **darkens** as high frequencies are absorbed. That gives you a familiar starting point — drag any curve from there to sculpt the part of the tail you want to change.

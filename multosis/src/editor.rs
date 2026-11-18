@@ -104,6 +104,7 @@ struct MultosisWindow {
     /// Slot `row*4 + k`. The editor's playhead overlay reads the active one
     /// each frame.
     mseg_phases: Arc<[AtomicU32; 64]>,
+    telemetry: Arc<tract_effects::modulation_telemetry::ModulationTelemetry>,
     /// Latest cursor position in physical pixels, updated on CursorMoved.
     mouse_pos: (f32, f32),
     text_renderer: widgets::TextRenderer,
@@ -156,6 +157,7 @@ impl MultosisWindow {
         reset_request: Arc<AtomicBool>,
         active_rows: Arc<AtomicU16>,
         mseg_phases: Arc<[AtomicU32; 64]>,
+        telemetry: Arc<tract_effects::modulation_telemetry::ModulationTelemetry>,
         config_dirty: Arc<AtomicBool>,
         pending_track_swap: Arc<AtomicU32>,
         scale_factor: f32,
@@ -164,6 +166,8 @@ impl MultosisWindow {
         let ph = (WINDOW_HEIGHT as f32 * scale_factor).round() as u32;
         let surface = widgets::SoftbufferSurface::new(window, pw, ph);
         let text_renderer = widgets::TextRenderer::new(include_bytes!("fonts/DejaVuSans.ttf"));
+        let mut effect_editor = EffectEditor::default();
+        effect_editor.bind_wave_palette(params.wave_palette.clone());
         Self {
             surface,
             physical_width: pw,
@@ -175,6 +179,7 @@ impl MultosisWindow {
             grid_handoff,
             active_rows,
             mseg_phases,
+            telemetry,
             toolbar_click: ClickTracker::new(),
             mouse_pos: (0.0, 0.0),
             text_renderer,
@@ -187,7 +192,7 @@ impl MultosisWindow {
             grid_cache: grid_view::GridCache::new(pw, ph),
             view: View::Grid,
             selected_track: 0,
-            effect_editor: EffectEditor::default(),
+            effect_editor,
             speed_dropdown: widgets::dropdown::DropdownState::new(),
             undo: UndoHistory::new(),
             config_dirty,
@@ -520,6 +525,7 @@ impl MultosisWindow {
         if from == to || from >= crate::grid::ROWS || to >= crate::grid::ROWS {
             return;
         }
+        self.effect_editor.invalidate_trace();
         let snap = self.snapshot();
         let opened = self.undo.begin_capture(snap);
         if let (Ok(mut grid), Ok(mut effects), Ok(mut modu)) = (
@@ -561,6 +567,8 @@ impl MultosisWindow {
         if let Some(snap) = self.undo.undo(current) {
             snap.restore(&self.params);
             self.effect_editor.clear_selection();
+            self.effect_editor.cancel_detector();
+            self.effect_editor.invalidate_trace();
             self.mark_config_dirty();
         }
     }
@@ -576,6 +584,8 @@ impl MultosisWindow {
         if let Some(snap) = self.undo.redo(current) {
             snap.restore(&self.params);
             self.effect_editor.clear_selection();
+            self.effect_editor.cancel_detector();
+            self.effect_editor.invalidate_trace();
             self.mark_config_dirty();
         }
     }
@@ -608,11 +618,32 @@ impl MultosisWindow {
         }
     }
 
+    fn finish_input(&mut self) {
+        self.undo.begin_capture(self.snapshot());
+        if let Some(ctrl) = self.toolbar_drag.end_drag() {
+            self.end_slider(ctrl);
+        }
+        self.left_gesture = None;
+        self.track_drag = None;
+        self.speed_dropdown.close();
+        if self.view == View::Effect {
+            let event = baseview::Event::Window(baseview::WindowEvent::Unfocused);
+            self.dispatch_effect_event(&event, true);
+            self.handle_effect_event(&event);
+        } else {
+            self.effect_editor.cancel_detector();
+        }
+        let after = self.snapshot();
+        self.undo.commit_capture(&after);
+    }
+
     fn handle_effect_event(&mut self, event: &baseview::Event) -> bool {
         self.dispatch_effect_event(event, false)
     }
 
     fn dispatch_effect_event(&mut self, event: &baseview::Event, finish_text: bool) -> bool {
+        self.effect_editor
+            .set_wave_automation(self.params.waves[self.selected_track].values());
         let geometry = self.effect_geometry();
         let response = {
             let (Ok(mut effects), Ok(mut modulation)) = (
@@ -637,16 +668,26 @@ impl MultosisWindow {
         if response.changed {
             self.mark_config_dirty();
         }
+        if let Some((slot, value)) = response.wave_automation {
+            let param = self.params.waves[self.selected_track].controls()[slot];
+            let setter = ParamSetter::new(self.gui_context.as_ref());
+            setter.begin_set_parameter(param);
+            setter.set_parameter(param, value as i32);
+            setter.end_set_parameter(param);
+        }
         if response.randomize {
             self.randomize_selected_track_effect();
         }
         if response.back {
+            self.effect_editor.disconnect_live();
             self.view = View::Grid;
         }
         response.captured
     }
 
     fn draw_effect_view(&mut self) {
+        self.effect_editor
+            .set_wave_automation(self.params.waves[self.selected_track].values());
         let effect = self.selected_track_effect();
         let modulation = self.selected_track_modulation();
         let geometry = self.effect_geometry();
@@ -659,6 +700,8 @@ impl MultosisWindow {
             self.selected_track,
             self.scale_factor,
         );
+        self.effect_editor
+            .connect_live(&self.telemetry, self.selected_track);
         self.effect_editor.draw(
             &mut self.surface.pixmap,
             &mut self.text_renderer,
@@ -707,6 +750,7 @@ impl MultosisWindow {
     fn draw(&mut self) {
         match self.view {
             View::Grid => {
+                self.effect_editor.disconnect_live();
                 let grid = self.params.grid.lock().map(|g| *g).unwrap_or_default();
                 self.grid_cache.update(&grid, self.scale_factor);
                 self.surface
@@ -847,6 +891,12 @@ impl baseview::WindowHandler for MultosisWindow {
         event: baseview::Event,
     ) -> baseview::EventStatus {
         match &event {
+            baseview::Event::Mouse(baseview::MouseEvent::CursorLeft) => {
+                if self.view == View::Effect {
+                    self.handle_effect_event(&event);
+                }
+            }
+            baseview::Event::Window(baseview::WindowEvent::Unfocused) => self.finish_input(),
             baseview::Event::Window(baseview::WindowEvent::Resized(info)) => {
                 self.physical_width = info.physical_size().width;
                 self.physical_height = info.physical_size().height;
@@ -985,6 +1035,7 @@ impl baseview::WindowHandler for MultosisWindow {
                                 // stale indices can't act on another track's MSEG.
                                 if new_track != self.selected_track {
                                     self.effect_editor.clear_selection();
+                                    self.effect_editor.cancel_detector();
                                 }
                                 self.selected_track = new_track;
                                 self.view = View::Effect;
@@ -1029,7 +1080,34 @@ impl baseview::WindowHandler for MultosisWindow {
                 }
                 return status;
             }
+            baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed {
+                button: baseview::MouseButton::Middle,
+                ..
+            })
+            | baseview::Event::Mouse(baseview::MouseEvent::ButtonReleased {
+                button: baseview::MouseButton::Middle,
+                ..
+            }) => {
+                let pressing = matches!(
+                    event,
+                    baseview::Event::Mouse(baseview::MouseEvent::ButtonPressed { .. })
+                );
+                if self.view == View::Effect
+                    && !self.speed_dropdown.is_open()
+                    && (!pressing || self.toolbar_drag.active_action().is_none())
+                {
+                    let opened = pressing && self.undo.begin_capture(self.snapshot());
+                    self.handle_effect_event(&event);
+                    if opened {
+                        let after = self.snapshot();
+                        self.undo.commit_capture(&after);
+                    }
+                }
+            }
             baseview::Event::Mouse(baseview::MouseEvent::WheelScrolled { delta, .. }) => {
+                if self.toolbar_drag.active_action().is_some() {
+                    return baseview::EventStatus::Captured;
+                }
                 // Mousewheel scrolls the currently-open dropdown popup.
                 // Lines deliver one click per detent; pixel-mode trackpads
                 // deliver fine-grained pixel counts — scale the latter to
@@ -1080,6 +1158,15 @@ impl baseview::WindowHandler for MultosisWindow {
                 let after = self.snapshot();
                 self.undo.commit_capture(&after);
             }
+            baseview::Event::Keyboard(ev)
+                if (self.speed_dropdown.is_open()
+                    || self.toolbar_drag.active_action().is_some()
+                    || self.track_drag.is_some()
+                    || self.left_gesture.is_some())
+                    && widgets::mseg::is_help_shortcut(ev) =>
+            {
+                return baseview::EventStatus::Captured;
+            }
             baseview::Event::Keyboard(_) if self.effect_editor.captures_keyboard() => {
                 let snap = self.snapshot();
                 let opened = self.undo.begin_capture(snap);
@@ -1101,7 +1188,9 @@ impl baseview::WindowHandler for MultosisWindow {
                 // Undo / redo — handled before any capture so the keystroke
                 // itself is never recorded as an editing gesture. Active in
                 // both views.
-                if ev.modifiers.contains(keyboard_types::Modifiers::CONTROL) {
+                if ev.modifiers.intersects(
+                    keyboard_types::Modifiers::CONTROL | keyboard_types::Modifiers::META,
+                ) {
                     let is_z = matches!(
                         &ev.key,
                         keyboard_types::Key::Character(s) if s.eq_ignore_ascii_case("z")
@@ -1140,6 +1229,13 @@ impl baseview::WindowHandler for MultosisWindow {
     }
 }
 
+impl Drop for MultosisWindow {
+    fn drop(&mut self) {
+        self.finish_input();
+        self.effect_editor.disconnect_live();
+    }
+}
+
 /// The nih-plug `Editor` — spawns the window.
 struct MultosisEditor {
     params: Arc<MultosisParams>,
@@ -1149,6 +1245,7 @@ struct MultosisEditor {
     reset_request: Arc<AtomicBool>,
     active_rows: Arc<AtomicU16>,
     mseg_phases: Arc<[AtomicU32; 64]>,
+    telemetry: Arc<tract_effects::modulation_telemetry::ModulationTelemetry>,
     config_dirty: Arc<AtomicBool>,
     /// Editor → audio handoff for the GUI's drag-and-drop track-swap gesture.
     /// Encoded `((from + 1) << 8) | (to + 1)`; see `Multosis::pending_track_swap`.
@@ -1166,6 +1263,7 @@ pub fn create(
     reset_request: Arc<AtomicBool>,
     active_rows: Arc<AtomicU16>,
     mseg_phases: Arc<[AtomicU32; 64]>,
+    telemetry: Arc<tract_effects::modulation_telemetry::ModulationTelemetry>,
     config_dirty: Arc<AtomicBool>,
     pending_track_swap: Arc<AtomicU32>,
 ) -> Option<Box<dyn Editor>> {
@@ -1177,6 +1275,7 @@ pub fn create(
         reset_request,
         active_rows,
         mseg_phases,
+        telemetry,
         config_dirty,
         pending_track_swap,
         pending_resize: Arc::new(AtomicU64::new(0)),
@@ -1201,6 +1300,7 @@ impl Editor for MultosisEditor {
         let reset_request = Arc::clone(&self.reset_request);
         let active_rows = Arc::clone(&self.active_rows);
         let mseg_phases = Arc::clone(&self.mseg_phases);
+        let telemetry = Arc::clone(&self.telemetry);
         let config_dirty = Arc::clone(&self.config_dirty);
         let pending_track_swap = Arc::clone(&self.pending_track_swap);
 
@@ -1225,6 +1325,7 @@ impl Editor for MultosisEditor {
                     reset_request,
                     active_rows,
                     mseg_phases,
+                    telemetry,
                     config_dirty,
                     pending_track_swap,
                     sf,

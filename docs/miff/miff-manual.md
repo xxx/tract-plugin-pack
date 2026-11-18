@@ -81,6 +81,37 @@ by **segments**.
 
 ### Drawing and editing
 
+The shared [curve tools](../mseg-editor.md) add shape pens, selection handles,
+reusable curves/favorites, cross-plugin copy/paste, mutation, transforms, and
+triplet grids through the **Tool**, **Shapes**, and **Edit** menus. All curve
+edits update the baked kernel.
+
+**Shapes → Browse shapes...** previews factory curves and shared favorites.
+Load/Fit replaces the kernel curve and rebakes it; storing/clearing favorites
+leaves it unchanged. See [browsing thumbnails](../mseg-editor.md#browsing-thumbnails).
+
+The browser's **Project** tab adds eight waves saved with this instance.
+Store/Clear leaves the kernel intact; Load/Fit rebakes it. See
+[project waves](../mseg-editor.md#project-waves).
+
+The **User** tab saves named curves shared across plugins, with paging, Rename
+and confirmed Delete. Management leaves the kernel intact; Load/Fit rebakes it.
+See [named user presets](../mseg-editor.md#named-user-presets).
+
+Factory/User category filters and the Save/Rename Category field organize curves
+without rebaking the kernel. See [categories](../mseg-editor.md#categories).
+
+**Find** or **Ctrl/Cmd+F** searches Factory/User names and categories; typing
+leaves the kernel intact. See [searching curves](../mseg-editor.md#searching-curves).
+
+Hover for footer hints, or click **?** beside Point for the gesture guide.
+**F1 / ?** and **View → Editing guide...** also open it. Help leaves the curve
+and kernel intact; see [context help](../mseg-editor.md#context-help-and-gesture-guide).
+
+Edit includes endpoint matching and **Smooth loop seam (10%)** across the whole
+kernel curve. These modify the saved shape and rebake the kernel; see
+[loop seam tools](../mseg-editor.md#loop-seam-tools).
+
 - **Double-click empty canvas** — add a node at the pointer. (A single click-and-drag on empty canvas draws a selection marquee instead of adding a node.)
 - **Drag a node** — move it. Interior nodes stay between their neighbours; the
   first and last nodes are pinned to the left and right edges (their value can

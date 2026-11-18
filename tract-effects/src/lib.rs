@@ -3,9 +3,13 @@
 pub mod compressor;
 pub mod editor;
 pub mod effects;
+pub mod lookahead;
 pub mod modulation;
+pub mod modulation_telemetry;
 pub mod randomize;
+pub mod sidechain;
 pub mod undo;
+pub mod waveform;
 
 #[cfg(test)]
 mod compatibility_tests {
