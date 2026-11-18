@@ -18,6 +18,40 @@ use keyboard_types::{Key, KeyState, KeyboardEvent, Modifiers};
 
 type Rect = (f32, f32, f32, f32);
 
+#[test]
+fn saved_snap_and_grid_edits_report_changes_and_remain_undoable() {
+    use crate::undo::UndoHistory;
+    let mut h = Harness::new();
+    let slot = h.editor.selected_mseg;
+    let before = h.modulation.clone();
+    let mut undo = UndoHistory::new();
+    let layout = widgets::mseg::mseg_layout(h.geometry.layout.mseg_pane, false, 1.0);
+
+    assert!(undo.begin_capture(before.clone()));
+    let (x, y, _, _) = layout.strip;
+    assert!(h.click((x + 7.0, y + 4.0, 1.0, 1.0)).changed);
+    assert_ne!(h.modulation.msegs[slot].snap, before.msegs[slot].snap);
+    undo.commit_capture(&h.modulation);
+    let after_snap = h.modulation.clone();
+
+    assert!(undo.begin_capture(after_snap.clone()));
+    assert!(
+        h.click(widgets::mseg::grid_button_rect(layout.strip, 1.0))
+            .captured
+    );
+    h.key(Key::Home);
+    assert!(h.key(Key::Enter).changed);
+    assert_ne!(
+        h.modulation.msegs[slot].time_divisions,
+        after_snap.msegs[slot].time_divisions
+    );
+    assert!(h.modulation.msegs[slot].same_geometry(&before.msegs[slot]));
+    undo.commit_capture(&h.modulation);
+    assert_eq!(undo.undo(h.modulation), Some(after_snap.clone()));
+    assert_eq!(undo.undo(after_snap), Some(before));
+    assert!(!undo.can_undo());
+}
+
 struct Harness {
     editor: EffectEditor,
     effect: TrackEffect,

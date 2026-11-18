@@ -210,6 +210,17 @@ pub struct MsegEditState {
 }
 
 impl MsegEditState {
+    /// Run an editor operation and report whether it changed the active node geometry.
+    pub fn edit_geometry<R>(
+        &mut self,
+        data: &mut MsegData,
+        edit: impl FnOnce(&mut Self, &mut MsegData) -> R,
+    ) -> (R, bool) {
+        let before = *data;
+        let result = edit(self, data);
+        (result, !before.same_geometry(data))
+    }
+
     /// Show a playback source while retaining the authored document for later editing.
     pub fn set_read_only_curve(&mut self, curve: Option<MsegData>) {
         if curve.is_some() && self.read_only_curve.is_none() {
@@ -1251,6 +1262,103 @@ mod tests {
     #[test]
     fn new_curve_only_is_curve_only() {
         assert!(MsegEditState::new_curve_only().is_curve_only());
+    }
+
+    #[test]
+    fn geometry_reports_real_node_edits_but_not_saved_settings_or_snapped_noops() {
+        use crate::mseg::render::strip_buttons;
+        use keyboard_types::{Key, KeyState, KeyboardEvent};
+
+        let rect = (0.0, 0.0, 880.0, 350.0);
+        let layout = mseg_layout(rect, true, 1.0);
+        let buttons = strip_buttons(layout.strip, 1.0, false);
+        let mut state = MsegEditState::new_curve_only();
+        state.set_grid_options(&[(16, 8), (8, 4)]);
+        let mut curve = MsegData::default();
+        curve.insert_node(0.5, 0.5).unwrap();
+
+        let toggle_snap = |state: &mut MsegEditState, data: &mut MsegData| {
+            state.on_mouse_down(
+                buttons.snap.0 + 1.0,
+                buttons.snap.1 + 1.0,
+                data,
+                rect,
+                1.0,
+                false,
+            )
+        };
+        assert_eq!(
+            state.edit_geometry(&mut curve, toggle_snap),
+            (Some(MsegEdit::Changed), false)
+        );
+        assert!(!curve.snap);
+        assert_eq!(
+            state.edit_geometry(&mut curve, toggle_snap),
+            (Some(MsegEdit::Changed), false)
+        );
+        assert!(curve.snap);
+
+        assert_eq!(
+            state.edit_geometry(&mut curve, |state, data| {
+                state.on_mouse_down(
+                    buttons.grid.0 + 1.0,
+                    buttons.grid.1 + 1.0,
+                    data,
+                    rect,
+                    1.0,
+                    false,
+                )
+            }),
+            (None, false)
+        );
+        let key = |key| KeyboardEvent {
+            key,
+            state: KeyState::Down,
+            ..KeyboardEvent::default()
+        };
+        state.on_key(&key(Key::End), &mut curve, rect, 1.0);
+        assert_eq!(
+            state.edit_geometry(&mut curve, |state, data| state.on_key(
+                &key(Key::Enter),
+                data,
+                rect,
+                1.0
+            )),
+            ((true, Some(MsegEdit::Changed)), false)
+        );
+        assert_eq!((curve.time_divisions, curve.value_steps), (8, 4));
+
+        let x = phase_to_x(&layout, 0.5);
+        let y = value_to_y(&layout, 0.5);
+        assert!(
+            !state
+                .edit_geometry(&mut curve, |state, data| state
+                    .on_mouse_down(x, y, data, rect, 1.0, false))
+                .1
+        );
+        assert_eq!(
+            state.edit_geometry(&mut curve, |state, data| state.on_mouse_move(
+                x + 1.0,
+                y + 1.0,
+                data,
+                rect,
+                1.0,
+                false
+            )),
+            (Some(MsegEdit::Changed), false)
+        );
+        assert_eq!(
+            state.edit_geometry(&mut curve, |state, data| {
+                state.on_mouse_move(x, value_to_y(&layout, 0.75), data, rect, 1.0, false)
+            }),
+            (Some(MsegEdit::Changed), true)
+        );
+        assert!(
+            !state
+                .edit_geometry(&mut curve, |state, data| state.on_mouse_up(data, rect, 1.0))
+                .1
+        );
+        assert_eq!(curve.nodes[1].value, 0.75);
     }
 
     // --- Task 8: interaction tests ---

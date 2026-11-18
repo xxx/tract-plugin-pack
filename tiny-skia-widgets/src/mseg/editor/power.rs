@@ -1341,8 +1341,10 @@ mod tests {
         );
         assert_ne!(data, original);
         assert_eq!(
-            state.on_key(&key(Key::Escape, Modifiers::empty()), &mut data, RECT, 1.0),
-            (true, Some(MsegEdit::Changed))
+            state.edit_geometry(&mut data, |state, data| {
+                state.on_key(&key(Key::Escape, Modifiers::empty()), data, RECT, 1.0)
+            }),
+            ((true, Some(MsegEdit::Changed)), true)
         );
         assert_eq!(data, original);
         assert!(!state.is_dragging());

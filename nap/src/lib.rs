@@ -283,6 +283,48 @@ impl NapParams {
     }
 }
 
+struct SequenceInputs {
+    params: GenParams,
+    curves: [MsegData; 3],
+}
+
+impl SequenceInputs {
+    fn read(params: &NapParams, sample_rate: f32) -> Option<Self> {
+        let decay = *params.decay_curve.lock().ok()?;
+        let width = *params.width_curve.lock().ok()?;
+        let tone = *params.tone_curve.lock().ok()?;
+        Some(Self {
+            params: GenParams {
+                sample_rate,
+                size_s: params.size.value(),
+                density: params.density.value(),
+                width_ms: params.width.value(),
+                seed: params.seed.value() as u64,
+            },
+            curves: [decay, width, tone],
+        })
+    }
+
+    fn same_design(&self, other: &Self) -> bool {
+        self.params == other.params
+            && self
+                .curves
+                .iter()
+                .zip(&other.curves)
+                .all(|(a, b)| a.same_geometry(b))
+    }
+
+    fn generate(&self, scratch: &mut VelvetSequence) {
+        let [decay, width, tone] = &self.curves;
+        generate(scratch, &self.params, decay, width, tone);
+    }
+
+    fn publish(&self, handoff: &SequenceHandoff, scratch: &mut VelvetSequence) {
+        self.generate(scratch);
+        handoff.publish(scratch);
+    }
+}
+
 impl Nap {
     /// Generate the sequence from the current params + curves and publish it.
     /// GUI / setup thread only (locks the curves, allocates nothing on the
@@ -293,18 +335,9 @@ impl Nap {
         sample_rate: f32,
         scratch: &mut VelvetSequence,
     ) {
-        let p = GenParams {
-            sample_rate,
-            size_s: params.size.value(),
-            density: params.density.value(),
-            width_ms: params.width.value(),
-            seed: params.seed.value() as u64,
-        };
-        let decay = *params.decay_curve.lock().unwrap();
-        let width = *params.width_curve.lock().unwrap();
-        let tone = *params.tone_curve.lock().unwrap();
-        generate(scratch, &p, &decay, &width, &tone);
-        handoff.publish(scratch);
+        if let Some(inputs) = SequenceInputs::read(params, sample_rate) {
+            inputs.publish(handoff, scratch);
+        }
     }
 
     /// Bake the IR from the current params/curves and publish it via the
@@ -320,25 +353,22 @@ impl Nap {
         ir_l: &mut IrSpectra,
         ir_r: &mut IrSpectra,
     ) {
-        // Build the sequence (same math as regenerate, without the sequence publish).
-        let p = GenParams {
-            sample_rate,
-            size_s: params.size.value(),
-            density: params.density.value(),
-            width_ms: params.width.value(),
-            seed: params.seed.value() as u64,
+        let Some(inputs) = SequenceInputs::read(params, sample_rate) else {
+            return;
         };
-        let decay = *params.decay_curve.lock().unwrap();
-        let width = *params.width_curve.lock().unwrap();
-        let tone = *params.tone_curve.lock().unwrap();
-        generate(scratch_seq, &p, &decay, &width, &tone);
+        inputs.generate(scratch_seq);
+        Self::bake_sequence_ir(ir_handoff, scratch_seq, baker, ir_l, ir_r);
+    }
 
-        // Clone the location vecs so we can pass them as separate borrows
-        // alongside &scratch_seq (borrow checker can't split the borrow otherwise).
-        let loc_l = scratch_seq.location[..scratch_seq.count].to_vec();
-        let loc_r = scratch_seq.location_r[..scratch_seq.count].to_vec();
-        baker.bake(scratch_seq, &loc_l, ir_l);
-        baker.bake(scratch_seq, &loc_r, ir_r);
+    fn bake_sequence_ir(
+        ir_handoff: &IrHandoff,
+        sequence: &VelvetSequence,
+        baker: &mut IrBaker,
+        ir_l: &mut IrSpectra,
+        ir_r: &mut IrSpectra,
+    ) {
+        baker.bake(sequence, &sequence.location[..sequence.count], ir_l);
+        baker.bake(sequence, &sequence.location_r[..sequence.count], ir_r);
         ir_handoff.publish(ir_l, ir_r);
     }
 }
