@@ -56,7 +56,6 @@ pub struct Processor {
     waveform_telemetry: Option<Arc<ModulationTelemetry>>,
     span_remaining: usize,
     span_processed: usize,
-    skip_precise_sample: bool,
     span_track: TrackEffect,
     span_bpm: f64,
     wave_bank: tiny_skia_widgets::mseg::WavePaletteSnapshot,
@@ -93,7 +92,6 @@ impl Processor {
             waveform_telemetry: None,
             span_remaining: 0,
             span_processed: 0,
-            skip_precise_sample: false,
             span_track: *track,
             span_bpm: 120.0,
             wave_bank: tiny_skia_widgets::mseg::WavePaletteSnapshot::default(),
@@ -162,17 +160,9 @@ impl Processor {
         let sample_rate = f32::from_bits(self.key.sample_rate_bits) as f64;
         self.state
             .begin_block(&self.modulation, left, right, sample_rate);
-        self.skip_precise_sample = false;
-        if self.state.precise_trigger_active()
-            && let Some((&l, &r)) = left.first().zip(right.first())
-        {
-            if self
-                .state
-                .next_precise_trigger_with_sidechain([l, r], sidechain.sample(0))
-            {
-                self.state.trigger();
-            }
-            self.skip_precise_sample = true;
+        if let Some((&l, &r)) = left.first().zip(right.first()) {
+            self.state
+                .preflight_precise_sample([l, r], sidechain.sample(0));
         }
         if let Some(telemetry) = &self.waveform_telemetry {
             self.waveform.begin_block(&telemetry.waveform);
@@ -229,9 +219,8 @@ impl Processor {
         within_span: bool,
     ) -> bool {
         self.state
-            .select_midi_wave(&self.modulation, &self.wave_bank, event);
-        self.state
-            .midi_note_on(&self.modulation, event, within_span)
+            .dispatch_playback_note(&self.modulation, &self.wave_bank, event, within_span)
+            .retriggered
     }
 
     pub fn uses_midi_waves(&self) -> bool {
@@ -247,12 +236,8 @@ impl Processor {
         self.wave_bank.refresh(palette);
     }
     pub fn accepts_midi(&self, event: tract_effects::modulation::MidiNoteOn) -> bool {
-        self.modulation.trigger.accepts_midi(event)
-            || self
-                .modulation
-                .wave_switch
-                .and_then(|mapping| mapping.slot(event))
-                .is_some_and(|slot| self.wave_bank.get(slot).is_some())
+        self.modulation
+            .accepts_playback_note(&self.wave_bank, event)
     }
 
     pub fn process_sample(&mut self, input: [f32; 2], mix: f32, bypass: bool) -> [f32; 2] {
@@ -266,18 +251,12 @@ impl Processor {
         mix: f32,
         bypass: bool,
     ) -> [f32; 2] {
-        if self.skip_precise_sample {
-            self.skip_precise_sample = false;
-        } else if self.span_remaining > 0
-            && self
-                .state
-                .next_precise_trigger_with_sidechain(input, sidechain)
-        {
-            if self.span_processed > 0 {
-                self.state.trigger_in_span();
-            } else {
-                self.state.trigger();
-            }
+        if self.state.consume_precise_sample(
+            input,
+            sidechain,
+            self.span_remaining,
+            self.span_processed > 0,
+        ) {
             let track = self.span_track;
             self.advance_segment(&track, self.span_remaining, self.span_bpm);
         }
@@ -365,16 +344,13 @@ impl Processor {
         if let Some(telemetry) = &self.waveform_telemetry {
             telemetry.audition.invalidate();
         }
-        self.skip_precise_sample = false;
         self.state.reset();
     }
     pub fn retrigger_modulation(&mut self) {
         self.configure_lookahead();
-        self.skip_precise_sample = false;
         self.state.restart_clock(&self.modulation);
     }
     pub fn reset(&mut self) {
-        self.skip_precise_sample = false;
         self.flush_dsp();
         self.state.reset();
     }

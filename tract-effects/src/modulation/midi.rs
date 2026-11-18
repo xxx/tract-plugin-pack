@@ -1,6 +1,7 @@
 //! Host-independent MIDI note validation and streaming trigger boundaries.
 
-use super::TriggerSource;
+use super::{ModulationState, TrackModulation, TriggerSource};
+use tiny_skia_widgets::mseg::WavePaletteSnapshot;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MidiNoteOn {
@@ -34,6 +35,41 @@ impl TriggerSource {
                     && channel.is_none_or(|channel| channel == event.channel)
             }
             _ => false,
+        }
+    }
+}
+
+impl TrackModulation {
+    /// Match notes that can stage a wave or retrigger this track.
+    pub fn accepts_playback_note(&self, bank: &WavePaletteSnapshot, event: MidiNoteOn) -> bool {
+        self.trigger.accepts_midi(event)
+            || self
+                .wave_switch
+                .and_then(|mapping| mapping.slot(event))
+                .is_some_and(|slot| bank.get(slot).is_some())
+    }
+}
+
+/// DSP and scheduling changes caused by one note.
+pub struct MidiPlaybackResult {
+    pub wave_staged: bool,
+    pub retriggered: bool,
+}
+
+impl ModulationState {
+    /// Stage the note's wave before applying its retrigger. Wave refresh waits for the sample.
+    pub fn dispatch_playback_note(
+        &mut self,
+        config: &TrackModulation,
+        bank: &WavePaletteSnapshot,
+        event: MidiNoteOn,
+        within_span: bool,
+    ) -> MidiPlaybackResult {
+        let wave_staged = self.select_midi_wave(config, bank, event);
+        let retriggered = self.midi_note_on(config, event, within_span);
+        MidiPlaybackResult {
+            wave_staged,
+            retriggered,
         }
     }
 }

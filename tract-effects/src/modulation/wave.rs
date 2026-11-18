@@ -307,7 +307,7 @@ impl super::ModulationState {
 mod tests {
     use super::*;
     use crate::effects::{Effect, EffectKind, ParamFormat, ParamScaling, ParamSpec, TrackEffect};
-    use crate::modulation::{MidiNoteOn, ModulationState, ModulationTarget};
+    use crate::modulation::{MidiNoteOn, ModulationState, ModulationTarget, TriggerSource};
     use tiny_skia_widgets::mseg::{
         CurveShape, FactoryShape, PlayMode, SyncMode, WavePalette, factory_shape,
     };
@@ -389,6 +389,35 @@ mod tests {
             channel: 0,
             note: 36 + slot,
         }
+    }
+
+    #[test]
+    fn playback_notes_distinguish_staged_waves_from_retriggers() {
+        let (mut config, _, snapshot, track) = setup(0);
+        config.trigger = TriggerSource::MidiNote {
+            note: Some(42),
+            channel: None,
+        };
+        assert!(config.accepts_playback_note(&snapshot, note(1)));
+        assert!(config.accepts_playback_note(&snapshot, note(6)));
+        assert!(!config.accepts_playback_note(&snapshot, note(7)));
+
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+        state.prepare_wave_bank(&config, &snapshot);
+        let wave = state.dispatch_playback_note(&config, &snapshot, note(1), true);
+        assert!(wave.wave_staged);
+        assert!(!wave.retriggered);
+        assert_eq!(state.trigger_epoch(), 0);
+        let trigger = state.dispatch_playback_note(&config, &snapshot, note(6), true);
+        assert!(!trigger.wave_staged);
+        assert!(trigger.retriggered);
+        assert_eq!(state.trigger_epoch(), 1);
+        assert_eq!(
+            state.refresh_pending_wave(&config, &track, &mut effect, 8),
+            Some(0)
+        );
+        assert_eq!(state.amplitude(), 1.0);
     }
 
     #[test]

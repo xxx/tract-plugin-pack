@@ -295,6 +295,7 @@ impl ModulationState {
         self.hz_phase = 0.0;
         self.transient.reset();
         self.precise.reset();
+        self.precise_sample_prepared = false;
         self.fired = false;
     }
     pub fn smoothing_active(&self) -> bool {

@@ -51,7 +51,6 @@ pub struct AudioEngine {
     trace_request: TraceRequest,
     waveform: WaveformClock,
     span_bpm: f64,
-    skip_precise_sample: bool,
     audition: AuditionRuntime,
     lookahead: [LookaheadDelay; ROWS],
     lookahead_mask: u16,
@@ -97,7 +96,6 @@ impl AudioEngine {
             trace_request: TraceRequest::default(),
             waveform: WaveformClock::default(),
             span_bpm: 120.0,
-            skip_precise_sample: false,
             audition: AuditionRuntime::new(16 * (4096 + lookahead_samples(48000.0))),
             lookahead: std::array::from_fn(|_| LookaheadDelay::new(lookahead_samples(48000.0))),
             lookahead_mask: 0,
@@ -208,7 +206,6 @@ impl AudioEngine {
     /// host; that calls the narrower `flush_dsp` so a mid-playback PDC
     /// realignment in Bitwig does not retrigger every MSEG.
     pub fn reset(&mut self) {
-        self.skip_precise_sample = false;
         self.playhead.reset();
         self.step = 0;
         self.clock.reset();
@@ -241,7 +238,6 @@ impl AudioEngine {
     /// Restart sequence/modulation clocks while retaining smoothed source levels.
     pub fn restart_transport(&mut self) {
         self.prepare_lookahead();
-        self.skip_precise_sample = false;
         self.playhead.reset();
         self.step = 0;
         self.clock.reset();
@@ -296,32 +292,30 @@ impl AudioEngine {
         span_remaining: usize,
         within_span: bool,
     ) -> (f32, f32, f32, f32) {
-        if self.skip_precise_sample {
-            self.skip_precise_sample = false;
-        } else {
-            let rows = self
-                .modulation
-                .precise_triggers_with_sidechain([dry_l, dry_r], sidechain);
-            if rows != 0 {
-                self.modulation.fire_precise(rows, within_span);
-                if rows & (1 << self.waveform.request().row) != 0 {
-                    self.modulation.prepare_waveform_segment(
-                        &mut self.waveform,
-                        &self.telemetry.waveform,
-                        &self.track_effects,
-                        self.span_bpm,
-                        self.sample_rate as f64,
-                    );
-                }
-                self.modulation.advance_rows(
-                    span_remaining,
+        let rows = self.modulation.consume_precise_samples(
+            [dry_l, dry_r],
+            sidechain,
+            span_remaining,
+            within_span,
+        );
+        if rows != 0 {
+            if rows & (1 << self.waveform.request().row) != 0 {
+                self.modulation.prepare_waveform_segment(
+                    &mut self.waveform,
+                    &self.telemetry.waveform,
+                    &self.track_effects,
                     self.span_bpm,
                     self.sample_rate as f64,
-                    &mut self.effects,
-                    &self.track_effects,
-                    rows,
                 );
             }
+            self.modulation.advance_rows(
+                span_remaining,
+                self.span_bpm,
+                self.sample_rate as f64,
+                &mut self.effects,
+                &self.track_effects,
+                rows,
+            );
         }
         self.modulation.refresh_pending_waves(
             &mut self.effects,
@@ -522,7 +516,6 @@ impl AudioEngine {
     ) {
         let n = left.len().min(right.len());
         self.span_bpm = bpm;
-        self.skip_precise_sample = false;
         let sr = self.sample_rate as f64;
         if n > 0 {
             self.prepare_lookahead();
@@ -609,14 +602,10 @@ impl AudioEngine {
             let advance_rows = if grid_prepared { midi_rows } else { u16::MAX };
             if grid_end > cursor && advance_rows != 0 {
                 if !grid_prepared {
-                    let rows = self.modulation.precise_triggers_with_sidechain(
+                    self.modulation.preflight_precise_samples(
                         [left[cursor], right[cursor]],
                         sidechain.sample(cursor),
                     );
-                    if rows != 0 {
-                        self.modulation.fire_precise(rows, false);
-                    }
-                    self.skip_precise_sample = true;
                 }
                 if advance_rows & (1 << self.waveform.request().row) != 0 {
                     self.modulation.prepare_waveform_segment(
