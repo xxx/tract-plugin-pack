@@ -1027,8 +1027,14 @@ pub fn draw_modulation_controls(
             &format!("{:+.0}%", depth * 100.0),
             norm,
         );
-        if spec.is_some() && depth == 0.0 {
-            let hint = "Depth is 0% — change it to apply modulation";
+        let hint = if spec.is_none() {
+            Some("Choose a target to apply modulation")
+        } else if depth == 0.0 {
+            Some("Depth is 0% — change it to apply modulation")
+        } else {
+            None
+        };
+        if let Some(hint) = hint {
             let size = 12.0 * scale;
             let width = tr.text_width(hint, size);
             let (_, y, _, h) = lay.modulation_header;
@@ -2026,16 +2032,6 @@ mod tests {
                         "-100%",
                     ),
                     (2, 1, Some(ModulationTarget::Mix), "Mix", 0.5, 0.75, "+50%"),
-                    (3, 2, None, "(none)", 0.0, 0.5, "+0%"),
-                    (
-                        1,
-                        0,
-                        Some(ModulationTarget::EffectParameter(99)),
-                        "(none)",
-                        0.0,
-                        0.5,
-                        "+0%",
-                    ),
                     (
                         2,
                         1,
@@ -2085,20 +2081,42 @@ mod tests {
         }
 
         #[test]
-        fn assigned_zero_depth_draws_the_colored_hint_and_erases_its_background() {
+        fn assignable_slots_prompt_for_the_missing_target_or_depth() {
             let mut tr = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
-            let hint = "Depth is 0% — change it to apply modulation";
+            let depth_hint = "Depth is 0% — change it to apply modulation";
+            let target_hint = "Choose a target to apply modulation";
             for (scale, baseline) in [(0.5, 12.0), (1.0, 26.0)] {
                 let lay = modulation_layout(scale);
-                for (slot, active, kind, target, label) in [
+                for (slot, kind, target, label, hint) in [
                     (
                         1,
-                        0,
                         EffectKind::Svf,
-                        ModulationTarget::EffectParameter(0),
+                        Some(ModulationTarget::EffectParameter(0)),
                         "Cutoff",
+                        depth_hint,
                     ),
-                    (3, 2, EffectKind::None, ModulationTarget::Mix, "Mix"),
+                    (2, EffectKind::Svf, None, "(none)", target_hint),
+                    (
+                        2,
+                        EffectKind::Svf,
+                        Some(ModulationTarget::Mix),
+                        "Mix",
+                        depth_hint,
+                    ),
+                    (
+                        3,
+                        EffectKind::Svf,
+                        Some(ModulationTarget::EffectParameter(99)),
+                        "(none)",
+                        target_hint,
+                    ),
+                    (
+                        3,
+                        EffectKind::None,
+                        Some(ModulationTarget::Mix),
+                        "Mix",
+                        depth_hint,
+                    ),
                 ] {
                     let mut actual = canvas();
                     draw_modulation_controls(
@@ -2106,14 +2124,14 @@ mod tests {
                         &mut tr,
                         slot,
                         kind,
-                        Some(target),
+                        target,
                         0.0,
                         false,
                         scale,
                         &lay,
                     );
                     let mut expected = canvas();
-                    selector_reference(&mut expected, &mut tr, &lay, active);
+                    selector_reference(&mut expected, &mut tr, &lay, slot - 1);
                     widgets::dropdown::draw_dropdown_trigger(
                         &mut expected,
                         &mut tr,
@@ -2148,7 +2166,7 @@ mod tests {
                         12.0 * scale,
                         mseg_color(slot),
                     );
-                    assert_pixels(&actual, &expected, "assigned zero-depth hint");
+                    assert_pixels(&actual, &expected, "modulation routing hint");
                 }
             }
         }
