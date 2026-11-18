@@ -11,16 +11,25 @@ same geometry tools for their static kernel/tail curves.
    the middle.
 2. Select the peak and click **Point**. Set **Value** to `0.75`, press Enter,
    and click outside the inspector. The peak moves down to the new level.
+
+   ![Minitosis walkthrough. Left, Triangle is highlighted in Shapes. Right, Point 2 shows Value 0.75 and the gold peak is lower.](mseg/first-curve-edit.png)
+
 3. Open **Shapes → Browse shapes... → User → Save**. Enter a new name such as
    `Lower triangle` and click **Save**. The new thumbnail appears on the User tab.
 4. Close the browser and choose **Shapes → Ramp up**. Return to the **User** tab.
    Select `Lower triangle` and click **Load** to recall the shape you just saved.
 
+   ![The Lower triangle preset selected on the User tab, with Load at the bottom left.](mseg/first-curve-saved.png)
+
 ## Find a task or control
 
 | To do this | Read this |
 |---|---|
+| Draw and repeat a segment | [Shape pens](#shape-pens) |
+| Stretch, scale, or skew several points | [Selecting and transforming](#selecting-and-transforming) |
+| Fix a jump when a curve loops | [Loop seam tools](#loop-seam-tools) |
 | Save, favourite, or recall a shape | [Reusing curves](#reusing-curves) |
+| Reuse part of a curve | [Copying and pasting a phrase](#copying-and-pasting-a-phrase) |
 | Edit a point by number | [Precise points and navigation](#precise-points-and-navigation) |
 | See what the envelope is doing during playback | [Live smoothing and trace](#live-smoothing-and-trace) |
 | Pick or switch a Project shape during playback | [Waves panel](#midi-wave-switching) |
@@ -39,11 +48,13 @@ to open the guide. In Nap, point at a pane before using the shortcut. Its four
 pages cover **Points**, **Select**, **Shapes**, and **View**. Static editors omit
 playback and routing controls unavailable in those plugins.
 
-Use the mousewheel, Up/Down, or Page Up/Down to scroll; Left/Right or Tab changes
-pages, and Home/End jumps within a page. Escape, F1, ?, or X closes the guide.
-An outside left-click or a right-click dismisses it without activating a control
-beneath. The guide keeps its opening pane's input ownership while covering other
-parts of the window.
+![The in-app gesture guide, open to Points, with tabs for Select, Shapes and View.](mseg/gesture-guide.png)
+
+| Action | Controls |
+|---|---|
+| Scroll within a page | Wheel, Up/Down, Page Up/Down, Home/End |
+| Change pages | Left/Right or Tab |
+| Close | Escape, F1, ?, or X. An outside left-click or a right-click closes the guide without clicking through. |
 
 Help preserves the curve, selection, tool and viewport, with no undo or bake
 work. Numeric fields and existing menus keep keyboard priority; help shortcuts
@@ -53,32 +64,37 @@ loss close the guide.
 
 ## Shape pens
 
-Choose **Line pen**, **Arc pen**, or **S-curve pen** from Tool. The white preview
-shows the next placement. Click to stamp, or drag to set its width, height, and
-direction. The pen remembers those dimensions. Clicking again without moving
-the pointer places another copy immediately after the previous one. Moving the
-pointer chooses a new starting position. Leftward dragging makes repetition
-proceed leftward. Repetition stops at the edge of the canvas.
+1. Choose **Line pen**, **Arc pen**, or **S-curve pen** from **Tool**. The white
+   outline shows the next stamp.
+2. Click to place the shape or drag to set its width, height, and direction.
+   The pen remembers those dimensions for the next stamp.
+3. Click again without moving the pointer to repeat. Repeats follow the direction
+   of the drag and stop at the canvas edge. Move the pointer to start elsewhere.
 
-Pens replace points within their span and preserve points outside it. S-curves
-use one native segment with two endpoints; arc pens use tension interpolation.
-Sharp seams between repeated shapes use a very short transition. Previews use
-the same boundary weights as the committed shape.
-**Escape** cancels the current gesture and returns to Pointer.
+![Purple S-curve stamps repeat across the canvas. A white preview at the right shows the next placement.](mseg/s-curve-pen.png)
+
+Each stamp replaces points within its span. An S-curve uses one segment with
+two endpoints, and Arc uses tension. Repeated shapes can use a short transition
+at their seams. Press **Escape** to cancel the gesture and return to Pointer.
 
 ### Native shapes and point weights
 
-The Point inspector's **Shape** button cycles **Curve → S-curve → Step**. Curve
-uses the existing linear/exponential tension law. S-curve provides flat endpoint
-tangents without adding intermediate points; Tension bends its progression.
-Step holds its starting level until the following point. The last point's
-unused Shape control is disabled.
+In **Point**, **Shape** sets how the segment leaves the selected point. The
+last point has no outgoing segment.
 
-**Weight** cycles **Hard → Medium → Soft**. Hard keeps the original behavior;
-Medium halves the endpoint slope; Soft eases to a flat tangent at that point.
-Times and levels remain exact. A Soft point in a rising curve creates a brief
-pause; it does not move the point or average its level with its neighbors.
-Hard points are filled, Medium points have a center dot, and Soft points are hollow.
+| Shape | Result |
+|---|---|
+| **Curve** | Tension bends a straight segment into an arc. |
+| **S-curve** | The segment eases in and out with flat ends. Tension moves the bend. |
+| **Step** | The starting level holds until the next point. |
+
+**Weight** sets the slope as a Curve segment meets the point. A filled **Hard**
+point uses the standard slope, a dotted **Medium** point halves it, and a hollow
+**Soft** point flattens it. All three keep the point's exact time and level.
+
+![Three versions of the same triangle. Hard is amber and straight. Medium is purple and gently rounded. Soft is teal and flattens at the endpoints and peak.](mseg/point-weights.png)
+
+*Hard in amber, Medium in purple, Soft in teal.*
 
 Native S-curves already have flat endpoints, so weights do not alter them.
 Steps retain their hard jumps. A point's weight may still affect the other
@@ -97,13 +113,19 @@ one undo step in Multosis/Minitosis.
 
 ## Selecting and transforming
 
-Pointer retains the existing node, tension-handle, marquee, and Ctrl-click
-selection gestures. Two or more selected points display a box with eight handles:
+With **Pointer**, drag from empty space around the points or Ctrl-click them
+individually. Two or more selected points display a box with eight handles.
 
-- Side handles stretch time; top/bottom handles stretch level; corners do both.
-- **Alt** scales around the selection's center.
-- **Ctrl** while dragging an edge handle skews the other axis.
-- **Shift** bypasses snapping while dragging.
+![The peak and trough of a sine curve are selected. White handles at the corners and the middle of each edge surround the two points.](mseg/selection-handles.png)
+
+| Drag here | What changes |
+|---|---|
+| Left or right handle | Time |
+| Top or bottom handle | Level |
+| Corner | Time and level together |
+
+Hold **Alt** to scale about the centre, **Ctrl** on an edge handle to skew
+the other axis, or **Shift** to bypass snapping.
 
 Endpoint times stay pinned to 0 and 1. Other points cannot cross their neighbors.
 Dragging back to the initial handle position restores the initial geometry,
@@ -111,22 +133,25 @@ including after a boundary was reached. Escape cancels the gesture.
 
 ## Loop seam tools
 
-Edit offers **Match loop end to start**, **Match loop start to end**, and
-**Smooth loop seam (10%)**. In the full editor, these use the hold-loop region
-when one is configured, otherwise the entire curve. Miff/Nap always use the
-entire static curve. The selected points do not change that scope.
+Amber dashed marks and a **Loop seam jump** hint show where a cyclic curve or
+hold loop wraps with a sudden level change. Choose a command from **Edit**.
 
-The two Match commands copy one endpoint node's level to the other. In cyclic
-playback or a hold loop, amber dashed marks and a **Loop seam jump** hint show a
-level discontinuity at the wrap. The indicator reads the incoming segment's
-actual held level: a stepped tail can still jump even when endpoint nodes match.
+| To do this | Choose |
+|---|---|
+| Copy the start level to the end point | **Match loop end to start** |
+| Copy the end level to the start point | **Match loop start to end** |
+| Ease the curve back to its starting level | **Smooth loop seam (10%)** |
 
-Smooth matches the end level to the start, gives the start a Soft weight, and
-adds a Soft point followed by a native S-curve return. The return occupies the
-last 10% of the loop; if existing points occupy that window, it uses the last
-half-segment instead. Existing interior points stay in place, and a two-point
-ramp keeps its original peak at the new return point. A stepped tail uses its
-held level. Already matched, flat seams are unchanged when Smooth is reapplied.
+![Three views of a stepped tail. The original jumps at the wrap. Matching the endpoints leaves the stepped tail jumping. A smooth return joins the tail to the start.](mseg/loop-seam-comparison.png)
+
+A stepped tail plays its held level all the way to the wrap, so matching the
+endpoints can leave a jump. **Smooth loop seam (10%)** uses that held
+level and adds a native S-curve over the last 10% of the loop. If that area
+contains points, the return takes the last half-segment. A two-point ramp
+keeps its original peak at the new return point. Already flat seams stay as drawn.
+
+The commands act on the hold-loop region when present and on the whole curve
+otherwise. In Miff and Nap they always act on the full static curve.
 
 These commands edit the saved curve, including its first/last loop segments and
 any interpolation sharing those boundary points. Selection and hold markers
@@ -289,17 +314,16 @@ use cached records; Refresh and explicit metadata actions read shared storage.
 ### Searching curves
 
 On Factory or User, click **Find**, press **Ctrl/Cmd+F**, or press **/** to focus
-search. The row has a query field, **Clear** and **X**. It matches names and
-categories using Unicode lowercase: every whitespace-separated term must occur
-in either field, in any order. For example, `bass pulse` can match a Pulse curve
-in Bass. Empty categories match `Uncategorized`. Matching uses literal substrings;
-punctuation has its ordinary meaning. The current category filter still applies.
+search. Results and the match count update as you type. `ramp` can match a
+curve named **Open ramp** or any curve in the **Ramps** category. Search ignores
+case and matches punctuation literally. Every term must appear in the name or
+category. For uncategorized curves, use `Uncategorized`. The current category
+filter still applies.
 
-Results update as you type from the browser snapshot, with a match count below
-the thumbnails. Selection follows the same visible record when possible. Cards,
-pages, double-click and all recall/management actions use matching results;
-empty results disable record actions. Favorites and Project keep fixed-slot
-browsing without a search field.
+![Find is open on User with ramp entered. Five matching cards appear, including Open ramp and curves in the Ramps category.](mseg/curve-search.png)
+
+Cards, navigation, and recall actions follow the visible results. Empty results
+disable record actions. Favorites and Project use their fixed slots.
 
 The query supports 256 Unicode characters, printable Option input, Ctrl/Cmd+A,
 Shift-selection, caret Left/Right/Home/End, Backspace and Delete. Once focused,
@@ -352,13 +376,16 @@ the added attributes and cannot reproduce those shapes.
 
 ### Copying and pasting a phrase
 
-Select at least two adjacent points, then choose **Copy selection** from Edit.
-The clipboard stores that phrase with its time normalized to 0..1. Levels,
-tension, steps, native shapes, and interior point weights retain their shape.
+1. Select at least two adjacent points and choose **Edit → Copy selection**.
+2. Select the destination interval.
+3. Choose **Edit → Paste replace selection** to fit the phrase into that
+   interval. Choose **Paste merge selection** to keep existing interior
+   points too. If two points land at the same time, the pasted point wins.
 
-Select an interval in the destination and choose **Paste replace selection** to
-fit the phrase into that interval. **Paste merge selection** retains existing
-interior points; pasted points win when their times coincide. Points outside
+![A pasted sine phrase fills the outlined section in the middle of the destination ramp.](mseg/paste-phrase.png)
+
+Copying a phrase retains its levels, tensions, steps, shapes, and interior
+point weights. Its time is relative to the copied interval. Points outside
 the interval and the outgoing segment after its last point are preserved.
 Existing boundary points keep their outside-facing weights so adjoining
 segments retain their styles. Full-curve replacement transfers every weight.
@@ -402,8 +429,13 @@ independent views, and its pulse field follows the Decay pane's view.
 In Multosis/Minitosis, assign an envelope to a pitch parameter in `st` or a
 logarithmic frequency parameter, set a nonzero Depth, and choose **Semitones**
 from Grid. The control shows **T/st**, keeping the current number of time
-divisions. A numeric grid preset restores ordinary value divisions. The mode
-saves per envelope and is undoable; changing it leaves existing points in place.
+divisions.
+
+![A stepped cutoff envelope snapped to pitch levels, with Snap On and Grid 16/st visible below the curve.](mseg/semitone-grid.png)
+
+Choose a numeric grid preset to return to ordinary level divisions. Changing
+the grid keeps the existing points in place. The mode saves per envelope and is
+undoable.
 
 The grid follows the routed parameter's base value, Depth, and polarity, including
 negative depth. Pitch offsets use integer semitones; frequencies use chromatic
@@ -474,11 +506,16 @@ absolute channel sets each peak. Full height is magnitude 1; louder signals
 clip visually. The horizontal axis follows the selected envelope's clock,
 including its triggers and loops. Zoom and pan apply to the backdrop too.
 
-The Audio menu's display choices are **Magnitude** (the default), **Combined**,
-and **Stereo**. Combined overlays signed left/right waveforms around one zero
-line. Stereo puts left in the upper half and right in the lower half, each with
-its own zero line. Opposite-polarity channels remain visible; they are never
-averaged. Vertical zoom/pan scales the signal inside each fixed Stereo lane.
+| Display | What to look for |
+|---|---|
+| **Magnitude** (default) | Peaks use the greater absolute level of either channel. |
+| **Combined** | Left and right waveforms share a centre line. |
+| **Stereo** | Left appears above right, each with its own centre line. |
+
+![The same audio shown as Magnitude, Combined, and Stereo. Magnitude draws upright peaks, Combined overlays both channels, and Stereo gives each channel its own lane.](mseg/audio-backdrop-modes.png)
+
+Opposite-polarity channels remain visible. Vertical zoom and pan scale the
+signal within each fixed Stereo lane.
 
 **Gain: -12 / 0 / +12 dB** adjusts only the backdrop's display level, useful for
 quiet material. The default is 0 dB. Peaks clip at the display boundaries without
