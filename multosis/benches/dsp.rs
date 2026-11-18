@@ -4,7 +4,8 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use multosis::effects::{EffectKind, TrackEffect, default_params_for_kind};
 use multosis::engine::AudioEngine;
 use multosis::grid::Grid;
-use multosis::modulation::{ModulationTarget, TrackModulation};
+use multosis::modulation::{ModulationTarget, TrackModulation, TriggerSource};
+use tiny_skia_widgets::mseg::{MAX_NODES, MsegNode, SyncMode};
 
 /// Build an engine with the default modulation on every row and `kind`
 /// installed on every row (or `None` for the all-silence baseline).
@@ -140,6 +141,41 @@ fn bench_process(c: &mut Criterion) {
         group.bench_function("process_512samp_mix_modulated", |b| {
             b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid));
         });
+    }
+
+    // At 13 Hz, the 1 s curves retrigger within their first ten segments.
+    for (node_count, duration, suffix) in [
+        (2, 0.05, ""),
+        (MAX_NODES, 0.05, ""),
+        (MAX_NODES, 1.0, "_early"),
+    ] {
+        let mut engine = engine_mixed();
+        let modulation = std::array::from_fn(|row| {
+            let mut modulation = TrackModulation::default_for_row(row);
+            modulation.trigger = TriggerSource::FreeHzSample { hz: 13.0 };
+            modulation.trigger_timing.blend_ms = 4.0;
+            for curve in &mut modulation.msegs {
+                curve.sync_mode = SyncMode::Time;
+                curve.time_seconds = duration;
+                curve.node_count = node_count;
+                for (i, node) in curve.nodes[..node_count].iter_mut().enumerate() {
+                    let phase = i as f32 / (node_count - 1) as f32;
+                    *node = MsegNode {
+                        time: phase,
+                        value: 0.55 + 0.4 * phase,
+                        ..MsegNode::default()
+                    };
+                }
+            }
+            modulation
+        });
+        engine.set_modulation(&modulation);
+        let mut left = vec![0.3_f32; 512];
+        let mut right = vec![0.3_f32; 512];
+        group.bench_function(
+            format!("process_512samp_sample_timed_{node_count}_nodes{suffix}"),
+            |b| b.iter(|| run_process(&mut engine, &mut left, &mut right, true, 1000.0, &grid)),
+        );
     }
 
     // Structural baseline: every row's effect is `None` (silence). The

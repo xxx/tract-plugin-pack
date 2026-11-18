@@ -5,7 +5,7 @@
 use crate::dropdown::draw_dropdown_popup;
 use crate::dropdown::draw_dropdown_trigger;
 use crate::mseg::editor::{MsegEditState, StripId};
-use crate::mseg::{HoldMode, MsegData, value_at_phase};
+use crate::mseg::{CurveSampler, HoldMode, MsegData};
 use crate::primitives::{
     color_bg, color_border, color_control_bg, color_muted, color_text, draw_rect, draw_rect_outline,
 };
@@ -324,13 +324,13 @@ fn draw_canvas(
         draw_rect(pixmap, px0, my, pw, 1.0, mid_color);
     }
 
-    // Envelope polyline: sample `value_at_phase` per pixel column of the plot.
     let cols = pw.max(1.0) as usize;
     let mut prev: Option<(f32, f32)> = None;
+    let mut sampler = CurveSampler::new(data);
     for col in 0..=cols {
         let phase = layout.viewport.phase_at(col as f32 / cols as f32);
         let x = phase_to_x(layout, phase);
-        let y = value_to_y(layout, value_at_phase(data, phase));
+        let y = value_to_y(layout, sampler.sample(phase));
         if let Some((px, py)) = prev {
             draw_plot_line(pixmap, layout, px, py, x, y, value_color);
         }
@@ -368,9 +368,6 @@ fn draw_canvas(
     }
     let preview = state.pen_preview();
     if preview.len() >= 2 {
-        let mut document = *data;
-        document.nodes[..preview.len()].copy_from_slice(preview);
-        document.node_count = preview.len();
         let start = preview[0].time.max(layout.viewport.time.0);
         let end = preview[preview.len() - 1]
             .time
@@ -380,12 +377,10 @@ fn draw_canvas(
             * layout.plot.2)
             .max(1.0) as usize;
         let mut previous = None;
+        let mut sampler = CurveSampler::from_nodes(preview);
         for column in 0..=columns {
             let t = start + (end - start) * column as f32 / columns as f32;
-            let point = (
-                phase_to_x(layout, t),
-                value_to_y(layout, value_at_phase(&document, t)),
-            );
+            let point = (phase_to_x(layout, t), value_to_y(layout, sampler.sample(t)));
             if let Some((px, py)) = previous {
                 draw_plot_line(pixmap, layout, px, py, point.0, point.1, color_text());
             }
@@ -518,9 +513,7 @@ fn draw_node_tooltip(
 /// the MSEG editor plot rect `rect`. For rendering inactive MSEGs as ghost
 /// context behind an active `draw_mseg`. `color` is packed `0xRRGGBBAA`.
 ///
-/// Samples the curve per pixel column exactly like `draw_canvas` so the ghost
-/// aligns with the active overlay; uses the same `draw_line` stroking routine
-/// as the active curve, just in the supplied faint colour.
+/// Uses the same per-column sampling as the active curve so the overlays align.
 pub fn draw_mseg_ghost(
     pixmap: &mut Pixmap,
     rect: (f32, f32, f32, f32),
@@ -541,14 +534,13 @@ pub fn draw_mseg_ghost(
     let b = ((color >> 8) & 0xFF) as u8;
     let a = (color & 0xFF) as u8;
     let stroke = tiny_skia::Color::from_rgba8(r, g, b, a);
-    // Sample `value_at_phase` per pixel column of the plot and stroke a
-    // polyline between consecutive samples — same pattern as `draw_canvas`.
     let cols = pw.max(1.0) as usize;
     let mut prev: Option<(f32, f32)> = None;
+    let mut sampler = CurveSampler::new(data);
     for col in 0..=cols {
         let phase = layout.viewport.phase_at(col as f32 / cols as f32);
         let x = phase_to_x(&layout, phase);
-        let y = value_to_y(&layout, value_at_phase(data, phase));
+        let y = value_to_y(&layout, sampler.sample(phase));
         if let Some((px, py)) = prev {
             draw_plot_line(pixmap, &layout, px, py, x, y, stroke);
         }
@@ -578,19 +570,18 @@ fn draw_nodes(
 ) {
     let a = data.active();
     // Tension handles: midpoint of each non-stepped segment.
+    let mut sampler = CurveSampler::new(data);
     for w in a.windows(2) {
         if w[0].stepped {
             continue;
         }
         let mid_phase = (w[0].time + w[1].time) * 0.5;
-        if !layout
-            .viewport
-            .contains(mid_phase, value_at_phase(data, mid_phase))
-        {
+        let value = sampler.sample(mid_phase);
+        if !layout.viewport.contains(mid_phase, value) {
             continue;
         }
         let hx = phase_to_x(layout, mid_phase);
-        let hy = value_to_y(layout, value_at_phase(data, mid_phase));
+        let hy = value_to_y(layout, value);
         // A mid-gray, visible against the dark canvas but clearly secondary
         // to the bright-accent node dots.
         draw_dot(pixmap, hx, hy, TENSION_R * scale, color_muted());
@@ -1112,16 +1103,18 @@ pub fn mseg_hit_test(
             }
         }
         // Then tension handles.
-        for i in 0..data.node_count - 1 {
-            if a[i].stepped {
+        let mut sampler = CurveSampler::new(data);
+        for (i, pair) in a.windows(2).enumerate() {
+            if pair[0].stepped {
                 continue;
             }
-            let mid = (a[i].time + a[i + 1].time) * 0.5;
-            if !layout.viewport.contains(mid, value_at_phase(data, mid)) {
+            let mid = (pair[0].time + pair[1].time) * 0.5;
+            let value = sampler.sample(mid);
+            if !layout.viewport.contains(mid, value) {
                 continue;
             }
             let hx = phase_to_x(layout, mid);
-            let hy = value_to_y(layout, value_at_phase(data, mid));
+            let hy = value_to_y(layout, value);
             if (x - hx).abs() <= hit_r && (y - hy).abs() <= hit_r {
                 return MsegHit::Tension(i);
             }

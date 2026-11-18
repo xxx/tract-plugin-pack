@@ -8,6 +8,7 @@
 
 use crate::dropdown::{DropdownEvent, DropdownState};
 use crate::mseg::MsegData;
+use crate::mseg::interpolation::segment_index;
 use crate::mseg::randomize::RandomStyle;
 
 mod browser;
@@ -954,26 +955,7 @@ impl MsegEditState {
             return None;
         }
         let phase = x_to_phase(&layout, x);
-        // Segment i is the last node whose time is <= phase, capped so a
-        // segment always exists. Compute `seg` inside a block so the
-        // immutable borrow of `data` via `active()` ends before the write.
-        // `phase` is clamped to [0,1]; the last node (time==1.0) is excluded
-        // from the loop window because it has no outgoing segment, so a click
-        // at phase 1.0 correctly resolves to the final segment.
-        let seg = {
-            let a = data.active();
-            let mut seg = 0;
-            for (i, n) in a.iter().enumerate().take(data.node_count - 1) {
-                // Nodes are time-sorted: once a node's time exceeds `phase`,
-                // no later node can match — mirror `value_at_phase`'s break.
-                if n.time <= phase {
-                    seg = i;
-                } else {
-                    break;
-                }
-            }
-            seg
-        };
+        let seg = segment_index(data.active(), phase);
         data.nodes[seg].stepped = !data.nodes[seg].stepped;
         data.debug_assert_valid();
         Some(MsegEdit::Changed)

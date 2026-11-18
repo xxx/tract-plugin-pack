@@ -2,7 +2,7 @@
 //! Size/Density/Width/Seed into a sparse signed pulse train with per-pulse
 //! coloration routing and per-pulse right-channel jitter.
 
-use tiny_skia_widgets::mseg::{MsegData, MsegNode, Polarity};
+use tiny_skia_widgets::mseg::{CurveSampler, MsegData, MsegNode, Polarity};
 
 use crate::coloration::Q;
 use crate::rng::Rng;
@@ -18,19 +18,6 @@ pub struct GenParams {
     /// Max right-channel jitter at Width=1.0, in milliseconds.
     pub width_ms: f32,
     pub seed: u64,
-}
-
-/// Forward-only curve sampler (monotonic `phase`), mirrors miff's `curve_value`.
-fn curve_value(data: &MsegData, phase: f32, seg: &mut usize) -> f32 {
-    let a = data.active();
-    let last = data.node_count - 1;
-    if phase >= a[last].time {
-        return a[last].value;
-    }
-    while *seg < last - 1 && a[*seg + 1].time <= phase {
-        *seg += 1;
-    }
-    tiny_skia_widgets::mseg::segment_value(&a[*seg], &a[*seg + 1], phase)
 }
 
 /// Generate the velvet sequence into `out` (pre-allocated to `MAX_PULSES`).
@@ -50,7 +37,9 @@ pub fn generate(
     let j_max = (params.width_ms * 0.001 * fs).max(0.0); // samples at Width=1
 
     let mut rng = Rng::new(params.seed);
-    let (mut sd, mut sw, mut st) = (0usize, 0usize, 0usize);
+    let mut decay = CurveSampler::new(decay);
+    let mut width = CurveSampler::new(width);
+    let mut tone = CurveSampler::new(tone);
     let denom = l_samples.max(1) as f32;
 
     let mut energy = 0.0f64;
@@ -66,15 +55,15 @@ pub fn generate(
         let sign = if rng.next_f32() < 0.5 { -1.0 } else { 1.0 };
 
         // Decay → gain.
-        let g = curve_value(decay, phase, &mut sd).clamp(0.0, 1.0);
+        let g = decay.sample(phase).clamp(0.0, 1.0);
         let coeff = sign * g;
 
         // Tone → nearest dictionary filter (0 = darkest, Q-1 = brightest).
-        let t = curve_value(tone, phase, &mut st).clamp(0.0, 1.0);
+        let t = tone.sample(phase).clamp(0.0, 1.0);
         let filter_idx = (t * (Q - 1) as f32).round() as u8;
 
         // Width → per-pulse max jitter; right channel offset in ±j samples.
-        let w = curve_value(width, phase, &mut sw).clamp(0.0, 1.0);
+        let w = width.sample(phase).clamp(0.0, 1.0);
         let j = (w * j_max).round();
         let r_jit = rng.next_f32(); // [0,1) → symmetric [-j, +j]
         let delta = ((r_jit * 2.0 - 1.0) * j).round() as i64;
@@ -234,29 +223,44 @@ mod tests {
     use tiny_skia_widgets::mseg::value_at_phase;
 
     #[test]
-    fn native_and_weighted_forward_walk_matches_the_shared_sampler() {
+    fn baked_sequence_matches_point_sampling_for_all_three_curves() {
         use tiny_skia_widgets::mseg::{PointWeight, SegmentShape};
-        for shape in [SegmentShape::Curve, SegmentShape::SCurve] {
-            for weight in [PointWeight::Hard, PointWeight::Medium, PointWeight::Soft] {
-                let mut data = MsegData::default();
-                data.insert_node(0.25, 0.8).unwrap();
-                data.insert_node(0.75, 0.2).unwrap();
-                data.nodes[0].shape = shape;
-                data.nodes[0].tension = -0.5;
-                data.nodes[1].weight = weight;
-                data.nodes[1].shape = shape;
-                data.nodes[2].stepped = true;
-                data.nodes[3].weight = PointWeight::Soft;
-                let mut segment = 0;
-                for i in 0..=4096 {
-                    let phase = i as f32 / 4096.0;
-                    assert_eq!(
-                        curve_value(&data, phase, &mut segment).to_bits(),
-                        value_at_phase(&data, phase).to_bits(),
-                        "{shape:?} {weight:?} {phase}"
-                    );
-                }
-            }
+        let mut decay = default_decay_curve();
+        decay.insert_node(0.25, 0.8).unwrap();
+        decay.nodes[0].shape = SegmentShape::SCurve;
+        decay.nodes[1].weight = PointWeight::Soft;
+        let mut width = default_width_curve();
+        width.insert_node(0.5, 0.8).unwrap();
+        width.nodes[1].stepped = true;
+        let tone = default_tone_curve();
+        let params = test_params();
+        let mut sequence = VelvetSequence::new();
+        generate(&mut sequence, &params, &decay, &width, &tone);
+
+        let mut rng = Rng::new(params.seed);
+        let max_jitter = params.width_ms * 0.001 * params.sample_rate;
+        let mut expected_coeffs = Vec::new();
+        let mut energy = 0.0_f64;
+        for (i, &location) in sequence.location[..sequence.count].iter().enumerate() {
+            let phase = location as f32 / (params.size_s * params.sample_rate);
+            rng.next_f32();
+            let sign = if rng.next_f32() < 0.5 { -1.0 } else { 1.0 };
+            let coeff = sign * value_at_phase(&decay, phase);
+            expected_coeffs.push(coeff);
+            energy += f64::from(coeff) * f64::from(coeff);
+
+            let filter = (value_at_phase(&tone, phase) * (Q - 1) as f32).round() as u8;
+            assert_eq!(sequence.filter_idx[i], filter);
+            let jitter = (value_at_phase(&width, phase) * max_jitter).round();
+            let offset = ((rng.next_f32() * 2.0 - 1.0) * jitter).round() as i64;
+            assert_eq!(
+                sequence.location_r[i],
+                (i64::from(location) + offset).max(0) as u32
+            );
+        }
+        let normalize = (1.0 / energy.sqrt()) as f32;
+        for (i, coeff) in expected_coeffs.into_iter().enumerate() {
+            assert_eq!(sequence.coeff[i].to_bits(), (coeff * normalize).to_bits());
         }
     }
 
@@ -288,12 +292,6 @@ mod tests {
         data.nodes[1].stepped = true;
         let mut editor = MsegEditState::new_curve_only();
         assert!(editor.smooth_loop_seam(&mut data).is_some());
-        let mut segment = 0;
-        for i in 0..=4096 {
-            let phase = i as f32 / 4096.0;
-            let value = curve_value(&data, phase, &mut segment);
-            assert_eq!(value.to_bits(), value_at_phase(&data, phase).to_bits());
-        }
         assert_eq!(value_at_phase(&data, 0.0), value_at_phase(&data, 1.0));
     }
 
@@ -319,10 +317,7 @@ mod tests {
         // The three defaults read as a physical room evolving across the tail:
         // loudness falls to silence, stereo width widens, tone darkens. Sample
         // start (phase 0) vs end (phase 1) and assert each direction holds.
-        let dir = |d: &MsegData| {
-            let (mut a, mut b) = (0usize, 0usize);
-            (curve_value(d, 0.0, &mut a), curve_value(d, 1.0, &mut b))
-        };
+        let dir = |d: &MsegData| (value_at_phase(d, 0.0), value_at_phase(d, 1.0));
         let (d0, d1) = dir(&default_decay_curve());
         assert!(
             d0 > 0.9 && d1 < 0.05,
@@ -480,19 +475,5 @@ mod tests {
             mean_idx(0.9) > mean_idx(0.1),
             "brighter tone → higher filter index"
         );
-    }
-
-    #[test]
-    fn curve_value_matches_value_at_phase() {
-        let mut d = MsegData::default();
-        d.insert_node(0.3, 0.8);
-        d.insert_node(0.6, 0.2);
-        let mut seg = 0;
-        for i in 0..=100 {
-            let phase = i as f32 / 100.0;
-            let got = curve_value(&d, phase, &mut seg);
-            let want = value_at_phase(&d, phase);
-            assert!((got - want).abs() < 1e-5, "phase {phase}: {got} vs {want}");
-        }
     }
 }

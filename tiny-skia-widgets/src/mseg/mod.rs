@@ -25,7 +25,7 @@ mod wave_params;
 pub use audio::*;
 pub use editor::*;
 pub use grid::{PitchGrid, ValueGrid};
-pub use interpolation::{PointWeight, SegmentShape, segment_value};
+pub use interpolation::{CurveSampler, PointWeight, SegmentShape, segment_value, value_at_phase};
 pub use palette::{
     WAVE_PALETTE_SLOTS, WavePalette, WavePaletteSnapshot, WaveShape, prepare_wave_palette_state,
 };
@@ -421,28 +421,6 @@ impl<'de> serde::Deserialize<'de> for MsegData {
         }
         Ok(data)
     }
-}
-
-/// Sample the envelope's raw shape at `phase` (0..1, clamped). Pure — used by
-/// both rendering and a consuming plugin's DSP.
-pub fn value_at_phase(data: &MsegData, phase: f32) -> f32 {
-    let a = data.active();
-    let phase = phase.clamp(0.0, 1.0);
-
-    // At or past the last node -> its value.
-    if phase >= a[data.node_count - 1].time {
-        return a[data.node_count - 1].value;
-    }
-    // Find the segment: the last node whose time is <= phase.
-    let mut i = 0;
-    for (k, node) in a.iter().enumerate().take(data.node_count - 1) {
-        if node.time <= phase {
-            i = k;
-        } else {
-            break;
-        }
-    }
-    segment_value(&a[i], &a[i + 1], phase)
 }
 
 /// Wrap `p` into the half-open range `[lo, hi)`.
