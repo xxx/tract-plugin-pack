@@ -24,6 +24,24 @@ use tract_effects::waveform::WaveformClock;
 /// large block are simply dropped (graceful, never panics).
 const MAX_BOUNDARIES: usize = 64;
 
+#[derive(Default)]
+struct LatencyTopology {
+    lookahead_samples: usize,
+    effect_rows: [u8; ROWS],
+    effect_count: usize,
+}
+
+impl LatencyTopology {
+    #[inline]
+    fn samples(&self, effects: &[EffectInstance; ROWS]) -> usize {
+        self.lookahead_samples
+            + self.effect_rows[..self.effect_count]
+                .iter()
+                .map(|&row| effects[row as usize].latency_samples())
+                .sum::<usize>()
+    }
+}
+
 /// Ties the playhead, step clock, and per-track effects into a
 /// stereo block processor.
 pub struct AudioEngine {
@@ -406,6 +424,7 @@ impl AudioEngine {
         mix: f32,
         span_remaining: usize,
         within_span: bool,
+        listen_latency: &LatencyTopology,
     ) {
         for (i, (left, right)) in left.iter_mut().zip(right).enumerate() {
             let (dry_l, dry_r) = (*left, *right);
@@ -423,7 +442,7 @@ impl AudioEngine {
                 mix_dry_r + (cw_r - mix_dry_r) * mix,
             ];
             let latency = if self.audition.needs_processing() {
-                self.chain_latency_samples()
+                listen_latency.samples(&self.effects)
             } else {
                 0
             };
@@ -567,6 +586,11 @@ impl AudioEngine {
         // disrupt its MSEG timing, so when the user un-mutes, the curve is
         // exactly where it would have been.
         let mute_mask = self.effective_mute_mask();
+        let listen_latency = if n > 0 && self.audition.needs_processing() {
+            self.latency_topology(mute_mask)
+        } else {
+            LatencyTopology::default()
+        };
 
         // Walk the block in segments split at each boundary. Per segment:
         // advance the per-MSEG-clock modulation, then render the audio. At a
@@ -636,6 +660,7 @@ impl AudioEngine {
                     mix,
                     grid_end - cursor,
                     cursor > grid_start,
+                    &listen_latency,
                 );
             } else {
                 self.process_segment::<false>(
@@ -646,6 +671,7 @@ impl AudioEngine {
                     mix,
                     grid_end - cursor,
                     cursor > grid_start,
+                    &listen_latency,
                 );
             }
             cursor = seg_end;
@@ -691,32 +717,25 @@ impl AudioEngine {
         self.lookahead_mask != 0
     }
 
-    /// Sum of per-effect latency samples across rows that are reachable
-    /// in the audio chain — i.e. not effectively muted (own mute or
-    /// solo-cancelled) and not `EffectKind::None`. This is what multosis
-    /// reports to the host as plugin delay compensation, so PDC keeps the
-    /// track aligned with the rest of the project regardless of which
-    /// rows have latency-introducing effects (today: only Warp Zone).
-    ///
-    /// We use the "potentially reachable" set rather than the grid-active
-    /// set: a row whose cells are off at the current playhead would
-    /// otherwise toggle latency every step, which is impractical for
-    /// hosts that re-align on each change. With this conservative sum the
-    /// host pulls back enough buffer for any column the user can reach
-    /// without re-arranging the track lanes.
+    /// Report adopted lookahead plus the live effect latency of all reachable rows.
     pub fn chain_latency_samples(&self) -> usize {
-        let mute_mask = self.effective_mute_mask();
-        let mut total = self.lookahead.iter().map(LookaheadDelay::delay).sum();
-        for (r, te) in self.track_effects.iter().enumerate() {
-            if te.kind == crate::effects::EffectKind::None {
-                continue;
+        self.latency_topology(self.effective_mute_mask())
+            .samples(&self.effects)
+    }
+
+    fn latency_topology(&self, mute_mask: u16) -> LatencyTopology {
+        // Grid activity changes at each step but the host aligns the reachable effects.
+        let mut topology = LatencyTopology {
+            lookahead_samples: self.lookahead.iter().map(LookaheadDelay::delay).sum(),
+            ..LatencyTopology::default()
+        };
+        for (row, track) in self.track_effects.iter().enumerate() {
+            if track.kind != crate::effects::EffectKind::None && mute_mask & (1 << row) == 0 {
+                topology.effect_rows[topology.effect_count] = row as u8;
+                topology.effect_count += 1;
             }
-            if mute_mask & (1 << r) != 0 {
-                continue;
-            }
-            total += self.effects[r].latency_samples();
         }
-        total
+        topology
     }
     /// Also used during initialization and explicit transport restart.
     pub fn prepare_lookahead(&mut self) {
