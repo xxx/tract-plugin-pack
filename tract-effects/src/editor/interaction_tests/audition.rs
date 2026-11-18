@@ -23,6 +23,24 @@ fn open_follower(h: &mut Harness) {
         .strip;
     h.click(widgets::mseg::follower_button_rect(strip, h.geometry.scale));
 }
+
+#[test]
+fn listen_availability_stops_at_the_last_row_and_tracks_the_current_source_token() {
+    let mut h = Harness::new();
+    let telemetry = Arc::new(ModulationTelemetry::default());
+    assert_eq!(h.editor.listen_label(), "Offline");
+    h.editor.connect_live(&telemetry, 16);
+    assert_eq!(h.editor.listen_label(), "Offline");
+    h.editor.connect_live(&telemetry, 15);
+    assert_eq!(h.editor.listen_label(), "Listen");
+    open_follower(&mut h);
+    h.key(Key::Character("l".into()));
+    assert_eq!(telemetry.audition.snapshot().unwrap().row, 15);
+    assert!(h.editor.listening(AuditionSource::Follower));
+    assert!(!h.editor.listening(AuditionSource::Trigger));
+    telemetry.audition.invalidate();
+    assert!(!h.editor.listening(AuditionSource::Follower));
+}
 fn draw(h: &mut Harness) {
     let mut pm = tiny_skia::Pixmap::new(
         h.geometry.window_size.0 as u32,

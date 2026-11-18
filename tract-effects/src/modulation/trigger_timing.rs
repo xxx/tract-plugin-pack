@@ -272,6 +272,117 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unchanged_fractional_rate_keeps_the_pending_deadline_and_blend_progress() {
+        let config = TrackModulation {
+            trigger: TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 1.0,
+            },
+            trigger_timing: TriggerTiming {
+                audio_delay_ms: 0.16666667,
+                blend_ms: 0.145,
+            },
+            ..TrackModulation::default()
+        };
+        let rate = 48000.1;
+        let mut timing = TimingRuntime::default();
+        timing.prepare(&config, true, rate, [0.0; 4], [0.0; 4]);
+        assert_eq!(timing.delay, 8);
+        assert!(!timing.dispatch(true));
+        timing.arm([0.875; 4], [true; 4]);
+        assert_eq!(timing.blends[0].remaining, 7);
+        timing.prepare(&config, true, rate, [0.5; 4], [0.0; 4]);
+        assert_eq!(timing.blends[0].remaining, 7);
+        assert_eq!(timing.blends[0].from, 0.875);
+        for _ in 0..7 {
+            assert!(!timing.dispatch(false));
+        }
+        assert!(timing.dispatch(false));
+        assert_eq!(timing.count, 0);
+    }
+
+    #[test]
+    fn retimed_cues_saturate_at_the_last_sample_in_the_ring() {
+        let config = TrackModulation {
+            trigger: TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 1.0,
+            },
+            lookahead: true,
+            trigger_timing: TriggerTiming {
+                audio_delay_ms: 4.0,
+                blend_ms: 0.0,
+            },
+            ..TrackModulation::default()
+        };
+        let mut timing = TimingRuntime::default();
+        timing.requested_path = Some(u16::MAX);
+        timing.prepare(&config, true, 1000.0, [0.0; 4], [0.0; 4]);
+        assert_eq!(timing.delay, 68);
+        assert!(!timing.dispatch(true));
+        timing.prepare(&config, true, 1024000.0, [0.0; 4], [0.0; 4]);
+        assert_eq!(timing.count, 1);
+        for _ in 0..PENDING_SIZE - 1 {
+            assert!(!timing.dispatch(false));
+        }
+        assert!(timing.dispatch(false));
+        assert_eq!(timing.count, 0);
+    }
+
+    #[test]
+    fn duplicate_deadlines_in_different_words_leave_exactly_one_pending_cue_each() {
+        let mut timing = TimingRuntime::default();
+        for expected in [17, 81, 145] {
+            timing.enqueue(expected);
+            timing.enqueue(expected);
+        }
+        assert_eq!(timing.count, 3);
+    }
+
+    #[test]
+    fn sample_rate_changes_leave_the_empty_queue_unscanned() {
+        let config = TrackModulation {
+            trigger: TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 5.0,
+            },
+            trigger_timing: TriggerTiming {
+                audio_delay_ms: 1.0,
+                blend_ms: 0.0,
+            },
+            ..TrackModulation::default()
+        };
+        let mut timing = TimingRuntime::default();
+        timing.prepare(&config, true, 1000.0, [0.0; 4], [0.0; 4]);
+        assert!(!timing.dispatch(true));
+        assert!(timing.dispatch(false));
+        assert_eq!(timing.count, 0);
+        assert_eq!(timing.cursor, 2);
+        timing.prepare(&config, true, 2000.0, [0.0; 4], [0.0; 4]);
+        assert_eq!(timing.cursor, 2);
+        assert_eq!(timing.delay, 2);
+    }
+
+    #[test]
+    fn rate_changes_keep_inactive_blends_inactive_even_before_audio_resumes() {
+        let config = TrackModulation {
+            trigger_timing: TriggerTiming {
+                audio_delay_ms: 0.0,
+                blend_ms: 4.0,
+            },
+            ..TrackModulation::default()
+        };
+        let mut timing = TimingRuntime::default();
+        timing.set_preferences(&config);
+        timing.arm([0.25; 4], [true; 4]);
+        assert_eq!(timing.blends, [Blend::default(); 4]);
+        for rate in [1000.0, 2000.0, 4000.0] {
+            timing.prepare(&config, false, rate, [0.5; 4], [0.0; 4]);
+        }
+        assert_eq!(timing.source(0, 1.0), 1.0);
+    }
+
+    #[test]
     fn sample_rate_changes_rescale_each_pending_cue_across_ring_wrap_and_word_boundaries() {
         let cfg = TrackModulation {
             trigger: TriggerSource::TransientSample {

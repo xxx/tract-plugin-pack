@@ -141,6 +141,75 @@ impl AudioFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn main_input_is_implicit_even_when_the_threshold_is_serialized() {
+        let settings = AudioTriggerSettings {
+            level_db: Some(-18.0),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(settings).unwrap();
+        assert_eq!(json["level_db"], -18.0);
+        assert!(json.get("input").is_none());
+        assert_eq!(
+            serde_json::from_value::<AudioTriggerSettings>(json).unwrap(),
+            settings
+        );
+    }
+
+    #[test]
+    fn threshold_edits_keep_both_filter_histories_and_reset_discards_them() {
+        let mut settings = AudioTriggerSettings {
+            highpass_hz: Some(200.0),
+            lowpass_hz: Some(2000.0),
+            ..Default::default()
+        };
+        let mut filter = AudioFilter::default();
+        filter.configure(settings, 48000.0);
+        for sample in [0.25, 0.5, -0.125, 0.0] {
+            filter.process(sample);
+        }
+        let mut reference = filter;
+        settings.level_db = Some(-18.0);
+        filter.configure(settings, 48000.0);
+        for sample in [0.75, 0.0, 0.0, 0.0] {
+            assert_eq!(filter.process(sample), reference.process(sample));
+        }
+        assert!((filter.level_floor - 0.12589254).abs() < 1e-6);
+        filter.reset();
+        let mut fresh = AudioFilter::default();
+        fresh.configure(settings, 48000.0);
+        for sample in [0.0, 0.75, 0.125, 0.0] {
+            assert_eq!(filter.process(sample), fresh.process(sample));
+        }
+    }
+
+    #[test]
+    fn cutoff_edits_and_sample_rate_changes_redesign_each_enabled_filter() {
+        for (highpass_hz, lowpass_hz) in [(Some(1000.0), None), (None, Some(1000.0))] {
+            let mut settings = AudioTriggerSettings {
+                highpass_hz,
+                lowpass_hz,
+                ..Default::default()
+            };
+            let mut filter = AudioFilter::default();
+            filter.configure(settings, 48000.0);
+            settings.highpass_hz = settings.highpass_hz.map(|hz| hz * 4.0);
+            settings.lowpass_hz = settings.lowpass_hz.map(|hz| hz * 4.0);
+            for sr in [48000.0, 96000.0] {
+                filter.configure(settings, sr);
+                let tangent = (std::f64::consts::PI * 4000.0 / sr).tan();
+                let one_pole = tangent / (1.0 + tangent);
+                let expected = if highpass_hz.is_some() {
+                    1.0 - one_pole
+                } else {
+                    one_pole
+                };
+                filter.reset();
+                assert!((f64::from(filter.process(1.0)) - expected).abs() < 1e-7);
+            }
+        }
+    }
     #[test]
     fn bypass_is_bit_exact_and_settings_round_trip() {
         let mut filter = AudioFilter::default();

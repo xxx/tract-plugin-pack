@@ -6,6 +6,7 @@ mod follower;
 mod lookahead;
 mod midi_pitch;
 mod midi_wave_switch;
+mod panel_rasters;
 mod position;
 mod semitone_grid;
 mod trigger_timing;
@@ -115,9 +116,14 @@ impl Harness {
     }
 
     fn key(&mut self, key: Key) -> EditorResponse {
+        self.key_with(key, KeyState::Down, Modifiers::empty())
+    }
+
+    fn key_with(&mut self, key: Key, state: KeyState, modifiers: Modifiers) -> EditorResponse {
         self.send(Event::Keyboard(KeyboardEvent {
-            state: KeyState::Down,
+            state,
             key,
+            modifiers,
             ..KeyboardEvent::default()
         }))
     }
@@ -183,6 +189,78 @@ mod mseg_popup_regressions {
     }
 
     #[test]
+    fn pixel_wheel_scales_like_line_wheel_for_an_open_curve_menu() {
+        let mut reference = open_overlapping_edit_menu(0.75);
+        assert!(
+            reference
+                .editor
+                .mseg_edit
+                .on_wheel(-1.5, reference.geometry.layout.mseg_pane)
+        );
+        let expected = popup_only(&mut reference);
+        for delta in [
+            baseview::ScrollDelta::Lines { x: 0.0, y: -1.0 },
+            baseview::ScrollDelta::Pixels { x: 0.0, y: -20.0 },
+        ] {
+            let mut h = open_overlapping_edit_menu(0.75);
+            h.editor.effect_dial_drag.set_input_scale(1.5);
+            let before = popup_only(&mut h);
+            let viewport = h.editor.mseg_edit.viewport();
+            assert!(
+                h.send(Event::Mouse(MouseEvent::WheelScrolled {
+                    delta,
+                    modifiers: Modifiers::empty()
+                }))
+                .captured
+            );
+            assert_eq!(h.editor.mseg_edit.viewport(), viewport);
+            let after = popup_only(&mut h);
+            assert!(before.data() != after.data());
+            assert!(
+                after.data() == expected.data(),
+                "pixel and line scrolling must match the backing-scaled menu scroll"
+            );
+        }
+    }
+
+    #[test]
+    fn clicking_flip_values_in_the_curve_menu_reports_the_edit() {
+        use widgets::dropdown::{DropdownList, DropdownState, dropdown_popup_layout};
+
+        let mut h = open_overlapping_edit_menu(1.0);
+        h.key(Key::Escape);
+        h.key_with(
+            Key::Character("a".into()),
+            KeyState::Down,
+            Modifiers::CONTROL,
+        );
+        h.press(MouseButton::Right);
+        assert!(h.editor.mseg_edit.has_open_menu());
+        let before = h.modulation.msegs[h.editor.selected_mseg];
+        let pane = h.geometry.layout.mseg_pane;
+        let mut geometry = DropdownState::new();
+        let items = [""; 32];
+        let anchor = (h.pointer.0, (h.pointer.1 - 22.0).max(pane.1), 240.0, 22.0);
+        let window = (pane.0 + pane.2, pane.1 + pane.3);
+        geometry.open((), anchor, DropdownList::flat(&items), 0, false, window);
+        let menu = dropdown_popup_layout(&geometry, &items, window).unwrap();
+        let flip = menu
+            .visible_rows
+            .iter()
+            .find(|row| row.item_index == 7)
+            .unwrap();
+        let click = h.click(flip.rect);
+        assert!(click.captured && click.changed);
+        for (original, edited) in before
+            .active()
+            .iter()
+            .zip(h.modulation.msegs[h.editor.selected_mseg].active())
+        {
+            assert_eq!(edited.value, 1.0 - original.value);
+        }
+    }
+
+    #[test]
     fn expanded_mseg_popup_renders_above_modulation_controls() {
         for scale in [0.5, 1.0, 2.0] {
             let mut h = open_overlapping_edit_menu(scale);
@@ -243,6 +321,142 @@ mod mseg_popup_regressions {
             assert_eq!(h.effect, effect);
             assert_eq!(h.modulation, modulation);
         }
+    }
+}
+
+#[test]
+fn idle_focus_loss_reports_no_curve_edit_and_pixel_scroll_matches_line_zoom() {
+    let mut result = None;
+    for delta in [
+        baseview::ScrollDelta::Lines { x: 0.0, y: 1.0 },
+        baseview::ScrollDelta::Pixels { x: 0.0, y: 20.0 },
+    ] {
+        let mut h = Harness::new();
+        let blur = h.send(Event::Window(baseview::WindowEvent::Unfocused));
+        assert!(blur.captured && !blur.changed);
+        let plot = h
+            .editor
+            .mseg_edit
+            .layout(h.geometry.layout.mseg_pane, 1.0)
+            .plot;
+        h.move_to(
+            plot.0 + plot.2 * 0.5,
+            plot.1 + plot.3 * 0.5,
+            Modifiers::empty(),
+        );
+        let before = h.editor.mseg_edit.viewport();
+        let wheel = h.send(Event::Mouse(MouseEvent::WheelScrolled {
+            delta,
+            modifiers: Modifiers::empty(),
+        }));
+        assert!(wheel.captured && !wheel.changed);
+        let after = h.editor.mseg_edit.viewport();
+        assert_ne!(after, before);
+        if let Some(expected) = result {
+            assert_eq!(after, expected);
+        }
+        result = Some(after);
+    }
+}
+
+#[test]
+fn open_trigger_and_waveform_menus_expand_to_fit_their_text() {
+    let mut h = Harness::new();
+    h.resize(1.25);
+    let geometry = &mut h.geometry.layout;
+    geometry.trigger.2 = 30.0;
+    geometry.audio.2 = 30.0;
+    for (rect, margin) in [(geometry.trigger, 14.0), (geometry.audio, 14.0)] {
+        assert!(h.click(rect).captured);
+        let items = dropdown_items(&h.editor, &h.effect);
+        let popup = widgets::dropdown::dropdown_popup_layout(
+            &h.editor.effect_dropdown,
+            &items,
+            h.geometry.window_size,
+        )
+        .unwrap();
+        let font = rect.3 * 0.5;
+        let widest = items
+            .iter()
+            .map(|label| h.tr.text_width(label, font))
+            .fold(0.0_f32, f32::max);
+        assert!(widest > rect.2);
+        assert_eq!(popup.popup_rect.2, widest + margin);
+        h.key(Key::Escape);
+    }
+}
+
+#[test]
+fn smoothing_and_detector_detail_drags_start_from_the_displayed_value() {
+    let mut h = Harness::new();
+    let slot = h.editor.selected_mseg;
+    h.modulation.smooth_ms[slot] = 19.0;
+    let smooth = h.geometry.layout.smooth;
+    let x = smooth.0 + smooth.2 * 0.5;
+    let y = smooth.1 + smooth.3 * 0.5;
+    h.move_to(x, y, Modifiers::empty());
+    h.press(MouseButton::Left);
+    h.move_to(x, y, Modifiers::SHIFT);
+    assert!((h.modulation.smooth_ms[slot] - 19.0).abs() < 1e-5);
+    h.move_to(x, y - 60.0, Modifiers::SHIFT);
+    let expected = 20.0 * 1001.0_f32.powf(0.01) - 1.0;
+    assert!((h.modulation.smooth_ms[slot] - expected).abs() < 1e-4);
+    h.release();
+
+    h.modulation.trigger = TriggerSource::TransientSample {
+        threshold: 1.5,
+        hold_ms: 50.0,
+    };
+    h.modulation.detector_response.detail = 30.0;
+    h.click(h.geometry.layout.detector_setup);
+    let detail = detector::detector_layout(h.geometry).detail;
+    let x = detail.0 + detail.2 * 0.5;
+    let y = detail.1 + detail.3 * 0.5;
+    h.move_to(x, y, Modifiers::empty());
+    h.press(MouseButton::Left);
+    assert!(h.move_to(x, y - 60.0, Modifiers::empty()).changed);
+    h.release();
+    assert!((h.modulation.detector_response.detail - 40.0).abs() < 1e-5);
+}
+
+#[test]
+fn a_pressed_dial_keeps_ownership_when_pointer_reaches_another_setup_control() {
+    for open_waves in [false, true] {
+        let mut h = Harness::new();
+        h.editor
+            .bind_wave_palette(std::sync::Arc::new(std::sync::Mutex::new(
+                widgets::mseg::WavePalette::default(),
+            )));
+        let mix = h.geometry.layout.mix;
+        h.move_to(mix.0 + mix.2 * 0.5, mix.1 + mix.3 * 0.5, Modifiers::empty());
+        h.press(MouseButton::Left);
+        assert_eq!(
+            h.editor.effect_dial_drag.active_action(),
+            Some(&EffectHit::Mix)
+        );
+        let strip = h
+            .editor
+            .mseg_edit
+            .layout(h.geometry.layout.mseg_pane, 1.0)
+            .strip;
+        let setup = if open_waves {
+            widgets::mseg::wave_midi_button_rect(strip, 1.0)
+        } else {
+            widgets::mseg::follower_button_rect(strip, 1.0)
+        };
+        h.move_to(
+            setup.0 + setup.2 * 0.5,
+            setup.1 + setup.3 * 0.5,
+            Modifiers::empty(),
+        );
+        assert!(h.press(MouseButton::Left).captured);
+        assert!(!h.editor.follower_panel_open());
+        assert!(!h.editor.wave_midi_panel_open());
+        assert_eq!(
+            h.editor.effect_dial_drag.active_action(),
+            Some(&EffectHit::Mix)
+        );
+        h.release();
     }
 }
 
@@ -1558,6 +1772,146 @@ mod detector_controls {
         h.editor
             .draw_popup(&mut pm, &mut h.tr, &h.effect, h.geometry);
     }
+
+    #[test]
+    fn compact_detector_places_controls_at_half_scale_and_flips_only_past_the_margin() {
+        let mut h = Harness::new();
+        h.geometry.scale = 0.5;
+        h.geometry.window_size = (700.0, 342.0);
+        h.geometry.layout.detector_setup = (550.0, 135.0, 40.0, 18.0);
+        let panel = layout(&h);
+        assert!(panel.usable);
+        assert_eq!(panel.rect, (502.0, 155.0, 196.0, 185.0));
+        assert_eq!(panel.close, (682.0, 159.0, 12.0, 10.0));
+        assert_eq!(panel.input, (508.0, 173.0, 184.0, 17.0));
+        assert_eq!(panel.reset, (508.0, 324.0, 44.0, 12.0));
+        assert_eq!(panel.meter, (508.0, 307.0, 184.0, 4.0));
+
+        h.geometry.layout.detector_setup.1 += 1.0;
+        assert_eq!(layout(&h).rect.1, 2.0);
+        h.geometry.layout.detector_setup.1 = 280.0;
+        assert_eq!(layout(&h).rect.1, 93.0);
+
+        h.geometry.window_size = (2.0, 2.0);
+        let tiny = layout(&h);
+        assert!(!tiny.usable);
+        assert_eq!(tiny.rect.0, 0.04);
+    }
+
+    #[test]
+    fn detector_double_click_restores_field_defaults_and_close_targets_dismiss_the_popup() {
+        let mut h = Harness::new();
+        open(&mut h);
+        h.modulation.audio_trigger.level_db = Some(-24.0);
+        h.modulation.detector_response.detail = 80.0;
+        h.editor.detector_owner = Some(h.editor.detector_binding(h.effect.kind, &h.modulation));
+        for control in [layout(&h).fields[0], layout(&h).detail] {
+            assert!(!h.click(control).changed);
+            assert!(h.click(control).changed);
+        }
+        assert_eq!(h.modulation.audio_trigger.level_db, None);
+        assert_eq!(h.modulation.detector_response.detail, 50.0);
+        let panel = layout(&h);
+        h.click((panel.rect.0 + 24.0, panel.rect.1 + 2.0, 2.0, 2.0));
+        assert!(h.editor.detector_panel_open());
+        h.click(panel.close);
+        assert!(!h.editor.detector_panel_open());
+        open(&mut h);
+        h.click((0.0, 0.0, 1.0, 1.0));
+        assert!(!h.editor.detector_panel_open());
+    }
+
+    #[test]
+    fn detector_numeric_drafts_keep_their_seed_and_ignore_modified_keys_and_key_up() {
+        let mut h = Harness::new();
+        open(&mut h);
+        h.modulation.audio_trigger.level_db = Some(-24.0);
+        h.modulation.detector_response.detail = 80.0;
+        h.editor.detector_owner = Some(h.editor.detector_binding(h.effect.kind, &h.modulation));
+        for (rect, action, seed) in [
+            (
+                layout(&h).fields[0],
+                EffectHit::Detector(DetectorField::Level),
+                "-24",
+            ),
+            (layout(&h).detail, EffectHit::DetectorDetail, "80"),
+        ] {
+            h.move_to(
+                rect.0 + rect.2 * 0.5,
+                rect.1 + rect.3 * 0.5,
+                Modifiers::empty(),
+            );
+            h.press(MouseButton::Right);
+            assert_eq!(h.editor.text_edit.active_for(&action), Some(seed));
+            for modifier in [Modifiers::CONTROL, Modifiers::META] {
+                h.key_with(Key::Character("9".into()), KeyState::Down, modifier);
+            }
+            h.key_with(Key::Backspace, KeyState::Up, Modifiers::empty());
+            assert_eq!(h.editor.text_edit.active_for(&action), Some(seed));
+            h.key(Key::Escape);
+        }
+
+        type_value(&mut h, DetectorField::Lowpass, "2 kHz");
+        assert!(h.press(MouseButton::Middle).changed);
+        assert_eq!(h.modulation.audio_trigger.lowpass_hz, Some(2000.0));
+        assert!(h.editor.detector_panel_open());
+        h.move_to(0.0, 0.0, Modifiers::empty());
+        h.press(MouseButton::Middle);
+        assert!(!h.editor.detector_panel_open());
+    }
+
+    #[test]
+    fn detector_monitor_shortcut_respects_modifiers_and_rebinding_closes_the_panel() {
+        let mut h = Harness::new();
+        let telemetry = Arc::new(ModulationTelemetry::default());
+        h.editor.connect_live(&telemetry, 0);
+        open(&mut h);
+        for modifier in [Modifiers::CONTROL, Modifiers::META, Modifiers::ALT] {
+            assert!(
+                h.key_with(Key::Character("l".into()), KeyState::Down, modifier)
+                    .captured
+            );
+            assert!(telemetry.audition.snapshot().is_none());
+        }
+        h.key_with(Key::Character("l".into()), KeyState::Up, Modifiers::empty());
+        assert!(telemetry.audition.snapshot().is_none());
+        h.key(Key::Character("l".into()));
+        assert!(telemetry.audition.snapshot().is_some());
+        h.modulation.trigger = TriggerSource::TransientSample {
+            threshold: 2.0,
+            hold_ms: 75.0,
+        };
+        h.move_to(20.0, 20.0, Modifiers::empty());
+        assert!(!h.editor.detector_panel_open());
+        assert!(telemetry.audition.snapshot().is_none());
+    }
+
+    #[test]
+    fn unusable_detector_keeps_the_latest_pointer_and_closes_on_click() {
+        let mut h = Harness::new();
+        open(&mut h);
+        h.geometry.window_size = (210.0, 180.0);
+        assert!(!layout(&h).usable);
+        let moved = h.editor.handle_event(
+            &Event::Mouse(MouseEvent::CursorMoved {
+                position: Point::new(100.0, 27.0),
+                modifiers: Modifiers::empty(),
+            }),
+            EditorContext {
+                pointer_position: h.pointer,
+                effect: &mut h.effect,
+                modulation: &mut h.modulation,
+                text_renderer: &mut h.tr,
+                geometry: h.geometry,
+            },
+        );
+        assert!(moved.captured);
+        assert_eq!(h.editor.mouse_pos, (100.0, 27.0));
+        assert!(h.editor.detector_panel_open());
+        assert!(h.press(MouseButton::Right).captured);
+        assert!(!h.editor.detector_panel_open());
+    }
+
     fn type_value(h: &mut Harness, field: DetectorField, text: &str) {
         let r = layout(h).fields[field as usize];
         h.move_to(r.0 + r.2 * 0.5, r.1 + r.3 * 0.5, Modifiers::empty());

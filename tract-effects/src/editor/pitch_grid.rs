@@ -194,4 +194,68 @@ mod tests {
         assert!(editor.mseg_edit.pitch_grid().is_none());
         assert_eq!(config.msegs, before.msegs);
     }
+
+    #[test]
+    fn semitone_grid_keeps_a_single_note_and_honors_its_exact_level_budget() {
+        let spec = effects::parameter_specs(EffectKind::PitchShift)[0];
+        let grid = |min, max, base, depth| {
+            mapped_grid(
+                ParamSpec { min, max, ..spec },
+                base,
+                depth,
+                widgets::Polarity::Unipolar,
+            )
+        };
+        assert_eq!(grid(0.5, 1.5, 0.5, 1.0).unwrap().levels(), &[0.5]);
+        assert_eq!(grid(0.0, 12.0, 0.0, 1.0).unwrap().levels().len(), 13);
+        assert!(grid(0.125, 0.875, 0.125, 1.0).is_none());
+        assert_eq!(
+            grid(-256.0, 255.0, -256.0, 1.0).unwrap().levels().len(),
+            512
+        );
+        assert!(grid(-256.0, 256.0, -3.0, 0.125).is_none());
+        assert!(grid(7.0, 7.0, 7.0, 1.0).is_none());
+        assert!(grid(8.0, 7.0, 7.0, 1.0).is_none());
+        for (min, max) in [
+            (f32::NAN, 12.0),
+            (0.0, f32::INFINITY),
+            (f32::NEG_INFINITY, 12.0),
+        ] {
+            assert!(grid(min, max, 0.0, 1.0).is_none());
+        }
+    }
+
+    #[test]
+    fn logarithmic_grid_depends_on_frequency_ratio_even_at_large_finite_endpoints() {
+        let spec = effects::parameter_specs(EffectKind::Svf)[0];
+        let min = 1e30_f32;
+        let max = min * 2.0;
+        let grid = mapped_grid(
+            ParamSpec { min, max, ..spec },
+            min,
+            1.0,
+            widgets::Polarity::Unipolar,
+        )
+        .unwrap();
+        assert_eq!(grid.levels().len(), 12);
+        for pair in grid.levels().windows(2) {
+            assert!((pair[1] - pair[0] - 1.0 / 12.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn logarithmic_pitch_requires_positive_ordered_frequency_endpoints() {
+        let spec = effects::parameter_specs(EffectKind::Svf)[0];
+        for (min, max) in [(-880.0, -220.0), (440.0, 440.0), (0.0, 440.0)] {
+            assert!(
+                mapped_grid(
+                    ParamSpec { min, max, ..spec },
+                    440.0,
+                    0.5,
+                    widgets::Polarity::Bipolar
+                )
+                .is_none()
+            );
+        }
+    }
 }

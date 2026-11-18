@@ -695,3 +695,38 @@ impl Session<'_> {
         true
     }
 }
+
+#[cfg(test)]
+mod field_tests {
+    use super::*;
+
+    #[test]
+    fn disabled_and_minimum_detector_values_are_distinct_at_the_slider_boundary() {
+        for (field, label, min, max, middle) in [
+            (DetectorField::Level, "Threshold", -60.0, 0.0, -30.0),
+            (
+                DetectorField::Highpass,
+                "High-pass",
+                20.0,
+                20000.0,
+                632.4555,
+            ),
+            (DetectorField::Lowpass, "Low-pass", 20.0, 20000.0, 632.4555),
+        ] {
+            assert_eq!(field.label(), label);
+            assert_eq!(field.norm(None), 0.0);
+            assert_eq!(field.display(None), "Off");
+            assert_eq!(field.value_at_norm(0.024), None);
+            assert!((field.value_at_norm(0.025).unwrap() - min).abs() < 1e-4);
+            assert!((field.norm(Some(min)) - 0.05).abs() < 1e-6);
+            assert!((field.norm(Some(middle)) - 0.525).abs() < 1e-6);
+            assert!((field.value_at_norm(0.525).unwrap() - middle).abs() < 0.001);
+            assert!((field.norm(Some(max)) - 1.0).abs() < 1e-6);
+            assert!((field.value_at_norm(1.0).unwrap() - max).abs() < 0.025);
+        }
+        assert_eq!(DetectorField::Level.display(Some(-30.0)), "-30.0 dB");
+        assert_eq!(DetectorField::Level.parse("0 dB"), Some(Some(0.0)));
+        assert_eq!(DetectorField::Highpass.parse("0 Hz"), Some(None));
+        assert_eq!(DetectorField::Lowpass.parse(" OFF "), Some(None));
+    }
+}

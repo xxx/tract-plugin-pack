@@ -968,6 +968,151 @@ mod tests {
     use super::*;
 
     #[test]
+    fn lookahead_capture_and_pending_sidechain_cues_follow_the_requested_path() {
+        let mut config = TrackModulation {
+            trigger: TriggerSource::TransientSample {
+                threshold: 1.5,
+                hold_ms: 50.0,
+            },
+            ..TrackModulation::default()
+        };
+        config.audio_trigger.input = DetectorInput::Sidechain;
+        for discard in [false, true] {
+            let mut state = ModulationState::default();
+            assert!(!state.precise_trigger_active());
+            assert!(!state.timing_clocked());
+            state.set_lookahead_path(1 << 3);
+            state.begin_block(&config, &[0.0], &[0.0], 1000.0);
+            assert!(state.precise_trigger_active());
+            assert!(state.timing_clocked());
+            let epoch = state.capture_epoch(&config, 1);
+            state.invalidate_lookahead_capture();
+            assert_eq!(state.capture_epoch(&config, 1), epoch + 1);
+            assert!(!state.next_precise_trigger_with_sidechain([0.0; 2], [1.0; 2]));
+            if discard {
+                state.discard_lookahead_cues();
+            }
+            for sample in 1..=6 {
+                let fired = state.next_precise_trigger_with_sidechain([0.0; 2], [0.0; 2]);
+                assert_eq!(fired, !discard && sample == 4, "sample {sample}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_inherited_lookahead_path_does_not_delay_non_audio_sample_triggers() {
+        let config = TrackModulation {
+            trigger: TriggerSource::FreeHzSample { hz: 250.0 },
+            ..TrackModulation::default()
+        };
+        let mut state = ModulationState::default();
+        state.set_lookahead_path(1 << 2);
+        state.begin_block(&config, &[0.0; 9], &[0.0; 9], 1000.0);
+        assert!(state.precise_trigger_active());
+        assert!(!state.timing_clocked());
+        for sample in 0..9 {
+            assert_eq!(
+                state.next_precise_trigger([0.0; 2]),
+                sample == 4 || sample == 8
+            );
+        }
+    }
+
+    #[test]
+    fn mix_delivery_survives_a_segment_but_is_cleared_by_effect_kind_replacement() {
+        let mut config = TrackModulation::default();
+        config.targets[0] = Some(ModulationTarget::Mix);
+        config.depths[0] = 1.0;
+        config.msegs[1].nodes[0].value = 0.375;
+        config.msegs[1].nodes[1].value = 0.375;
+        let mut track = TrackEffect {
+            kind: EffectKind::Svf,
+            mix: 0.25,
+            ..TrackEffect::default()
+        };
+        let mut state = ModulationState::default();
+        let mut effect = crate::effects::EffectInstance::new(track.kind);
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 1000.0);
+        assert_eq!(state.next_mix(track.mix), 0.625);
+        assert_eq!(state.delivered_mix(), Some((0.625, 1)));
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 1000.0);
+        assert_eq!(state.delivered_mix(), Some((0.625, 1)));
+        track.kind = EffectKind::SallenKey;
+        let mut replacement = crate::effects::EffectInstance::new(track.kind);
+        state.advance_segment(&config, &track, &mut replacement, 1, 120.0, 1000.0);
+        assert_eq!(state.delivered_mix(), None);
+    }
+
+    #[test]
+    fn smoothing_only_uses_positive_and_finite_audio_rates() {
+        let mut config = TrackModulation::default();
+        config.targets = [None; 3];
+        config.smooth_ms[1] = 20.0;
+        let track = TrackEffect::default();
+        let mut effect = crate::effects::EffectInstance::new(track.kind);
+        let mut state = ModulationState::default();
+        for rate in [f64::NAN, f64::INFINITY, 0.0, -48000.0] {
+            state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+            assert!(state.smoothing_active());
+            state.advance_segment(&config, &track, &mut effect, 1, 120.0, rate);
+            assert!(!state.smoothing_active());
+        }
+    }
+
+    #[test]
+    fn pitch_and_daw_retriggers_each_mark_a_new_capture_epoch() {
+        for trigger in [
+            TriggerSource::DawPosition,
+            TriggerSource::MidiPitch {
+                transpose: 0,
+                channel: None,
+            },
+        ] {
+            let config = TrackModulation {
+                trigger,
+                ..TrackModulation::default()
+            };
+            let mut state = ModulationState::default();
+            state.begin_block(&config, &[0.0], &[0.0], 48000.0);
+            let epoch = state.capture_epoch(&config, 0);
+            state.trigger();
+            assert_eq!(state.capture_epoch(&config, 0), epoch + 1);
+        }
+    }
+
+    #[test]
+    fn editing_a_follower_on_an_assignable_slot_refreshes_its_held_parameter_at_the_boundary() {
+        let mut config = TrackModulation {
+            targets: [None, Some(ModulationTarget::EffectParameter(0)), None],
+            depths: [0.0, 0.5, 0.0],
+            ..TrackModulation::default()
+        };
+        config.follower.routes[2].enabled = true;
+        config.follower.attack_ms = 0.0;
+        config.follower.release_ms = 0.0;
+        let kind = EffectKind::Svf;
+        let track = TrackEffect {
+            kind,
+            params: crate::effects::default_params_for_kind(kind),
+            ..Default::default()
+        };
+        let mut state = ModulationState::default();
+        let mut effect = crate::effects::EffectInstance::new(kind);
+        let mut norms = Vec::new();
+        for (amount, expected) in [(1.0, 0.25), (0.5, 0.125)] {
+            config.follower.routes[2].amount = amount;
+            state.begin_block(&config, &[0.25], &[0.25], 48000.0);
+            state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+            state.process_modulation_sample(&config, &mut effect, [0.25; 2], [0.0; 2]);
+            assert_eq!(state.output(2), expected);
+            let (norm, slot) = state.parameter_norms()[0].unwrap();
+            assert_eq!(slot, 2);
+            norms.push(norm);
+        }
+        assert!(norms[1] < norms[0]);
+    }
+
+    #[test]
     fn transient_followers_match_their_attack_and_release_time_constants() {
         let mut detector = TransientDetector::default();
         for _ in 0..10 {

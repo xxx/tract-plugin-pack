@@ -726,4 +726,60 @@ mod layout_tests {
         assert!(layout((223.0, 260.0), pane, 0.5).is_none());
         assert!(layout((330.0, 229.0), pane, 1.0).is_none());
     }
+
+    #[test]
+    fn wave_setup_admits_the_exact_minimum_and_keeps_scaled_channel_controls() {
+        let pane = (0.0, 0.0, 1200.0, 700.0);
+        let minimum = layout((224.0, 204.0), pane, 0.5).unwrap();
+        assert_rect(minimum.panel, (4.0, 4.0, 216.0, 196.0));
+        assert_eq!(minimum.values[3].3, 20.0);
+        let full = layout((1300.0, 800.0), pane, 2.0).unwrap();
+        assert_eq!(full.panel.2, 840.0);
+        assert_eq!(full.values[3].3, 68.0);
+        let mut panel = Panel::default();
+        assert_eq!(panel.index(Field::Channel), 0);
+        for (channel, row) in [(0, 1), (7, 8), (15, 16)] {
+            panel.draft.channel = Some(channel);
+            assert_eq!(panel.index(Field::Channel), row);
+        }
+    }
+
+    #[test]
+    fn wave_label_clipping_preserves_the_longest_fitting_unicode_prefix() {
+        let mut font = widgets::TextRenderer::new(widgets::DEFAULT_FONT);
+        let color = tiny_skia::Color::WHITE;
+        let size = 16.0;
+        for prefix in ["Bé", "BéZ", ""] {
+            let mut actual = tiny_skia::Pixmap::new(128, 36).unwrap();
+            let mut expected = actual.clone();
+            let width = font.text_width(prefix, size);
+            text(
+                &mut font,
+                &mut actual,
+                (3.0, 20.0),
+                "BéZ",
+                size,
+                width,
+                color,
+            );
+            font.draw_text(&mut expected, 3.0, 20.0, prefix, size, color);
+            assert!(actual.data() == expected.data(), "clipped text {prefix:?}");
+        }
+    }
+
+    #[test]
+    fn a_midi_wave_mapping_only_replaces_the_bound_valid_curve() {
+        let editor = EffectEditor::default();
+        let effect = TrackEffect::default();
+        let mut config = TrackModulation::default();
+        config.wave_switch = Some(MidiWaveMapping {
+            envelope: 3,
+            first_note: 60,
+            channel: None,
+        });
+        assert!(editor.wave_display_curve(&effect, &config, 3).is_some());
+        assert!(editor.wave_display_curve(&effect, &config, 2).is_none());
+        config.wave_switch.as_mut().unwrap().first_note = 121;
+        assert!(editor.wave_display_curve(&effect, &config, 3).is_none());
+    }
 }

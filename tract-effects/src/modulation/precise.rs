@@ -468,4 +468,92 @@ mod tests {
         assert!(runtime.next_sample([0.0; 2]));
         assert!(runtime.next_sample([0.0; 2]));
     }
+
+    #[test]
+    fn sample_trigger_rejects_invalid_rates_and_parameters_without_publishing_detector_data() {
+        let mut runtime = PreciseTrigger::default();
+        for hz in [0.0, -5.0, f32::NAN, f32::INFINITY] {
+            runtime.prepare(TriggerSource::FreeHzSample { hz }, 48000.0);
+            assert!(!runtime.active());
+        }
+        for threshold in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            runtime.prepare(
+                TriggerSource::TransientSample {
+                    threshold,
+                    hold_ms: 10.0,
+                },
+                48000.0,
+            );
+            assert!(!runtime.active());
+            assert_eq!(runtime.reading(), None);
+        }
+        for rate in [0.0, -48000.0, 1e-100, 1e100, f64::NAN] {
+            runtime.prepare(
+                TriggerSource::TransientSample {
+                    threshold: 1.5,
+                    hold_ms: 10.0,
+                },
+                rate,
+            );
+            assert!(!runtime.active());
+        }
+        runtime.prepare(TriggerSource::FreeHzSample { hz: 5.0 }, 48000.0);
+        let old_filter = runtime.filter;
+        runtime.configure_audio(AudioTriggerSettings {
+            input: DetectorInput::Sidechain,
+            highpass_hz: Some(200.0),
+            ..AudioTriggerSettings::default()
+        });
+        runtime.configure_response(TransientSettings {
+            algorithm: TransientAlgorithm::Peak,
+            detail: 100.0,
+        });
+        assert!(runtime.active());
+        assert_eq!(runtime.reading(), None);
+        assert_eq!(runtime.filter, old_filter);
+        assert!(!runtime.response_prepared);
+    }
+
+    #[test]
+    fn sample_hz_rate_changes_preserve_fractional_phase_but_leaving_the_mode_resets_it() {
+        let hz = TriggerSource::FreeHzSample { hz: 10.0 };
+        let mut runtime = PreciseTrigger::default();
+        runtime.prepare(hz, 1000.0);
+        for _ in 0..25 {
+            assert!(!runtime.next_sample([0.0; 2]));
+        }
+        runtime.prepare(hz, 2000.0);
+        for _ in 0..150 {
+            assert!(!runtime.next_sample([0.0; 2]));
+        }
+        assert!(runtime.next_sample([0.0; 2]));
+        for _ in 0..20 {
+            assert!(!runtime.next_sample([0.0; 2]));
+        }
+        runtime.prepare(TriggerSource::Free, 2000.0);
+        runtime.prepare(hz, 2000.0);
+        for _ in 0..200 {
+            assert!(!runtime.next_sample([0.0; 2]));
+        }
+        assert!(runtime.next_sample([0.0; 2]));
+    }
+
+    #[test]
+    fn repeated_fractional_rate_preparation_does_not_extend_the_refractory_window() {
+        let mut runtime = PreciseTrigger::default();
+        let trigger = TriggerSource::TransientSample {
+            threshold: 1.5,
+            hold_ms: 0.15,
+        };
+        let rate = 48000.1;
+        runtime.prepare(trigger, rate);
+        runtime.configure_response(TransientSettings {
+            algorithm: TransientAlgorithm::Peak,
+            detail: 50.0,
+        });
+        assert!(runtime.next_sample([1.0; 2]));
+        assert_eq!(runtime.detector.refractory, 7);
+        runtime.prepare(trigger, rate);
+        assert_eq!(runtime.detector.refractory, 7);
+    }
 }

@@ -1027,4 +1027,191 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn waveform_capture_requires_a_valid_request_and_usable_clock() {
+        use crate::modulation::TriggerSource;
+        let telemetry = WaveformTelemetry::default();
+        let mut clock = WaveformClock::default();
+        let mut config = config();
+        assert!(!clock.request().matches(0, EffectKind::None));
+        let token = telemetry.request_sidechain(15, 3, EffectKind::Svf);
+        assert_ne!(token, 0);
+        assert_eq!(telemetry.request(16, 3, EffectKind::Svf), 0);
+        assert_eq!(telemetry.request(15, 4, EffectKind::Svf), 0);
+        clock.begin_block(&telemetry);
+        let req = clock.request();
+        assert_eq!(req.token, token);
+        assert_eq!(req.slot, 3);
+        assert!(req.sidechain);
+        assert!(req.matches(15, EffectKind::Svf));
+        assert!(!req.matches(14, EffectKind::Svf));
+        assert!(!req.matches(15, EffectKind::None));
+
+        let prepare = |clock: &mut WaveformClock, config: &TrackModulation, sample_rate| {
+            clock.prepare_segment(
+                &telemetry,
+                15,
+                WaveformTiming {
+                    config,
+                    kind: EffectKind::Svf,
+                    phase: 0.0,
+                    trigger_epoch: 1,
+                    bpm: 120.0,
+                    sample_rate,
+                },
+            );
+            clock.active()
+        };
+        config.msegs[3].sync_mode = tiny_skia_widgets::SyncMode::Time;
+        config.msegs[3].time_seconds = 0.0;
+        assert!(!prepare(&mut clock, &config, 48000.0));
+        config.trigger = TriggerSource::DawPosition;
+        assert!(prepare(&mut clock, &config, 48000.0));
+        for invalid_rate in [0.0, -48000.0, f64::INFINITY, f64::NAN] {
+            assert!(!prepare(&mut clock, &config, invalid_rate));
+        }
+    }
+
+    #[test]
+    fn seek_tolerance_keeps_nearby_peaks_and_clock_changes_flush_pending_audio() {
+        let telemetry = WaveformTelemetry::default();
+        let token = telemetry.request(0, 0, EffectKind::Svf);
+        let mut config = config();
+        let mut clock = WaveformClock::default();
+        prepare(&mut clock, &telemetry, &config, 0.25, 0);
+        clock.follow_sample_phase();
+        clock.record_sample(&telemetry, [0.75; 2], [0.125; 2], 0.25);
+        let segment = |clock: &mut WaveformClock, config: &TrackModulation, phase| {
+            clock.prepare_segment(
+                &telemetry,
+                0,
+                WaveformTiming {
+                    config,
+                    kind: EffectKind::Svf,
+                    phase,
+                    trigger_epoch: 0,
+                    bpm: 120.0,
+                    sample_rate: 48000.0,
+                },
+            );
+        };
+        segment(&mut clock, &config, 0.25 - 1e-6);
+        assert_eq!(telemetry.head(), 0);
+        segment(&mut clock, &config, 0.125);
+        assert_eq!(telemetry.head(), 1);
+        assert_eq!(telemetry.point(0, token).unwrap().input, 0.75);
+        clock.record_sample(&telemetry, [0.5; 2], [0.25; 2], 0.0);
+        let phase = clock.phase;
+        config.trigger = crate::modulation::TriggerSource::DawPosition;
+        segment(&mut clock, &config, phase);
+        assert_eq!(telemetry.head(), 2);
+        assert_eq!(telemetry.point(1, token).unwrap().input, 0.5);
+
+        clock.record_sample(&telemetry, [0.375; 2], [0.125; 2], phase);
+        clock.sync_position(&telemetry, 0, 0.75);
+        assert_eq!(telemetry.head(), 2);
+        clock.sync_position(&telemetry, 1, 0.75);
+        assert_eq!(telemetry.head(), 3);
+        assert_eq!(clock.phase, 0.75);
+        assert_eq!(telemetry.point(2, token).unwrap().input, 0.375);
+    }
+
+    #[test]
+    fn selected_smoothed_slot_tracks_played_phase_and_pause_discards_pending_bins() {
+        let telemetry = WaveformTelemetry::default();
+        let token = telemetry.request(0, 2, EffectKind::Svf);
+        let mut config = config();
+        config.smooth_ms[2] = 20.0;
+        let mut clock = WaveformClock::default();
+        prepare(&mut clock, &telemetry, &config, 0.0, 0);
+        clock.record_sample(&telemetry, [0.75; 2], [0.125; 2], 0.625);
+        clock.finish_block(&telemetry);
+        assert_eq!(telemetry.point(0, token).unwrap().bin, 320);
+        clock.pause();
+        assert!(!clock.active());
+        clock.record_sample(&telemetry, [0.875; 2], [0.5; 2], 0.75);
+        clock.sync_position(&telemetry, 1, 0.0);
+        clock.finish_block(&telemetry);
+        assert_eq!(telemetry.head(), 1);
+        assert_eq!(clock.phase, 0.625);
+    }
+
+    #[test]
+    fn live_curve_changes_ignore_cyclic_sustain_then_capture_the_one_shot_endpoint() {
+        let telemetry = WaveformTelemetry::default();
+        let token = telemetry.request(0, 0, EffectKind::Svf);
+        let mut config = config();
+        let sr = 1024.0;
+        let doc = &mut config.msegs[0];
+        doc.snap = false;
+        let sustain = doc.insert_node(0.25 + 1.0 / sr as f32, 0.5).unwrap();
+        doc.hold = HoldMode::Sustain(sustain);
+        let mut clock = WaveformClock::default();
+        clock.begin_block(&telemetry);
+        clock.prepare_segment(
+            &telemetry,
+            0,
+            WaveformTiming {
+                config: &config,
+                kind: EffectKind::Svf,
+                phase: 0.25 - 1.0 / sr,
+                trigger_epoch: 0,
+                bpm: 120.0,
+                sample_rate: sr,
+            },
+        );
+        clock.record_sample(&telemetry, [0.75; 2], [0.5; 2], 0.0);
+        clock.record_sample(&telemetry, [0.125; 2], [0.25; 2], 0.0);
+        assert_eq!(telemetry.head(), 0);
+        clock.finish_block(&telemetry);
+        assert_eq!(telemetry.point(0, token).unwrap().input, 0.75);
+
+        let mut one_shot = config.msegs[0];
+        one_shot.play_mode = PlayMode::OneShot;
+        one_shot.hold = HoldMode::None;
+        clock.sync_position(&telemetry, 1, 1.0 - 1.0 / sr);
+        clock.update_curve(&one_shot);
+        clock.record_sample(&telemetry, [0.625; 2], [0.5; 2], 0.0);
+        clock.record_sample(&telemetry, [1.0; 2], [1.0; 2], 0.0);
+        clock.finish_block(&telemetry);
+        assert_eq!(telemetry.head(), 3);
+        assert_eq!(
+            telemetry.point(2, token),
+            Some(WaveformPoint {
+                bin: 511,
+                input: 0.625,
+                output: 0.5
+            })
+        );
+    }
+
+    #[test]
+    fn a_whole_projected_cycle_flushes_peaks_even_with_equal_phases() {
+        let telemetry = WaveformTelemetry::default();
+        let token = telemetry.request(0, 0, EffectKind::Svf);
+        let mut config = config();
+        config.msegs[0].time_seconds = 1.0 / 1024.0;
+        let mut clock = WaveformClock::default();
+        clock.begin_block(&telemetry);
+        clock.prepare_segment(
+            &telemetry,
+            0,
+            WaveformTiming {
+                config: &config,
+                kind: EffectKind::Svf,
+                phase: 0.125,
+                trigger_epoch: 0,
+                bpm: 120.0,
+                sample_rate: 1024.0,
+            },
+        );
+        clock.record_sample(&telemetry, [0.75; 2], [0.5; 2], 0.0);
+        clock.record_sample(&telemetry, [0.125; 2], [0.25; 2], 0.0);
+        clock.finish_block(&telemetry);
+        assert_eq!(telemetry.head(), 2);
+        assert_eq!(telemetry.point(0, token).unwrap().input, 0.75);
+        assert_eq!(telemetry.point(1, token).unwrap().input, 0.125);
+        assert_eq!(telemetry.point(1, token).unwrap().bin, 64);
+    }
 }

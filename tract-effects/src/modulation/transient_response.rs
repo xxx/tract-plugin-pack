@@ -123,6 +123,69 @@ impl TransientDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn envelope_detail_scales_all_four_detector_windows() {
+        use precise::DetectorCoefficients;
+        let sr = 48000.0;
+        let response = TransientSettings {
+            algorithm: TransientAlgorithm::Envelope,
+            detail: 25.0,
+        };
+        assert_eq!(
+            DetectorCoefficients::for_response(sr, response),
+            DetectorCoefficients {
+                fast_a: one_pole_coef(TRANSIENT_FAST_ATTACK_MS * 2.0, sr),
+                fast_r: one_pole_coef(TRANSIENT_FAST_RELEASE_MS * 2.0, sr),
+                slow_a: one_pole_coef(TRANSIENT_SLOW_ATTACK_MS * 2.0, sr),
+                slow_r: one_pole_coef(TRANSIENT_SLOW_RELEASE_MS * 2.0, sr),
+            }
+        );
+    }
+
+    #[test]
+    fn peak_ratio_is_strict_at_equality() {
+        let response = TransientSettings {
+            algorithm: TransientAlgorithm::Peak,
+            detail: 50.0,
+        };
+        let coefficients = precise::DetectorCoefficients::for_response(1000.0, response);
+        let mut detector = TransientDetector {
+            slow_env: 0.125,
+            ..TransientDetector::default()
+        };
+        assert!(!detector.process_response(0.25, 2.0, 0.0, 1000.0, coefficients, 0.0, response));
+        assert!(detector.process_response(0.625, 2.0, 0.0, 1000.0, coefficients, 0.0, response));
+    }
+
+    #[test]
+    fn rms_compares_powers_against_squared_thresholds_and_updates_the_fast_average() {
+        let response = TransientSettings {
+            algorithm: TransientAlgorithm::Rms,
+            detail: 50.0,
+        };
+        let coefficients = precise::DetectorCoefficients {
+            fast_a: 0.5,
+            slow_a: 1.0,
+            ..Default::default()
+        };
+        for (slow, floor, ratio, crosses) in [
+            (0.015625, 0.25, 2.0, true),
+            (0.03125, 0.25, 2.0, false),
+            (0.015625, 0.5, 2.0, false),
+            (0.015625, 0.25, 3.0, false),
+        ] {
+            let mut detector = TransientDetector {
+                slow_env: slow,
+                ..TransientDetector::default()
+            };
+            assert_eq!(
+                detector.process_response(0.5, ratio, 0.0, 1000.0, coefficients, floor, response),
+                crosses
+            );
+            assert_eq!(detector.fast_env, 0.125);
+        }
+    }
     fn config(algorithm: TransientAlgorithm, detail: f32) -> TrackModulation {
         TrackModulation {
             trigger: TriggerSource::TransientSample {

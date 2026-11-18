@@ -587,3 +587,27 @@ impl Session<'_> {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signed_audio_shift_and_unsigned_blend_map_to_distinct_slider_ranges() {
+        let settings = TriggerTiming {
+            audio_delay_ms: 1.25,
+            blend_ms: 7.5,
+        };
+        assert_eq!(Field::Delay.label(), "Audio shift");
+        assert_eq!(Field::Blend.label(), "Retrigger blend");
+        assert_eq!(Field::Delay.value(settings), 1.25);
+        assert_eq!(Field::Blend.value(settings), 7.5);
+        assert_eq!(Field::Delay.norm(settings, false), 0.3125);
+        assert_eq!(Field::Delay.norm(settings, true), 0.65625);
+        assert_eq!(Field::Blend.norm(settings, false), 0.375);
+        assert_eq!(Field::Blend.norm(settings, true), 0.375);
+        let mut settings = settings;
+        Field::Delay.set(&mut settings, -1.5);
+        assert_eq!(Field::Delay.norm(settings, true), 0.3125);
+    }
+}

@@ -123,6 +123,29 @@ impl ModulationState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pitch_readout_keeps_a_latched_note_while_invalid_rates_suspend_its_clock() {
+        let (mut config, _, mut state, _) = setup();
+        state.begin_block(&config, &[0.0], &[0.0], 48000.0);
+        state.midi_note_on(&config, MidiNoteOn::new(0, 0, 69, 1.0).unwrap(), false);
+        assert!(state.waveform_running(&config, 1));
+        for rate in [0.0, -48000.0, f64::NAN, f64::INFINITY] {
+            let epoch = state.capture_epoch(&config, 1);
+            state.begin_block(&config, &[0.0], &[0.0], rate);
+            assert_eq!(state.pitch.step, 0.0);
+            assert!(!state.waveform_running(&config, 1));
+            assert_eq!(state.pitch_reading().unwrap().note, Some(69));
+            assert_eq!(state.capture_epoch(&config, 1), epoch + 1);
+        }
+        config.trigger = TriggerSource::MidiPitch {
+            transpose: 12,
+            channel: None,
+        };
+        state.begin_block(&config, &[0.0], &[0.0], 48000.0);
+        assert!(state.waveform_running(&config, 1));
+        assert_eq!(state.pitch_reading().unwrap().hz, 880.0);
+    }
     fn setup() -> (
         TrackModulation,
         TrackEffect,

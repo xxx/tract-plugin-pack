@@ -1073,6 +1073,51 @@ mod tests {
     }
 
     #[test]
+    fn modulation_status_controls_keep_their_scaled_offsets_and_gaps() {
+        for scale in [0.5, 1.25, 2.0] {
+            let lay = effect_layout(scale);
+            let strip = widgets::mseg::mseg_layout(lay.mseg_pane, false, scale).strip;
+            let right = lay.mseg_pane.0 + lay.mseg_pane.2;
+            let y = strip.1 + 44.0 * scale;
+            assert_eq!(
+                lay.trace,
+                (right - 78.0 * scale, y, 72.0 * scale, 26.0 * scale)
+            );
+            assert_eq!(
+                lay.smooth,
+                (right - 234.0 * scale, y, 150.0 * scale, 26.0 * scale)
+            );
+            assert_eq!(
+                lay.audio,
+                (right - 354.0 * scale, y, 114.0 * scale, 26.0 * scale)
+            );
+            assert_eq!(
+                lay.detector_setup,
+                (150.0 * scale, 272.0 * scale, 130.0 * scale, 26.0 * scale)
+            );
+            assert!(!rects_overlap(lay.audio, lay.smooth));
+            assert!(!rects_overlap(lay.smooth, lay.trace));
+            assert!(!rects_overlap(lay.detector_setup, lay.trigger));
+        }
+    }
+
+    #[test]
+    fn pitch_mode_disables_hits_on_both_readouts() {
+        let scale = 1.25;
+        let lay = effect_layout(scale);
+        let pitch = TriggerSource::MidiPitch {
+            transpose: 0,
+            channel: None,
+        };
+        for rect in [lay.mseg_sync, lay.mseg_length] {
+            let x = rect.0 + rect.2 * 0.5;
+            let y = rect.1 + rect.3 * 0.5;
+            assert!(effect_hit(x, y, scale, 2, 1, TriggerSource::Free).is_some());
+            assert_eq!(effect_hit(x, y, scale, 2, 1, pitch), None);
+        }
+    }
+
+    #[test]
     fn section_headers_are_disjoint_from_their_section_controls() {
         let lay = effect_layout(1.0);
         // EFFECT header clears the editor bar above and the EFFECT controls below.
@@ -1311,6 +1356,8 @@ mod tests {
             let mut actual = canvas();
             let original = actual.clone();
             draw_mseg_playhead_in_layout(&mut actual, &layout, 0.2, 1.0);
+            assert_eq!(actual.data(), original.data());
+            draw_mseg_playhead_in_layout(&mut actual, &layout, 0.8, 1.0);
             assert_eq!(actual.data(), original.data());
             draw_mseg_playhead_in_layout(&mut actual, &layout, 0.5, 1.0);
             assert_ne!(actual.data(), original.data());

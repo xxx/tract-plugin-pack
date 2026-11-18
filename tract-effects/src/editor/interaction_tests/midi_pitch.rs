@@ -179,6 +179,27 @@ fn external_pitch_mode_changes_finish_length_drags_before_they_can_edit_saved_le
 }
 
 #[test]
+fn pitch_mode_preserves_active_mix_drags() {
+    let mut h = setup(1.0);
+    let mix = h.geometry.layout.mix;
+    h.move_to(mix.0 + mix.2 * 0.5, mix.1 + mix.3 * 0.5, Modifiers::empty());
+    h.press(MouseButton::Left);
+    assert_eq!(
+        h.editor.effect_dial_drag.active_action(),
+        Some(&EffectHit::Mix)
+    );
+    let before = h.effect.mix;
+    let y = if before > 0.5 {
+        h.pointer.1 + 30.0
+    } else {
+        h.pointer.1 - 30.0
+    };
+    assert!(h.move_to(h.pointer.0, y, Modifiers::empty()).changed);
+    assert_ne!(h.effect.mix, before);
+    h.release();
+}
+
+#[test]
 fn complete_extreme_pitch_readouts_fit_and_render_with_units_at_each_scale() {
     use crate::modulation::{MidiPitchReading, MidiPitchSettings};
     for scale in [0.5, 1.0, 2.0] {

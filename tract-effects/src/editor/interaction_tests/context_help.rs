@@ -175,6 +175,94 @@ fn modulation_hover_hints_clear_on_cursor_leave_without_closing_help() {
 }
 
 #[test]
+fn contextual_hints_follow_the_control_and_clock_under_the_pointer() {
+    let mut h = at_scale(1.0);
+    let layout = h.geometry.layout;
+    let hint_at = |h: &mut Harness, rect: Rect| {
+        h.move_to(
+            rect.0 + rect.2 * 0.5,
+            rect.1 + rect.3 * 0.5,
+            Modifiers::empty(),
+        );
+        h.editor.mseg_edit.context_hint(
+            &h.modulation.msegs[h.editor.selected_mseg],
+            layout.mseg_pane,
+            1.0,
+        )
+    };
+    for (rect, expected) in [
+        (layout.mseg_selector, "other curves"),
+        (layout.target, "destination"),
+        (layout.depth, "Scale modulation"),
+        (layout.trigger, "Choose a clock"),
+        (layout.mseg_sync, "seconds or host beats"),
+        (layout.mseg_length, "playback length"),
+        (layout.smooth, "milliseconds"),
+        (layout.trace, "measured modulation"),
+    ] {
+        let hint = hint_at(&mut h, rect).unwrap();
+        assert!(
+            hint.contains(expected),
+            "{hint:?} must contain {expected:?}"
+        );
+    }
+    h.modulation.trigger = TriggerSource::TransientSample {
+        threshold: 1.5,
+        hold_ms: 50.0,
+    };
+    assert!(
+        hint_at(&mut h, layout.trigger_rate)
+            .unwrap()
+            .contains("onset sensitivity")
+    );
+    assert!(
+        hint_at(&mut h, layout.trigger_aux)
+            .unwrap()
+            .contains("audio triggers")
+    );
+
+    let channel = MidiField::Channel.rect(&layout, 1.0);
+    h.modulation.trigger = TriggerSource::MidiNote {
+        note: Some(60),
+        channel: None,
+    };
+    assert!(hint_at(&mut h, channel).unwrap().contains("MIDI restarts"));
+    h.modulation.trigger = TriggerSource::MidiPitch {
+        transpose: 0,
+        channel: None,
+    };
+    assert!(hint_at(&mut h, channel).unwrap().contains("pitch channel"));
+    assert!(
+        hint_at(&mut h, layout.mseg_length)
+            .unwrap()
+            .contains("controls cycle rate")
+    );
+    let transpose = MidiField::Transpose.rect(&layout, 1.0);
+    assert!(
+        hint_at(&mut h, transpose)
+            .unwrap()
+            .contains("Transpose MIDI pitch")
+    );
+
+    let strip = h.editor.mseg_edit.layout(layout.mseg_pane, 1.0).strip;
+    let waves = widgets::mseg::wave_midi_button_rect(strip, 1.0);
+    h.modulation.wave_switch = Some(crate::modulation::MidiWaveMapping {
+        envelope: 1,
+        first_note: 60,
+        channel: None,
+    });
+    assert!(hint_at(&mut h, waves).unwrap().contains("Project wave"));
+    assert!(
+        hint_at(&mut h, layout.target)
+            .unwrap()
+            .contains("destination")
+    );
+    h.click(layout.trigger);
+    assert!(h.editor.effect_dropdown.is_open());
+    assert_eq!(hint_at(&mut h, layout.target), None);
+}
+
+#[test]
 fn detector_modal_cursor_leave_clears_hints_before_the_panel_consumes_the_event() {
     let mut h = at_scale(1.0);
     h.modulation.trigger = TriggerSource::TransientSample {

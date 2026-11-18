@@ -273,6 +273,180 @@ mod tests {
         );
         assert!((clock.phase(&curve(SyncMode::Time)).unwrap() - 0.5 - 1.0 / 96000.0).abs() < 1e-12);
     }
+
+    #[test]
+    fn host_loop_counts_and_positions_follow_multiple_returns_in_each_time_domain() {
+        let mut host = frame(2.5, 6.75);
+        host.loop_beats = Some((1.0, 3.0));
+        host.loop_seconds = Some((4.0, 7.0));
+        for (sample, position, count) in [
+            (0, 2.5, 0.0),
+            (1, 1.0, 1.0),
+            (4, 2.5, 1.0),
+            (5, 1.0, 2.0),
+            (9, 1.0, 3.0),
+        ] {
+            assert_eq!(host.point(SyncMode::Beat, sample, 4.0), Some(position));
+            assert_eq!(host.loop_count(SyncMode::Beat, sample, 4.0), count);
+        }
+        for (sample, position, count) in [
+            (0, 6.75, 0.0),
+            (1, 4.0, 1.0),
+            (12, 6.75, 1.0),
+            (13, 4.0, 2.0),
+            (25, 4.0, 3.0),
+        ] {
+            assert_eq!(host.point(SyncMode::Time, sample, 4.0), Some(position));
+            assert_eq!(host.loop_count(SyncMode::Time, sample, 4.0), count);
+        }
+        host.beats = Some(3.0);
+        assert_eq!(host.point(SyncMode::Beat, 0, 4.0), Some(3.0));
+        assert_eq!(host.loop_count(SyncMode::Beat, 0, 4.0), 0.0);
+        assert_eq!(host.loop_count(SyncMode::Beat, 1, 4.0), 1.0);
+        host.bpm = 0.0;
+        assert_eq!(host.loop_count(SyncMode::Beat, 1, 4.0), 0.0);
+        host.bpm = 120.0;
+        host.beats = Some(3.5);
+        assert_eq!(host.point(SyncMode::Beat, 1, 4.0), Some(4.0));
+        assert_eq!(host.loop_count(SyncMode::Beat, 1, 4.0), 0.0);
+        host.playing = false;
+        assert_eq!(host.point(SyncMode::Time, 25, 4.0), Some(6.75));
+        assert_eq!(host.loop_count(SyncMode::Time, 25, 4.0), 0.0);
+    }
+
+    #[test]
+    fn loop_iterations_follow_the_cyclic_wrap_or_one_shot_intro_at_exact_boundaries() {
+        let mut doc = curve(SyncMode::Time);
+        doc.time_seconds = 1.0;
+        let start = doc.insert_node(0.25, 0.25).unwrap();
+        let end = doc.insert_node(0.75, 0.75).unwrap();
+        let mut clock = PositionClock::default();
+        for (cycles, cyclic, one_shot, whole_curve) in [
+            (-0.5, -2.0, 0.0, -1.0),
+            (0.0, -1.0, 0.0, 0.0),
+            (0.25, 0.0, 0.0, 0.0),
+            (0.625, 0.0, 0.0, 0.0),
+            (0.75, 1.0, 1.0, 0.0),
+            (1.125, 1.0, 1.0, 1.0),
+            (1.25, 2.0, 2.0, 1.0),
+            (1.75, 3.0, 3.0, 1.0),
+            (2.25, 4.0, 4.0, 2.0),
+        ] {
+            clock.requested = frame(0.0, cycles);
+            clock.prepare(true, 48000.0);
+            doc.hold = HoldMode::Loop { start, end };
+            doc.play_mode = PlayMode::OneShot;
+            assert_eq!(
+                clock.loop_iteration(&doc),
+                Some(one_shot),
+                "one-shot {cycles}"
+            );
+            doc.play_mode = PlayMode::Cyclic;
+            assert_eq!(clock.loop_iteration(&doc), Some(cyclic), "cyclic {cycles}");
+            doc.hold = HoldMode::None;
+            assert_eq!(
+                clock.loop_iteration(&doc),
+                Some(whole_curve),
+                "whole curve {cycles}"
+            );
+        }
+        clock.reset();
+        assert_eq!(clock.loop_iteration(&doc), None);
+        assert_eq!(clock.phase(&doc), None);
+        assert!(!clock.prepare(true, 0.0));
+        assert_eq!(clock.phase(&doc), None);
+    }
+
+    #[test]
+    fn host_loop_ranges_and_tempo_reject_degenerate_or_nonfinite_values() {
+        for bad_loop in [
+            (1.0, 1.0),
+            (2.0, 1.0),
+            (1.0, f64::INFINITY),
+            (f64::NEG_INFINITY, 1.0),
+            (-f64::MAX, f64::MAX),
+        ] {
+            let mut host = frame(0.0, 0.0);
+            host.loop_beats = Some(bad_loop);
+            host.loop_seconds = Some(bad_loop);
+            let normalized = host.normalized();
+            assert_eq!(normalized.loop_beats, None);
+            assert_eq!(normalized.loop_seconds, None);
+        }
+        let mut host = frame(0.0, 0.0);
+        host.loop_seconds = Some((1.0e308, 1.5e308));
+        assert_eq!(host.normalized().loop_seconds, host.loop_seconds);
+        for bpm in [0.0, -120.0, f64::NAN, f64::INFINITY] {
+            host.bpm = bpm;
+            assert_eq!(host.normalized().bpm, 0.0);
+        }
+    }
+
+    #[test]
+    fn block_position_jitter_at_half_a_sample_does_not_bump_capture_epochs() {
+        let mut clock = PositionClock::default();
+        clock.requested = frame(0.0, 0.0);
+        clock.requested.seconds = None;
+        assert!(clock.prepare(true, 1024.0));
+        clock.advance_sample();
+        let epochs = [clock.epoch(SyncMode::Beat), clock.epoch(SyncMode::Time)];
+
+        // An expected 2/1024 beats at this sample plus half a beat-sample.
+        clock.requested.beats = Some(3.0 / 1024.0);
+        assert!(!clock.prepare(true, 1024.0));
+        assert_eq!(
+            [clock.epoch(SyncMode::Beat), clock.epoch(SyncMode::Time)],
+            epochs
+        );
+
+        // More than half a sample with the time domain still unavailable.
+        clock.requested.beats = Some(5.0 / 1024.0);
+        assert!(clock.prepare(true, 1024.0));
+        assert_eq!(clock.epoch(SyncMode::Beat), epochs[0] + 1);
+        assert_eq!(clock.epoch(SyncMode::Time), epochs[1]);
+    }
+
+    #[test]
+    fn disabling_position_ignores_seeks_until_reactivation_at_the_same_rate() {
+        let mut clock = PositionClock::default();
+        clock.requested = frame(2.0, 0.75);
+        assert!(clock.prepare(true, 48000.0));
+        let epochs = [clock.epoch(SyncMode::Beat), clock.epoch(SyncMode::Time)];
+
+        clock.requested = frame(4.0, 1.25);
+        assert!(!clock.prepare(false, 48000.0));
+        assert_eq!(
+            [clock.epoch(SyncMode::Beat), clock.epoch(SyncMode::Time)],
+            epochs
+        );
+        assert_eq!(clock.phase(&curve(SyncMode::Time)), None);
+        assert!(clock.prepare(true, 48000.0));
+        assert_eq!(clock.epoch(SyncMode::Beat), epochs[0] + 1);
+        assert_eq!(clock.epoch(SyncMode::Time), epochs[1] + 1);
+        assert_eq!(clock.phase(&curve(SyncMode::Time)), Some(0.625));
+        let invalid = MsegData {
+            time_seconds: -2.0,
+            ..curve(SyncMode::Time)
+        };
+        assert_eq!(clock.phase(&invalid), None);
+    }
+
+    #[test]
+    fn waveform_capture_uses_the_host_phase_for_a_stopped_daw_clock() {
+        use crate::modulation::{ModulationState, TrackModulation, TriggerSource};
+        let cfg = TrackModulation {
+            trigger: TriggerSource::DawPosition,
+            msegs: [curve(SyncMode::Time); 4],
+            ..TrackModulation::default()
+        };
+        let mut state = ModulationState::default();
+        let mut host = frame(2.0, 0.75);
+        host.playing = false;
+        state.set_host_position(host);
+        state.begin_block(&cfg, &[0.0; 8], &[0.0; 8], 48000.0);
+        assert_eq!(state.waveform_phase(&cfg, 0), 0.375);
+        assert!(!state.waveform_running(&cfg, 0));
+    }
     #[test]
     fn negative_positions_and_hold_modes_follow_existing_playback_rules() {
         let mut clock = PositionClock::default();

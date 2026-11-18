@@ -57,6 +57,65 @@ fn numeric(h: &mut Harness, row: usize, text: &str) {
 }
 
 #[test]
+fn follower_input_choices_wrap_and_amount_drag_does_not_edit_attack() {
+    use crate::modulation::DetectorInput;
+    let mut h = setup(1.0);
+    h.modulation.follower.routes[1].mode = FollowerMode::Add;
+    h.click(button(&h));
+    h.click(layout(&h).rows[2].unwrap());
+    h.key(Key::ArrowDown);
+    assert!(h.key(Key::Enter).changed);
+    assert_eq!(
+        h.modulation.follower.detector.input,
+        DetectorInput::Sidechain
+    );
+    h.key(Key::ArrowLeft);
+    assert_eq!(h.modulation.follower.detector.input, DetectorInput::Main);
+    h.key(Key::ArrowRight);
+    assert_eq!(
+        h.modulation.follower.detector.input,
+        DetectorInput::Sidechain
+    );
+
+    h.key(Key::ArrowUp);
+    assert_eq!(h.editor.follower.focus, 1);
+    let before = h.modulation.follower;
+    let amount = layout(&h).rows[3].unwrap();
+    let x = amount.0 + amount.2 * 0.5;
+    let y = amount.1 + amount.3 * 0.5;
+    h.move_to(x, y, Modifiers::empty());
+    h.press(MouseButton::Left);
+    assert!(h.editor.follower.dragging());
+    assert!(h.move_to(x, y - 30.0, Modifiers::empty()).changed);
+    h.release();
+    assert!(h.modulation.follower.routes[1].amount > before.routes[1].amount);
+    assert_eq!(h.modulation.follower.attack_ms, before.attack_ms);
+
+    h.key(Key::Home);
+    h.key(Key::ArrowUp);
+    assert_eq!(h.editor.follower.focus, 10);
+}
+
+#[test]
+fn a_zero_wheel_event_clamps_scroll_after_the_body_gains_visible_rows() {
+    let mut h = setup(0.5);
+    h.click(button(&h));
+    h.key(Key::End);
+    assert!(h.editor.follower.scroll > 0);
+    h.geometry.scale = 1.0;
+    h.geometry.window_size = (1336.0, 680.0);
+    assert_eq!(layout(&h).visible, 11);
+    assert!(
+        h.send(Event::Mouse(MouseEvent::WheelScrolled {
+            delta: baseview::ScrollDelta::Lines { x: 0.0, y: 0.0 },
+            modifiers: Modifiers::empty(),
+        }))
+        .captured
+    );
+    assert_eq!(h.editor.follower.scroll, 0);
+}
+
+#[test]
 fn follower_modal_routes_the_selected_curve_and_scrolls_keyboard_focus_at_each_scale() {
     for scale in [0.5, 1.0, 2.0] {
         let mut h = setup(scale);
@@ -253,6 +312,192 @@ fn follower_panel_places_every_hit_region_inside_the_full_and_scrolled_layouts()
         h.geometry.window_size = size;
         assert!(follower_ui::layout(h.geometry, 0).is_none());
     }
+}
+
+#[test]
+fn follower_shortcuts_follow_visible_rows_and_suppress_modified_keys_and_releases() {
+    let mut h = setup(1.0);
+    h.click(button(&h));
+    h.geometry.window_size = (800.0, 350.0);
+    assert_eq!(layout(&h).visible, 5);
+    for (key, modifiers, expected) in [
+        (Key::PageDown, Modifiers::empty(), 4),
+        (Key::PageDown, Modifiers::empty(), 8),
+        (Key::PageDown, Modifiers::empty(), 10),
+        (Key::PageUp, Modifiers::empty(), 6),
+        (Key::PageUp, Modifiers::empty(), 2),
+        (Key::Home, Modifiers::empty(), 0),
+        (Key::ArrowUp, Modifiers::empty(), 10),
+        (Key::Tab, Modifiers::empty(), 0),
+        (Key::Tab, Modifiers::SHIFT, 10),
+        (Key::Home, Modifiers::empty(), 0),
+    ] {
+        let response = h.key_with(key, KeyState::Down, modifiers);
+        assert!(response.captured && !response.changed);
+        assert_eq!(h.editor.follower.focus, expected);
+        assert!(layout(&h).rows[expected].is_some());
+    }
+    let before = h.modulation.clone();
+    for (state, modifiers) in [
+        (KeyState::Up, Modifiers::empty()),
+        (KeyState::Down, Modifiers::CONTROL),
+        (KeyState::Down, Modifiers::META),
+        (KeyState::Down, Modifiers::ALT),
+    ] {
+        assert!(!h.key_with(Key::Enter, state, modifiers).changed);
+    }
+    assert_eq!(h.modulation, before);
+    assert!(!h.key(Key::Character("x".into())).changed);
+    assert!(h.key(Key::Character(" ".into())).changed);
+    assert!(h.modulation.follower.routes[1].enabled);
+    assert!(h.key(Key::ArrowLeft).changed);
+    assert!(!h.modulation.follower.routes[1].enabled);
+    h.key(Key::ArrowDown);
+    assert!(h.key(Key::ArrowLeft).changed);
+    assert_eq!(h.modulation.follower.routes[1].mode, FollowerMode::Multiply);
+    assert!(h.key(Key::ArrowRight).changed);
+    assert_eq!(h.modulation.follower.routes[1].mode, FollowerMode::Follow);
+    h.key(Key::ArrowDown);
+    assert!(h.key(Key::ArrowRight).changed);
+    assert_eq!(
+        h.modulation.follower.detector.input,
+        crate::modulation::DetectorInput::Sidechain
+    );
+    assert!(h.key(Key::ArrowLeft).changed);
+    assert_eq!(
+        h.modulation.follower.detector.input,
+        crate::modulation::DetectorInput::Main
+    );
+    h.key(Key::ArrowDown);
+    assert!(h.key(Key::ArrowLeft).changed);
+    assert!((h.modulation.follower.routes[1].amount - 0.98).abs() < 1e-6);
+    assert!(
+        h.key_with(Key::ArrowRight, KeyState::Down, Modifiers::SHIFT)
+            .changed
+    );
+    assert!((h.modulation.follower.routes[1].amount - 0.982).abs() < 1e-6);
+}
+
+#[test]
+fn follower_numeric_navigation_commits_tab_and_consumes_escape_inside_the_field() {
+    let mut h = setup(1.0);
+    h.click(button(&h));
+    let amount = layout(&h).rows[3].unwrap();
+    h.move_to(amount.0 + 10.0, amount.1 + 10.0, Modifiers::empty());
+    h.press(MouseButton::Right);
+    h.type_replacement("125%");
+    assert!(h.key(Key::Tab).changed);
+    assert_eq!(h.modulation.follower.routes[1].amount, 1.25);
+    assert_eq!(h.editor.follower.focus, 4);
+    h.key(Key::Enter);
+    h.type_replacement("11 ms");
+    assert!(
+        h.key_with(Key::Tab, KeyState::Down, Modifiers::SHIFT)
+            .changed
+    );
+    assert_eq!(h.modulation.follower.attack_ms, 11.0);
+    assert_eq!(h.editor.follower.focus, 3);
+
+    h.key(Key::Enter);
+    h.type_replacement("170%");
+    assert!(!h.key(Key::Escape).changed);
+    assert!(h.editor.follower_panel_open());
+    assert_eq!(h.modulation.follower.routes[1].amount, 1.25);
+    assert!(h.key(Key::ArrowRight).changed);
+    assert!((h.modulation.follower.routes[1].amount - 1.27).abs() < 1e-6);
+}
+
+#[test]
+fn follower_wheel_drag_middle_click_and_resize_keep_the_correct_field_owner() {
+    let mut h = setup(1.0);
+    h.click(button(&h));
+    h.geometry.window_size = (800.0, 350.0);
+    let wheel = |delta| {
+        Event::Mouse(MouseEvent::WheelScrolled {
+            delta,
+            modifiers: Modifiers::empty(),
+        })
+    };
+    h.send(wheel(baseview::ScrollDelta::Pixels { x: 0.0, y: -80.0 }));
+    assert_eq!(h.editor.follower.scroll, 2);
+    h.send(wheel(baseview::ScrollDelta::Lines { x: 0.0, y: -20.0 }));
+    assert_eq!(h.editor.follower.scroll, 6);
+    h.send(wheel(baseview::ScrollDelta::Pixels { x: 0.0, y: 80.0 }));
+    assert_eq!(h.editor.follower.scroll, 4);
+    let attack = layout(&h).rows[4].unwrap();
+    h.move_to(attack.0 + 10.0, attack.1 + 10.0, Modifiers::empty());
+    h.press(MouseButton::Left);
+    assert!(h.editor.pointer_gesture_active());
+    h.send(wheel(baseview::ScrollDelta::Lines { x: 0.0, y: -2.0 }));
+    assert_eq!(h.editor.follower.scroll, 4);
+    assert!(
+        h.move_to(attack.0 + 10.0, attack.1 - 6.0, Modifiers::empty())
+            .changed
+    );
+    assert!(h.modulation.follower.attack_ms > 5.0);
+    h.release();
+    assert!(!h.editor.pointer_gesture_active());
+    let committed = h.modulation.clone();
+    assert!(
+        !h.move_to(attack.0 + 10.0, attack.1 - 20.0, Modifiers::empty())
+            .changed
+    );
+    assert_eq!(h.modulation, committed);
+
+    h.move_to(attack.0 + 10.0, attack.1 + 10.0, Modifiers::empty());
+    h.press(MouseButton::Right);
+    h.type_replacement("6 ms");
+    assert!(h.press(MouseButton::Middle).changed);
+    assert!(h.editor.follower_panel_open());
+    assert_eq!(h.modulation.follower.attack_ms, 6.0);
+    h.press(MouseButton::Right);
+    h.type_replacement("12 ms");
+    h.move_to(1.0, 1.0, Modifiers::empty());
+    assert!(h.press(MouseButton::Middle).changed);
+    assert!(!h.editor.follower_panel_open());
+    assert_eq!(h.modulation.follower.attack_ms, 12.0);
+
+    h.geometry.window_size = (1336.0, 680.0);
+    h.click(button(&h));
+    let attack = layout(&h).rows[4].unwrap();
+    h.move_to(attack.0 + 10.0, attack.1 + 10.0, Modifiers::empty());
+    h.press(MouseButton::Right);
+    h.type_replacement("99 ms");
+    let resized = baseview::WindowInfo::from_logical_size(baseview::Size::new(800.0, 360.0), 1.0);
+    h.send(Event::Window(baseview::WindowEvent::Resized(resized)));
+    assert!(!h.editor.follower_panel_open());
+    assert_eq!(h.modulation.follower.attack_ms, 12.0);
+}
+
+#[test]
+fn follower_mode_picker_navigates_and_cancels_before_panel_dismissal() {
+    let mut h = setup(1.0);
+    h.click(button(&h));
+    h.key(Key::ArrowDown);
+    h.key(Key::Enter);
+    h.key(Key::End);
+    h.key(Key::ArrowUp);
+    assert!(h.key(Key::Enter).changed);
+    assert_eq!(h.modulation.follower.routes[1].mode, FollowerMode::Add);
+    h.key(Key::Enter);
+    h.key(Key::PageDown);
+    assert!(h.key(Key::Enter).changed);
+    assert_eq!(h.modulation.follower.routes[1].mode, FollowerMode::Multiply);
+    h.key(Key::Enter);
+    h.key(Key::PageUp);
+    assert!(h.key(Key::Enter).changed);
+    assert_eq!(h.modulation.follower.routes[1].mode, FollowerMode::Follow);
+    h.key(Key::Enter);
+    h.key(Key::End);
+    h.key(Key::Home);
+    assert!(!h.key(Key::Enter).changed);
+    h.key(Key::Enter);
+    h.key(Key::ArrowDown);
+    h.key(Key::Escape);
+    assert!(h.editor.follower_panel_open());
+    assert_eq!(h.modulation.follower.routes[1].mode, FollowerMode::Follow);
+    assert!(h.key(Key::ArrowLeft).changed);
+    assert_eq!(h.modulation.follower.routes[1].mode, FollowerMode::Multiply);
 }
 #[test]
 fn follower_panel_rejects_too_short_layout_and_keeps_valid_rows_inside_its_body() {

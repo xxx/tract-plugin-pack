@@ -345,3 +345,139 @@ impl EffectEditor {
             })
     }
 }
+
+#[cfg(test)]
+mod field_tests {
+    use super::*;
+
+    #[test]
+    fn follower_scroll_reveals_only_the_needed_rows_and_clamps_to_the_last_page() {
+        let mut panel = Panel {
+            focus: 5,
+            ..Panel::default()
+        };
+        panel.reveal(4);
+        assert_eq!(panel.scroll, 2);
+        panel.focus = 10;
+        panel.reveal(4);
+        assert_eq!(panel.scroll, 7);
+        panel.focus = 6;
+        panel.reveal(4);
+        assert_eq!(panel.scroll, 6);
+    }
+
+    #[test]
+    fn follower_layout_uses_effective_width_and_quarter_scale_row_height() {
+        let mut geometry = EditorGeometry {
+            layout: super::super::view::effect_layout((16.0, 16.0, 640.0, 640.0), 1.0),
+            window_size: (350.0, 600.0),
+            scale: 1.0,
+        };
+        let compact = layout(geometry, 0).unwrap();
+        assert_eq!(compact.scale, 0.7125);
+        geometry.window_size.0 = 640.0;
+        geometry.scale = 0.78;
+        let fitted = layout(geometry, 0).unwrap();
+        assert!((fitted.rows[0].unwrap().3 - 24.96).abs() < 1e-5);
+        geometry.scale = 0.892;
+        let fitted = layout(geometry, 0).unwrap();
+        assert_eq!(fitted.rows[0].unwrap().3, 28.543999);
+    }
+
+    #[test]
+    fn follower_rows_use_signed_percent_log_time_and_db_in_their_own_units() {
+        let mut config = FollowerConfig::default();
+        config.routes[2].mode = FollowerMode::Add;
+        for (field, label, draft, shown, value, norm) in [
+            (Field::Amount, "Amount", "-75 %", "-75%", -75.0, 0.3125),
+            (
+                Field::Attack,
+                "Attack",
+                "9 ms",
+                "9.0 ms",
+                9.0,
+                10.0_f32.ln() / 1001.0_f32.ln(),
+            ),
+            (
+                Field::Hold,
+                "Hold",
+                "99 ms",
+                "99.0 ms",
+                99.0,
+                100.0_f32.ln() / 2001.0_f32.ln(),
+            ),
+            (
+                Field::Release,
+                "Release",
+                "999 ms",
+                "999.0 ms",
+                999.0,
+                1000.0_f32.ln() / 5001.0_f32.ln(),
+            ),
+            (Field::Gain, "Gain", "-6 dB", "-6.0 dB", -6.0, 0.375),
+            (
+                Field::Threshold,
+                "Threshold",
+                "-45 dB",
+                "-45.0 dB",
+                -45.0,
+                0.2875,
+            ),
+        ] {
+            assert_eq!(field.label(), label);
+            let entered = field.parse(config, 2, draft).unwrap();
+            assert_eq!(entered, Some(value));
+            field.set(&mut config, 2, entered);
+            assert!((field.value(config, 2).unwrap() - value).abs() < 1e-5);
+            assert_eq!(field.display(config, 2), shown);
+            assert!((field.norm(config, 2) - norm).abs() < 1e-6);
+            assert!((field.at_norm(config, 2, norm).unwrap() - value).abs() < 0.001);
+        }
+        assert_eq!(config.routes[2].amount, -0.75);
+        assert_eq!(config.attack_ms, 9.0);
+        assert_eq!(config.hold_ms, 99.0);
+        assert_eq!(config.release_ms, 999.0);
+        assert_eq!(config.gain_db, -6.0);
+        assert_eq!(config.detector.level_db, Some(-45.0));
+        assert_eq!(Field::Hold.parse(config, 2, "2001 ms"), None);
+        assert_eq!(Field::Release.parse(config, 2, "5001 ms"), None);
+        assert_eq!(Field::Amount.parse(config, 0, "-75 %"), None);
+    }
+
+    #[test]
+    fn follower_filter_rows_share_the_detector_cutoff_scale_and_off_position() {
+        let mut config = FollowerConfig::default();
+        for (field, label, cutoff, norm) in [
+            (Field::Highpass, "High-pass", 200.0, 0.05 + 0.95 / 3.0),
+            (Field::Lowpass, "Low-pass", 2000.0, 0.05 + 0.95 * 2.0 / 3.0),
+        ] {
+            assert_eq!(field.label(), label);
+            assert_eq!(field.norm(config, 1), 0.0);
+            assert_eq!(field.at_norm(config, 1, 0.0), None);
+            assert_eq!(field.value(config, 1), None);
+            field.set(&mut config, 1, Some(cutoff));
+            assert_eq!(field.value(config, 1), Some(cutoff));
+            assert!((field.norm(config, 1) - norm).abs() < 1e-6);
+            assert!((field.at_norm(config, 1, norm).unwrap() - cutoff).abs() < 0.002);
+        }
+        assert_eq!(config.detector.highpass_hz, Some(200.0));
+        assert_eq!(config.detector.lowpass_hz, Some(2000.0));
+    }
+
+    #[test]
+    fn clipped_follower_text_keeps_an_exact_fit_and_respects_unicode_boundaries() {
+        let mut tr = widgets::TextRenderer::new(include_bytes!(
+            "../../../tiny-skia-widgets/test_data/DejaVuSans.ttf"
+        ));
+        let size = 16.0;
+        let color = tiny_skia::Color::WHITE;
+        for (text, visible) in [("BéZ", "Bé"), ("BéZ", "BéZ"), ("BéZ", "")] {
+            let mut actual = tiny_skia::Pixmap::new(128, 36).unwrap();
+            let mut expected = actual.clone();
+            let width = tr.text_width(visible, size);
+            bounded_text(&mut tr, &mut actual, (3.0, 20.0), text, size, width, color);
+            tr.draw_text(&mut expected, 3.0, 20.0, visible, size, color);
+            assert!(actual.data() == expected.data(), "visible text {visible:?}");
+        }
+    }
+}

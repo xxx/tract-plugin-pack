@@ -514,24 +514,72 @@ mod tests {
 
     #[test]
     fn wave_mix_transition_continues_from_the_consumed_value_at_the_existing_endpoint() {
+        for (base, depth) in [(0.0, 1.0), (0.25, 0.25)] {
+            let (mut config, _, snapshot, mut track) = setup(1);
+            config.targets[0] = Some(ModulationTarget::Mix);
+            config.depths[0] = depth;
+            track.mix = base;
+            let mut state = ModulationState::default();
+            let mut effect = Probe::default();
+            state.prepare_wave_bank(&config, &snapshot);
+            state.advance_segment(&config, &track, &mut effect, 100, 120.0, 1000.0);
+            for _ in 0..40 {
+                assert_eq!(state.next_mix(base), base);
+            }
+            let phases = state.phases;
+            state.select_midi_wave(&config, &snapshot, note(1));
+            state.refresh_pending_wave(&config, &track, &mut effect, 60);
+            assert!((state.next_mix(base) - (base + depth / 60.0)).abs() < 1e-7);
+            assert_eq!(state.phases, phases);
+            for _ in 0..59 {
+                state.next_mix(base);
+            }
+            assert_eq!(state.next_mix(base), base + depth);
+        }
+    }
+
+    #[test]
+    fn wave_switch_updates_a_shadowed_slot_without_delivering_its_parameter() {
         let (mut config, _, snapshot, track) = setup(1);
-        config.targets[0] = Some(ModulationTarget::Mix);
+        config.targets[1] = config.targets[0];
+        config.depths[1] = 1.0;
         let mut state = ModulationState::default();
         let mut effect = Probe::default();
         state.prepare_wave_bank(&config, &snapshot);
-        state.advance_segment(&config, &track, &mut effect, 100, 120.0, 1000.0);
-        for _ in 0..40 {
-            assert_eq!(state.next_mix(0.0), 0.0);
-        }
-        let phases = state.phases;
-        state.select_midi_wave(&config, &snapshot, note(1));
-        state.refresh_pending_wave(&config, &track, &mut effect, 60);
-        assert!((state.next_mix(0.0) - 1.0 / 60.0).abs() < 1e-7);
-        assert_eq!(state.phases, phases);
-        for _ in 0..59 {
-            state.next_mix(0.0);
-        }
-        assert_eq!(state.next_mix(0.0), 1.0);
+        state.advance_segment(&config, &track, &mut effect, 16, 120.0, 48000.0);
+        let sets = effect.sets;
+        assert!(state.select_midi_wave(&config, &snapshot, note(1)));
+        assert_eq!(
+            state.refresh_pending_wave(&config, &track, &mut effect, 16),
+            Some(1)
+        );
+        assert_eq!(state.output(1), 1.0);
+        assert_eq!(effect.sets, sets);
+    }
+
+    #[test]
+    fn effect_replacement_inherits_latched_wave_and_ignores_repeat_selection_until_bank_edits() {
+        let (config, mut palette, mut snapshot, track) = setup(1);
+        let mut old = ModulationState::default();
+        let mut effect = Probe::default();
+        old.prepare_wave_bank(&config, &snapshot);
+        assert!(old.select_midi_wave(&config, &snapshot, note(1)));
+        old.refresh_pending_wave(&config, &track, &mut effect, 16);
+        let mut replacement = ModulationState::default();
+        replacement.inherit_midi_wave(&old);
+        assert_eq!(replacement.midi_wave(), old.midi_wave());
+        assert_eq!(
+            replacement.effective_mseg(&config, 1),
+            old.effective_mseg(&config, 1)
+        );
+        assert!(!replacement.select_midi_wave(&config, &snapshot, note(1)));
+
+        palette
+            .store(1, &CurveShape::capture(&config.msegs[1]))
+            .unwrap();
+        assert!(snapshot.refresh(&palette));
+        assert!(replacement.select_midi_wave(&config, &snapshot, note(1)));
+        assert_eq!(replacement.effective_mseg(&config, 1).nodes[0].value, 0.0);
     }
 
     #[test]
@@ -890,13 +938,32 @@ mod tests {
         state.advance_segment(&config, &track, &mut effect, 8, 120.0, 48000.0);
         assert_eq!(state.output(0), 0.0);
         state.process_smoothing_sample(&config, &mut effect);
-        assert!((state.output(0) - (1.0 - (-1.0_f32 / 480.0).exp())).abs() < 1e-7);
+        for slot in 0..4 {
+            assert!(
+                (state.output(slot) - (1.0 - (-1.0_f32 / 480.0).exp())).abs() < 1e-7,
+                "slot {slot}"
+            );
+        }
         assert!((state.precise_phase(0) - phase - 1.0 / 48000.0).abs() < 1e-12);
         assert_eq!(state.trigger_epoch(), epoch);
     }
 
     #[test]
     fn wave_mapping_bounds_channels_and_saved_state_are_validated() {
+        let any = MidiWaveMapping {
+            envelope: 1,
+            first_note: 36,
+            channel: None,
+        };
+        assert_eq!(any.slot(note(7)), Some(7));
+        assert_eq!(any.slot(note(8)), None);
+        assert_eq!(
+            any.slot(MidiNoteOn {
+                channel: 16,
+                ..note(1)
+            }),
+            None
+        );
         for first_note in [0, 36, 120] {
             let mapping = MidiWaveMapping {
                 envelope: 3,

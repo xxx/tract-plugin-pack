@@ -850,4 +850,349 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn routing_queries_follow_the_winning_slot_and_target_format() {
+        let (mut config, track) = config();
+        assert!(config.smoothing_supported(0, track.kind));
+        assert!(config.smoothing_supported(3, track.kind));
+        assert!(!config.smoothing_supported(4, track.kind));
+        assert!(config.continuous_parameter(track.kind, 0));
+        assert!(config.smoothed_parameter(track.kind, 0));
+        assert!(!config.continuous_parameter(track.kind, 1));
+        assert!(!config.smoothed_parameter(track.kind, 1));
+
+        config.targets[2] = config.targets[0];
+        assert!(!config.continuous_parameter(track.kind, 0));
+        assert!(!config.smoothed_parameter(track.kind, 0));
+        config.trigger = TriggerSource::DawPosition;
+        assert!(config.continuous_parameter(track.kind, 0));
+        assert!(!config.smoothed_parameter(track.kind, 0));
+
+        let selector = crate::effects::parameter_specs(track.kind)
+            .iter()
+            .position(|spec| matches!(spec.format, ParamFormat::Enum { .. }))
+            .unwrap();
+        config.targets[2] = Some(ModulationTarget::EffectParameter(selector));
+        config.smooth_ms[3] = 100.0;
+        assert!(!config.smoothed_parameter(track.kind, selector));
+    }
+
+    #[test]
+    fn held_route_reports_normalized_delivery_and_releases_to_base() {
+        let (mut config, mut track) = config();
+        track.params[0] = 0.125;
+        for node in &mut config.msegs[1].nodes {
+            node.value = 0.25;
+        }
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+        assert!(!state.smoothing_active());
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+        assert!(state.smoothing_active());
+        assert!(!state.holds_smoothed_parameter(track.kind, 0));
+        state.process_smoothing_sample(&config, &mut effect);
+        assert!(state.holds_smoothed_parameter(track.kind, 0));
+        assert!(!state.holds_smoothed_parameter(track.kind, 1));
+        assert!(!state.holds_smoothed_parameter(EffectKind::None, 0));
+        assert_eq!(effect.value, 0.375);
+        assert_eq!(state.parameter_norms()[0], Some((0.375, 1)));
+
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+        assert_eq!(state.parameter_norms()[0], Some((0.375, 1)));
+        state.set_telemetry_enabled(false);
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+        assert_eq!(state.parameter_norms()[0], Some((0.0, 1)));
+        assert_eq!(effect.value, 0.375);
+
+        config.targets[0] = None;
+        config.smooth_ms[1] = 0.0;
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+        assert_eq!(effect.value, track.params[0]);
+        assert!(!state.smoothing_active());
+        assert!(!state.holds_smoothed_parameter(track.kind, 0));
+        assert!(state.parameter_norms().iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn mix_delivery_uses_the_new_slot_and_ramps_to_base_on_release() {
+        let (mut config, mut track) = config();
+        track.mix = 0.25;
+        config.targets = [Some(ModulationTarget::Mix), None, None];
+        config.smooth_ms[0] = 20.0;
+        for node in &mut config.msegs[1].nodes {
+            node.value = 0.5;
+        }
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+
+        state.advance_segment(&config, &track, &mut effect, 4, 120.0, 48000.0);
+        assert_eq!(state.delivered_mix(), None);
+        assert_eq!(state.next_mix(track.mix), 0.75);
+        assert_eq!(state.delivered_mix(), Some((0.75, 1)));
+
+        config.targets[1] = config.targets[0].take();
+        config.depths[1] = 1.0;
+        for node in &mut config.msegs[2].nodes {
+            node.value = 0.125;
+        }
+        state.advance_segment(&config, &track, &mut effect, 3, 120.0, 48000.0);
+        assert_eq!(state.delivered_mix(), None);
+        for expected in [0.625, 0.5, 0.375] {
+            assert_eq!(state.next_mix(track.mix), expected);
+            assert_eq!(state.delivered_mix(), Some((expected, 2)));
+        }
+        config.targets[1] = None;
+        state.advance_segment(&config, &track, &mut effect, 2, 120.0, 48000.0);
+        assert_eq!(state.delivered_mix(), None);
+        assert_eq!(state.next_mix(track.mix), 0.3125);
+        assert_eq!(state.next_mix(track.mix), track.mix);
+        assert!(!state.mix_is_active());
+    }
+
+    #[test]
+    fn sample_rate_change_starts_a_fresh_tick_and_updates_the_time_constant() {
+        let (mut config, track) = config();
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+        state.process_smoothing_sample(&config, &mut effect);
+        assert_eq!(effect.sets, 1);
+        let before = f64::from(state.output(1));
+        for node in &mut config.msegs[1].nodes {
+            node.value = 0.75;
+        }
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 96000.0);
+        state.process_smoothing_sample(&config, &mut effect);
+        let expected = before + (0.75 - before) * -(-1.0_f64 / 1920.0).exp_m1();
+        assert_eq!(effect.sets, 2);
+        assert!((f64::from(effect.value) - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn restarting_position_and_pitch_publishes_new_capture_epochs() {
+        for trigger in [
+            TriggerSource::DawPosition,
+            TriggerSource::MidiPitch {
+                transpose: 0,
+                channel: None,
+            },
+        ] {
+            let mut state = ModulationState::default();
+            let (mut config, _) = config();
+            config.trigger = trigger;
+            for expected in 1..=2 {
+                state.restart_clock(&config);
+                assert_eq!(state.trigger_epoch(), expected);
+                for slot in 0..4 {
+                    assert_eq!(state.capture_epoch(&config, slot), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn beat_clock_uses_tempo_and_one_shot_intro_precedes_the_loop() {
+        let mut doc = MsegData {
+            sync_mode: SyncMode::Beat,
+            beats: 2.0,
+            snap: false,
+            ..MsegData::default()
+        };
+        assert_eq!(phase_step(&doc, 120.0, 48000.0), 1.0 / 48000.0);
+        assert_eq!(phase_step(&doc, 60.0, 48000.0), 1.0 / 96000.0);
+        assert_eq!(phase_step(&doc, 0.0, 48000.0), 0.0);
+        doc.beats = 0.0;
+        assert_eq!(phase_step(&doc, 120.0, 48000.0), 0.0);
+        doc.beats = -2.0;
+        assert_eq!(phase_step(&doc, -120.0, 48000.0), 0.0);
+
+        let start = doc.insert_node(0.125, 0.5).unwrap();
+        let end = doc.insert_node(0.75, 0.5).unwrap();
+        doc.hold = HoldMode::Loop { start, end };
+        assert_eq!(phase_next(&doc, 0.0, 0.0625), 0.0625);
+        assert_eq!(phase_next(&doc, 0.625, 0.25), 0.25);
+    }
+
+    #[test]
+    fn edits_to_a_held_destination_wait_for_tick_but_new_destinations_apply_immediately() {
+        let (mut config, mut track) = config();
+        track.params[0] = 0.125;
+        for node in &mut config.msegs[1].nodes {
+            node.value = 0.25;
+        }
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+        state.process_smoothing_sample(&config, &mut effect);
+        assert_eq!(effect.value, 0.375);
+
+        track.params[0] = 0.25;
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+        state.process_smoothing_sample(&config, &mut effect);
+        assert_eq!(effect.value, 0.375);
+        assert_eq!(effect.sets, 1);
+
+        track.kind = EffectKind::SallenKey;
+        let mut replacement = Probe::default();
+        state.advance_segment(&config, &track, &mut replacement, 1, 120.0, 48000.0);
+        assert!(!state.holds_smoothed_parameter(track.kind, 0));
+        state.process_smoothing_sample(&config, &mut replacement);
+        assert_eq!(replacement.value, 0.5);
+
+        config.targets[0] = Some(ModulationTarget::Mix);
+        state.advance_segment(&config, &track, &mut replacement, 1, 120.0, 48000.0);
+        state.process_smoothing_sample(&config, &mut replacement);
+        assert_eq!(replacement.value, track.params[0]);
+        assert!(!state.holds_smoothed_parameter(track.kind, 0));
+        assert!((state.next_mix(track.mix) - (track.mix + 0.25)).abs() < 1e-7);
+    }
+
+    #[test]
+    fn enabling_and_disabling_smoothing_changes_the_response_at_the_next_sample() {
+        let (mut config, track) = config();
+        config.trigger = TriggerSource::DawPosition;
+        config.msegs[1].time_seconds = 1.0;
+        config.smooth_ms[1] = -0.0;
+        let sr = 48000.0;
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+        for (seconds, ms, expected) in [
+            (0.25, -0.0, 0.25),
+            (0.5, 20.0, 0.25 + 0.25 * -(-1.0_f32 / 960.0).exp_m1()),
+            (0.75, 0.0, 0.75),
+        ] {
+            config.smooth_ms[1] = ms;
+            state.set_host_position(HostPosition {
+                seconds: Some(seconds),
+                ..HostPosition::default()
+            });
+            state.begin_block(&config, &[0.0], &[0.0], sr);
+            state.advance_segment(&config, &track, &mut effect, 1, 120.0, sr);
+            state.process_smoothing_sample(&config, &mut effect);
+            assert!((state.output(1) - expected).abs() < 1e-7);
+        }
+    }
+
+    #[test]
+    fn pitch_capture_epoch_advances_only_at_the_curves_own_loop_end() {
+        let (mut config, track) = config();
+        config.trigger = TriggerSource::MidiPitch {
+            transpose: 0,
+            channel: None,
+        };
+        config.msegs[0].play_mode = PlayMode::Cyclic;
+        config.msegs[3].play_mode = PlayMode::OneShot;
+        config.msegs[2].snap = false;
+        let start = config.msegs[2].insert_node(0.125, 0.0).unwrap();
+        let end = config.msegs[2].insert_node(0.5, 1.0).unwrap();
+        config.msegs[2].hold = HoldMode::Loop { start, end };
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+        let sr = 1760.0;
+        state.begin_block(&config, &[0.0; 5], &[0.0; 5], sr);
+        assert!(state.midi_note_on(&config, MidiNoteOn::new(0, 0, 69, 1.0).unwrap(), false));
+        state.advance_segment(&config, &track, &mut effect, 5, 120.0, sr);
+        let initial: [u64; 4] = std::array::from_fn(|slot| state.capture_epoch(&config, slot));
+        for (sample, expected) in [
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 1, 0],
+            [1, 1, 2, 0],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            state.process_smoothing_sample(&config, &mut effect);
+            for slot in 0..4 {
+                assert_eq!(
+                    state.capture_epoch(&config, slot),
+                    initial[slot] + expected[slot],
+                    "sample {sample}, slot {slot}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_cyclic_wrap_refreshes_smoothing_before_the_next_control_tick() {
+        let (mut config, track) = config();
+        config.msegs[1].time_seconds = 1.0 / 1024.0;
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+        state.advance_segment(&config, &track, &mut effect, 4, 120.0, 4096.0);
+        for _ in 0..3 {
+            state.process_smoothing_sample(&config, &mut effect);
+        }
+        let before_wrap = state.output(1);
+        assert!(before_wrap > 0.0);
+        state.process_smoothing_sample(&config, &mut effect);
+        assert_eq!(state.phase(1), 0.0);
+        assert!(state.output(1) < before_wrap);
+    }
+
+    #[test]
+    fn a_stopped_one_shot_samples_edits_at_the_next_control_tick() {
+        let (mut config, track) = config();
+        let doc = &mut config.msegs[1];
+        doc.play_mode = PlayMode::OneShot;
+        doc.time_seconds = 1.0 / 1024.0;
+        let end = doc.insert_node(0.25, 0.125).unwrap();
+        doc.hold = HoldMode::Sustain(end);
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 4096.0);
+        state.process_smoothing_sample(&config, &mut effect);
+        assert_eq!(state.phase(1), 0.25);
+        config.msegs[1].nodes[end].value = 0.875;
+        state.advance_segment(&config, &track, &mut effect, 4, 120.0, 4096.0);
+        let held_raw = state.smooth.slots[1].raw;
+        for _ in 0..3 {
+            state.process_smoothing_sample(&config, &mut effect);
+            assert_eq!(state.smooth.slots[1].raw, held_raw);
+        }
+        state.process_smoothing_sample(&config, &mut effect);
+        assert_eq!(state.smooth.slots[1].raw, 0.875);
+    }
+
+    #[test]
+    fn switching_to_daw_position_at_an_invalid_rate_freezes_the_previous_smoothing_phase() {
+        let (mut config, track) = config();
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+        state.process_smoothing_sample(&config, &mut effect);
+        let phase = state.precise_phase(1);
+        assert!(phase > 0.0);
+        config.trigger = TriggerSource::DawPosition;
+        state.begin_block(&config, &[0.0], &[0.0], 0.0);
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 0.0);
+        let smoother = state.smooth.clone();
+        state.process_smoothing_sample(&config, &mut effect);
+        assert_eq!(state.precise_phase(1), phase);
+        assert_eq!(state.smooth, smoother);
+    }
+
+    #[test]
+    fn a_legacy_winner_releases_the_held_route_before_applying_its_endpoint() {
+        let (mut config, mut track) = config();
+        track.params[0] = 0.125;
+        for node in &mut config.msegs[2].nodes {
+            node.value = 0.5;
+        }
+        let mut state = ModulationState::default();
+        let mut effect = Probe::default();
+        state.advance_segment(&config, &track, &mut effect, 1, 120.0, 48000.0);
+        state.process_smoothing_sample(&config, &mut effect);
+        assert_eq!(effect.sets, 1);
+        config.targets[1] = config.targets[0];
+        config.depths[1] = 0.5;
+        state.restore_released_targets(&config, &track, &mut effect);
+        assert_eq!(effect.value, track.params[0]);
+        assert_eq!(effect.sets, 2);
+        state.prepare_smoothing(&config, &track, &mut effect, 1, 120.0, 48000.0);
+        assert_eq!(effect.value, 0.375);
+        assert!(!state.holds_smoothed_parameter(track.kind, 0));
+    }
 }

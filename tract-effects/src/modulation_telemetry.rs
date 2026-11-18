@@ -891,4 +891,96 @@ mod tests {
             assert!((999..=1001).contains(&ca), "{sr}: {ca}");
         }
     }
+
+    #[test]
+    fn trace_request_checks_both_bounds_and_matches_only_its_row_and_kind() {
+        let telemetry = ModulationTelemetry::default();
+        let mut clock = TraceClock::default();
+        let idle = clock.begin_block(&telemetry, 2000.0);
+        assert!(!idle.matches(0, EffectKind::None));
+        assert!(!clock.tick());
+        let token = telemetry.request_for_modes(15, 3, EffectKind::Svf, false, true, 5, true);
+        assert_ne!(token, 0);
+        let request = clock.begin_block(&telemetry, 2000.0);
+        assert_eq!(request.token, token);
+        assert_eq!(request.slot, 3);
+        assert_eq!(request.follower, 5);
+        assert!(request.position_sync);
+        assert!(request.midi_pitch);
+        assert!(!clock.tick());
+        assert!(request.matches(15, EffectKind::Svf));
+        assert!(!request.matches(14, EffectKind::Svf));
+        assert!(!request.matches(15, EffectKind::None));
+        assert_eq!(telemetry.request(16, 3, EffectKind::Svf, true), 0);
+        assert_eq!(telemetry.request(15, 4, EffectKind::Svf, true), 0);
+        assert_eq!(clock.begin_block(&telemetry, 2000.0).token, token);
+    }
+
+    #[test]
+    fn trace_tick_relocks_on_new_request_or_sample_rate_and_keeps_exact_spacing() {
+        let telemetry = ModulationTelemetry::default();
+        let mut clock = TraceClock::default();
+        telemetry.request(0, 0, EffectKind::Svf, true);
+        clock.begin_block(&telemetry, 2000.0);
+        assert!(clock.tick());
+        assert!(!clock.tick());
+        assert!(clock.tick());
+        clock.begin_block(&telemetry, 4000.0);
+        assert!(clock.tick());
+        telemetry.request(0, 1, EffectKind::Svf, true);
+        clock.begin_block(&telemetry, 4000.0);
+        assert!(clock.tick());
+        for _ in 0..3 {
+            assert!(!clock.tick());
+        }
+        assert!(clock.tick());
+    }
+
+    #[test]
+    fn sidechain_peak_detector_round_trips_in_a_snapshot() {
+        let telemetry = ModulationTelemetry::default();
+        let token = telemetry.request(0, 0, EffectKind::Svf, false);
+        let mut clock = TraceClock::default();
+        clock.begin_block(&telemetry, 48000.0);
+        let mut frame = frame();
+        frame.detector = Some(DetectorReading {
+            level: 0.25,
+            settings: AudioTriggerSettings {
+                input: DetectorInput::Sidechain,
+                lowpass_hz: Some(2500.0),
+                ..AudioTriggerSettings::default()
+            },
+            response: crate::modulation::TransientSettings {
+                algorithm: crate::modulation::TransientAlgorithm::Peak,
+                detail: 0.75,
+            },
+        });
+        clock.publish(&telemetry, 0, &frame);
+        assert_eq!(telemetry.frame(token).unwrap().detector, frame.detector);
+    }
+
+    #[test]
+    fn packed_target_overflow_preserves_the_mix_sentinel_and_invalid_wave_tags_are_rejected() {
+        #[cfg(target_pointer_width = "64")]
+        assert_ne!(
+            target(Some(ModulationTarget::EffectParameter(usize::MAX))),
+            target(Some(ModulationTarget::Mix))
+        );
+        let tag = wave_tag(Some((
+            MidiWaveMapping {
+                envelope: 2,
+                first_note: 48,
+                channel: Some(5),
+            },
+            Some(6),
+        )));
+        for bad_tag in [
+            tag & !255,
+            (tag & !255) | 5,
+            tag | (16 << 16),
+            tag | (8 << 24),
+        ] {
+            assert_eq!(read_wave_tag(bad_tag), None, "tag {bad_tag:#010x}");
+        }
+    }
 }

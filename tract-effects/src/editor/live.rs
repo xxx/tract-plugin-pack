@@ -444,3 +444,73 @@ impl Session<'_> {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modulation::ModulationState;
+    use crate::modulation_telemetry::TraceClock;
+
+    #[test]
+    fn audio_views_select_input_and_output_independently_and_use_linear_gain() {
+        for (view, input, output, live, frozen) in [
+            (AudioView::Off, false, false, "Audio: Off", "Audio: Off"),
+            (AudioView::Input, true, false, "Audio: In", "Frozen: In"),
+            (AudioView::Output, false, true, "Audio: Out", "Frozen: Out"),
+            (AudioView::Both, true, true, "Audio: Both", "Frozen: Both"),
+            (AudioView::Sidechain, true, false, "Audio: SC", "Frozen: SC"),
+        ] {
+            assert_eq!((view.input(), view.output()), (input, output));
+            assert_eq!(view.label(false), live);
+            assert_eq!(view.label(true), frozen);
+        }
+        for (gain, db) in [
+            (AudioGain::Minus12, -12.0),
+            (AudioGain::Unity, 0.0),
+            (AudioGain::Plus12, 12.0),
+        ] {
+            assert!((20.0 * gain.multiplier().log10() - db).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn trace_bins_preserve_endpoints_and_automation_edits_clear_obsolete_frames() {
+        let telemetry = Arc::new(ModulationTelemetry::default());
+        let mut editor = EffectEditor::default();
+        let effect = TrackEffect {
+            kind: EffectKind::Svf,
+            ..TrackEffect::default()
+        };
+        let config = TrackModulation::default();
+        editor.connect_live(&telemetry, 13);
+        editor.trace_enabled = true;
+        assert!(editor.trace_enabled());
+        editor.refresh_live(&effect, &config);
+        assert_eq!(editor.live.as_ref().unwrap().row(), 13);
+
+        let mut clock = TraceClock::default();
+        let request = clock.begin_block(&telemetry, 48000.0);
+        assert!(request.matches(13, effect.kind));
+        let mut frame = ModulationFrame::capture(effect.kind, &config, &ModulationState::default());
+        for (phase, value) in [(0.0, 0.25), (0.5, 0.75), (1.0, 0.125)] {
+            frame.phases[request.slot] = phase;
+            frame.outputs[request.slot] = value;
+            clock.record(&telemetry, 13, &frame);
+        }
+        clock.publish(&telemetry, 13, &frame);
+        editor.refresh_live(&effect, &config);
+        let live = editor.live.as_ref().unwrap();
+        assert_eq!(live.frame, Some(frame));
+        assert_eq!(live.bins[0], Some((0.0, 0.25)));
+        assert_eq!(live.bins[TRACE_CAPACITY / 2], Some((0.5, 0.75)));
+        assert_eq!(live.bins[TRACE_CAPACITY - 1], Some((1.0, 0.125)));
+
+        let mut raster = tiny_skia::Pixmap::new(640, 360).unwrap();
+        let rect = (12.0, 12.0, 608.0, 320.0);
+        editor.draw_live_trace(&mut raster, rect, 1.0);
+        assert!(raster.data().iter().any(|byte| *byte != 0));
+        let live = editor.live.as_mut().unwrap();
+        live.refresh(effect.kind, &config, request.slot, true, [0, 1, 0, 0]);
+        assert!(live.frame.is_none());
+    }
+}

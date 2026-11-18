@@ -264,3 +264,15 @@ impl Session<'_> {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_indices_match_their_dropdown_labels() {
+        assert_eq!(MODES[mode_index(FollowerMode::Follow)], "Follow");
+        assert_eq!(MODES[mode_index(FollowerMode::Add)], "Add");
+        assert_eq!(MODES[mode_index(FollowerMode::Multiply)], "Multiply");
+    }
+}

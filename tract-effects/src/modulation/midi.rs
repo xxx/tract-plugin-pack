@@ -72,6 +72,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_first_out_of_range_note_and_channel_are_rejected_before_matching() {
+        let valid = MidiNoteOn {
+            timing: 2,
+            channel: 15,
+            note: 127,
+        };
+        let invalid_channel = MidiNoteOn {
+            channel: 16,
+            ..valid
+        };
+        let invalid_note = MidiNoteOn { note: 128, ..valid };
+        for source in [
+            TriggerSource::MidiNote {
+                note: None,
+                channel: None,
+            },
+            TriggerSource::MidiPitch {
+                transpose: 0,
+                channel: None,
+            },
+        ] {
+            assert!(source.accepts_midi(valid));
+            assert!(!source.accepts_midi(invalid_channel));
+            assert!(!source.accepts_midi(invalid_note));
+        }
+        let mut cursor = MidiCursor::default();
+        let mut events = [invalid_channel, invalid_note, valid].into_iter();
+        assert_eq!(cursor.next_matching(&mut events, 3, |_| true), Some(valid));
+        assert_eq!(cursor.next_matching(&mut events, 3, |_| true), None);
+    }
+
+    #[test]
     fn filters_accept_only_matching_valid_positive_note_ons() {
         let all = TriggerSource::MidiNote {
             note: None,

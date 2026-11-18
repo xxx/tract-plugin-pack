@@ -346,6 +346,24 @@ mod tests {
         runtime.next([0.0; 2], [-0.5, 0.5]);
         assert_eq!(runtime.value(), 0.5);
     }
+
+    #[test]
+    fn holding_at_an_unchanged_fractional_rate_does_not_round_the_count_up() {
+        let mut config = instant();
+        config.hold_ms = 0.145;
+        let rate = 48000.1;
+        let mut runtime = FollowerRuntime::default();
+        runtime.prepare(config, rate);
+        runtime.next([0.75; 2], [0.0; 2]);
+        assert_eq!(runtime.hold_remaining, 7);
+        runtime.prepare(config, rate);
+        for _ in 0..7 {
+            runtime.next([0.0; 2], [0.0; 2]);
+            assert_eq!(runtime.value(), 0.75);
+        }
+        runtime.next([0.0; 2], [0.0; 2]);
+        assert_eq!(runtime.value(), 0.0);
+    }
     #[test]
     fn attack_and_release_are_sample_rate_independent_time_constants() {
         for sr in [1000.0, 48000.0, 96000.0] {
@@ -477,6 +495,150 @@ mod tests {
         cfg.detector.input = DetectorInput::Sidechain;
         runtime.prepare(cfg, 48000.0);
         assert_eq!(runtime.value(), 0.0);
+    }
+
+    #[test]
+    fn every_shared_response_edit_refreshes_old_and_new_enabled_routes() {
+        let mut cfg = instant();
+        cfg.routes[2].enabled = true;
+        let mut runtime = FollowerRuntime::default();
+        assert_eq!(runtime.prepare(cfg, 48000.0), 0b0101);
+        assert_eq!(runtime.prepare(cfg, 48000.0), 0);
+        cfg.detector.input = DetectorInput::Sidechain;
+        assert_eq!(runtime.prepare(cfg, 48000.0), 0b0101);
+        cfg.attack_ms = 4.0;
+        assert_eq!(runtime.prepare(cfg, 48000.0), 0b0101);
+        cfg.hold_ms = 8.0;
+        assert_eq!(runtime.prepare(cfg, 48000.0), 0b0101);
+        cfg.release_ms = 12.0;
+        assert_eq!(runtime.prepare(cfg, 48000.0), 0b0101);
+        cfg.gain_db = 2.0;
+        cfg.routes[2].enabled = false;
+        cfg.routes[3].enabled = true;
+        assert_eq!(runtime.prepare(cfg, 48000.0), 0b1101);
+        assert_eq!(cfg.request_key(0), 5);
+        assert_eq!(cfg.request_key(2), 0);
+        cfg.routes[3].mode = FollowerMode::Multiply;
+        assert_eq!(cfg.request_key(3), 7);
+        assert_eq!(runtime.prepare(cfg, 48000.0), 0b1000);
+    }
+
+    #[test]
+    fn adjusting_hold_after_a_rate_change_counts_only_time_left_since_the_peak() {
+        let mut cfg = instant();
+        cfg.hold_ms = 6.0;
+        let mut runtime = FollowerRuntime::default();
+        runtime.prepare(cfg, 1000.0);
+        runtime.next([0.8; 2], [0.0; 2]);
+        for _ in 0..2 {
+            runtime.next([0.0; 2], [0.0; 2]);
+            assert_eq!(runtime.value(), 0.8);
+        }
+        cfg.hold_ms = 9.0;
+        runtime.prepare(cfg, 2000.0);
+        for _ in 0..14 {
+            runtime.next([0.0; 2], [0.0; 2]);
+            assert_eq!(runtime.value(), 0.8);
+        }
+        runtime.next([0.0; 2], [0.0; 2]);
+        assert_eq!(runtime.value(), 0.0);
+
+        runtime.next([1.0; 2], [0.0; 2]);
+        for _ in 0..18 {
+            runtime.next([0.0; 2], [0.0; 2]);
+        }
+        cfg.hold_ms = 12.0;
+        runtime.prepare(cfg, 2000.0);
+        runtime.next([0.0; 2], [0.0; 2]);
+        assert_eq!(
+            runtime.value(),
+            0.0,
+            "a hold edit must not restart an expired hold"
+        );
+    }
+
+    #[test]
+    fn active_coefficient_changes_take_effect_without_resetting_the_envelope() {
+        let mut cfg = instant();
+        cfg.attack_ms = 10.0;
+        cfg.release_ms = 20.0;
+        cfg.gain_db = 6.0206;
+        let mut runtime = FollowerRuntime::default();
+        runtime.prepare(cfg, 1000.0);
+        for _ in 0..10 {
+            runtime.next([0.25; 2], [0.0; 2]);
+        }
+        let before = runtime.value();
+        assert!((before - 0.5 * (1.0 - (-1.0_f32).exp())).abs() < 1e-6);
+        runtime.prepare(cfg, 2000.0);
+        assert_eq!(runtime.value(), before);
+        for _ in 0..20 {
+            runtime.next([0.25; 2], [0.0; 2]);
+        }
+        assert!((runtime.value() - 0.5 * (1.0 - (-2.0_f32).exp())).abs() < 1e-6);
+        let before_release = runtime.value();
+        for _ in 0..40 {
+            runtime.next([0.0; 2], [0.0; 2]);
+        }
+        assert!((runtime.value() - before_release * (-1.0_f32).exp()).abs() < 1e-6);
+
+        cfg.attack_ms = 0.0;
+        runtime.prepare(cfg, 2000.0);
+        runtime.next([0.4; 2], [0.0; 2]);
+        assert!((runtime.value() - 0.8).abs() < 1e-6);
+        cfg.gain_db = 0.0;
+        runtime.prepare(cfg, 2000.0);
+        runtime.next([0.25; 2], [0.0; 2]);
+        assert_eq!(runtime.reading().unwrap().level, 0.25);
+        assert!(runtime.value() > 0.25);
+        cfg.release_ms = 0.0;
+        runtime.prepare(cfg, 2000.0);
+        runtime.next([0.25; 2], [0.0; 2]);
+        assert_eq!(runtime.value(), 0.25);
+    }
+
+    #[test]
+    fn unusable_detector_rates_suspend_updates_until_a_valid_rate_returns() {
+        let cfg = instant();
+        for rate in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::MAX,
+            -48000.0,
+            0.0,
+            f64::MIN_POSITIVE,
+        ] {
+            let mut runtime = FollowerRuntime::default();
+            runtime.prepare(cfg, 48000.0);
+            runtime.next([0.75; 2], [0.0; 2]);
+            assert_eq!(runtime.prepare(cfg, rate), 0);
+            runtime.next([0.5; 2], [0.0; 2]);
+            assert!(runtime.reading().is_none(), "rate {rate}");
+            assert_eq!(runtime.value(), 0.75);
+            runtime.prepare(cfg, 48000.0);
+            runtime.next([0.5; 2], [0.0; 2]);
+            assert_eq!(runtime.reading().unwrap().envelope, 0.5);
+        }
+    }
+
+    #[test]
+    fn follower_silences_very_small_envelopes_before_delivery() {
+        let mut runtime = FollowerRuntime::default();
+        runtime.prepare(instant(), 48000.0);
+        runtime.next([1e-31; 2], [0.0; 2]);
+        let reading = runtime.reading().unwrap();
+        assert!(reading.level > 0.0);
+        assert_eq!(reading.envelope, 0.0);
+    }
+
+    #[test]
+    fn the_envelope_floor_preserves_its_exact_boundary_while_held() {
+        let mut runtime = FollowerRuntime::default();
+        runtime.prepare(instant(), 48000.0);
+        runtime.envelope = 1e-30;
+        runtime.hold_remaining = 1;
+        runtime.next([0.0; 2], [0.0; 2]);
+        assert_eq!(runtime.value(), 1e-30_f32);
     }
     #[test]
     fn defaults_round_trip_and_invalid_settings_samples_or_rates_cannot_make_nan() {
