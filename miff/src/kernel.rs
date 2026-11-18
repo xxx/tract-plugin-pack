@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use realfft::RealFftPlanner;
 use rustfft::num_complex::Complex;
-use tiny_skia_widgets::mseg::{MsegData, MsegNode};
+use tiny_skia_widgets::mseg::{CurveSampler, MsegData, MsegNode};
 
 /// Maximum kernel length, and the fixed Phaseless STFT frame size.
 pub const MAX_KERNEL: usize = 4096;
@@ -115,36 +115,19 @@ pub fn default_flat_curve() -> MsegData {
     d
 }
 
-/// Sample the curve at `phase` using a forward-only segment cursor `*seg`.
-/// Callers walk `phase` monotonically increasing; `*seg` only advances. This
-/// reproduces the shared shape/weight interpolation without rescanning from node 0.
-fn curve_value(data: &MsegData, phase: f32, seg: &mut usize) -> f32 {
-    let a = data.active();
-    let last = data.node_count - 1;
-    // At or past the last node -> its value (matches value_at_phase).
-    if phase >= a[last].time {
-        return a[last].value;
-    }
-    // Advance the cursor to the last node (in 0..=last-1) with time <= phase.
-    while *seg < last - 1 && a[*seg + 1].time <= phase {
-        *seg += 1;
-    }
-    tiny_skia_widgets::mseg::segment_value(&a[*seg], &a[*seg + 1], phase)
-}
-
 /// Bake the curve into raw (un-normalized) bipolar FIR taps, into
-/// `out[..len]`. `kernel[i] = 2*curve_value(i/(len-1)) - 1` — the bipolar map
+/// `out[..len]`. `kernel[i] = 2*value_at_phase(i/(len-1)) - 1` — the bipolar map
 /// puts the MSEG midline (value 0.5) at a zero tap. `len` is clamped to
 /// `[16, MAX_KERNEL]` and rounded down to a multiple of 16 (SIMD requirement).
 /// Returns the effective `len` used.
 pub fn bake_taps(data: &MsegData, len: usize, out: &mut [f32; MAX_KERNEL]) -> usize {
     let len = (len.clamp(16, MAX_KERNEL) / 16) * 16;
     *out = [0.0; MAX_KERNEL];
-    let mut seg = 0usize;
+    let mut sampler = CurveSampler::new(data);
     let denom = (len - 1).max(1) as f32;
     for (i, tap) in out.iter_mut().take(len).enumerate() {
         let phase = i as f32 / denom;
-        *tap = 2.0 * curve_value(data, phase, &mut seg) - 1.0;
+        *tap = 2.0 * sampler.sample(phase) - 1.0;
     }
     len
 }
