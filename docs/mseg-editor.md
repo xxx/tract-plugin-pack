@@ -652,15 +652,18 @@ Each curve can use that shared signal in a different way. Use **Follow** beside
 
 ### Duck with a sidechain
 
-1. Route a kick or other trigger sound into the plugin's external sidechain.
+1. Choose an effect such as **SVF** and send audio through it. In Multosis,
+   light a cell on that effect's row and start playback. In Minitosis, set
+   **Mix** to **100%** for this walkthrough.
+2. Route a kick or other trigger sound into the plugin's external sidechain.
    Select **Amp** and load **Shapes → Flat high** for a full-level curve.
-2. Open **Follow**. Turn **This curve** on, choose **Add** for **Curve mode**,
+3. Open **Follow**. Turn **This curve** on, choose **Add** for **Curve mode**,
    and set **Amount** to −100%. At this setting, the follower subtracts from
    Amp as the sidechain gets louder.
-3. Set the shared **Input** to **Sidechain**. Play the sidechain and check that
+4. Set the shared **Input** to **Sidechain**. Play the sidechain and check that
    the Input and Envelope meters respond. Use **Listen** to hear the filtered
    detector input if needed. [Sidechain routing](#external-sidechain)
-4. Start with **Attack** at 5 ms, **Hold** at 0 ms, and **Release** at 100 ms.
+5. Start with **Attack** at 5 ms, **Hold** at 0 ms, and **Release** at 100 ms.
    Lower Attack for a quicker drop or raise Release for a slower return.
    Turn on **Trace** to see the measured dip below the flat Amp curve.
 
