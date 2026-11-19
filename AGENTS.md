@@ -168,7 +168,7 @@ Common shape per plugin: `lib.rs` (plugin struct, params, `process()`), `editor.
 - `bake_taps` uses the shared `mseg::CurveSampler` to advance through ordered phases in O(N + nodes), with the same interpolation as `mseg::value_at_phase`.
 
 **Dependencies**
-- nih-plug points to `xxx/nih-plug` branch `finish-vst3-pr` — fork adds `Editor::set_size()`, `update_track_info()` + `TrackInfo`, `BYPASS_BUFFER_COPY`, SIMD compat, VST3 license fix.
+- The workspace pins `nih_plug` and `nih_plug_xtask` to the same `xxx/nih-plug` revision from `tract-mainline`, based on upstream `master`. The fork retains the `vst3` bindings port, host and standalone resizing, CLAP track info, `AsyncExecutor::gui_context`, `BYPASS_BUFFER_COPY`, split-block transport positions, and hyphenated standalone packaging.
 - baseview pinned to tag `v0.1.1` across every crate (and the nih-plug fork) so the tree resolves a single baseview. v0.1.1 fixes an x11 modifier-mask bug (`KeyButMask::BUTTON1/2/4` mis-wired to ALT/NUM_LOCK/META) that broke the MSEG editor's Alt-held stepped-draw.
 
 ## Wavetable File Formats

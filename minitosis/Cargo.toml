@@ -13,7 +13,7 @@ name = "minitosis"
 path = "src/main.rs"
 
 [dependencies]
-nih_plug = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr", features = ["standalone", "assert_process_allocs"] }
+nih_plug = { workspace = true, features = ["standalone", "assert_process_allocs"] }
 serde = { version = "1.0", features = ["derive"] }
 baseview = { git = "https://github.com/RustAudio/baseview.git", tag = "v0.1.1", features = ["opengl"] }
 keyboard-types = "0.6"

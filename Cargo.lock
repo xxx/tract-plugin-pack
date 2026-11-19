@@ -1540,7 +1540,7 @@ dependencies = [
 [[package]]
 name = "nih_plug"
 version = "0.0.0"
-source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#32f72ccc8194cb79ada455be6d0b8753ed638c6a"
+source = "git+https://github.com/xxx/nih-plug.git?rev=6d31da0207a4ab537779f29db69fee66c5519ffc#6d31da0207a4ab537779f29db69fee66c5519ffc"
 dependencies = [
  "anyhow",
  "anymap3",
@@ -1577,7 +1577,7 @@ dependencies = [
 [[package]]
 name = "nih_plug_derive"
 version = "0.1.0"
-source = "git+https://github.com/xxx/nih-plug.git?branch=finish-vst3-pr#32f72ccc8194cb79ada455be6d0b8753ed638c6a"
+source = "git+https://github.com/xxx/nih-plug.git?rev=6d31da0207a4ab537779f29db69fee66c5519ffc#6d31da0207a4ab537779f29db69fee66c5519ffc"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1587,7 +1587,7 @@ dependencies = [
 [[package]]
 name = "nih_plug_xtask"
 version = "0.1.0"
-source = "git+https://github.com/xxx/nih-plug.git?rev=2882e1642946103f39a5e068c8c8ebc901a6599e#2882e1642946103f39a5e068c8c8ebc901a6599e"
+source = "git+https://github.com/xxx/nih-plug.git?rev=6d31da0207a4ab537779f29db69fee66c5519ffc#6d31da0207a4ab537779f29db69fee66c5519ffc"
 dependencies = [
  "anyhow",
  "cargo_metadata",

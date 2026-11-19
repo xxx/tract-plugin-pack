@@ -7,7 +7,7 @@ edition.workspace = true
 tiny-skia = "0.12"
 fontdue = "0.9"
 # Editor base (softbuffer + nih-plug integration)
-nih_plug = { git = "https://github.com/xxx/nih-plug.git", branch = "finish-vst3-pr" }
+nih_plug.workspace = true
 baseview = { git = "https://github.com/RustAudio/baseview.git", tag = "v0.1.1", features = ["opengl"] }
 softbuffer = { version = "0.4", default-features = false, features = ["kms", "x11"] }
 raw-window-handle = "0.5"
