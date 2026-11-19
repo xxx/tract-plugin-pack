@@ -1,22 +1,29 @@
 # Publish a plugin release
 
+Record user-visible changes as they land under **Unreleased** and name the
+affected plugins or formats. [Changelog](../../CHANGELOG.md)
+
 1. In the repository's **Settings → General → Releases**, turn on **Enable
    release immutability** before publishing. [GitHub's setup instructions](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes)
 2. Create an active tag ruleset matching `v[0-9]*` with **Restrict updates**
    and **Restrict deletions** enabled and an empty bypass list. This keeps the
    tag fixed while the draft is under review. [GitHub's ruleset instructions](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository)
-3. Tag the release commit and push that tag. Use a version tag such as `v0.1.0`.
+3. Move the **Unreleased** entries into a versioned changelog section headed
+   `## 0.1.0 - YYYY-MM-DD`, using the release version and date. Keep an empty
+   **Unreleased** section at the top for future changes. Include the changelog
+   update in the release commit, then tag the commit and push the tag.
 
    ```bash
    git tag -a v0.1.0 -m "Release v0.1.0"
    git push origin refs/tags/v0.1.0
    ```
 
-4. After **Release Plugins** succeeds, open the draft under **Releases**, review
-   the notes, and confirm that all 14 ZIPs are attached. Immediately before
-   publishing, resolve the remote tag and compare the result to the full commit
-   SHA on the **Built from commit** line. Run this from the repository root and
-   substitute your release tag.
+4. After **Release Plugins** succeeds, open the draft under **Releases**. Use
+   the matching changelog section for the release notes and keep the
+   **Built from commit** line and macOS installation link. Confirm that all 14
+   ZIPs are attached. Immediately before publishing, resolve the remote tag
+   and compare the result to the full commit SHA on the **Built from commit**
+   line. Run this from the repository root and substitute your release tag.
 
    ```bash
    gh api --method GET 'repos/{owner}/{repo}/commits' \
