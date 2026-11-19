@@ -19,11 +19,14 @@ Each plugin keeps its user manual under `docs/<plugin>/`:
 | Warp Zone | [warp-zone/warp-zone-manual.md](warp-zone/warp-zone-manual.md) | [warp-zone/warp-zone-manual.pdf](warp-zone/warp-zone-manual.pdf) |
 | Wavetable Filter | [wavetable-filter/wavetable-filter-manual.md](wavetable-filter/wavetable-filter-manual.md) | [wavetable-filter/wavetable-filter-manual.pdf](wavetable-filter/wavetable-filter-manual.pdf) |
 
-[Illustrated MSEG editor guide](mseg-editor.md) for Multosis, Minitosis, Miff,
-and Nap.
+Illustrated MSEG editor guide for Multosis, Minitosis, Miff, and Nap.
+[Markdown](mseg-editor.md) · [PDF](mseg-editor.pdf)
+
+[Installing the plug-ins on macOS](installing-macos.md)
 
 ## Development
 
+- [Publishing a release](development/releases.md)
 - [Mutation testing](development/mutation-testing.md): supported scopes, local
   commands, and CI behaviour.
 
@@ -48,6 +51,18 @@ pandoc --pdf-engine=xelatex \
        -V monofont="DejaVu Sans Mono" \
        <plugin>-manual.md \
        -o <plugin>-manual.pdf
+```
+
+From the repository root, regenerate the shared MSEG editor PDF after editing
+the guide or its screenshots.
+
+```bash
+cd docs
+pandoc --pdf-engine=xelatex --shift-heading-level-by=-1 --toc --toc-depth=1 \
+       -V mainfont="DejaVu Serif" \
+       -V monofont="DejaVu Sans Mono" \
+       -V geometry:margin=2.5cm -V colorlinks=true \
+       mseg-editor.md -o mseg-editor.pdf
 ```
 
 A successful run produces no warnings. If you see `Missing character: There is no <glyph>`, either:
