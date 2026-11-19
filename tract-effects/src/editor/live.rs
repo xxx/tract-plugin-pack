@@ -537,7 +537,10 @@ mod tests {
         let rect = (12.0, 12.0, 608.0, 320.0);
         let layout = editor.mseg_edit.layout(rect, 1.0);
         editor.draw_live_trace(&mut raster, &layout, &config.msegs[request.slot]);
-        assert!(raster.data().iter().any(|byte| *byte != 0));
+        let pale_amber = tiny_skia::Color::from_rgba8(255, 213, 129, 235)
+            .premultiply()
+            .to_color_u8();
+        assert!(raster.pixels().contains(&pale_amber));
 
         let mut displayed = widgets::MsegData::default();
         displayed.nodes[0].value = 0.25;

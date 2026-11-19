@@ -42,6 +42,8 @@ exclude_re = [
     '^tract-effects/src/modulation/audition\.rs:\d+:19: replace >> with << in AuditionControl::snapshot$',
     # Packed floats occupy the low word and tags or the second float occupy the high word.
     '^tract-effects/src/modulation_telemetry\.rs:\d+:(24|28|52): replace \| with \^ in (pair|norm|optional_float)$',
+    # The project wave ID occupies only the low byte, below the generation.
+    '^tract-effects/src/modulation_telemetry\.rs:\d+:55: replace \| with \^ in ModulationFrame::trace_wave_key$',
     # Valid wave fields occupy separate bytes. Invalid envelope 255 decodes as absent either way.
     '^tract-effects/src/modulation_telemetry\.rs:(108|109|110):13: replace \| with \^ in wave_tag$',
     # is_valid already rejects envelope and channel overflow after decoding.

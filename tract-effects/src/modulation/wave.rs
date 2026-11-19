@@ -724,6 +724,8 @@ mod tests {
             if let Some(slot) = initial_slot {
                 actual.select_midi_wave(&config, &bank, note(slot));
                 reference.select_midi_wave(&config, &bank, note(slot));
+                actual.refresh_pending_wave(&config, &track, &mut effect, 128);
+                reference.refresh_pending_wave(&config, &track, &mut reference_effect, 128);
             }
             actual.advance_segment(&config, &track, &mut effect, 128, 120.0, 48000.0);
             reference.advance_segment(&config, &track, &mut reference_effect, 128, 120.0, 48000.0);
@@ -732,6 +734,8 @@ mod tests {
                 reference.process_smoothing_sample(&config, &mut reference_effect);
             }
             let sets = effect.sets;
+            let mut expected_generations = actual.wave_generations();
+            expected_generations[1] += 1;
             actual.select_midi_wave(
                 &config,
                 &bank,
@@ -741,6 +745,7 @@ mod tests {
                 actual.refresh_pending_wave(&config, &track, &mut effect, 105),
                 None
             );
+            assert_eq!(actual.wave_generations(), expected_generations);
             actual.process_smoothing_sample(&config, &mut effect);
             reference.process_smoothing_sample(&config, &mut reference_effect);
             assert_eq!(actual.output(1).to_bits(), reference.output(1).to_bits());

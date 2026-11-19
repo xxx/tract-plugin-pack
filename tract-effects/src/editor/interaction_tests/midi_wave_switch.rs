@@ -1,5 +1,5 @@
 use super::*;
-use crate::modulation::{MidiWaveMapping, TriggerSource};
+use crate::modulation::{MidiWaveMapping, ModulationState, TriggerSource};
 use crate::modulation_telemetry::{ModulationFrame, ModulationTelemetry, TraceClock};
 use std::sync::{Arc, Mutex};
 use widgets::mseg::{FactoryShape, WavePalette, factory_shape};
@@ -234,6 +234,10 @@ fn wave_setup_changes_only_mapping_and_its_controls_have_keyboard_priority() {
     h.key(Key::Home);
     h.key(Key::Enter);
     assert_eq!(h.modulation.wave_switch.unwrap().first_note, 0);
+    h.click(lay.values[2]);
+    h.key(Key::Character("1".into()));
+    assert!(h.key(Key::Enter).changed);
+    assert_eq!(h.modulation.wave_switch.unwrap().first_note, 1);
     h.click(lay.values[3]);
     h.key(Key::End);
     h.key(Key::Enter);
@@ -255,6 +259,48 @@ fn wave_setup_changes_only_mapping_and_its_controls_have_keyboard_priority() {
     h.key(Key::Escape);
     assert!(!h.editor.wave_midi_panel_open());
     assert_eq!(h.modulation.msegs, before.1.msegs);
+}
+
+#[test]
+fn displayed_wave_rejects_stale_effect_and_host_automation_frames() {
+    let mut h = setup(1.0);
+    let mapping = MidiWaveMapping {
+        envelope: 1,
+        first_note: 36,
+        channel: None,
+    };
+    h.modulation.wave_switch = Some(mapping);
+    h.editor.set_wave_automation([0; 4]);
+    h.editor
+        .connect_live(&Arc::new(ModulationTelemetry::default()), 0);
+    let mut midi =
+        ModulationFrame::capture(h.effect.kind, &h.modulation, &ModulationState::default());
+    midi.wave = Some((mapping, Some(1)));
+    h.editor.live.as_mut().unwrap().frame = Some(midi);
+    let display = h
+        .editor
+        .wave_display_curve(&h.effect, &h.modulation, 1)
+        .unwrap();
+    assert!(display.active().iter().all(|point| point.value == 1.0));
+
+    let other_effect = ModulationFrame {
+        kind: EffectKind::Bitcrush,
+        ..midi
+    };
+    let old_automation = ModulationFrame {
+        wave_automation: [0, 2, 0, 0],
+        ..midi
+    };
+    for stale in [other_effect, old_automation] {
+        h.editor.live.as_mut().unwrap().frame = Some(stale);
+        assert_eq!(
+            h.editor
+                .wave_display_curve(&h.effect, &h.modulation, 1)
+                .unwrap()
+                .active(),
+            h.modulation.msegs[1].active()
+        );
+    }
 }
 
 #[test]
