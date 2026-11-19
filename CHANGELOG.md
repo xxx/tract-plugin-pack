@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0 - 2026-11-19
+
 ### Added
 
 - Gain Brain links gain controls across plugin instances. GS Meter measures
