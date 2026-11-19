@@ -211,10 +211,10 @@ impl LiveSource {
             }
             return;
         };
-        let project_wave = frame.project_wave(slot);
+        let wave_key = frame.trace_wave_key(slot);
         if self
             .frame
-            .is_some_and(|previous| previous.project_wave(slot) != project_wave)
+            .is_some_and(|previous| previous.trace_wave_key(slot) != wave_key)
         {
             self.bins.fill(None);
         }
@@ -222,7 +222,7 @@ impl LiveSource {
         self.cursor = self.cursor.max(head.saturating_sub(TRACE_CAPACITY as u64));
         for index in self.cursor..head {
             if let Some(point) = self.telemetry.point(index, token)
-                && point.project_wave == project_wave
+                && point.wave_key == wave_key
                 && point.phase.is_finite()
                 && point.value.is_finite()
             {
@@ -596,6 +596,83 @@ mod tests {
         let bins = &editor.live.as_ref().unwrap().bins;
         assert!(bins[..TRACE_CAPACITY - 1].iter().all(Option::is_none));
         assert_eq!(bins[TRACE_CAPACITY - 1], Some((1.0, frame.outputs[slot])));
+    }
+
+    #[test]
+    fn trace_restarts_after_switching_away_and_back_between_measurements() {
+        use crate::effects::EffectInstance;
+        use crate::modulation::{MidiNoteOn, MidiWaveMapping};
+        use widgets::mseg::{FactoryShape, WavePalette, WavePaletteSnapshot, factory_shape};
+
+        let telemetry = Arc::new(ModulationTelemetry::default());
+        let mut editor = EffectEditor::default();
+        let effect = TrackEffect::default();
+        let slot = editor.selected_mseg;
+        let mapping = MidiWaveMapping {
+            envelope: slot as u8,
+            first_note: 60,
+            channel: None,
+        };
+        let config = TrackModulation {
+            wave_switch: Some(mapping),
+            ..TrackModulation::default()
+        };
+        let mut palette = WavePalette::default();
+        palette
+            .store(0, &factory_shape(FactoryShape::RampUp))
+            .unwrap();
+        palette
+            .store(1, &factory_shape(FactoryShape::RampDown))
+            .unwrap();
+        let mut bank = WavePaletteSnapshot::default();
+        bank.refresh(&palette);
+        let mut state = ModulationState::default();
+        state.prepare_wave_bank(&config, &bank);
+        let mut dsp = EffectInstance::new(effect.kind);
+        let mut select = |state: &mut ModulationState, note| {
+            assert!(state.select_midi_wave(
+                &config,
+                &bank,
+                MidiNoteOn {
+                    timing: 0,
+                    channel: 0,
+                    note
+                }
+            ));
+            state.refresh_pending_wave(&config, &effect, &mut dsp, 64);
+        };
+        editor.connect_live(&telemetry, 0);
+        editor.set_trace_enabled(true);
+        editor.refresh_live(&effect, &config);
+        let mut clock = TraceClock::default();
+        clock.begin_block_for_curve(&telemetry, 48000.0, |request| {
+            config.msegs.get(request.slot)
+        });
+        let frame_at = |state: &ModulationState, phase| {
+            let mut frame = ModulationFrame::capture(effect.kind, &config, state);
+            frame.phases[slot] = phase;
+            frame
+        };
+
+        select(&mut state, 60);
+        let first = frame_at(&state, 0.0);
+        clock.record(&telemetry, 0, &first);
+        clock.publish(&telemetry, 0, &first);
+        editor.refresh_live(&effect, &config);
+        assert!(editor.live.as_ref().unwrap().bins[0].is_some());
+        clock.record(&telemetry, 0, &frame_at(&state, 0.25));
+
+        select(&mut state, 61);
+        select(&mut state, 60);
+        let latest = frame_at(&state, 1.0);
+        assert_eq!(first.wave, latest.wave);
+        clock.record(&telemetry, 0, &latest);
+        clock.publish(&telemetry, 0, &latest);
+        editor.refresh_live(&effect, &config);
+
+        let bins = &editor.live.as_ref().unwrap().bins;
+        assert!(bins[..TRACE_CAPACITY - 1].iter().all(Option::is_none));
+        assert_eq!(bins[TRACE_CAPACITY - 1], Some((1.0, latest.outputs[slot])));
     }
 
     #[test]

@@ -49,6 +49,7 @@ pub struct ModulationFrame {
     pub mix: Option<(f32, u8)>,
     pub detector: Option<DetectorReading>,
     pub wave: Option<(MidiWaveMapping, Option<u8>)>,
+    pub wave_generations: [u32; 4],
     pub wave_automation: [u8; 4],
     pub position_sync: bool,
     pub follower: Option<crate::modulation::FollowerReading>,
@@ -65,6 +66,7 @@ impl ModulationFrame {
             mix: state.delivered_mix(),
             detector: state.detector_reading(),
             wave: state.midi_wave(),
+            wave_generations: state.wave_generations(),
             wave_automation: state.wave_automation(),
             position_sync: config.trigger == crate::modulation::TriggerSource::DawPosition,
             follower: state.follower_reading(),
@@ -93,12 +95,16 @@ impl ModulationFrame {
             .and_then(|(_, wave)| wave)
             .map_or(0, |wave| wave + 1)
     }
+
+    pub(crate) fn trace_wave_key(&self, slot: usize) -> u64 {
+        (u64::from(self.wave_generations[slot]) << 8) | u64::from(self.project_wave(slot))
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TracePoint {
     pub phase: f32,
     pub value: f32,
-    pub(crate) project_wave: u8,
+    pub(crate) wave_key: u64,
 }
 fn pair(a: f32, b: f32) -> u64 {
     a.to_bits() as u64 | ((b.to_bits() as u64) << 32)
@@ -182,6 +188,7 @@ struct AtomicFrame {
     detector_input: AtomicU32,
     detector_response: [AtomicU32; 2],
     wave: AtomicU32,
+    wave_generations: [AtomicU32; 4],
     wave_automation: AtomicU32,
     position_sync: AtomicBool,
     follower: follower::AtomicFollower,
@@ -202,6 +209,7 @@ impl Default for AtomicFrame {
             detector_input: AtomicU32::new(0),
             detector_response: std::array::from_fn(|_| AtomicU32::new(0)),
             wave: AtomicU32::new(0),
+            wave_generations: std::array::from_fn(|_| AtomicU32::new(0)),
             wave_automation: AtomicU32::new(0),
             position_sync: AtomicBool::new(false),
             follower: follower::AtomicFollower::default(),
@@ -221,6 +229,7 @@ impl AtomicFrame {
         }
         for i in 0..4 {
             self.sources[i].store(pair(frame.phases[i], frame.outputs[i]), Ordering::Release);
+            self.wave_generations[i].store(frame.wave_generations[i], Ordering::Release);
         }
         for i in 0..MAX_EFFECT_PARAMS {
             self.parameters[i].store(norm(frame.parameters[i]), Ordering::Release);
@@ -285,6 +294,8 @@ impl AtomicFrame {
             detail: f32::from_bits(self.detector_response[1].load(Ordering::Acquire)),
         };
         let wave = read_wave_tag(self.wave.load(Ordering::Acquire));
+        let wave_generations =
+            std::array::from_fn(|i| self.wave_generations[i].load(Ordering::Acquire));
         let wave_automation = self.wave_automation.load(Ordering::Acquire).to_le_bytes();
         let position_sync = self.position_sync.load(Ordering::Acquire);
         let follower = self.follower.load();
@@ -314,6 +325,7 @@ impl AtomicFrame {
                 },
             }),
             wave,
+            wave_generations,
             wave_automation,
             position_sync,
             follower,
@@ -326,7 +338,7 @@ struct TraceCell {
     stamp: AtomicU64,
     token: AtomicU64,
     value: AtomicU64,
-    project_wave: AtomicU32,
+    wave_key: AtomicU64,
 }
 impl Default for TraceCell {
     fn default() -> Self {
@@ -334,7 +346,7 @@ impl Default for TraceCell {
             stamp: AtomicU64::new(0),
             token: AtomicU64::new(0),
             value: AtomicU64::new(0),
-            project_wave: AtomicU32::new(0),
+            wave_key: AtomicU64::new(0),
         }
     }
 }
@@ -486,14 +498,14 @@ impl ModulationTelemetry {
         }
         let actual = cell.token.load(Ordering::Acquire);
         let (phase, value) = unpair(cell.value.load(Ordering::Acquire));
-        let project_wave = cell.project_wave.load(Ordering::Acquire) as u8;
+        let wave_key = cell.wave_key.load(Ordering::Acquire);
         if cell.stamp.load(Ordering::Acquire) != stamp || actual != token {
             return None;
         }
         Some(TracePoint {
             phase,
             value,
-            project_wave,
+            wave_key,
         })
     }
     fn record(&self, token: u64, point: TracePoint) {
@@ -503,8 +515,7 @@ impl ModulationTelemetry {
         cell.token.store(token, Ordering::Release);
         cell.value
             .store(pair(point.phase, point.value), Ordering::Release);
-        cell.project_wave
-            .store(u32::from(point.project_wave), Ordering::Release);
+        cell.wave_key.store(point.wave_key, Ordering::Release);
         cell.stamp.store(index.wrapping_add(1), Ordering::Release);
         self.head.store(index.wrapping_add(1), Ordering::Release);
     }
@@ -602,7 +613,7 @@ impl TraceClock {
                 TracePoint {
                     phase: frame.phases[self.request.slot],
                     value: frame.outputs[self.request.slot],
-                    project_wave: frame.project_wave(self.request.slot),
+                    wave_key: frame.trace_wave_key(self.request.slot),
                 },
             );
         }
@@ -745,6 +756,7 @@ mod tests {
             mix: Some((0.4, 2)),
             detector: None,
             wave: None,
+            wave_generations: [0; 4],
             wave_automation: [0, 1, 4, 8],
             position_sync: false,
             follower: None,
@@ -766,7 +778,7 @@ mod tests {
             Some(TracePoint {
                 phase: 0.25,
                 value: 0.75,
-                project_wave: 1,
+                wave_key: 1,
             })
         );
         telemetry.release(token);
@@ -866,7 +878,7 @@ mod tests {
                     Some(TracePoint {
                         phase: 0.25,
                         value: 0.75,
-                        project_wave: 1,
+                        wave_key: 1,
                     })
                 );
                 assert!(telemetry.point(head.wrapping_sub(1), token).is_none());
@@ -947,7 +959,7 @@ mod tests {
                 TracePoint {
                     phase: i as f32,
                     value: 0.25,
-                    project_wave: 0,
+                    wave_key: 0,
                 },
             );
         }
@@ -978,6 +990,7 @@ mod tests {
                 let mut frame = frame();
                 frame.outputs.fill(value);
                 frame.phases.fill(1.0 - value);
+                frame.wave_generations.fill(i as u32);
                 frame.mix = Some((value, 1));
                 frame.detector = Some(DetectorReading {
                     response: crate::modulation::TransientSettings {
@@ -1008,6 +1021,7 @@ mod tests {
             if let Some((frame, head)) = shared.frame_with_trace_head(token) {
                 let value = frame.outputs[0];
                 assert_eq!(value, (head % 1000) as f32 / 1000.0);
+                assert_eq!(frame.wave_generations, [head as u32; 4]);
                 assert!(frame.outputs.iter().all(|v| *v == value));
                 assert!(frame.phases.iter().all(|v| *v == 1.0 - value));
                 assert_eq!(frame.mix, Some((value, 1)));

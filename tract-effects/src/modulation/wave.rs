@@ -58,6 +58,13 @@ pub(super) struct MidiWaveRuntime {
     before_curve: Box<MsegData>,
     revision: Option<u64>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct PendingWave {
+    slot: usize,
+    previous_midi_wave: Option<u8>,
+}
+
 impl MidiWaveRuntime {
     pub(super) fn curve<'a>(&'a self, config: &'a TrackModulation, slot: usize) -> &'a MsegData {
         if self
@@ -169,8 +176,12 @@ impl super::ModulationState {
     pub fn midi_wave(&self) -> Option<(MidiWaveMapping, Option<u8>)> {
         self.wave.reading()
     }
+    pub(crate) fn wave_generations(&self) -> [u32; 4] {
+        self.wave_generations
+    }
     pub fn inherit_midi_wave(&mut self, previous: &Self) {
         self.wave.inherit(&previous.wave);
+        self.wave_generations = previous.wave_generations;
         self.automated.inherit(&previous.automated);
     }
     /// Prepare overrides, returning whether a first-sample geometry refresh is pending.
@@ -190,12 +201,16 @@ impl super::ModulationState {
             // Resolve bank edits and same-offset MIDI before refreshing the audible geometry.
             let before = *self.effective_mseg(config, slot);
             *self.wave.before_curve = before;
-            self.pending_wave = Some(slot);
+            self.pending_wave = Some(PendingWave {
+                slot,
+                previous_midi_wave: self.wave.active,
+            });
         }
         if let Some(slot) = self.wave.prepare(config, bank)
             && !self.automated.active(slot)
             && transition != Some(slot)
         {
+            self.wave_generations[slot] = self.wave_generations[slot].wrapping_add(1);
             self.smooth.wave_changed(slot);
         }
         let changed = self.automated.prepare(config, &self.wave, bank);
@@ -212,6 +227,7 @@ impl super::ModulationState {
         bank: &WavePaletteSnapshot,
         event: MidiNoteOn,
     ) -> bool {
+        let previous_midi_wave = self.wave.active;
         if let Some(slot) = self
             .wave
             .select(config, bank, event, self.pending_wave.is_none())
@@ -220,7 +236,10 @@ impl super::ModulationState {
                 return false;
             }
             if self.pending_wave.is_none() {
-                self.pending_wave = Some(slot);
+                self.pending_wave = Some(PendingWave {
+                    slot,
+                    previous_midi_wave,
+                });
             }
             true
         } else {
@@ -235,12 +254,22 @@ impl super::ModulationState {
         effect: &mut impl super::Effect,
         remaining: usize,
     ) -> Option<usize> {
-        let slot = self.pending_wave.take()?;
-        if remaining == 0
-            || self
-                .wave
-                .geometry_unchanged(self.effective_mseg(config, slot))
+        let PendingWave {
+            slot,
+            previous_midi_wave,
+        } = self.pending_wave.take()?;
+        if remaining == 0 {
+            return None;
+        }
+        let geometry_changed = !self
+            .wave
+            .geometry_unchanged(self.effective_mseg(config, slot));
+        if geometry_changed
+            || (!self.automated.active(slot) && previous_midi_wave != self.wave.active)
         {
+            self.wave_generations[slot] = self.wave_generations[slot].wrapping_add(1);
+        }
+        if !geometry_changed {
             return None;
         }
         if self.smooth.wave_changed(slot) {
@@ -458,8 +487,10 @@ mod tests {
         state.prepare_wave_bank(&config, &snapshot);
         state.select_midi_wave(&config, &snapshot, note(0));
         state.advance_segment(&config, &track, &mut effect, 100, 120.0, 1000.0);
+        state.refresh_pending_wave(&config, &track, &mut effect, 100);
         let sets = effect.sets;
         let phases = state.phases;
+        let generations = state.wave_generations();
         state.select_midi_wave(&config, &snapshot, note(1));
         state.select_midi_wave(&config, &snapshot, note(0));
         assert_eq!(effect.sets, sets);
@@ -469,6 +500,7 @@ mod tests {
         );
         assert_eq!(effect.sets, sets);
         assert_eq!(state.phases, phases);
+        assert_eq!(state.wave_generations(), generations);
     }
 
     #[test]
