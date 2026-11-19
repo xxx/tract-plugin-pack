@@ -2,6 +2,9 @@
 
 A collection of audio effect plugins (VST3, CLAP, standalone) built with [nih-plug](https://github.com/robbert-vdh/nih-plug).
 
+See the [plugin manuals and MSEG editor guide](docs/README.md) or the
+[release instructions](docs/development/releases.md).
+
 ## Plugins
 
 ### Gain Brain
