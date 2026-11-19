@@ -12,6 +12,8 @@ edition = "2024"
 
 [workspace.dependencies]
 fearless_simd = "1.0"
+nih_plug = { git = "https://github.com/xxx/nih-plug.git", rev = "6d31da0207a4ab537779f29db69fee66c5519ffc" }
+nih_plug_xtask = { git = "https://github.com/xxx/nih-plug.git", rev = "6d31da0207a4ab537779f29db69fee66c5519ffc" }
 
 [profile.release]
 lto = true
