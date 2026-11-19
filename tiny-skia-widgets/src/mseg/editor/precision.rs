@@ -109,27 +109,39 @@ impl PointInspector {
         if !self.dirty {
             return None;
         }
-        let Ok(value) = self.fields[self.active].trim().parse::<f64>() else {
+        let text = self.fields[self.active].trim();
+        let entered = if text.is_empty() {
+            None
+        } else if let Some(value) = text.parse::<f64>().ok().filter(|value| value.is_finite()) {
+            Some(value)
+        } else {
             self.error = "Enter a finite number".into();
             return None;
         };
-        if !value.is_finite() {
-            self.error = "Enter a finite number".into();
-            return None;
-        }
         let (minimum, maximum) = match self.active {
             0 => (0.0, self.time_scale as f64),
             1 if !self.bipolar => (0.0, 1.0),
             _ => (-1.0, 1.0),
         };
-        if !maximum.is_finite() || maximum <= minimum || value < minimum || value > maximum {
-            self.error = "Value is outside its allowed range".into();
+        if let Some(value) = entered
+            && (!maximum.is_finite() || maximum <= minimum || value < minimum || value > maximum)
+        {
+            self.error = self.range_error(data);
             return None;
         }
         let mut candidate = *data;
         let n = &mut candidate.nodes[self.node];
+        let value = entered.unwrap_or(0.0);
         match self.active {
-            0 => n.time = (value / self.time_scale as f64) as f32,
+            0 => {
+                n.time = if entered.is_some() {
+                    (value / self.time_scale as f64) as f32
+                } else {
+                    data.nodes[self.node - 1]
+                        .time
+                        .midpoint(data.nodes[self.node + 1].time)
+                };
+            }
             1 => {
                 n.value = if self.bipolar {
                     ((value + 1.0) * 0.5) as f32
@@ -140,18 +152,27 @@ impl PointInspector {
             _ => n.tension = value as f32,
         }
         if !candidate.is_valid() {
-            self.error = if self.active == 0 {
-                "Time must stay between neighboring points"
-            } else {
-                "Value is outside its allowed range"
-            }
-            .into();
+            self.error = self.range_error(data);
             return None;
         }
         let changed = candidate != *data;
         *data = candidate;
         self.refresh(data);
         changed.then_some(MsegEdit::Changed)
+    }
+
+    fn range_error(&self, data: &MsegData) -> String {
+        match self.active {
+            0 => format!(
+                "Time must be between {} and {} {}",
+                data.nodes[self.node - 1].time * self.time_scale,
+                data.nodes[self.node + 1].time * self.time_scale,
+                self.time_unit,
+            ),
+            1 if self.bipolar => "Value must be −1 to 1".into(),
+            1 => "Value must be 0 to 1".into(),
+            _ => "Tension must be −1 to 1".into(),
+        }
     }
 }
 
@@ -511,8 +532,13 @@ impl MsegEditState {
         );
         for (i, label) in [
             format!("Time ({})", inspector.time_unit),
-            "Value".into(),
-            "Tension".into(),
+            if inspector.bipolar {
+                "Value (−1 to 1)"
+            } else {
+                "Value (0 to 1)"
+            }
+            .into(),
+            "Tension (−1 to 1)".into(),
         ]
         .iter()
         .enumerate()
@@ -699,9 +725,9 @@ fn inspector_rect(rect: (f32, f32, f32, f32), scale: f32) -> (f32, f32, f32, f32
 }
 fn field_rect(panel: (f32, f32, f32, f32), field: usize, scale: f32) -> (f32, f32, f32, f32) {
     (
-        panel.0 + 90.0 * scale,
+        panel.0 + 116.0 * scale,
         panel.1 + (30.0 + 32.0 * field as f32) * scale,
-        (panel.2 - 100.0 * scale).max(0.0),
+        (panel.2 - 126.0 * scale).max(0.0),
         26.0 * scale,
     )
 }
@@ -972,6 +998,36 @@ mod tests {
         );
         assert_eq!(data.nodes[1].time, 0.25);
         assert!(!state.has_open_menu());
+    }
+
+    #[test]
+    fn clearing_a_numeric_field_applies_its_default_when_clicking_away() {
+        for (field, polarity, duration, expected) in [
+            (0, Polarity::Unipolar, 1.0, 0.375),
+            (0, Polarity::Unipolar, 0.0, 0.375),
+            (1, Polarity::Unipolar, 1.0, 0.0),
+            (1, Polarity::Bipolar, 1.0, 0.5),
+            (2, Polarity::Unipolar, 1.0, 0.0),
+        ] {
+            let (mut state, mut data) = fixture(false);
+            data.nodes[1].time = 0.25;
+            data.nodes[1].tension = 0.8;
+            data.insert_node(0.75, 0.5).unwrap();
+            data.time_seconds = duration;
+            data.polarity = polarity;
+            assert!(state.open_point_inspector(&data));
+            for _ in 0..field {
+                state.on_key(&key(Key::Tab), &mut data, RECT, 1.0);
+            }
+            state.on_key(&key(Key::Delete), &mut data, RECT, 1.0);
+            assert_eq!(
+                state.on_mouse_down(0.0, 0.0, &mut data, RECT, 1.0, false),
+                Some(MsegEdit::Changed)
+            );
+            assert!(!state.has_open_menu());
+            let point = data.nodes[1];
+            assert_eq!([point.time, point.value, point.tension][field], expected);
+        }
     }
 
     #[test]

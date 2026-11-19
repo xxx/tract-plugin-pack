@@ -2,11 +2,43 @@
 use crate::effects::{EffectKind, MAX_EFFECT_PARAMS};
 use crate::modulation::{AudioTriggerSettings, DetectorInput, DetectorReading};
 use crate::modulation::{MidiWaveMapping, ModulationState, ModulationTarget, TrackModulation};
+use std::hash::{DefaultHasher, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use tiny_skia_widgets::{HoldMode, MsegData};
 mod follower;
 mod pitch;
 
 pub const TRACE_CAPACITY: usize = 512;
+
+fn trace_curve_key(curve: &MsegData) -> u64 {
+    let mut hash = DefaultHasher::new();
+    hash.write_u8(curve.play_mode as u8);
+    hash.write_u8(curve.sync_mode as u8);
+    hash.write_u32(curve.time_seconds.to_bits());
+    hash.write_u32(curve.beats.to_bits());
+    match curve.hold {
+        HoldMode::None => hash.write_u8(0),
+        HoldMode::Sustain(index) => {
+            hash.write_u8(1);
+            hash.write_usize(index);
+        }
+        HoldMode::Loop { start, end } => {
+            hash.write_u8(2);
+            hash.write_usize(start);
+            hash.write_usize(end);
+        }
+    }
+    for node in curve.active() {
+        hash.write_u32(node.time.to_bits());
+        hash.write_u32(node.value.to_bits());
+        hash.write_u32(node.tension.to_bits());
+        hash.write_u8(u8::from(node.stepped));
+        hash.write_u8(node.shape as u8);
+        hash.write_u8(node.weight as u8);
+    }
+    hash.finish().max(1)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ModulationFrame {
     pub kind: EffectKind,
@@ -17,6 +49,7 @@ pub struct ModulationFrame {
     pub mix: Option<(f32, u8)>,
     pub detector: Option<DetectorReading>,
     pub wave: Option<(MidiWaveMapping, Option<u8>)>,
+    pub wave_generations: [u32; 4],
     pub wave_automation: [u8; 4],
     pub position_sync: bool,
     pub follower: Option<crate::modulation::FollowerReading>,
@@ -33,6 +66,7 @@ impl ModulationFrame {
             mix: state.delivered_mix(),
             detector: state.detector_reading(),
             wave: state.midi_wave(),
+            wave_generations: state.wave_generations(),
             wave_automation: state.wave_automation(),
             position_sync: config.trigger == crate::modulation::TriggerSource::DawPosition,
             follower: state.follower_reading(),
@@ -50,11 +84,27 @@ impl ModulationFrame {
             && self.wave.map(|(mapping, _)| mapping)
                 == config.wave_switch.filter(|mapping| mapping.is_valid())
     }
+
+    pub(crate) fn project_wave(&self, slot: usize) -> u8 {
+        let automated = self.wave_automation[slot];
+        if automated != 0 {
+            return automated;
+        }
+        self.wave
+            .filter(|(mapping, _)| mapping.envelope as usize == slot)
+            .and_then(|(_, wave)| wave)
+            .map_or(0, |wave| wave + 1)
+    }
+
+    pub(crate) fn trace_wave_key(&self, slot: usize) -> u64 {
+        (u64::from(self.wave_generations[slot]) << 8) | u64::from(self.project_wave(slot))
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TracePoint {
     pub phase: f32,
     pub value: f32,
+    pub(crate) wave_key: u64,
 }
 fn pair(a: f32, b: f32) -> u64 {
     a.to_bits() as u64 | ((b.to_bits() as u64) << 32)
@@ -128,6 +178,7 @@ fn read_wave_tag(bits: u32) -> Option<(MidiWaveMapping, Option<u8>)> {
 struct AtomicFrame {
     stamp: AtomicU64,
     token: AtomicU64,
+    trace_head: AtomicU64,
     kind: AtomicU32,
     targets: [AtomicU32; 3],
     sources: [AtomicU64; 4],
@@ -137,6 +188,7 @@ struct AtomicFrame {
     detector_input: AtomicU32,
     detector_response: [AtomicU32; 2],
     wave: AtomicU32,
+    wave_generations: [AtomicU32; 4],
     wave_automation: AtomicU32,
     position_sync: AtomicBool,
     follower: follower::AtomicFollower,
@@ -147,6 +199,7 @@ impl Default for AtomicFrame {
         Self {
             stamp: AtomicU64::new(0),
             token: AtomicU64::new(0),
+            trace_head: AtomicU64::new(0),
             kind: AtomicU32::new(0),
             targets: std::array::from_fn(|_| AtomicU32::new(0)),
             sources: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -156,6 +209,7 @@ impl Default for AtomicFrame {
             detector_input: AtomicU32::new(0),
             detector_response: std::array::from_fn(|_| AtomicU32::new(0)),
             wave: AtomicU32::new(0),
+            wave_generations: std::array::from_fn(|_| AtomicU32::new(0)),
             wave_automation: AtomicU32::new(0),
             position_sync: AtomicBool::new(false),
             follower: follower::AtomicFollower::default(),
@@ -164,16 +218,18 @@ impl Default for AtomicFrame {
     }
 }
 impl AtomicFrame {
-    fn store(&self, token: u64, frame: &ModulationFrame) {
+    fn store(&self, token: u64, frame: &ModulationFrame, trace_head: u64) {
         let stamp = self.stamp.load(Ordering::Relaxed).wrapping_add(2) & !1;
         self.stamp.store(stamp | 1, Ordering::Release);
         self.token.store(token, Ordering::Release);
+        self.trace_head.store(trace_head, Ordering::Release);
         self.kind.store(frame.kind as u32, Ordering::Release);
         for i in 0..3 {
             self.targets[i].store(target(frame.targets[i]), Ordering::Release);
         }
         for i in 0..4 {
             self.sources[i].store(pair(frame.phases[i], frame.outputs[i]), Ordering::Release);
+            self.wave_generations[i].store(frame.wave_generations[i], Ordering::Release);
         }
         for i in 0..MAX_EFFECT_PARAMS {
             self.parameters[i].store(norm(frame.parameters[i]), Ordering::Release);
@@ -208,12 +264,13 @@ impl AtomicFrame {
         self.pitch.store(frame.pitch);
         self.stamp.store(stamp, Ordering::Release);
     }
-    fn load(&self, token: u64) -> Option<ModulationFrame> {
+    fn load(&self, token: u64) -> Option<(ModulationFrame, u64)> {
         let stamp = self.stamp.load(Ordering::Acquire);
         if stamp == 0 || stamp & 1 != 0 {
             return None;
         }
         let actual_token = self.token.load(Ordering::Acquire);
+        let trace_head = self.trace_head.load(Ordering::Acquire);
         let tag = self.kind.load(Ordering::Acquire);
         let targets = std::array::from_fn(|i| untarget(self.targets[i].load(Ordering::Acquire)));
         let sources: [(f32, f32); 4] =
@@ -237,6 +294,8 @@ impl AtomicFrame {
             detail: f32::from_bits(self.detector_response[1].load(Ordering::Acquire)),
         };
         let wave = read_wave_tag(self.wave.load(Ordering::Acquire));
+        let wave_generations =
+            std::array::from_fn(|i| self.wave_generations[i].load(Ordering::Acquire));
         let wave_automation = self.wave_automation.load(Ordering::Acquire).to_le_bytes();
         let position_sync = self.position_sync.load(Ordering::Acquire);
         let follower = self.follower.load();
@@ -248,7 +307,7 @@ impl AtomicFrame {
             .iter()
             .copied()
             .find(|kind| *kind as u32 == tag)?;
-        Some(ModulationFrame {
+        let frame = ModulationFrame {
             kind,
             targets,
             phases: sources.map(|p| p.0),
@@ -266,17 +325,20 @@ impl AtomicFrame {
                 },
             }),
             wave,
+            wave_generations,
             wave_automation,
             position_sync,
             follower,
             pitch,
-        })
+        };
+        Some((frame, trace_head))
     }
 }
 struct TraceCell {
     stamp: AtomicU64,
     token: AtomicU64,
     value: AtomicU64,
+    wave_key: AtomicU64,
 }
 impl Default for TraceCell {
     fn default() -> Self {
@@ -284,6 +346,7 @@ impl Default for TraceCell {
             stamp: AtomicU64::new(0),
             token: AtomicU64::new(0),
             value: AtomicU64::new(0),
+            wave_key: AtomicU64::new(0),
         }
     }
 }
@@ -292,6 +355,7 @@ pub struct ModulationTelemetry {
     pub audition: crate::modulation::AuditionControl,
     pub waveform: crate::waveform::WaveformTelemetry,
     request: AtomicU64,
+    trace_curve: AtomicU64,
     epoch: AtomicU32,
     head: AtomicU64,
     latest: AtomicFrame,
@@ -303,6 +367,7 @@ impl Default for ModulationTelemetry {
             audition: crate::modulation::AuditionControl::default(),
             waveform: crate::waveform::WaveformTelemetry::default(),
             request: AtomicU64::new(0),
+            trace_curve: AtomicU64::new(0),
             epoch: AtomicU32::new(0),
             head: AtomicU64::new(0),
             latest: AtomicFrame::default(),
@@ -346,6 +411,30 @@ impl ModulationTelemetry {
         follower: u8,
         midi_pitch: bool,
     ) -> u64 {
+        self.request_with_curve(
+            row,
+            slot,
+            kind,
+            trace,
+            position_sync,
+            follower,
+            midi_pitch,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn request_with_curve(
+        &self,
+        row: usize,
+        slot: usize,
+        kind: EffectKind,
+        trace: bool,
+        position_sync: bool,
+        follower: u8,
+        midi_pitch: bool,
+        curve: Option<&MsegData>,
+    ) -> u64 {
         if row >= 16 || slot >= 4 {
             return 0;
         }
@@ -358,13 +447,22 @@ impl ModulationTelemetry {
             | (((follower & 7) as u64) << 25)
             | ((midi_pitch as u64) << 28);
         let current = self.request.load(Ordering::Acquire);
-        if current as u32 == key as u32 {
+        let curve_key = curve.map_or(0, trace_curve_key);
+        if current as u32 == key as u32 && self.trace_curve.load(Ordering::Relaxed) == curve_key {
             return current;
         }
         let epoch = self.epoch.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
         let token = ((epoch as u64) << 32) | key;
+        // Withdraw the old token before publishing the new curve key.
+        self.request.store(0, Ordering::Release);
+        self.trace_curve.store(curve_key, Ordering::Release);
         self.request.store(token, Ordering::Release);
         token
+    }
+
+    fn trace_curve_for(&self, token: u64) -> Option<u64> {
+        let curve = self.trace_curve.load(Ordering::Acquire);
+        (self.request.load(Ordering::Acquire) == token).then_some(curve)
     }
     /// End history across processor/state replacement, including same-kind reloads.
     pub fn invalidate(&self) {
@@ -378,6 +476,11 @@ impl ModulationTelemetry {
             .compare_exchange(token, 0, Ordering::AcqRel, Ordering::Relaxed);
     }
     pub fn frame(&self, token: u64) -> Option<ModulationFrame> {
+        self.frame_with_trace_head(token).map(|(frame, _)| frame)
+    }
+
+    /// Pair the displayed wave with the end of its published trace history.
+    pub(crate) fn frame_with_trace_head(&self, token: u64) -> Option<(ModulationFrame, u64)> {
         if token == 0 {
             None
         } else {
@@ -395,10 +498,15 @@ impl ModulationTelemetry {
         }
         let actual = cell.token.load(Ordering::Acquire);
         let (phase, value) = unpair(cell.value.load(Ordering::Acquire));
+        let wave_key = cell.wave_key.load(Ordering::Acquire);
         if cell.stamp.load(Ordering::Acquire) != stamp || actual != token {
             return None;
         }
-        Some(TracePoint { phase, value })
+        Some(TracePoint {
+            phase,
+            value,
+            wave_key,
+        })
     }
     fn record(&self, token: u64, point: TracePoint) {
         let index = self.head.load(Ordering::Relaxed);
@@ -407,6 +515,7 @@ impl ModulationTelemetry {
         cell.token.store(token, Ordering::Release);
         cell.value
             .store(pair(point.phase, point.value), Ordering::Release);
+        cell.wave_key.store(point.wave_key, Ordering::Release);
         cell.stamp.store(index.wrapping_add(1), Ordering::Release);
         self.head.store(index.wrapping_add(1), Ordering::Release);
     }
@@ -450,6 +559,16 @@ impl TraceClock {
         telemetry: &ModulationTelemetry,
         sample_rate: f64,
     ) -> TraceRequest {
+        self.begin_block_for_curve(telemetry, sample_rate, |_| None)
+    }
+
+    /// Record editor-requested traces only once the audio thread has adopted the curve.
+    pub fn begin_block_for_curve<'a>(
+        &mut self,
+        telemetry: &ModulationTelemetry,
+        sample_rate: f64,
+        curve_for_request: impl FnOnce(TraceRequest) -> Option<&'a MsegData>,
+    ) -> TraceRequest {
         let token = telemetry.request.load(Ordering::Acquire);
         if token != self.request.token || sample_rate != self.sample_rate {
             self.remaining = 0.0;
@@ -466,6 +585,14 @@ impl TraceClock {
             follower: ((token >> 25) & 7) as u8,
             midi_pitch: token & (1 << 28) != 0,
         };
+        if self.request.trace {
+            self.request.trace = match telemetry.trace_curve_for(token) {
+                Some(0) => true,
+                Some(expected) => curve_for_request(self.request)
+                    .is_some_and(|curve| trace_curve_key(curve) == expected),
+                None => false,
+            };
+        }
         self.request
     }
     pub fn tick(&mut self) -> bool {
@@ -486,13 +613,18 @@ impl TraceClock {
                 TracePoint {
                     phase: frame.phases[self.request.slot],
                     value: frame.outputs[self.request.slot],
+                    wave_key: frame.trace_wave_key(self.request.slot),
                 },
             );
         }
     }
     pub fn publish(&self, telemetry: &ModulationTelemetry, row: usize, frame: &ModulationFrame) {
         if self.request.accepts(row, frame) {
-            telemetry.latest.store(self.request.token, frame);
+            telemetry.latest.store(
+                self.request.token,
+                frame,
+                telemetry.head.load(Ordering::Relaxed),
+            );
         }
     }
 }
@@ -500,6 +632,50 @@ impl TraceClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_curve_is_tied_to_the_published_request() {
+        let telemetry = ModulationTelemetry::default();
+        let mut curve = MsegData::default();
+        let old = telemetry.request_with_curve(
+            0,
+            0,
+            EffectKind::Svf,
+            true,
+            false,
+            0,
+            false,
+            Some(&curve),
+        );
+        assert_eq!(
+            telemetry.trace_curve_for(old),
+            Some(trace_curve_key(&curve))
+        );
+
+        curve.nodes[0].value = 0.5;
+        telemetry.request.store(0, Ordering::Release);
+        telemetry
+            .trace_curve
+            .store(trace_curve_key(&curve), Ordering::Release);
+        assert_eq!(telemetry.trace_curve_for(old), None);
+
+        let new = telemetry.request_with_curve(
+            0,
+            0,
+            EffectKind::Svf,
+            true,
+            false,
+            0,
+            false,
+            Some(&curve),
+        );
+        assert_ne!(new, old);
+        assert_eq!(
+            telemetry.trace_curve_for(new),
+            Some(trace_curve_key(&curve))
+        );
+        assert_eq!(telemetry.trace_curve_for(old), None);
+    }
     #[test]
     fn pitch_telemetry_preserves_waiting_and_extreme_notes_and_rejects_other_clock_modes() {
         use crate::modulation::{MidiPitchReading, TriggerSource};
@@ -580,6 +756,7 @@ mod tests {
             mix: Some((0.4, 2)),
             detector: None,
             wave: None,
+            wave_generations: [0; 4],
             wave_automation: [0, 1, 4, 8],
             position_sync: false,
             follower: None,
@@ -600,7 +777,8 @@ mod tests {
             telemetry.point(0, token),
             Some(TracePoint {
                 phase: 0.25,
-                value: 0.75
+                value: 0.75,
+                wave_key: 1,
             })
         );
         telemetry.release(token);
@@ -699,7 +877,8 @@ mod tests {
                     telemetry.point(head, token),
                     Some(TracePoint {
                         phase: 0.25,
-                        value: 0.75
+                        value: 0.75,
+                        wave_key: 1,
                     })
                 );
                 assert!(telemetry.point(head.wrapping_sub(1), token).is_none());
@@ -780,6 +959,7 @@ mod tests {
                 TracePoint {
                     phase: i as f32,
                     value: 0.25,
+                    wave_key: 0,
                 },
             );
         }
@@ -792,7 +972,7 @@ mod tests {
                 .phase,
             TRACE_CAPACITY as f32 + 4.0
         );
-        telemetry.latest.store(token, &frame());
+        telemetry.latest.store(token, &frame(), telemetry.head());
         telemetry.latest.stamp.store(3, Ordering::Release);
         assert!(telemetry.frame(token).is_none());
     }
@@ -810,6 +990,7 @@ mod tests {
                 let mut frame = frame();
                 frame.outputs.fill(value);
                 frame.phases.fill(1.0 - value);
+                frame.wave_generations.fill(i as u32);
                 frame.mix = Some((value, 1));
                 frame.detector = Some(DetectorReading {
                     response: crate::modulation::TransientSettings {
@@ -832,13 +1013,15 @@ mod tests {
                         lowpass_hz: None,
                     },
                 });
-                writer.latest.store(token, &frame);
+                writer.latest.store(token, &frame, i);
             }
             finished.store(true, Ordering::Release);
         });
         while !done.load(Ordering::Acquire) {
-            if let Some(frame) = shared.frame(token) {
+            if let Some((frame, head)) = shared.frame_with_trace_head(token) {
                 let value = frame.outputs[0];
+                assert_eq!(value, (head % 1000) as f32 / 1000.0);
+                assert_eq!(frame.wave_generations, [head as u32; 4]);
                 assert!(frame.outputs.iter().all(|v| *v == value));
                 assert!(frame.phases.iter().all(|v| *v == 1.0 - value));
                 assert_eq!(frame.mix, Some((value, 1)));

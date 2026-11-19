@@ -194,15 +194,15 @@ impl EffectEditor {
         }
         let mut display = config.msegs[slot];
         display.hold = widgets::HoldMode::None;
-        let midi = self
+        let active = self
             .live
             .as_ref()
             .and_then(|source| source.frame)
-            .filter(|frame| frame.matches(effect.kind, config))
-            .and_then(|frame| frame.wave)
-            .filter(|(value, _)| Some(*value) == mapping)
-            .and_then(|(_, slot)| slot);
-        let active = automated.checked_sub(1).or(midi);
+            .filter(|frame| {
+                frame.matches(effect.kind, config) && frame.wave_automation[slot] == automated
+            })
+            .map_or(automated, |frame| frame.project_wave(slot))
+            .checked_sub(1);
         if let Some(active) = active
             && let Some(binding) = self.mseg_edit.wave_palette()
             && let Ok(palette) = binding.lock()
@@ -423,10 +423,16 @@ impl Session<'_> {
             .iter()
             .position(|value| *value == field)
             .unwrap_or(0);
+        let items = DropdownList::flat(field.items());
+        let items = if field == Field::FirstNote {
+            items.with_filter(super::midi::note_matches)
+        } else {
+            items
+        };
         self.state.wave_midi.dropdown.open(
             field,
             lay.values[index],
-            DropdownList::flat(field.items()),
+            items,
             self.state.wave_midi.index(field),
             field == Field::FirstNote,
             (self.physical_width, self.physical_height),

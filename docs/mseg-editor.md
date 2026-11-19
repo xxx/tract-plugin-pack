@@ -1,9 +1,40 @@
-# Shared MSEG curve tools
+# MSEG editor guide
 
 Multosis, Minitosis, Miff, and Nap share these editing tools. The **Tool**,
 **Shapes**, **Edit**, and **View** menus sit beneath the existing curve controls.
 Multosis/Minitosis provide playback and modulation routing; Miff/Nap use the
 same geometry tools for their static kernel/tail curves.
+
+## Make and save your first curve
+
+1. Open **Shapes → Triangle**. The curve now has two endpoints and a peak in
+   the middle.
+2. Select the peak and click **Point**. Set **Value** to `0.75`, press Enter,
+   and click outside the inspector. The peak moves down to the new level.
+
+   ![Minitosis walkthrough. Left, Triangle is highlighted in Shapes. Right, Point 2 shows Value 0.75 and the gold peak is lower.](mseg/first-curve-edit.png)
+
+3. Open **Shapes → Browse shapes... → User → Save**. Enter a new name such as
+   `Lower triangle` and click **Save**. The new thumbnail appears on the User tab.
+4. Close the browser and choose **Shapes → Ramp up**. Return to the **User** tab.
+   Select `Lower triangle` and click **Load** to recall the shape you just saved.
+
+   ![The Lower triangle preset selected on the User tab, with Load at the bottom left.](mseg/first-curve-saved.png)
+
+## Find a task or control
+
+| To do this | Read this |
+|---|---|
+| Draw and repeat a segment | [Shape pens](#shape-pens) |
+| Stretch, scale, or skew several points | [Selecting and transforming](#selecting-and-transforming) |
+| Fix a jump when a curve loops | [Loop seam tools](#loop-seam-tools) |
+| Save, favourite, or recall a shape | [Reusing curves](#reusing-curves) |
+| Reuse part of a curve | [Copying and pasting a phrase](#copying-and-pasting-a-phrase) |
+| Edit a point by number | [Precise points and navigation](#precise-points-and-navigation) |
+| See what the envelope is doing during playback | [Live smoothing and trace](#live-smoothing-and-trace) |
+| Pick or switch a Project shape during playback | [Waves panel](#midi-wave-switching) |
+| Choose a periodic restart clock | [Free Hz and Free Hz (sample)](#free-hz-and-free-hz-sample) |
+| Make a curve react to incoming audio | [Envelope follower](#envelope-follower) |
 
 ## Context help and gesture guide
 
@@ -17,11 +48,13 @@ to open the guide. In Nap, point at a pane before using the shortcut. Its four
 pages cover **Points**, **Select**, **Shapes**, and **View**. Static editors omit
 playback and routing controls unavailable in those plugins.
 
-Use the mousewheel, Up/Down, or Page Up/Down to scroll; Left/Right or Tab changes
-pages, and Home/End jumps within a page. Escape, F1, ?, or X closes the guide.
-An outside left-click or a right-click dismisses it without activating a control
-beneath. The guide keeps its opening pane's input ownership while covering other
-parts of the window.
+![The in-app gesture guide, open to Points, with tabs for Select, Shapes and View.](mseg/gesture-guide.png)
+
+| Action | Controls |
+|---|---|
+| Scroll within a page | Wheel, Up/Down, Page Up/Down, Home/End |
+| Change pages | Left/Right or Tab |
+| Close | Escape, F1, ?, or X. An outside left-click or a right-click closes the guide without clicking through. |
 
 Help preserves the curve, selection, tool and viewport, with no undo or bake
 work. Numeric fields and existing menus keep keyboard priority; help shortcuts
@@ -31,38 +64,46 @@ loss close the guide.
 
 ## Shape pens
 
-Choose **Line pen**, **Arc pen**, or **S-curve pen** from Tool. The white preview
-shows the next placement. Click to stamp, or drag to set its width, height, and
-direction. The pen remembers those dimensions. Clicking again without moving
-the pointer places another copy immediately after the previous one. Moving the
-pointer chooses a new starting position. Leftward dragging makes repetition
-proceed leftward. Repetition stops at the edge of the canvas.
+1. Choose **Line pen**, **Arc pen**, or **S-curve pen** from **Tool**. The white
+   outline shows the next stamp.
+2. Click to place the shape or drag to set its width, height, and direction.
+   The pen remembers those dimensions for the next stamp.
+3. Click again without moving the pointer to repeat. Repeats follow the direction
+   of the drag and stop at the canvas edge. Move the pointer to start elsewhere.
 
-Pens replace points within their span and preserve points outside it. S-curves
-use one native segment with two endpoints; arc pens use tension interpolation.
-Sharp seams between repeated shapes use a very short transition. Previews use
-the same boundary weights as the committed shape.
-**Escape** cancels the current gesture and returns to Pointer.
+![Purple S-curve stamps repeat across the canvas. A white preview at the right shows the next placement.](mseg/s-curve-pen.png)
+
+Each stamp replaces points within its span. An S-curve uses one segment with
+two endpoints, and Arc uses tension. Repeated shapes can use a short transition
+at their seams. Press **Escape** to cancel the gesture and return to Pointer.
 
 ### Native shapes and point weights
 
-The Point inspector's **Shape** button cycles **Curve → S-curve → Step**. Curve
-uses the existing linear/exponential tension law. S-curve provides flat endpoint
-tangents without adding intermediate points; Tension bends its progression.
-Step holds its starting level until the following point. The last point's
-unused Shape control is disabled.
+In **Point**, **Shape** sets how the segment leaves the selected point. The
+last point has no outgoing segment.
 
-**Weight** cycles **Hard → Medium → Soft**. Hard keeps the original behavior;
-Medium halves the endpoint slope; Soft eases to a flat tangent at that point.
-Times and levels remain exact. A Soft point in a rising curve creates a brief
-pause; it does not move the point or average its level with its neighbors.
-Hard points are filled, Medium points have a center dot, and Soft points are hollow.
+| Shape | Result |
+|---|---|
+| **Curve** | Tension bends a straight segment into an arc. |
+| **S-curve** | The segment eases in and out with flat ends. Tension moves the bend. |
+| **Step** | The starting level holds until the next point. |
+
+**Weight** sets the slope as a Curve segment meets the point. A filled **Hard**
+point uses the standard slope, a dotted **Medium** point halves it, and a hollow
+**Soft** point flattens it. All three keep the point's exact time and level.
+
+![Three versions of the same triangle. Hard is amber and straight. Medium is purple and gently rounded. Soft is teal and flattens at the endpoints and peak.](mseg/point-weights.png)
+
+*Hard in amber, Medium in purple, Soft in teal.*
 
 Native S-curves already have flat endpoints, so weights do not alter them.
 Steps retain their hard jumps. A point's weight may still affect the other
 adjacent Curve segment, including the incoming segment at the final point.
 All new interpolation stays between its endpoints and uses the same sampler
 for drawing, live modulation, Miff tap baking, and Nap sequence generation.
+
+The factory **Sine** uses four editable points, with a native S-curve between
+its peak and trough. It starts at the centre line, rising into the first peak.
 
 Edit offers **Curve/S-curve/Stepped segments** and **Hard/Medium/Soft points**.
 These act on the selected points, or all points when nothing is selected.
@@ -72,13 +113,19 @@ one undo step in Multosis/Minitosis.
 
 ## Selecting and transforming
 
-Pointer retains the existing node, tension-handle, marquee, and Ctrl-click
-selection gestures. Two or more selected points display a box with eight handles:
+With **Pointer**, drag from empty space around the points or Ctrl-click them
+individually. Two or more selected points display a box with eight handles.
 
-- Side handles stretch time; top/bottom handles stretch level; corners do both.
-- **Alt** scales around the selection's center.
-- **Ctrl** while dragging an edge handle skews the other axis.
-- **Shift** bypasses snapping while dragging.
+![The peak and trough of a sine curve are selected. White handles at the corners and the middle of each edge surround the two points.](mseg/selection-handles.png)
+
+| Drag here | What changes |
+|---|---|
+| Left or right handle | Time |
+| Top or bottom handle | Level |
+| Corner | Time and level together |
+
+Hold **Alt** to scale about the centre, **Ctrl** on an edge handle to skew
+the other axis, or **Shift** to bypass snapping.
 
 Endpoint times stay pinned to 0 and 1. Other points cannot cross their neighbors.
 Dragging back to the initial handle position restores the initial geometry,
@@ -86,22 +133,25 @@ including after a boundary was reached. Escape cancels the gesture.
 
 ## Loop seam tools
 
-Edit offers **Match loop end to start**, **Match loop start to end**, and
-**Smooth loop seam (10%)**. In the full editor, these use the hold-loop region
-when one is configured, otherwise the entire curve. Miff/Nap always use the
-entire static curve. The selected points do not change that scope.
+Amber dashed marks and a **Loop seam jump** hint show where a cyclic curve or
+hold loop wraps with a sudden level change. Choose a command from **Edit**.
 
-The two Match commands copy one endpoint node's level to the other. In cyclic
-playback or a hold loop, amber dashed marks and a **Loop seam jump** hint show a
-level discontinuity at the wrap. The indicator reads the incoming segment's
-actual held level: a stepped tail can still jump even when endpoint nodes match.
+| To do this | Choose |
+|---|---|
+| Copy the start level to the end point | **Match loop end to start** |
+| Copy the end level to the start point | **Match loop start to end** |
+| Ease the curve back to its starting level | **Smooth loop seam (10%)** |
 
-Smooth matches the end level to the start, gives the start a Soft weight, and
-adds a Soft point followed by a native S-curve return. The return occupies the
-last 10% of the loop; if existing points occupy that window, it uses the last
-half-segment instead. Existing interior points stay in place, and a two-point
-ramp keeps its original peak at the new return point. A stepped tail uses its
-held level. Already matched, flat seams are unchanged when Smooth is reapplied.
+![Three views of a stepped tail. The original jumps at the wrap. Matching the endpoints leaves the stepped tail jumping. A smooth return joins the tail to the start.](mseg/loop-seam-comparison.png)
+
+A stepped tail plays its held level all the way to the wrap, so matching the
+endpoints can leave a jump. **Smooth loop seam (10%)** uses that held
+level and adds a native S-curve over the last 10% of the loop. If that area
+contains points, the return takes the last half-segment. A two-point ramp
+keeps its original peak at the new return point. Already flat seams stay as drawn.
+
+The commands act on the hold-loop region when present and on the whole curve
+otherwise. In Miff and Nap they always act on the full static curve.
 
 These commands edit the saved curve, including its first/last loop segments and
 any interpolation sharing those boundary points. Selection and hold markers
@@ -111,6 +161,25 @@ return leaves the curve intact. Per-envelope [Smooth](#live-smoothing-and-trace)
 provides the separate live lag control.
 
 ## Reusing curves
+
+### Save the current shape
+
+Open **Shapes → Browse shapes...** and choose where to keep the curve you drew.
+
+| Tab | How to save | Where it is available |
+|---|---|---|
+| **User** | Click **Save**, enter a name, then click **Save** again. | Shared across Multosis, Minitosis, Miff, and Nap on this computer. |
+| **Favorites** | Choose one of the eight slots and click **Store**. | Shared across those plugins, including future projects. |
+| **Project** | Choose one of the eight slots and click **Store**. | Saved with this plugin instance, including its preset or DAW project. |
+
+**Store** replaces the selected slot with the curve from the editor. To recall
+a saved shape, select its thumbnail and click **Load**. **Fit** recalls it
+within the current curve's level range. The saved shape contains geometry.
+The receiving curve supplies its own length, trigger, and routing.
+
+![Curve Browser on the Favorites tab, with slot 1 selected and a Store button below the thumbnails.](mseg/favorite-slots.png)
+
+![Save user preset dialog with Name, Category, Save, and Cancel controls.](mseg/save-user-preset.png)
 
 ### Browsing thumbnails
 
@@ -245,17 +314,16 @@ use cached records; Refresh and explicit metadata actions read shared storage.
 ### Searching curves
 
 On Factory or User, click **Find**, press **Ctrl/Cmd+F**, or press **/** to focus
-search. The row has a query field, **Clear** and **X**. It matches names and
-categories using Unicode lowercase: every whitespace-separated term must occur
-in either field, in any order. For example, `bass pulse` can match a Pulse curve
-in Bass. Empty categories match `Uncategorized`. Matching uses literal substrings;
-punctuation has its ordinary meaning. The current category filter still applies.
+search. Results and the match count update as you type. `ramp` can match a
+curve named **Open ramp** or any curve in the **Ramps** category. Search ignores
+case and matches punctuation literally. Every term must appear in the name or
+category. For uncategorized curves, use `Uncategorized`. The current category
+filter still applies.
 
-Results update as you type from the browser snapshot, with a match count below
-the thumbnails. Selection follows the same visible record when possible. Cards,
-pages, double-click and all recall/management actions use matching results;
-empty results disable record actions. Favorites and Project keep fixed-slot
-browsing without a search field.
+![Find is open on User with ramp entered. Five matching cards appear, including Open ramp and curves in the Ramps category.](mseg/curve-search.png)
+
+Cards, navigation, and recall actions follow the visible results. Empty results
+disable record actions. Favorites and Project use their fixed slots.
 
 The query supports 256 Unicode characters, printable Option input, Ctrl/Cmd+A,
 Shift-selection, caret Left/Right/Home/End, Backspace and Delete. Once focused,
@@ -308,13 +376,16 @@ the added attributes and cannot reproduce those shapes.
 
 ### Copying and pasting a phrase
 
-Select at least two adjacent points, then choose **Copy selection** from Edit.
-The clipboard stores that phrase with its time normalized to 0..1. Levels,
-tension, steps, native shapes, and interior point weights retain their shape.
+1. Select at least two adjacent points and choose **Edit → Copy selection**.
+2. Select the destination interval.
+3. Choose **Edit → Paste replace selection** to fit the phrase into that
+   interval. Choose **Paste merge selection** to keep existing interior
+   points too. If two points land at the same time, the pasted point wins.
 
-Select an interval in the destination and choose **Paste replace selection** to
-fit the phrase into that interval. **Paste merge selection** retains existing
-interior points; pasted points win when their times coincide. Points outside
+![A pasted sine phrase fills the outlined section in the middle of the destination ramp.](mseg/paste-phrase.png)
+
+Copying a phrase retains its levels, tensions, steps, shapes, and interior
+point weights. Its time is relative to the copied interval. Points outside
 the interval and the outgoing segment after its last point are preserved.
 Existing boundary points keep their outside-facing weights so adjoining
 segments retain their styles. Full-curve replacement transfers every weight.
@@ -324,17 +395,22 @@ it would exceed 128 points or create overlapping times.
 ## Precise points and navigation
 
 Select one point and click **Point**, choose **Inspect point** from Edit, or press
-**Ctrl/Cmd+Enter**. The floating inspector provides exact **Time**, **Value**, and
-outgoing **Tension** fields. Time uses beats in Beat mode, milliseconds in Time
-mode, or percent in Miff/Nap. Bipolar values use -1..1. The shared effect editor
-shows the point's routed parameter value (or Amp dB) beneath the fields.
+**Ctrl/Cmd+Enter**. The shared effect editor shows the point's routed parameter
+value or Amp dB beneath the fields.
+
+![Point inspector with the Time, Value, Tension, Shape, and Weight fields.](mseg/point-inspector.png)
+
+| Field | Valid entry | If blank when applied |
+|---|---|---|
+| **Time** | Strictly between the previous and next points. Enter beats in Beat mode, milliseconds in Time mode, or a percentage of the span in Miff/Nap. The endpoints stay at the start and end of the curve. | Midpoint between the neighbouring points. |
+| **Value** | 0 to 1 for Unipolar or −1 to 1 for Bipolar. | 0 in the displayed range. This is the bottom in Unipolar and the centre in Bipolar. |
+| **Tension** | −1 to 1 for the outgoing Curve or S-curve segment. Steps and the last point have no editable tension. | 0, the neutral tension for the selected shape. |
 
 Focusing a field selects its contents for replacement. Enter applies that field;
 Tab applies and moves to the next editable field (Shift+Tab moves back). Escape
-closes and discards uncommitted text. Clicking outside applies valid input and
-closes; invalid input keeps the inspector open with an error. Right-click
-dismisses it. Endpoint times, stepped tension, and the last point's unused
-tension are read-only. Exact numeric input bypasses the snap grid.
+closes and discards uncommitted text. Clicking outside applies the entry or its
+blank-field default and closes. Invalid text keeps the inspector open and shows
+an error. Right-click dismisses it. Exact numeric input bypasses the snap grid.
 
 **Wheel** over the canvas zooms time around the pointer; **Shift+wheel** zooms
 levels. **Middle-drag** pans. **View → Fit all** restores the full curve;
@@ -353,8 +429,13 @@ independent views, and its pulse field follows the Decay pane's view.
 In Multosis/Minitosis, assign an envelope to a pitch parameter in `st` or a
 logarithmic frequency parameter, set a nonzero Depth, and choose **Semitones**
 from Grid. The control shows **T/st**, keeping the current number of time
-divisions. A numeric grid preset restores ordinary value divisions. The mode
-saves per envelope and is undoable; changing it leaves existing points in place.
+divisions.
+
+![A stepped cutoff envelope snapped to pitch levels, with Snap On and Grid 16/st visible below the curve.](mseg/semitone-grid.png)
+
+Choose a numeric grid preset to return to ordinary level divisions. Changing
+the grid keeps the existing points in place. The mode saves per envelope and is
+undoable.
 
 The grid follows the routed parameter's base value, Depth, and polarity, including
 negative depth. Pitch offsets use integer semitones; frequencies use chromatic
@@ -403,12 +484,18 @@ Explicit Reset clears it; a DSP flush clears it while preserving phase. Amp and
 Mix update each sample; continuous effect targets update on a 1 kHz control
 clock. Existing Free Hz and Transient triggers still align to processing blocks.
 
-Trace toggles the white measured source history. It shows actual envelope
-output before Depth/Target mapping; colored dial arcs show values delivered to
-their destinations, including Mix transitions. Trace follows zoom/pan and
-clears when switching envelopes, rows, or effects. It fills as audio is processed
-and hides while Minitosis prepares a newly selected effect. Toggling Trace does
-not change the sound or project state.
+Trace is off by default. Turn it on to see where the measured envelope output
+visibly differs from the drawn curve, for example when Smooth or an envelope
+follower changes the source. The thin trace uses a lighter tint of the selected
+curve's colour and draws beneath it. Trace measures
+the source before Depth and Target mapping. Colored dial arcs show values
+delivered to their destinations, including Mix transitions. Trace follows zoom
+and pan, pauses during curve drags, and starts fresh after curve edits or when
+switching envelopes, rows, effects, or active MIDI waves. It fills as audio is
+processed and hides while Minitosis prepares a newly selected effect. The toggle
+is a display preference.
+
+![A two-pixel gold square curve with a one-pixel pale gold trace showing the smoothed rise and fall.](mseg/smoothing-trace.png)
 
 ### Audio waveform backdrop
 
@@ -419,11 +506,16 @@ absolute channel sets each peak. Full height is magnitude 1; louder signals
 clip visually. The horizontal axis follows the selected envelope's clock,
 including its triggers and loops. Zoom and pan apply to the backdrop too.
 
-The Audio menu's display choices are **Magnitude** (the default), **Combined**,
-and **Stereo**. Combined overlays signed left/right waveforms around one zero
-line. Stereo puts left in the upper half and right in the lower half, each with
-its own zero line. Opposite-polarity channels remain visible; they are never
-averaged. Vertical zoom/pan scales the signal inside each fixed Stereo lane.
+| Display | What to look for |
+|---|---|
+| **Magnitude** (default) | Peaks use the greater absolute level of either channel. |
+| **Combined** | Left and right waveforms share a centre line. |
+| **Stereo** | Left appears above right, each with its own centre line. |
+
+![The same audio shown as Magnitude, Combined, and Stereo. Magnitude draws upright peaks, Combined overlays both channels, and Stereo gives each channel its own lane.](mseg/audio-backdrop-modes.png)
+
+Opposite-polarity channels remain visible. Vertical zoom and pan scale the
+signal within each fixed Stereo lane.
 
 **Gain: -12 / 0 / +12 dB** adjusts only the backdrop's display level, useful for
 quiet material. The default is 0 dB. Peaks clip at the display boundaries without
@@ -457,11 +549,11 @@ view closes, Audio is Off, or Freeze is active. Miff/Nap retain their static vie
 ## MIDI retriggering
 
 Multosis/Minitosis accept MIDI note input. Route MIDI from your DAW to the plugin
-and choose **Trigger → MIDI note**. **Note** selects Any or a note number 0–127;
-**Ch.** selects Any or channel 1–16. Click these stepped controls to open their
-menus. The Note menu supports typing a number to search. MIDI note numbers avoid
-different DAWs' octave-naming conventions. Filters are saved per row/effect and
-participate in local undo.
+and choose **Trigger → MIDI note**. Open **Note** to choose **Any** or search by
+pitch name or MIDI number, such as `C4` or `(60)`. The menu uses C4 (60) for
+middle C. Compare MIDI numbers if your DAW displays a different octave. **Ch.**
+selects Any or channel 1–16. Filters are saved per row/effect and participate in
+local undo.
 
 Each matching positive-velocity note-on restarts all four envelopes on that row
 at the host's note offset. Multiple notes within a block are retained. Other
@@ -477,16 +569,52 @@ Minitosis uses each effect's recalled filters as prepared processors are adopted
 
 ## MIDI wave switching
 
-In Multosis/Minitosis, click **Waves...** beside the MSEG playback control to
-open Project-wave setup. Enable **MIDI**, choose **MIDI curve** (Amp/1/2/3), a **First**
-MIDI note from 0 to 120, and **Ch.** Any or 1–16. The eight consecutive notes
-beginning there select Project waves 1–8. Each row/effect has its own destination
-and mapping. Settings save with the project and participate in local curve undo.
+In Multosis and Minitosis, **Waves...** beside **Cyclic / One-shot** chooses
+which geometry a curve plays. It uses the eight slots on the Curve Browser's
+**Project** tab. The stored waves share the timing and modulation routing of the
+curve that plays them. The same button may read **MIDI on**, **MIDI P1–P8**,
+or **Wave P1–P8**, depending on the current selection.
+
+![Project waves panel with MIDI set to On, MIDI curve 1, First C2 (36), channel 3, and Wave 1 set to Project 2.](mseg/project-waves.png)
+
+### Play a stored Project wave
+
+1. With the shape you want on the canvas, open **Shapes → Browse shapes... →
+   Project**. Select slot **1** and click **Store**.
+2. Select MSEG **1** and open **Waves...**. Choose **Project 1** in the **Wave 1**
+   field. The canvas previews that slot and geometry editing pauses.
+3. To edit the drawn curve again, choose **Drawn/MIDI**. If MIDI switching is
+   enabled for that curve, switch **MIDI** to **Off** as well.
+
+The **Wave 1** field is also a host automation parameter. **Project 1–8** takes
+priority over the MIDI mapping on that curve. [Wave automation](#wave-automation)
+
+### Switch among Project waves with MIDI
+
+1. Store the shapes you want to switch between in Project slots and route MIDI
+   to the plugin. Select the envelope to switch, for example MSEG **1**.
+2. Open **Waves...** and set **Wave 1** to **Drawn/MIDI**. Turn **MIDI** on and
+   set **MIDI curve** to **1**.
+3. Choose **First** and **Ch.**. With **First** at **C2 (36)**, note 36 chooses
+   Project 1 and the next seven semitones choose Project 2–8. For example,
+   **D2 (38)** chooses Project 3. Choose **Any** to accept all MIDI channels.
+
+### Waves panel reference
+
+| Field | What it controls |
+|---|---|
+| **MIDI** | Switches live MIDI wave selection on or off. |
+| **MIDI curve** | One of Amp, 1, 2, or 3 to switch with notes. Each row or effect has its own mapping. |
+| **First** | Lowest note in the mapping, MIDI 0–120. The range spans eight consecutive notes. Search by name or number. |
+| **Ch.** | MIDI channel for wave switching, Any or 1–16. |
+| **Wave Amp/1/2/3** | Geometry choice for the currently selected tab. **Drawn/MIDI** follows the drawn or MIDI-selected wave. **Project 1–8** picks a specific slot. |
+
+The MIDI mapping saves with the project and participates in local curve undo.
 
 Positive note-ons switch at their host sample offsets. Empty slots, note-offs,
 zero-velocity notes and notes outside the range/channel leave the playing wave
 unchanged. Same-offset notes retain their order; the last valid selection wins.
-The MIDI button shows the active slot, such as **MIDI P3**.
+The bottom-strip **Waves...** button shows the active slot, such as **MIDI P3**.
 
 Switching preserves phase, smoothing and the other curves' clocks. The existing
 **Trigger** setting remains independent: if a note also matches MIDI retriggering,
@@ -509,16 +637,44 @@ bank and mapping, with playback selection established by subsequent MIDI notes.
 No extra trigger buffering is added; modulated effects retain their own latency.
 
 Use Tab or Up/Down to choose a setup field, Left/Right to change its value,
-and Enter/Space to toggle or open its selector. The First-note selector supports
-numeric search. Escape closes a selector before closing setup; outside/right
+and Enter/Space to toggle or open its selector. Escape closes a selector before
+closing setup. Outside or right
 clicks, focus loss and resize dismiss it without acting on controls beneath it.
 
 ## Envelope follower
 
-Multosis/Minitosis provide **Follow** beside Waves. Each row/effect has one
-linked stereo envelope follower; Amp/1/2/3 independently choose whether and how
-to use it. The selected curve's panel has **This curve**, **Curve mode** and
-**Amount** controls:
+The envelope follower turns the level of incoming audio into a control signal.
+In Multosis and Minitosis, a row or effect has one linked stereo follower.
+Each curve can use that shared signal in a different way. Use **Follow** beside
+**Waves...** to adjust the selected curve and the shared response.
+
+![Follower panel for MSEG 1 with its Multiply route, shared response sliders, Input and Envelope meters, and Listen button.](mseg/follower.png)
+
+### Duck with a sidechain
+
+1. Choose an effect such as **SVF** and send audio through it. In Multosis,
+   light a cell on that effect's row and start playback. In Minitosis, set
+   **Mix** to **100%** for this walkthrough.
+2. Route a kick or other trigger sound into the plugin's external sidechain.
+   Select **Amp** and load **Shapes → Flat high** for a full-level curve.
+3. Open **Follow**. Turn **This curve** on, choose **Add** for **Curve mode**,
+   and set **Amount** to −100%. At this setting, the follower subtracts from
+   Amp as the sidechain gets louder.
+4. Set the shared **Input** to **Sidechain**. Play the sidechain and check that
+   the Input and Envelope meters respond. Use **Listen** to hear the filtered
+   detector input if needed. [Sidechain routing](#external-sidechain)
+5. Start with **Attack** at 5 ms, **Hold** at 0 ms, and **Release** at 100 ms.
+   Lower Attack for a quicker drop or raise Release for a slower return.
+   Turn on **Trace** to see the measured dip below the flat Amp curve.
+
+In Minitosis, Amp ducks the wet contribution to Mix. In Multosis, Amp ducks
+the output of the row after its Mix blend.
+
+### Follower control reference
+
+**This curve**, **Curve mode**, and **Amount** apply to the selected Amp, 1, 2,
+or 3 tab. With **This curve** enabled, the three modes combine the follower and
+curve as follows.
 
 - **Follow:** Amount × envelope replaces the drawn source.
 - **Add:** curve + Amount × envelope; negative Amount subtracts the envelope.
@@ -545,9 +701,10 @@ The **shared response** applies to every enabled route on that row/effect:
 while preserving every curve's enable/mode/amount. Settings save with the project
 and use local modulation undo. They do not add host automation parameters.
 
-Input and Envelope meters show the actual filtered/gained detector level and
-envelope, or unavailable state. The white trace and dial arcs show the resulting
-combined modulation. Ordinary Audio backdrops remain raw; frozen captures stay
+The **Input** meter shows the filtered and gained signal level at the detector.
+The **Envelope** meter shows the shared result after the response timing. The
+thin trace shows the combined source for the selected curve, and the dial arcs
+show the delivered target values. Audio backdrops show raw waveforms. Frozen captures stay
 available while adjusting the follower. Enum destinations bypass Smooth lag but
 still use the follower's response. Effect parameters retain their 1 kHz control
 cadence; Amp and Mix update each sample.
@@ -567,6 +724,8 @@ Multosis/Minitosis provide **Listen** in both **Detect...** and **Follow** panel
 Click it, or press **L** with no numeric edit, dropdown or drag active, to hear
 that panel's filtered Main or Sidechain input. Click/press again to return to
 normal processing. Output gain still applies.
+
+![Audio detector set to Main, with the Listen button highlighted below the detector meter.](mseg/detector-listen.png)
 
 The trigger detector monitors its mono sum through High-pass/Low-pass. The
 follower monitors stereo through its filters and shared Gain; routes can remain
@@ -601,6 +760,8 @@ The old Time/Beat controls show the measured note and Hz/kHz, **Waiting**, or
 **No data** when there is no matching measurement yet. Saved Time/Beat lengths
 return when leaving MIDI pitch; they do not change its rate or tempo response.
 
+![MIDI pitch controls before and after a note. The top row reads Waiting. The bottom row shows Note 33 at 27.5 Hz with transpose set to −12 semitones.](mseg/midi-pitch-readout.png)
+
 Cyclic, OneShot and hold markers retain their traversal behavior. A shorter
 hold loop naturally repeats faster than the full-curve Hz rate. Every new note
 restarts a completed OneShot. MIDI/Project waves and envelope-follower routes
@@ -608,7 +769,7 @@ can be used together; a note can switch a wave and set pitch at the same time.
 Smooth retains its level across notes; Amp and Mix update per sample while
 effect parameters retain the fixed 1 kHz control cadence.
 
-The waveform and white trace follow actual pitch phases. Waiting pauses audio
+The waveform and thin trace follow actual pitch phases. Waiting pauses audio
 capture; frozen captures stay available. Retrigger on play keeps the last note
 and restarts phase. Ordinary DSP flush and same-effect sample-rate changes keep
 pitch and phase; a different effect kind waits for a fresh note. Explicit
@@ -622,6 +783,8 @@ timeline. Every curve keeps its own length: **Beat** divides the host's quarter
 note position by its beat length; **Time** uses song seconds and its time length.
 The first sample plays the supplied position, including after a seek or restart.
 Active host loops also wrap within a processing block when their ranges are known.
+
+![The trigger reads DAW, Beat is selected, and Length is one bar. The playhead is partway across the envelope plot, which also shows the captured input waveform.](mseg/daw-position.png)
 
 **Cyclic** repeats across the timeline, including negative pre-roll positions.
 **OneShot** starts at timeline zero and stops at its endpoint or sustain marker.
@@ -667,6 +830,8 @@ paused; the strip shows **Wave P1–P8**. Hold markers are ignored during Projec
 playback. Choose Drawn/MIDI and turn MIDI Off to restore normal geometry editing
 and saved hold markers. View/Help and timing/routing controls remain available.
 
+![Project wave 2 supplies the displayed shape. The strip reads Wave P2 and the geometry editing controls are dimmed.](mseg/automated-wave.png)
+
 Wave values and the Project bank save with host state; older presets default
 to Drawn/MIDI. Reset reapplies host Wave values while clearing runtime MIDI
 selection; transport retrigger retains both. Multosis Wave lanes remain attached
@@ -674,14 +839,37 @@ to their row numbers when rows move. Miff/Nap retain manual Project recall.
 
 ## Sample-timed Hz and audio triggers
 
-Multosis/Minitosis offer **Free Hz (sample)** and **Transient (sample)** in the
-Trigger menu. These are opt-in; existing Free Hz/Transient settings retain their
-block-aligned timing and old projects keep their sound. The closed controls show
-**Hz exact** or **Audio**, with the existing Rate or Sens/Hold dials.
+### Free Hz and Free Hz (sample)
 
-Free Hz (sample) keeps a continuous clock across host buffers, grid steps, and
-other rows' MIDI notes. Its first restart follows one full period. Rate edits
-retain clock progress. Transient (sample) uses the same dual-envelope detection
+Both trigger modes restart all four envelopes on the row or effect at the
+**Rate** setting of 0.05–20 Hz, independently of DAW tempo. At **5 Hz**, the
+restart interval is 200 ms. **Time/Beat** and **Length** still set how quickly
+each curve moves between its points.
+
+![The trigger menu lists both Free Hz and Free Hz (sample). After selecting the sample mode, the closed control reads Hz exact beside the Rate dial.](mseg/free-hz-menu.png)
+
+| Trigger mode | When it restarts | When to choose it |
+|---|---|---|
+| **Free Hz** | At the start of a host audio buffer, when the time accumulated through that buffer reaches the interval. It can fire once per buffer. The host buffer size affects the timing. | To recall a setup made with the original Free Hz timing. |
+| **Free Hz (sample)** | On the sample where the interval comes due, even inside a buffer. A long buffer can contain several restarts. The closed button reads **Hz exact**. | For new rhythmic cuts or other modulation that needs consistent restart timing across buffer sizes. |
+
+For example, at 48 kHz with 512-sample buffers, a 5 Hz clock first comes due
+at sample 9,600. That falls inside the buffer starting at sample 9,216.
+**Free Hz** restarts at that buffer's start. **Free Hz (sample)** restarts at
+sample 9,600.
+
+Free Hz (sample) keeps its clock across buffers, grid steps, and other rows'
+MIDI notes. The first restart follows a full period. Rate edits retain clock
+progress.
+
+### Transient (sample)
+
+The closed button reads **Audio**. The **Detect...** button sits just above it,
+with **Sens** and **Hold** to the right.
+
+![Transient (sample) controls. Detect opens the detector panel, and the adjacent Sens and Hold dials show 80% and 50 ms.](mseg/transient-controls.png)
+
+Transient (sample) uses the same dual-envelope detection
 and Hold rules as Transient, but restarts on each qualifying sample, including
 multiple detections in one buffer. By default it listens to the plugin's original
 dry stereo-average input, before any row's effects; Detect can select the external
@@ -701,6 +889,8 @@ Choose **Trigger → Timing...** in Multosis/Minitosis to open timing controls
 without changing the current trigger source. Settings save per row/effect and
 add no host automation parameters. Lookahead, Audio shift and Retrigger blend
 default Off; only enabled audio lookahead adds reported latency.
+
+![Trigger timing with Lookahead Off, Audio shift at 2.00 ms, and Retrigger blend at 5.00 ms.](mseg/trigger-timing.png)
 
 - **Audio shift (0–4 ms, or -4–+4 ms with Lookahead):** offsets phase resets from
   Transient (sample), rounded to the nearest sample. The detector and its
@@ -746,6 +936,9 @@ still reads live original Main/Sidechain. **Audio shift** can then be -4..+4 ms.
 A negative shift moves resets earlier relative to the detector's cue on the
 delayed input; zero retains alignment against the added lookahead. Detection
 itself still follows the selected algorithm's causal response.
+
+![Trigger timing with Lookahead enabled at 4 ms. Audio shift is set to −2.00 ms, which moves the reset earlier relative to the delayed input.](mseg/trigger-lookahead.png)
+
 Existing effect/FFT latency keeps its prior relationship to modulation and is
 separate from this shift. MIDI/free/DAW clocks and wave-note offsets retain their
 normal processing-time definitions, as with other latency-adding effects.
@@ -783,6 +976,8 @@ The panel provides **Input: Main / Sidechain**, **Algorithm**, **Detail**,
 **Threshold**, **High-pass**, and **Low-pass**. Input defaults to Main,
 Algorithm to Envelope, Detail to 50%, and threshold/filters to Off. Older
 projects and the other trigger modes keep their existing behavior.
+
+![Audio detector showing Peak rise with 75% Detail. The detector meter is below the Threshold and filter sliders.](mseg/audio-detector.png)
 
 - **Envelope:** the original fast/slow rectified-envelope detector. At Detail
   50%, its attack/release windows remain 0.5/5 ms (fast) and 30/200 ms (slow).
@@ -844,7 +1039,11 @@ Use **Audio → Sidechain** to align curves against the unfiltered source. This
 view is independent of Detect's Input choice. A stereo-only layout also remains
 available for hosts choosing the previous audio configuration.
 
+![The sidechain channel waveforms appear behind the curve. Frozen: SC in the Audio control identifies the held sidechain capture.](mseg/sidechain-backdrop.png)
+
 ## Edit commands
+
+![The Edit menu open over selected points, showing Compress and Expand, Copy and Paste, Flip, Reverse, Nudge, and Quantize.](mseg/edit-commands.png)
 
 - **Compress/Expand values/times** retain their existing behavior and require a
   selection. Each invocation scales the selected axis by 0.75 or 1.25 around
@@ -887,8 +1086,12 @@ or overlap points are rejected as a whole. The grid menu adds **6 / 8**,
 | Shift+Left / Right | Nudge by 1/16 of a cell |
 | Delete / Backspace | Delete selected interior points |
 | Escape | Close a menu or cancel a curve gesture |
+| Ctrl/Cmd+Z | Undo in Multosis or Minitosis |
+| Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y | Redo in Multosis or Minitosis |
 
 Menus accept arrows, Home/End, Page Up/Down, Enter, Escape, and wheel scrolling.
 Active text fields retain keyboard priority. Multosis/Minitosis record each
 curve gesture or command as one undo step. Miff rebakes on changes. Nap defers
 Efficient-engine IR baking during a gesture and bakes on release.
+
+![In Minitosis, dragging the gold triangle's peak lowers it to 0.50 on the left. Ctrl+Z restores the peak to 1.00 on the right.](mseg/undo-curve-edit.png)

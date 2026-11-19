@@ -28,6 +28,7 @@ const BORDER: f32 = 1.0;
 
 /// Scrollbar strip width, in physical pixels.
 const SCROLLBAR_W: f32 = 5.0;
+type ItemFilter = fn(&str, &str) -> bool;
 
 /// Crate-local key enum. The editor maps host (baseview) key events to this,
 /// so the widget never depends on baseview.
@@ -64,6 +65,7 @@ struct Active<A> {
     scroll_px: f32,
     filter: String,
     filter_enabled: bool,
+    item_filter: ItemFilter,
     /// `Some(grab_offset_y)` while the scrollbar thumb is being dragged.
     scrollbar_drag: Option<f32>,
     /// Section headers as `(item_index, header_label)`, in ascending item-index
@@ -106,6 +108,7 @@ pub enum RowKind {
 pub struct DropdownList<'a> {
     pub items: &'a [&'a str],
     pub sections: &'a [(usize, &'a str)],
+    item_filter: ItemFilter,
 }
 
 impl<'a> DropdownList<'a> {
@@ -114,13 +117,24 @@ impl<'a> DropdownList<'a> {
         Self {
             items,
             sections: &[],
+            item_filter: filter_matches,
         }
     }
 
     /// A list with `(item_index, header_label)` section markers above the
     /// indicated items. Indices must be ascending.
     pub fn sectioned(items: &'a [&'a str], sections: &'a [(usize, &'a str)]) -> Self {
-        Self { items, sections }
+        Self {
+            items,
+            sections,
+            item_filter: filter_matches,
+        }
+    }
+
+    /// Override how a query matches item labels. Section labels keep substring matching.
+    pub fn with_filter(mut self, item_filter: ItemFilter) -> Self {
+        self.item_filter = item_filter;
+        self
     }
 }
 
@@ -186,12 +200,13 @@ fn item_matches(
     sections: &[(usize, String)],
     item_index: usize,
     filter: &str,
+    item_filter: ItemFilter,
 ) -> bool {
     if filter.is_empty() {
         return true;
     }
     let item = items.get(item_index).copied().unwrap_or("");
-    if filter_matches(item, filter) {
+    if item_filter(item, filter) {
         return true;
     }
     if let Some(s) = section_of(sections, item_index) {
@@ -215,7 +230,12 @@ enum FilteredRow {
 /// - An item matches when its label OR the label of its owning section header
 ///   (if any) contains the filter (case-insensitive). Empty filter matches all.
 /// - A section header is shown iff at least one item in its section matches.
-fn filtered_rows(items: &[&str], sections: &[(usize, String)], filter: &str) -> Vec<FilteredRow> {
+fn filtered_rows(
+    items: &[&str],
+    sections: &[(usize, String)],
+    filter: &str,
+    item_filter: ItemFilter,
+) -> Vec<FilteredRow> {
     let mut out = Vec::new();
     let mut next_section = 0usize;
     for i in 0..items.len() {
@@ -227,13 +247,13 @@ fn filtered_rows(items: &[&str], sections: &[(usize, String)], filter: &str) -> 
                 .map(|(s, _)| *s)
                 .unwrap_or(items.len());
             let any_match = (sections[next_section].0..section_end)
-                .any(|j| item_matches(items, sections, j, filter));
+                .any(|j| item_matches(items, sections, j, filter, item_filter));
             if any_match {
                 out.push(FilteredRow::Header(next_section));
             }
             next_section += 1;
         }
-        if item_matches(items, sections, i, filter) {
+        if item_matches(items, sections, i, filter, item_filter) {
             out.push(FilteredRow::Item(i));
         }
     }
@@ -242,8 +262,13 @@ fn filtered_rows(items: &[&str], sections: &[(usize, String)], filter: &str) -> 
 
 /// UNFILTERED indices of items in `filtered_rows`, in display order. Used by
 /// the keyboard-nav code paths that only care about item rows.
-fn filtered_item_indices(items: &[&str], sections: &[(usize, String)], filter: &str) -> Vec<usize> {
-    filtered_rows(items, sections, filter)
+fn filtered_item_indices(
+    items: &[&str],
+    sections: &[(usize, String)],
+    filter: &str,
+    item_filter: ItemFilter,
+) -> Vec<usize> {
+    filtered_rows(items, sections, filter, item_filter)
         .into_iter()
         .filter_map(|r| match r {
             FilteredRow::Item(i) => Some(i),
@@ -274,7 +299,7 @@ pub fn dropdown_popup_layout<A: Copy + PartialEq>(
     let item_h = ah;
     let filter_h = if active.filter_enabled { ah } else { 0.0 };
 
-    let rows = filtered_rows(items, &active.sections, &active.filter);
+    let rows = filtered_rows(items, &active.sections, &active.filter, active.item_filter);
     let n = rows.len();
     let content_height = n as f32 * item_h;
 
@@ -590,7 +615,11 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         filter_enabled: bool,
         window_size: (f32, f32),
     ) {
-        let DropdownList { items, sections } = list;
+        let DropdownList {
+            items,
+            sections,
+            item_filter,
+        } = list;
         let highlight = current.min(items.len().saturating_sub(1));
         let sections: Vec<(usize, String)> = sections
             .iter()
@@ -603,6 +632,7 @@ impl<A: Copy + PartialEq> DropdownState<A> {
             scroll_px: 0.0,
             filter: String::new(),
             filter_enabled,
+            item_filter,
             scrollbar_drag: None,
             sections,
         });
@@ -633,7 +663,7 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         };
         // Display position is into the *interleaved* row sequence (headers +
         // items) so the row-y math matches what `dropdown_popup_layout` does.
-        let rows = filtered_rows(items, &active.sections, &active.filter);
+        let rows = filtered_rows(items, &active.sections, &active.filter, active.item_filter);
         let Some(k) = rows
             .iter()
             .position(|r| matches!(r, FilteredRow::Item(i) if *i == active.highlight))
@@ -669,7 +699,8 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         let active = self.active.as_ref()?;
         let action = active.action;
         // Navigation walks the item rows only (headers are skipped).
-        let item_matches = filtered_item_indices(items, &active.sections, &active.filter);
+        let item_matches =
+            filtered_item_indices(items, &active.sections, &active.filter, active.item_filter);
 
         match key {
             DropdownKey::Esc => {
@@ -743,9 +774,10 @@ impl<A: Copy + PartialEq> DropdownState<A> {
         }
         active.scroll_px = 0.0;
         let action = active.action;
-        let first = filtered_item_indices(items, &active.sections, &active.filter)
-            .first()
-            .copied();
+        let first =
+            filtered_item_indices(items, &active.sections, &active.filter, active.item_filter)
+                .first()
+                .copied();
         if let Some(idx) = first {
             active.highlight = idx;
         }
@@ -983,20 +1015,26 @@ mod tests {
     #[test]
     fn filtered_indices_empty_filter_returns_all() {
         let items = ["a", "b", "c"];
-        assert_eq!(filtered_item_indices(&items, &[], ""), vec![0, 1, 2]);
+        assert_eq!(
+            filtered_item_indices(&items, &[], "", filter_matches),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
     fn filtered_indices_returns_unfiltered_positions() {
         let items = ["alpha", "bravo", "bravado", "bract"];
         // "bra" matches bravo(1), bravado(2), bract(3) — alpha(0) does not.
-        assert_eq!(filtered_item_indices(&items, &[], "bra"), vec![1, 2, 3]);
+        assert_eq!(
+            filtered_item_indices(&items, &[], "bra", filter_matches),
+            vec![1, 2, 3]
+        );
     }
 
     #[test]
     fn filtered_indices_no_match_is_empty() {
         let items = ["a", "b"];
-        assert!(filtered_item_indices(&items, &[], "z").is_empty());
+        assert!(filtered_item_indices(&items, &[], "z", filter_matches).is_empty());
     }
 
     #[test]

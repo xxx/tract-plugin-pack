@@ -2196,6 +2196,7 @@ mod detector_controls {
                 settings: AudioTriggerSettings::default(),
             }),
             wave: None,
+            wave_generations: [0; 4],
             wave_automation: [0; 4],
             position_sync: false,
             follower: None,
@@ -2445,6 +2446,26 @@ mod midi_retrigger {
                 channel: None
             }
         );
+    }
+
+    #[test]
+    fn searching_by_pitch_name_or_number_selects_the_corresponding_note() {
+        let mut h = Harness::new();
+        select_source(&mut h);
+        let note = MidiField::Note.rect(&h.geometry.layout, 1.0);
+        assert_eq!(MidiField::Note.items()[62], "C#4 (61)");
+        for (query, number) in [("c#4", 61), ("1", 1)] {
+            h.click(note);
+            h.key(Key::Character(query.into()));
+            assert!(h.key(Key::Enter).changed);
+            assert_eq!(
+                h.modulation.trigger,
+                TriggerSource::MidiNote {
+                    note: Some(number),
+                    channel: None,
+                }
+            );
+        }
     }
 
     #[test]
@@ -3092,6 +3113,7 @@ mod smoothing_controls {
     #[test]
     fn smooth_numeric_entry_is_saved_per_slot_and_trace_toggle_is_view_only() {
         let mut h = Harness::new();
+        assert!(!h.editor.trace_enabled());
         let before = h.modulation.clone();
         let slot = h.editor.selected_mseg;
         let smooth = h.geometry.layout.smooth;
@@ -3110,9 +3132,12 @@ mod smoothing_controls {
         let trace = h.geometry.layout.trace;
         let response = h.click(trace);
         assert!(response.captured && !response.changed);
-        assert!(!h.editor.trace_enabled());
+        assert!(h.editor.trace_enabled());
         assert_eq!(h.modulation, config);
         h.editor.cancel_interaction();
+        assert!(h.editor.trace_enabled());
+        let response = h.click(trace);
+        assert!(response.captured && !response.changed);
         assert!(!h.editor.trace_enabled());
     }
 
@@ -3201,6 +3226,7 @@ mod smoothing_controls {
             mix: None,
             detector: None,
             wave: None,
+            wave_generations: [0; 4],
             wave_automation: [0; 4],
             position_sync: false,
             follower: None,

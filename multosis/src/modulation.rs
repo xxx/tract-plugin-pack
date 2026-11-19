@@ -154,6 +154,13 @@ impl Modulation {
     pub fn capture_epoch(&self, row: usize, slot: usize) -> u64 {
         self.states[row].capture_epoch(&self.config[row], slot)
     }
+    pub(crate) fn trace_curve(
+        &self,
+        row: usize,
+        slot: usize,
+    ) -> Option<&tiny_skia_widgets::MsegData> {
+        self.config.get(row)?.msegs.get(slot)
+    }
     pub fn set_telemetry_request(
         &mut self,
         request: tract_effects::modulation_telemetry::TraceRequest,

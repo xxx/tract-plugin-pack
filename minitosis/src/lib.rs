@@ -224,9 +224,10 @@ impl Minitosis {
             .params
             .controls_for(kind)
             .track(self.params.mix.value(), false);
-        let request = self.trace_clock.begin_block(
+        let request = self.trace_clock.begin_block_for_curve(
             &self.shared.telemetry,
             f32::from_bits(self.processor.key.sample_rate_bits) as f64,
+            |request| self.processor.modulation.msegs.get(request.slot),
         );
         self.processor
             .set_telemetry_enabled(request.matches(0, self.processor.key.kind));

@@ -233,7 +233,8 @@ impl MsegEditState {
     pub fn geometry_read_only(&self) -> bool {
         self.read_only_curve.is_some()
     }
-    pub(crate) fn display_data<'a>(&'a self, author: &'a MsegData) -> &'a MsegData {
+    /// Return the curve currently shown in the editor, including wave overrides.
+    pub fn display_data<'a>(&'a self, author: &'a MsegData) -> &'a MsegData {
         self.read_only_curve.as_ref().unwrap_or(author)
     }
     /// Cancel transient geometry-dependent input while keeping selection and strip preferences.

@@ -261,7 +261,7 @@ fn entries(page: HelpPage, curve_only: bool) -> impl Iterator<Item = &'static En
                     ),
                     animated(
                         "Follow",
-                        "Route audio level to Amp/1/2/3. Follow replaces the curve source; Add/Multiply combine them. Mode/Amount belong to this curve; input, filters, Gain and Attack/Hold/Release are shared. Reset response keeps routes. The white trace and meters show actual audio-driven values; geometry stays editable.",
+                        "Route audio level to Amp/1/2/3. Follow replaces the curve source. Add/Multiply combine them. Mode/Amount belong to this curve. Input, filters, Gain and Attack/Hold/Release are shared. Reset response keeps routes. The thin trace and meters show actual audio-driven values. Geometry stays editable.",
                     ),
                     animated(
                         "Listen / L",

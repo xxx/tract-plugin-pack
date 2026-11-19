@@ -1,6 +1,6 @@
 //! GUI-side reusable curves, independent of playback and routing.
 
-use super::{HoldMode, MAX_NODES, MsegData, MsegNode, SegmentShape};
+use super::{HoldMode, MAX_NODES, MsegData, MsegNode, PointWeight, SegmentShape};
 
 pub const MAX_SHAPE_BYTES: usize = 65_536;
 
@@ -181,12 +181,23 @@ pub fn factory_shape(kind: FactoryShape) -> CurveShape {
         FactoryShape::RampUp => vec![node(0.0, 0.0), node(1.0, 1.0)],
         FactoryShape::RampDown => vec![node(0.0, 1.0), node(1.0, 0.0)],
         FactoryShape::Triangle => vec![node(0.0, 0.0), node(0.5, 1.0), node(1.0, 0.0)],
-        FactoryShape::Sine => (0..=32)
-            .map(|i| {
-                let t = i as f32 / 32.0;
-                node(t, 0.5 - 0.5 * (t * std::f32::consts::TAU).cos())
-            })
-            .collect(),
+        FactoryShape::Sine => vec![
+            MsegNode {
+                tension: -0.125,
+                ..node(0.0, 0.5)
+            },
+            MsegNode {
+                shape: SegmentShape::SCurve,
+                weight: PointWeight::Soft,
+                ..node(0.25, 1.0)
+            },
+            MsegNode {
+                tension: 0.125,
+                weight: PointWeight::Soft,
+                ..node(0.75, 0.0)
+            },
+            node(1.0, 0.5),
+        ],
         FactoryShape::Square => vec![node(0.0, 1.0), node(0.5, 0.0), node(1.0, 1.0)],
         FactoryShape::Duck => vec![
             node(0.0, 0.0),
@@ -368,5 +379,19 @@ mod tests {
         }
         let oversized = " ".repeat(65_537);
         assert!(CurveShape::from_json(&oversized).is_err());
+    }
+
+    #[test]
+    fn four_point_factory_sine_follows_a_full_cycle_starting_at_the_rising_midline() {
+        let shape = factory_shape(FactoryShape::Sine);
+        assert_eq!(shape.nodes().len(), 4);
+        let mut data = MsegData::default();
+        shape.apply(&mut data, false).unwrap();
+        for sample in 0..=1024 {
+            let t = sample as f32 / 1024.0;
+            let expected = 0.5 + 0.5 * (t * std::f32::consts::TAU).sin();
+            let actual = super::super::value_at_phase(&data, t);
+            assert!((actual - expected).abs() <= 0.011, "phase {t}: {actual}");
+        }
     }
 }

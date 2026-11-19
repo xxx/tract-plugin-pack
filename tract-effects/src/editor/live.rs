@@ -181,7 +181,7 @@ impl LiveSource {
         trace: bool,
         wave_automation: [u8; 4],
     ) {
-        let token = self.telemetry.request_for_modes(
+        let token = self.telemetry.request_with_curve(
             self.row,
             slot,
             kind,
@@ -189,6 +189,7 @@ impl LiveSource {
             config.trigger == crate::modulation::TriggerSource::DawPosition,
             config.follower.normalized().request_key(slot),
             config.trigger.pitch_settings().is_some(),
+            trace.then_some(&config.msegs[slot]),
         );
         if token != self.token {
             self.bins.fill(None);
@@ -196,22 +197,32 @@ impl LiveSource {
             self.cursor = self.telemetry.head();
             self.token = token;
         }
-        if let Some(frame) = self
+        let matches = |frame: &ModulationFrame| {
+            frame.matches(kind, config) && frame.wave_automation == wave_automation
+        };
+        let Some((frame, head)) = self
             .telemetry
-            .frame(token)
-            .filter(|f| f.matches(kind, config) && f.wave_automation == wave_automation)
-        {
-            self.frame = Some(frame);
-        } else if self
+            .frame_with_trace_head(token)
+            .filter(|(frame, _)| matches(frame))
+        else {
+            if self.frame.as_ref().is_some_and(|frame| !matches(frame)) {
+                self.frame = None;
+                self.bins.fill(None);
+            }
+            return;
+        };
+        let wave_key = frame.trace_wave_key(slot);
+        if self
             .frame
-            .is_some_and(|f| !f.matches(kind, config) || f.wave_automation != wave_automation)
+            .is_some_and(|previous| previous.trace_wave_key(slot) != wave_key)
         {
-            self.frame = None;
+            self.bins.fill(None);
         }
-        let head = self.telemetry.head();
+        self.frame = Some(frame);
         self.cursor = self.cursor.max(head.saturating_sub(TRACE_CAPACITY as u64));
         for index in self.cursor..head {
             if let Some(point) = self.telemetry.point(index, token)
+                && point.wave_key == wave_key
                 && point.phase.is_finite()
                 && point.value.is_finite()
             {
@@ -220,7 +231,7 @@ impl LiveSource {
                 self.bins[bin] = Some((point.phase, point.value));
             }
         }
-        self.cursor = head;
+        self.cursor = self.cursor.max(head);
     }
 }
 impl EffectEditor {
@@ -282,6 +293,17 @@ impl EffectEditor {
     pub fn trace_enabled(&self) -> bool {
         self.trace_enabled
     }
+
+    pub fn set_trace_enabled(&mut self, enabled: bool) {
+        if self.trace_enabled != enabled {
+            self.trace_enabled = enabled;
+            self.clear_modulation_trace();
+        }
+    }
+
+    fn trace_visible(&self) -> bool {
+        self.trace_enabled && !self.mseg_edit.is_editing_curve()
+    }
     pub fn set_audio_view(&mut self, view: AudioView) {
         if (self.audio_view == AudioView::Sidechain) != (view == AudioView::Sidechain) {
             self.audio_frozen = false;
@@ -319,6 +341,7 @@ impl EffectEditor {
         self.audio_gain
     }
     pub(super) fn refresh_live(&mut self, effect: &TrackEffect, config: &TrackModulation) {
+        let trace = self.trace_visible();
         if let Some(live) = &mut self.live {
             live.refresh_waveform(
                 effect.kind,
@@ -330,7 +353,7 @@ impl EffectEditor {
                 effect.kind,
                 config,
                 self.selected_mseg.min(3),
-                self.trace_enabled,
+                trace,
                 self.wave_automation.unwrap_or([0; 4]),
             );
         }
@@ -338,18 +361,20 @@ impl EffectEditor {
     pub(super) fn draw_live_trace(
         &self,
         pm: &mut tiny_skia::Pixmap,
-        rect: (f32, f32, f32, f32),
-        scale: f32,
+        layout: &widgets::mseg::MsegLayout,
+        curve: &widgets::MsegData,
     ) {
-        if self.trace_enabled
+        if self.trace_visible()
             && let Some(live) = &self.live
         {
+            let (r, g, b, _) = widgets::color_to_rgba_u8(mseg_color(self.selected_mseg));
+            let tint = |channel| channel + (255 - channel) / 4;
             widgets::mseg::draw_mseg_trace(
                 pm,
-                &self.mseg_edit.layout(rect, scale),
+                layout,
+                self.mseg_edit.display_data(curve),
                 &live.bins,
-                scale,
-                tiny_skia::Color::from_rgba8(235, 245, 255, 210),
+                tiny_skia::Color::from_rgba8(tint(r), tint(g), tint(b), 235),
             );
         }
     }
@@ -483,14 +508,17 @@ mod tests {
         };
         let config = TrackModulation::default();
         editor.connect_live(&telemetry, 13);
-        editor.trace_enabled = true;
+        editor.set_trace_enabled(true);
         assert!(editor.trace_enabled());
         editor.refresh_live(&effect, &config);
         assert_eq!(editor.live.as_ref().unwrap().row(), 13);
 
         let mut clock = TraceClock::default();
-        let request = clock.begin_block(&telemetry, 48000.0);
+        let request = clock.begin_block_for_curve(&telemetry, 48000.0, |request| {
+            config.msegs.get(request.slot)
+        });
         assert!(request.matches(13, effect.kind));
+        assert!(request.trace);
         let mut frame = ModulationFrame::capture(effect.kind, &config, &ModulationState::default());
         for (phase, value) in [(0.0, 0.25), (0.5, 0.75), (1.0, 0.125)] {
             frame.phases[request.slot] = phase;
@@ -507,10 +535,273 @@ mod tests {
 
         let mut raster = tiny_skia::Pixmap::new(640, 360).unwrap();
         let rect = (12.0, 12.0, 608.0, 320.0);
-        editor.draw_live_trace(&mut raster, rect, 1.0);
-        assert!(raster.data().iter().any(|byte| *byte != 0));
+        let layout = editor.mseg_edit.layout(rect, 1.0);
+        editor.draw_live_trace(&mut raster, &layout, &config.msegs[request.slot]);
+        let pale_amber = tiny_skia::Color::from_rgba8(255, 213, 129, 235)
+            .premultiply()
+            .to_color_u8();
+        assert!(raster.pixels().contains(&pale_amber));
+
+        let mut displayed = widgets::MsegData::default();
+        displayed.nodes[0].value = 0.25;
+        displayed.nodes[1].value = 0.125;
+        displayed.insert_node(0.5, 0.75).unwrap();
+        editor.mseg_edit.set_read_only_curve(Some(displayed));
+        raster.fill(tiny_skia::Color::TRANSPARENT);
+        editor.draw_live_trace(&mut raster, &layout, &config.msegs[request.slot]);
+        assert!(raster.data().iter().all(|&byte| byte == 0));
+
         let live = editor.live.as_mut().unwrap();
         live.refresh(effect.kind, &config, request.slot, true, [0, 1, 0, 0]);
         assert!(live.frame.is_none());
+    }
+
+    #[test]
+    fn trace_discards_retained_and_unread_points_from_previous_midi_wave() {
+        let telemetry = Arc::new(ModulationTelemetry::default());
+        let mut editor = EffectEditor::default();
+        let effect = TrackEffect::default();
+        let slot = editor.selected_mseg;
+        let mapping = crate::modulation::MidiWaveMapping {
+            envelope: slot as u8,
+            first_note: 60,
+            channel: None,
+        };
+        let config = TrackModulation {
+            wave_switch: Some(mapping),
+            ..TrackModulation::default()
+        };
+        editor.connect_live(&telemetry, 0);
+        editor.set_trace_enabled(true);
+        editor.refresh_live(&effect, &config);
+        let mut clock = TraceClock::default();
+        clock.begin_block_for_curve(&telemetry, 48000.0, |request| {
+            config.msegs.get(request.slot)
+        });
+        let mut frame = ModulationFrame::capture(effect.kind, &config, &ModulationState::default());
+        frame.wave = Some((mapping, Some(0)));
+        frame.phases[slot] = 0.0;
+        clock.record(&telemetry, 0, &frame);
+        clock.publish(&telemetry, 0, &frame);
+        editor.refresh_live(&effect, &config);
+        assert!(editor.live.as_ref().unwrap().bins[0].is_some());
+
+        frame.phases[slot] = 0.5;
+        clock.record(&telemetry, 0, &frame);
+        frame.wave = Some((mapping, Some(1)));
+        frame.phases[slot] = 1.0;
+        clock.record(&telemetry, 0, &frame);
+        editor.refresh_live(&effect, &config);
+        assert!(editor.live.as_ref().unwrap().bins[TRACE_CAPACITY - 1].is_none());
+        clock.publish(&telemetry, 0, &frame);
+        editor.refresh_live(&effect, &config);
+
+        let bins = &editor.live.as_ref().unwrap().bins;
+        assert!(bins[..TRACE_CAPACITY - 1].iter().all(Option::is_none));
+        assert_eq!(bins[TRACE_CAPACITY - 1], Some((1.0, frame.outputs[slot])));
+    }
+
+    #[test]
+    fn trace_restarts_after_switching_away_and_back_between_measurements() {
+        use crate::effects::EffectInstance;
+        use crate::modulation::{MidiNoteOn, MidiWaveMapping};
+        use widgets::mseg::{FactoryShape, WavePalette, WavePaletteSnapshot, factory_shape};
+
+        let telemetry = Arc::new(ModulationTelemetry::default());
+        let mut editor = EffectEditor::default();
+        let effect = TrackEffect::default();
+        let slot = editor.selected_mseg;
+        let mapping = MidiWaveMapping {
+            envelope: slot as u8,
+            first_note: 60,
+            channel: None,
+        };
+        let config = TrackModulation {
+            wave_switch: Some(mapping),
+            ..TrackModulation::default()
+        };
+        let mut palette = WavePalette::default();
+        palette
+            .store(0, &factory_shape(FactoryShape::RampUp))
+            .unwrap();
+        palette
+            .store(1, &factory_shape(FactoryShape::RampDown))
+            .unwrap();
+        let mut bank = WavePaletteSnapshot::default();
+        bank.refresh(&palette);
+        let mut state = ModulationState::default();
+        state.prepare_wave_bank(&config, &bank);
+        let mut dsp = EffectInstance::new(effect.kind);
+        let mut select = |state: &mut ModulationState, note| {
+            assert!(state.select_midi_wave(
+                &config,
+                &bank,
+                MidiNoteOn {
+                    timing: 0,
+                    channel: 0,
+                    note
+                }
+            ));
+            state.refresh_pending_wave(&config, &effect, &mut dsp, 64);
+        };
+        editor.connect_live(&telemetry, 0);
+        editor.set_trace_enabled(true);
+        editor.refresh_live(&effect, &config);
+        let mut clock = TraceClock::default();
+        clock.begin_block_for_curve(&telemetry, 48000.0, |request| {
+            config.msegs.get(request.slot)
+        });
+        let frame_at = |state: &ModulationState, phase| {
+            let mut frame = ModulationFrame::capture(effect.kind, &config, state);
+            frame.phases[slot] = phase;
+            frame
+        };
+
+        select(&mut state, 60);
+        let first = frame_at(&state, 0.0);
+        clock.record(&telemetry, 0, &first);
+        clock.publish(&telemetry, 0, &first);
+        editor.refresh_live(&effect, &config);
+        assert!(editor.live.as_ref().unwrap().bins[0].is_some());
+        clock.record(&telemetry, 0, &frame_at(&state, 0.25));
+
+        select(&mut state, 61);
+        select(&mut state, 60);
+        let latest = frame_at(&state, 1.0);
+        assert_eq!(first.wave, latest.wave);
+        clock.record(&telemetry, 0, &latest);
+        clock.publish(&telemetry, 0, &latest);
+        editor.refresh_live(&effect, &config);
+
+        let bins = &editor.live.as_ref().unwrap().bins;
+        assert!(bins[..TRACE_CAPACITY - 1].iter().all(Option::is_none));
+        assert_eq!(bins[TRACE_CAPACITY - 1], Some((1.0, latest.outputs[slot])));
+    }
+
+    #[test]
+    fn trace_restarts_for_edited_curve_and_rejects_readings_until_audio_adopts_it() {
+        let telemetry = Arc::new(ModulationTelemetry::default());
+        let mut editor = EffectEditor::default();
+        let effect = TrackEffect::default();
+        let old_config = TrackModulation::default();
+        let mut config = old_config.clone();
+        let slot = editor.selected_mseg;
+        editor.connect_live(&telemetry, 0);
+        editor.set_trace_enabled(true);
+        editor.refresh_live(&effect, &config);
+
+        let mut clock = TraceClock::default();
+        let mut frame = ModulationFrame::capture(effect.kind, &config, &ModulationState::default());
+        let old_request = clock.begin_block_for_curve(&telemetry, 48000.0, |request| {
+            config.msegs.get(request.slot)
+        });
+        assert!(clock.tick());
+        frame.phases[slot] = 0.5;
+        frame.outputs[slot] = 1.0;
+        clock.record(&telemetry, 0, &frame);
+        clock.publish(&telemetry, 0, &frame);
+        editor.refresh_live(&effect, &config);
+        assert_eq!(
+            editor.live.as_ref().unwrap().bins[TRACE_CAPACITY / 2],
+            Some((0.5, 1.0))
+        );
+
+        config.msegs[slot].nodes[1].value = 0.25;
+        editor.refresh_live(&effect, &config);
+        let waiting = clock.begin_block_for_curve(&telemetry, 48000.0, |request| {
+            old_config.msegs.get(request.slot)
+        });
+        assert_ne!(waiting.token, old_request.token);
+        assert!(!clock.tick());
+        editor.refresh_live(&effect, &config);
+        assert!(
+            editor
+                .live
+                .as_ref()
+                .unwrap()
+                .bins
+                .iter()
+                .all(Option::is_none)
+        );
+
+        let adopted = clock.begin_block_for_curve(&telemetry, 48000.0, |request| {
+            config.msegs.get(request.slot)
+        });
+        assert_eq!(adopted.token, waiting.token);
+        assert!(clock.tick());
+        frame.outputs[slot] = 0.25;
+        clock.record(&telemetry, 0, &frame);
+        clock.publish(&telemetry, 0, &frame);
+        editor.refresh_live(&effect, &config);
+        assert_eq!(
+            editor.live.as_ref().unwrap().bins[TRACE_CAPACITY / 2],
+            Some((0.5, 0.25))
+        );
+
+        config.msegs[slot].snap = !config.msegs[slot].snap;
+        editor.refresh_live(&effect, &config);
+        assert_eq!(editor.live.as_ref().unwrap().token, adopted.token);
+    }
+
+    #[test]
+    fn trace_pauses_during_curve_gestures_and_resumes_with_fresh_history() {
+        let telemetry = Arc::new(ModulationTelemetry::default());
+        let mut editor = EffectEditor::default();
+        let effect = TrackEffect::default();
+        let mut config = TrackModulation::default();
+        let slot = editor.selected_mseg;
+        let rect = (12.0, 12.0, 880.0, 320.0);
+        editor.connect_live(&telemetry, 0);
+        editor.set_trace_enabled(true);
+        editor.refresh_live(&effect, &config);
+        let mut clock = TraceClock::default();
+        let before = clock.begin_block_for_curve(&telemetry, 48000.0, |request| {
+            config.msegs.get(request.slot)
+        });
+        let mut frame = ModulationFrame::capture(effect.kind, &config, &ModulationState::default());
+        frame.outputs[slot] = 1.0;
+        clock.record(&telemetry, 0, &frame);
+        clock.publish(&telemetry, 0, &frame);
+        editor.refresh_live(&effect, &config);
+        assert!(editor.live.as_ref().unwrap().bins[0].is_some());
+
+        let layout = editor.mseg_edit.layout(rect, 1.0);
+        let node = config.msegs[slot].nodes[1];
+        editor.mseg_edit.on_mouse_down(
+            widgets::mseg::phase_to_x(&layout, node.time),
+            widgets::mseg::value_to_y(&layout, node.value),
+            &mut config.msegs[slot],
+            rect,
+            1.0,
+            false,
+        );
+        assert!(editor.mseg_edit.is_editing_curve());
+        let mut raster = tiny_skia::Pixmap::new(920, 360).unwrap();
+        editor.draw_live_trace(&mut raster, &layout, &config.msegs[slot]);
+        assert!(raster.data().iter().all(|&byte| byte == 0));
+        editor.refresh_live(&effect, &config);
+        let paused = clock.begin_block(&telemetry, 48000.0);
+        assert!(!paused.trace);
+        assert_ne!(paused.token, before.token);
+        assert!(editor.trace_enabled());
+
+        let _ = editor
+            .mseg_edit
+            .on_mouse_up(&mut config.msegs[slot], rect, 1.0);
+        editor.refresh_live(&effect, &config);
+        let after = clock.begin_block_for_curve(&telemetry, 48000.0, |request| {
+            config.msegs.get(request.slot)
+        });
+        assert!(after.trace);
+        assert_ne!(after.token, before.token);
+        assert!(
+            editor
+                .live
+                .as_ref()
+                .unwrap()
+                .bins
+                .iter()
+                .all(Option::is_none)
+        );
     }
 }

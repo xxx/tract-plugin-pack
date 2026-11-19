@@ -164,7 +164,7 @@ impl EffectEditor {
             mouse_pos: (0.0, 0.0),
             trigger_choices,
             live: None,
-            trace_enabled: true,
+            trace_enabled: false,
             measured_arcs_only: false,
             audio_view: AudioView::Off,
             audio_frozen: false,
@@ -1140,7 +1140,7 @@ impl<'a> Session<'a> {
             output_color: mseg_color(sel),
         };
         let audio_bins = self.state.live.as_ref().map(|live| &live.waveform[..]);
-        widgets::mseg::draw_mseg_with_background(
+        widgets::mseg::draw_mseg_with_layers(
             pixmap,
             self.text_renderer,
             lay.mseg_pane,
@@ -1154,17 +1154,18 @@ impl<'a> Session<'a> {
                     widgets::mseg::draw_mseg_audio(pm, layout, bins, audio_style);
                 }
             },
+            |pm, layout| self.state.draw_live_trace(pm, layout, &modu.msegs[sel]),
         );
         for (m, mseg) in modu.msegs.iter().enumerate() {
             if m != sel {
                 let playback = self.state.wave_display_curve(&track, &modu, m);
                 let mseg = playback.as_ref().unwrap_or(mseg);
                 let c = mseg_color(m);
-                // Pack the slot colour with ghost alpha (~0x60).
+                // The two-pixel stamps overlap, so start with a lower alpha for ghosts.
                 let r = (c.red() * 255.0).round() as u32;
                 let g = (c.green() * 255.0).round() as u32;
                 let b = (c.blue() * 255.0).round() as u32;
-                let packed = (r << 24) | (g << 16) | (b << 8) | 0x60;
+                let packed = (r << 24) | (g << 16) | (b << 8) | 0x36;
                 widgets::mseg::draw_mseg_ghost(
                     pixmap,
                     lay.mseg_pane,
@@ -1187,8 +1188,6 @@ impl<'a> Session<'a> {
             phase,
             self.scale_factor,
         );
-        self.state
-            .draw_live_trace(pixmap, lay.mseg_pane, self.scale_factor);
         // Selector + target + depth (when on an assignable MSEG).
         let (target, depth) = if sel == 0 {
             (None, 0.0)
@@ -1421,7 +1420,7 @@ impl<'a> Session<'a> {
                 }
             }
             EffectHit::Trace => {
-                self.state.trace_enabled = !self.state.trace_enabled;
+                self.state.set_trace_enabled(!self.state.trace_enabled());
             }
             EffectHit::MidiFilter(field) => self.open_midi_filter(field),
             EffectHit::DetectorSetup => self.open_detector(),
@@ -2135,10 +2134,10 @@ mod tests {
         use super::*;
 
         const GHOSTS: [[(usize, u32); 3]; 4] = [
-            [(1, 0xffc85860), (2, 0xc378ff60), (3, 0x66d9a060)],
-            [(0, 0x4fc3f760), (2, 0xc378ff60), (3, 0x66d9a060)],
-            [(0, 0x4fc3f760), (1, 0xffc85860), (3, 0x66d9a060)],
-            [(0, 0x4fc3f760), (1, 0xffc85860), (2, 0xc378ff60)],
+            [(1, 0xffc85836), (2, 0xc378ff36), (3, 0x66d9a036)],
+            [(0, 0x4fc3f736), (2, 0xc378ff36), (3, 0x66d9a036)],
+            [(0, 0x4fc3f736), (1, 0xffc85836), (3, 0x66d9a036)],
+            [(0, 0x4fc3f736), (1, 0xffc85836), (2, 0xc378ff36)],
         ];
 
         fn canvas() -> tiny_skia::Pixmap {
@@ -2577,10 +2576,7 @@ mod tests {
             editor.effect_dropdown.open(
                 action,
                 (20.0, 20.0, 140.0, 30.0),
-                widgets::dropdown::DropdownList {
-                    items: &["one", "two"],
-                    sections: &[],
-                },
+                widgets::dropdown::DropdownList::flat(&["one", "two"]),
                 0,
                 true,
                 (800.0, 600.0),

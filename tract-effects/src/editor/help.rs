@@ -75,7 +75,9 @@ impl Session<'_> {
                 Some(EffectHit::Smooth(_)) => {
                     Some("Lag the source; right-click enters milliseconds")
                 }
-                Some(EffectHit::Trace) => Some("Show measured modulation output"),
+                Some(EffectHit::Trace) => {
+                    Some("Show where measured modulation differs from the curve")
+                }
                 Some(EffectHit::Audio) => Some("Choose a waveform view or freeze the capture"),
                 Some(EffectHit::DetectorSetup) => {
                     Some("Choose detector input, threshold and filters")

@@ -156,11 +156,48 @@ pub fn draw_mseg_with_background(
     node_tooltip: Option<(usize, &str)>,
     background: impl FnOnce(&mut Pixmap, &MsegLayout),
 ) {
+    draw_mseg_with_layers(
+        pixmap,
+        text_renderer,
+        rect,
+        data,
+        state,
+        scale,
+        value_color,
+        node_tooltip,
+        background,
+        |_, _| {},
+    );
+}
+
+/// Draw a background below the grid and an overlay between the grid and the curve.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_mseg_with_layers(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    rect: (f32, f32, f32, f32),
+    data: &MsegData,
+    state: &MsegEditState,
+    scale: f32,
+    value_color: tiny_skia::Color,
+    node_tooltip: Option<(usize, &str)>,
+    background: impl FnOnce(&mut Pixmap, &MsegLayout),
+    overlay: impl FnOnce(&mut Pixmap, &MsegLayout),
+) {
     let data = state.display_data(data);
     let layout = state.layout(rect, scale);
     // The three sub-rects (marker lane / canvas / strip) are non-overlapping,
     // so draw order is immaterial — each paints only its own region.
-    draw_canvas(pixmap, &layout, data, state, scale, value_color, background);
+    draw_canvas(
+        pixmap,
+        &layout,
+        data,
+        state,
+        scale,
+        value_color,
+        background,
+        overlay,
+    );
     draw_marker_lane(pixmap, &layout, data, state, scale, value_color);
     draw_strip(pixmap, text_renderer, &layout, data, state, scale);
 
@@ -247,6 +284,7 @@ fn draw_marker_lane(
 }
 
 /// Draw the canvas: background, grid, and the envelope polyline.
+#[allow(clippy::too_many_arguments)]
 fn draw_canvas(
     pixmap: &mut Pixmap,
     layout: &MsegLayout,
@@ -255,6 +293,7 @@ fn draw_canvas(
     scale: f32,
     value_color: tiny_skia::Color,
     background: impl FnOnce(&mut Pixmap, &MsegLayout),
+    overlay: impl FnOnce(&mut Pixmap, &MsegLayout),
 ) {
     let (cx, cy, cw, ch) = layout.canvas;
     if cw <= 0.0 || ch <= 0.0 {
@@ -324,18 +363,8 @@ fn draw_canvas(
         draw_rect(pixmap, px0, my, pw, 1.0, mid_color);
     }
 
-    let cols = pw.max(1.0) as usize;
-    let mut prev: Option<(f32, f32)> = None;
-    let mut sampler = CurveSampler::new(data);
-    for col in 0..=cols {
-        let phase = layout.viewport.phase_at(col as f32 / cols as f32);
-        let x = phase_to_x(layout, phase);
-        let y = value_to_y(layout, sampler.sample(phase));
-        if let Some((px, py)) = prev {
-            draw_plot_line(pixmap, layout, px, py, x, y, value_color);
-        }
-        prev = Some((x, y));
-    }
+    overlay(pixmap, layout);
+    draw_curve(pixmap, layout, data, value_color);
 
     draw_loop_seam(pixmap, layout, data, state, scale);
     if !state.geometry_read_only() {
@@ -350,7 +379,7 @@ fn draw_canvas(
             ((*x1, *y1), (*x0, *y1)),
             ((*x0, *y1), (*x0, *y0)),
         ] {
-            draw_clipped_line(pixmap, layout.canvas, a.0, a.1, b.0, b.1, value_color);
+            draw_clipped_line(pixmap, layout.canvas, a, b, value_color, 1.0);
         }
         for (_, (x, y)) in handles {
             if !in_rect(layout.canvas, x, y) {
@@ -523,10 +552,6 @@ pub fn draw_mseg_ghost(
     color: u32,
 ) {
     let layout = state.layout(rect, scale);
-    let (_px0, _py0, pw, ph) = layout.plot;
-    if pw <= 0.0 || ph <= 0.0 {
-        return;
-    }
     // Unpack 0xRRGGBBAA into a tiny_skia::Color, matching the convention used
     // by the rest of the widget crate (`Color::from_rgba8`).
     let r = ((color >> 24) & 0xFF) as u8;
@@ -534,17 +559,31 @@ pub fn draw_mseg_ghost(
     let b = ((color >> 8) & 0xFF) as u8;
     let a = (color & 0xFF) as u8;
     let stroke = tiny_skia::Color::from_rgba8(r, g, b, a);
+    draw_curve(pixmap, &layout, data, stroke);
+}
+
+const CURVE_WIDTH: f32 = 2.0;
+
+fn draw_curve(pixmap: &mut Pixmap, layout: &MsegLayout, data: &MsegData, color: tiny_skia::Color) {
+    let (_, _, pw, ph) = layout.plot;
+    if pw <= 0.0 || ph <= 0.0 {
+        return;
+    }
     let cols = pw.max(1.0) as usize;
-    let mut prev: Option<(f32, f32)> = None;
     let mut sampler = CurveSampler::new(data);
-    for col in 0..=cols {
+    let start = layout.viewport.phase_at(0.0);
+    let mut prev = (
+        phase_to_x(layout, start),
+        value_to_y(layout, sampler.sample(start)),
+    );
+    for col in 1..=cols {
         let phase = layout.viewport.phase_at(col as f32 / cols as f32);
-        let x = phase_to_x(&layout, phase);
-        let y = value_to_y(&layout, sampler.sample(phase));
-        if let Some((px, py)) = prev {
-            draw_plot_line(pixmap, &layout, px, py, x, y, stroke);
-        }
-        prev = Some((x, y));
+        let point = (
+            phase_to_x(layout, phase),
+            value_to_y(layout, sampler.sample(phase)),
+        );
+        draw_clipped_line(pixmap, layout.plot, prev, point, color, CURVE_WIDTH);
+        prev = point;
     }
 }
 
@@ -1170,18 +1209,16 @@ pub(crate) fn draw_plot_line(
     y1: f32,
     color: tiny_skia::Color,
 ) {
-    draw_clipped_line(pixmap, layout.plot, x0, y0, x1, y1, color);
+    draw_clipped_line(pixmap, layout.plot, (x0, y0), (x1, y1), color, 1.0);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn draw_clipped_line(
     pixmap: &mut Pixmap,
     clip: (f32, f32, f32, f32),
-    x0: f32,
-    y0: f32,
-    x1: f32,
-    y1: f32,
+    (x0, y0): (f32, f32),
+    (x1, y1): (f32, f32),
     color: tiny_skia::Color,
+    width: f32,
 ) {
     if clip.2 <= 0.0 || clip.3 <= 0.0 {
         return;
@@ -1210,15 +1247,16 @@ fn draw_clipped_line(
             }
         }
     }
-    let (x, y) = (x0 + dx * begin, y0 + dy * begin);
+    let inset = width - 1.0;
+    let (x, y) = (x0 + dx * begin - inset, y0 + dy * begin - inset);
     let (dx, dy) = (dx * (end - begin), dy * (end - begin));
     let steps = dx.abs().max(dy.abs()).ceil().max(1.0) as usize;
     for s in 0..=steps {
         let t = s as f32 / steps as f32;
         let (left, top) = ((x + dx * t).max(clip.0), (y + dy * t).max(clip.1));
         let (right, bottom) = (
-            (x + dx * t + 1.0).min(clip.0 + clip.2),
-            (y + dy * t + 1.0).min(clip.1 + clip.3),
+            (x + dx * t + width).min(clip.0 + clip.2),
+            (y + dy * t + width).min(clip.1 + clip.3),
         );
         if right > left && bottom > top {
             draw_rect(pixmap, left, top, right - left, bottom - top, color);
@@ -1328,6 +1366,7 @@ mod tests {
                     &state,
                     scale,
                     tiny_skia::Color::from_rgba8(255, 0, 0, 255),
+                    |_, _| {},
                     |_, _| {},
                 );
                 let mut checked = 0;
@@ -1704,13 +1743,13 @@ mod tests {
             draw_mseg_trace(
                 &mut pm,
                 &layout,
+                &MsegData::default(),
                 &[
                     Some((0.25, 0.75)),
                     Some((0.5, 0.5)),
                     Some((0.70, 0.30)),
                     Some((0.75, 0.25)),
                 ],
-                scale,
                 color_text(),
             );
             assert!(pm.pixels().iter().any(|pixel| pixel.alpha() > 0));
@@ -1728,6 +1767,82 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn measured_trace_draws_only_visible_deviations_without_bridging_overlap() {
+        let mut pm = Pixmap::new(400, 280).unwrap();
+        let layout = mseg_layout((0.0, 0.0, 400.0, 280.0), true, 1.0);
+        let curve = MsegData::default();
+        draw_mseg_trace(
+            &mut pm,
+            &layout,
+            &curve,
+            &[Some((0.25, 0.25)), Some((0.30, 0.3001)), Some((0.35, 0.35))],
+            color_text(),
+        );
+        assert!(pm.pixels().iter().all(|pixel| pixel.alpha() == 0));
+
+        draw_mseg_trace(
+            &mut pm,
+            &layout,
+            &curve,
+            &[Some((0.25, 0.75)), Some((0.30, 0.30)), Some((0.35, 0.70))],
+            color_text(),
+        );
+        assert!(pm.pixels().iter().any(|pixel| pixel.alpha() > 0));
+        let column = phase_to_x(&layout, 0.30) as usize;
+        assert!(
+            pm.pixels()
+                .chunks_exact(400)
+                .all(|row| row[column].alpha() == 0)
+        );
+    }
+
+    #[test]
+    fn authored_and_ghost_curves_are_two_pixels_while_trace_is_one_even_over_the_grid() {
+        let mut pm = Pixmap::new(400, 300).unwrap();
+        let mut curve = MsegData::default();
+        curve.nodes[0].value = 0.25;
+        curve.nodes[1].value = 0.25;
+        curve.value_steps = 4;
+        let state = MsegEditState::new();
+        let layout = state.layout(RECT, 1.0);
+        let column = phase_to_x(&layout, 0.55).round() as usize;
+        let authored = tiny_skia::Color::from_rgba8(255, 0, 0, 255);
+        let trace = tiny_skia::Color::from_rgba8(0, 255, 0, 255);
+        let count = |pm: &Pixmap, color: tiny_skia::Color| {
+            pm.pixels()
+                .chunks_exact(400)
+                .filter(|row| row[column] == color.premultiply().to_color_u8())
+                .count()
+        };
+        draw_mseg_with_layers(
+            &mut pm,
+            &mut TextRenderer::new(crate::DEFAULT_FONT),
+            RECT,
+            &curve,
+            &state,
+            1.0,
+            authored,
+            None,
+            |_, _| {},
+            |pm, layout| {
+                draw_mseg_trace(
+                    pm,
+                    layout,
+                    &curve,
+                    &[Some((0.4, 0.5)), Some((0.5, 0.5)), Some((0.6, 0.5))],
+                    trace,
+                );
+            },
+        );
+        assert_eq!(count(&pm, authored), 2);
+        assert_eq!(count(&pm, trace), 1);
+
+        pm.fill(tiny_skia::Color::TRANSPARENT);
+        draw_mseg_ghost(&mut pm, RECT, &curve, &state, 1.0, 0xFF0000FF);
+        assert_eq!(count(&pm, authored), 2);
     }
 
     #[test]
@@ -1806,43 +1921,41 @@ mod tests {
     }
 }
 
-/// Overlay measured normalized output, leaving large unmeasured phase gaps disconnected.
+/// Draw measured output where it visibly diverges from the displayed curve.
 pub fn draw_mseg_trace(
     pixmap: &mut Pixmap,
     layout: &MsegLayout,
+    curve: &MsegData,
     points: &[Option<(f32, f32)>],
-    scale: f32,
     color: tiny_skia::Color,
 ) {
-    let mut previous: Option<(f32, f32)> = None;
+    let (px, py, pw, ph) = layout.plot;
+    if pw <= 0.0 || ph <= 0.0 {
+        return;
+    }
+    let mut curve = CurveSampler::new(curve);
+    let overlap = (CURVE_WIDTH + 1.0) * 0.5;
+    let mut previous = None;
     for &(phase, value) in points.iter().flatten() {
         if !phase.is_finite() || !value.is_finite() {
             continue;
         }
-        let x = phase_to_x(layout, phase);
-        let y = value_to_y(layout, value);
-        if let Some((p, v)) = previous
-            && (0.0..=0.125).contains(&(phase - p))
-        {
-            draw_plot_line(
-                pixmap,
-                layout,
-                phase_to_x(layout, p),
-                value_to_y(layout, v),
-                x,
-                y,
-                color,
-            );
+        let mut x = phase_to_x(layout, phase);
+        let mut y = value_to_y(layout, value);
+        if (y - value_to_y(layout, curve.sample(phase))).abs() <= overlap {
+            previous = None;
+            continue;
         }
         if layout.viewport.contains(phase, value) {
-            let radius = scale.max(1.0) * 0.75;
-            let (px, py, pw, ph) = layout.plot;
-            let (left, top) = ((x - radius).max(px), (y - radius).max(py));
-            let (right, bottom) = ((x + radius).min(px + pw), (y + radius).min(py + ph));
-            if right > left && bottom > top {
-                draw_rect(pixmap, left, top, right - left, bottom - top, color);
-            }
+            x = x.min(px + pw - 1.0).max(px);
+            y = y.min(py + ph - 1.0).max(py);
+            draw_rect(pixmap, x, y, pw.min(1.0), ph.min(1.0), color);
         }
-        previous = Some((phase, value));
+        if let Some((p, prev_x, prev_y)) = previous
+            && (0.0..=0.125).contains(&(phase - p))
+        {
+            draw_plot_line(pixmap, layout, prev_x, prev_y, x, y, color);
+        }
+        previous = Some((phase, x, y));
     }
 }

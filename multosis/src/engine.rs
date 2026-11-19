@@ -546,7 +546,11 @@ impl AudioEngine {
             self.audition.prepare(request, sr);
         }
         self.waveform.begin_block(&self.telemetry.waveform);
-        self.trace_request = self.trace_clock.begin_block(&self.telemetry, sr);
+        self.trace_request =
+            self.trace_clock
+                .begin_block_for_curve(&self.telemetry, sr, |request| {
+                    self.modulation.trace_curve(request.row, request.slot)
+                });
         self.modulation
             .set_telemetry_request(self.trace_request, &self.track_effects);
 
