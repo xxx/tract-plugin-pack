@@ -1,0 +1,22 @@
+[package]
+name = "lincoln"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+nih_plug = { workspace = true, features = ["standalone", "assert_process_allocs"] }
+baseview = { git = "https://github.com/RustAudio/baseview.git", tag = "v0.1.1", features = ["opengl"] }
+keyboard-types = "0.6"
+tiny-skia = "0.12"
+tiny-skia-widgets = { path = "../tiny-skia-widgets" }
+tract-dsp = { path = "../tract-dsp" }
+
+[package.metadata.bundler]
+name = "Lincoln"
+company = "mpd"
+description = "Three-band upward and downward compressor"
+license = "GPL-3.0-or-later"
+version = "0.1.0"

@@ -63,6 +63,16 @@ A multiband stereo imager modeled on iZotope Ozone Imager. Four fixed bands with
 - CPU-rendered GUI (tiny-skia + softbuffer), freely resizable, Cassiopeia A gold/teal palette
 - Inspired by [iZotope Ozone Imager](https://www.izotope.com/en/products/ozone/features/imager.html)
 
+### Lincoln
+
+A three-band upward and downward compressor calibrated against Xfer OTT 1.37.
+The two automatable Linkwitz–Riley crossovers default to 88.3 Hz and 2.5 kHz.
+
+- Global Depth, Time, input and output gain, and upward and downward strength
+- Per-band threshold, output gain, direction switches, and live gain-change meters
+- Linked stereo or mono, consistent release timing across sample rates, and zero latency
+- Resizable CPU-rendered editor with a frequency map and numeric entry
+
 ### Miff
 
 A convolution filter whose FIR kernel you draw by hand with an MSEG editor — a sibling of Wavetable Filter, but the kernel comes from a sketched curve instead of a wavetable file.
@@ -301,6 +311,7 @@ local commands, and CI behaviour.
 - [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
 - [HD26 Manual](docs/hd26/hd26-manual.md)
 - [Imagine Manual](docs/imagine/imagine-manual.md)
+- [Lincoln Manual](docs/lincoln/lincoln-manual.md)
 - [Miff Manual](docs/miff/miff-manual.md)
 - [Minitosis Manual](docs/minitosis/minitosis-manual.md)
 - [Multosis Manual](docs/multosis/multosis-manual.md)

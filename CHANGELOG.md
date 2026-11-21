@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- Lincoln provides three bands of upward and downward compression with
+  automatable crossovers and zero reported latency.
+
 ## 0.1.0 - 2026-11-19
 
 ### Added
