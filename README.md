@@ -259,6 +259,7 @@ tract-plugin-pack/
 ├── gs-meter/               # Loudness meter + gain utility
 ├── hd26/                   # Unison-detune chorus + pseudo-stereo widener (Serum-inspired)
 ├── imagine/                # Multiband stereo imager modeled on Ozone Imager
+├── lincoln/                # Three-band upward/downward compressor with adjustable crossovers
 ├── miff/                   # MSEG hand-drawn FIR convolution filter
 ├── minitosis/              # Single-effect processor with four MSEGs
 ├── multosis/               # 16-row grid sequencer with per-row effects + MSEGs
@@ -279,6 +280,7 @@ tract-plugin-pack/
 │   ├── gs-meter/
 │   ├── hd26/
 │   ├── imagine/
+│   ├── lincoln/
 │   ├── miff/
 │   ├── minitosis/
 │   ├── multosis/
