@@ -311,6 +311,7 @@ local commands, and CI behaviour.
 - [GS Meter Manual](docs/gs-meter/gs-meter-manual.md)
 - [HD26 Manual](docs/hd26/hd26-manual.md)
 - [Imagine Manual](docs/imagine/imagine-manual.md)
+- [Lincoln Manual](docs/lincoln/lincoln-manual.md)
 - [Miff Manual](docs/miff/miff-manual.md)
 - [Minitosis Manual](docs/minitosis/minitosis-manual.md)
 - [Multosis Manual](docs/multosis/multosis-manual.md)

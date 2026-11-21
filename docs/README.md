@@ -8,6 +8,7 @@ Each plugin keeps its user manual under `docs/<plugin>/`:
 | Gated | [gated-manual.md](gated/gated-manual.md) | [gated-manual.pdf](gated/gated-manual.pdf) |
 | GS Meter | [gs-meter-manual.md](gs-meter/gs-meter-manual.md) | [gs-meter-manual.pdf](gs-meter/gs-meter-manual.pdf) |
 | Imagine | [imagine/imagine-manual.md](imagine/imagine-manual.md) | [imagine/imagine-manual.pdf](imagine/imagine-manual.pdf) |
+| Lincoln | [lincoln-manual.md](lincoln/lincoln-manual.md) | [lincoln-manual.pdf](lincoln/lincoln-manual.pdf) |
 | Miff | [miff-manual.md](miff/miff-manual.md) | [miff-manual.pdf](miff/miff-manual.pdf) |
 | Minitosis | [minitosis-manual.md](minitosis/minitosis-manual.md) | [minitosis-manual.pdf](minitosis/minitosis-manual.pdf) |
 | Multosis | [multosis-manual.md](multosis/multosis-manual.md) | [multosis-manual.pdf](multosis/multosis-manual.pdf) |
