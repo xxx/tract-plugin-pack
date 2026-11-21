@@ -19,5 +19,32 @@ fn bench_ring_buffer_push(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_ring_buffer_push);
+fn bench_ring_buffer_read_range(c: &mut Criterion) {
+    const CAPACITY: usize = 1_536_000;
+    const WINDOW: usize = 96_000;
+    let mut ring = RingBuffer::new(CAPACITY);
+    ring.push(&vec![0.5; CAPACITY]);
+    let mut out = vec![0.0; WINDOW];
+
+    let mut group = c.benchmark_group("ring_buffer_read_range");
+    group.throughput(Throughput::Elements(WINDOW as u64));
+    for (name, start) in [
+        ("contiguous", CAPACITY / 2),
+        ("wrapped", CAPACITY - WINDOW / 2),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                ring.read_range(black_box(start), &mut out);
+                black_box(&out);
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_ring_buffer_push,
+    bench_ring_buffer_read_range
+);
 criterion_main!(benches);

@@ -45,6 +45,25 @@ fn minmax_slice(s: &[f32]) -> MinMax {
     })
 }
 
+fn copy_ring_range<T: Copy>(buffer: &[T], start_pos: usize, out: &mut [T]) {
+    if out.is_empty() {
+        return;
+    }
+    let start = start_pos % buffer.len();
+    let first = (buffer.len() - start).min(out.len());
+    let (prefix, rest) = out.split_at_mut(first);
+    prefix.copy_from_slice(&buffer[start..start + first]);
+    for chunk in rest.chunks_mut(buffer.len()) {
+        chunk.copy_from_slice(&buffer[..chunk.len()]);
+    }
+}
+
+fn read_recent<T: Copy>(buffer: &[T], write_pos: usize, out: &mut [T]) -> usize {
+    let count = out.len().min(write_pos).min(buffer.len());
+    copy_ring_range(buffer, write_pos - count, &mut out[..count]);
+    count
+}
+
 /// A fixed-size circular buffer for audio samples.
 ///
 /// The writer pushes samples sequentially. The reader can read any
@@ -53,18 +72,15 @@ pub struct RingBuffer {
     buffer: Vec<f32>,
     /// Monotonically increasing. Index into buffer is `write_pos % capacity`.
     write_pos: AtomicUsize,
-    capacity: usize,
     // Mipmap Level 1: min/max per BLOCK_SIZE samples
     level1: Vec<MinMax>,
     level1_pos: usize,
-    level1_capacity: usize,
     // Accumulator for current L1 block being built
     l1_accum: MinMax,
     l1_accum_count: usize,
     // Mipmap Level 2: min/max per SUPER_BLOCK_SIZE samples
     level2: Vec<MinMax>,
     level2_pos: usize,
-    level2_capacity: usize,
     // Accumulator for current L2 block
     l2_block_count: usize,
     l2_accum: MinMax,
@@ -79,10 +95,8 @@ impl RingBuffer {
         Self {
             buffer: vec![0.0f32; capacity],
             write_pos: AtomicUsize::new(0),
-            capacity,
             level1: vec![MinMax::default(); l1_cap],
             level1_pos: 0,
-            level1_capacity: l1_cap,
             l1_accum: MinMax {
                 min: f32::MAX,
                 max: f32::MIN,
@@ -90,7 +104,6 @@ impl RingBuffer {
             l1_accum_count: 0,
             level2: vec![MinMax::default(); l2_cap],
             level2_pos: 0,
-            level2_capacity: l2_cap,
             l2_block_count: 0,
             l2_accum: MinMax {
                 min: f32::MAX,
@@ -106,65 +119,48 @@ impl RingBuffer {
 
     /// Buffer capacity in samples.
     pub fn capacity(&self) -> usize {
-        self.capacity
+        self.buffer.len()
     }
 
     /// Push a slice of samples into the ring buffer.
     /// Called from the audio thread only (single writer).
     ///
-    /// Two-pass approach:
-    /// 1. Bulk memcpy into the circular buffer (no per-sample arithmetic).
-    /// 2. Block-aligned mipmap reduction with SIMD min/max.
+    /// Raw storage retains at most `capacity()` samples. The mipmaps reduce the
+    /// full input in block order using SIMD min/max.
     pub fn push(&mut self, samples: &[f32]) {
         if samples.is_empty() {
             return;
         }
 
-        let pos = self.write_pos.load(Ordering::Relaxed);
-        let cap = self.capacity;
-        let start = pos % cap;
+        let next_pos = self.total_written() + samples.len();
+        let cap = self.buffer.len();
+        let retained = &samples[samples.len().saturating_sub(cap)..];
+        let start = (next_pos - retained.len()) % cap;
 
-        // ── Pass 1: bulk memcpy ──────────────────────────────────────────
-        let end = start + samples.len();
+        let end = start + retained.len();
         if end <= cap {
-            self.buffer[start..end].copy_from_slice(samples);
+            self.buffer[start..end].copy_from_slice(retained);
         } else {
             let first = cap - start;
-            self.buffer[start..cap].copy_from_slice(&samples[..first]);
-            self.buffer[..end - cap].copy_from_slice(&samples[first..]);
+            self.buffer[start..cap].copy_from_slice(&retained[..first]);
+            self.buffer[..end - cap].copy_from_slice(&retained[first..]);
         }
 
-        // ── Pass 2: block-aligned mipmap reduction ───────────────────────
-        let mut remaining = BLOCK_SIZE - self.l1_accum_count;
-        let mut offset = 0;
-        let mut left = samples.len();
+        // Reduce the input in absolute mipmap blocks, independent of the raw ring wrap.
+        let mut remaining = samples;
+        while !remaining.is_empty() {
+            let count = remaining.len().min(BLOCK_SIZE - self.l1_accum_count);
+            let (chunk, rest) = remaining.split_at(count);
+            remaining = rest;
 
-        while left > 0 {
-            let chunk = left.min(remaining);
-
-            // Read from the buffer (cache-hot after memcpy)
-            let buf_start = (start + offset) % cap;
-            let mm = if buf_start + chunk <= cap {
-                minmax_slice(&self.buffer[buf_start..buf_start + chunk])
-            } else {
-                let first_len = cap - buf_start;
-                let a = minmax_slice(&self.buffer[buf_start..cap]);
-                let b = minmax_slice(&self.buffer[..chunk - first_len]);
-                MinMax {
-                    min: a.min.min(b.min),
-                    max: a.max.max(b.max),
-                }
-            };
-
+            let mm = minmax_slice(chunk);
             self.l1_accum.min = self.l1_accum.min.min(mm.min);
             self.l1_accum.max = self.l1_accum.max.max(mm.max);
-            self.l1_accum_count += chunk;
-            offset += chunk;
-            left -= chunk;
+            self.l1_accum_count += count;
 
-            if self.l1_accum_count >= BLOCK_SIZE {
+            if self.l1_accum_count == BLOCK_SIZE {
                 // Flush L1 block
-                let l1_idx = self.level1_pos % self.level1_capacity;
+                let l1_idx = self.level1_pos % self.level1.len();
                 self.level1[l1_idx] = self.l1_accum;
                 self.level1_pos += 1;
 
@@ -174,7 +170,7 @@ impl RingBuffer {
                 self.l2_block_count += 1;
 
                 if self.l2_block_count >= BLOCKS_PER_SUPER {
-                    let l2_idx = self.level2_pos % self.level2_capacity;
+                    let l2_idx = self.level2_pos % self.level2.len();
                     self.level2[l2_idx] = self.l2_accum;
                     self.level2_pos += 1;
                     self.l2_accum = MinMax {
@@ -189,13 +185,10 @@ impl RingBuffer {
                     max: f32::MIN,
                 };
                 self.l1_accum_count = 0;
-                remaining = BLOCK_SIZE;
-            } else {
-                remaining -= chunk;
             }
         }
 
-        self.write_pos.store(pos + samples.len(), Ordering::Relaxed);
+        self.write_pos.store(next_pos, Ordering::Relaxed);
     }
 
     /// Read the most recent `count` samples into `out`.
@@ -203,23 +196,7 @@ impl RingBuffer {
     /// `count` if fewer have been written).
     /// Called from the GUI thread (non-consuming reader).
     pub fn read_most_recent(&self, out: &mut [f32]) -> usize {
-        let pos = self.write_pos.load(Ordering::Relaxed);
-        let count = out.len();
-        let available = pos.min(self.capacity);
-        let to_read = count.min(available);
-        if to_read == 0 {
-            return 0;
-        }
-        let start = pos.saturating_sub(to_read);
-        let mut idx = start % self.capacity;
-        for slot in out.iter_mut().take(to_read) {
-            *slot = self.buffer[idx];
-            idx += 1;
-            if idx == self.capacity {
-                idx = 0;
-            }
-        }
-        to_read
+        read_recent(&self.buffer, self.total_written(), out)
     }
 
     /// Read samples from an absolute position range [start_pos, start_pos + count).
@@ -228,58 +205,18 @@ impl RingBuffer {
     /// content. Pre-filled zeros cover positions never written.
     /// Returns the number of samples copied (always == out.len()).
     pub fn read_range(&self, start_pos: usize, out: &mut [f32]) -> usize {
-        let count = out.len();
-        let mut idx = start_pos % self.capacity;
-        for slot in out.iter_mut().take(count) {
-            *slot = self.buffer[idx];
-            idx += 1;
-            if idx == self.capacity {
-                idx = 0;
-            }
-        }
-        count
+        copy_ring_range(&self.buffer, start_pos, out);
+        out.len()
     }
 
     /// Read the most recent `count` blocks from Level 1 mipmap.
     pub fn read_most_recent_l1(&self, out: &mut [MinMax]) -> usize {
-        let pos = self.level1_pos;
-        let count = out.len();
-        let available = pos.min(self.level1_capacity);
-        let to_read = count.min(available);
-        if to_read == 0 {
-            return 0;
-        }
-        let start = pos - to_read;
-        let mut idx = start % self.level1_capacity;
-        for slot in out.iter_mut().take(to_read) {
-            *slot = self.level1[idx];
-            idx += 1;
-            if idx == self.level1_capacity {
-                idx = 0;
-            }
-        }
-        to_read
+        read_recent(&self.level1, self.level1_pos, out)
     }
 
     /// Read the most recent `count` blocks from Level 2 mipmap.
     pub fn read_most_recent_l2(&self, out: &mut [MinMax]) -> usize {
-        let pos = self.level2_pos;
-        let count = out.len();
-        let available = pos.min(self.level2_capacity);
-        let to_read = count.min(available);
-        if to_read == 0 {
-            return 0;
-        }
-        let start = pos - to_read;
-        let mut idx = start % self.level2_capacity;
-        for slot in out.iter_mut().take(to_read) {
-            *slot = self.level2[idx];
-            idx += 1;
-            if idx == self.level2_capacity {
-                idx = 0;
-            }
-        }
-        to_read
+        read_recent(&self.level2, self.level2_pos, out)
     }
 
     /// Select the appropriate mipmap level based on decimation factor.
@@ -346,11 +283,10 @@ mod tests {
         let mut rb = RingBuffer::new(1024);
         rb.push(&[1.0, 2.0]);
 
-        let mut out = [0.0f32; 5];
+        let mut out = [-1.0; 5];
         let n = rb.read_most_recent(&mut out);
         assert_eq!(n, 2);
-        assert_eq!(out[0], 1.0);
-        assert_eq!(out[1], 2.0);
+        assert_eq!(out, [1.0, 2.0, -1.0, -1.0, -1.0]);
     }
 
     #[test]
@@ -409,6 +345,17 @@ mod tests {
         // Positions 0,1 in the circular buffer now contain 5.0, 6.0
         assert_eq!(out[0], 5.0);
         assert_eq!(out[1], 6.0);
+    }
+
+    #[test]
+    fn read_range_copies_through_multiple_wraps() {
+        let mut rb = RingBuffer::new(4);
+        rb.push(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+        let mut out = [0.0; 11];
+        assert_eq!(rb.read_range(3, &mut out), out.len());
+        assert_eq!(out, [4.0, 5.0, 6.0, 3.0, 4.0, 5.0, 6.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(rb.read_range(3, &mut []), 0);
     }
 
     #[test]
@@ -474,6 +421,70 @@ mod tests {
         rb.read_most_recent_l1(&mut out);
         assert_eq!(out[0].min, -5.0);
         assert_eq!(out[0].max, 3.0);
+    }
+
+    #[test]
+    fn push_larger_than_two_turns_keeps_latest_raw_samples_and_mipmap_blocks() {
+        let mut rb = RingBuffer::new(BLOCK_SIZE);
+        rb.push(&[2.0]);
+        let mut input = [0.0; BLOCK_SIZE * 3];
+        input[BLOCK_SIZE - 1..2 * BLOCK_SIZE - 1].fill(1.0);
+        input[2 * BLOCK_SIZE - 1..].fill(3.0);
+        input[2 * BLOCK_SIZE - 1] = 2.0;
+        rb.push(&input);
+
+        let mut raw = [0.0; BLOCK_SIZE];
+        assert_eq!(rb.total_written(), 3 * BLOCK_SIZE + 1);
+        assert_eq!(rb.read_most_recent(&mut raw), raw.len());
+        assert_eq!(raw, [3.0; BLOCK_SIZE]);
+        let mut mipmap = [MinMax::default(); 2];
+        assert_eq!(rb.read_most_recent_l1(&mut mipmap), 2);
+        assert_eq!(
+            mipmap.map(|pair| (pair.min, pair.max)),
+            [(1.0, 1.0), (2.0, 3.0)]
+        );
+    }
+
+    #[test]
+    fn recent_mipmaps_follow_absolute_blocks_across_ring_wraps() {
+        let capacity = SUPER_BLOCK_SIZE + 19;
+        let mut rb = RingBuffer::new(capacity);
+        let mut input: Vec<f32> = (0..SUPER_BLOCK_SIZE * 5 + 13)
+            .map(|i| if i % 2 == 0 { i as f32 } else { -(i as f32) })
+            .collect();
+        input[SUPER_BLOCK_SIZE * 4 + 20] = f32::INFINITY;
+        input[SUPER_BLOCK_SIZE * 4 + 21] = f32::NEG_INFINITY;
+        input[SUPER_BLOCK_SIZE * 4 + 22] = f32::NAN;
+
+        for samples in input.chunks(73) {
+            rb.push(samples);
+        }
+
+        for width in [BLOCK_SIZE, SUPER_BLOCK_SIZE] {
+            let count = capacity / width + 1;
+            let mut out = vec![MinMax::default(); count + 1];
+            let n = if width == BLOCK_SIZE {
+                rb.read_most_recent_l1(&mut out)
+            } else {
+                rb.read_most_recent_l2(&mut out)
+            };
+            assert_eq!(n, count);
+            let blocks = input.chunks_exact(width);
+            let expected = blocks.skip(input.len() / width - n).map(|samples| {
+                samples
+                    .iter()
+                    .fold((f32::MAX, f32::MIN), |(min, max), &sample| {
+                        (min.min(sample), max.max(sample))
+                    })
+            });
+            assert!(
+                out[..n]
+                    .iter()
+                    .map(|pair| (pair.min, pair.max))
+                    .eq(expected)
+            );
+            assert_eq!((out[n].min, out[n].max), (0.0, 0.0));
+        }
     }
 
     #[test]
