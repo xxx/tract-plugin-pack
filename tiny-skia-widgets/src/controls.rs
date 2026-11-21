@@ -221,6 +221,40 @@ pub fn draw_outline_button(
     active_border_color: Color,
     active_fill_color: Color,
 ) {
+    draw_outline_button_scaled(
+        pixmap,
+        text_renderer,
+        x,
+        y,
+        w,
+        h,
+        label,
+        active,
+        border_color,
+        text_color,
+        active_border_color,
+        active_fill_color,
+        1.0,
+    );
+}
+
+/// Draw an outline button whose minimum text size and border follow the editor's scale.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_outline_button_scaled(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    label: &str,
+    active: bool,
+    border_color: Color,
+    text_color: Color,
+    active_border_color: Color,
+    active_fill_color: Color,
+    scale: f32,
+) {
     let border = if active {
         active_border_color
     } else {
@@ -229,12 +263,12 @@ pub fn draw_outline_button(
     if active {
         draw_rect(pixmap, x, y, w, h, active_fill_color);
     }
-    draw_rect_outline(pixmap, x, y, w, h, border, 1.0);
+    draw_rect_outline(pixmap, x, y, w, h, border, scale);
 
-    let text_size = (h * 0.5).max(10.0);
+    let text_size = (h * 0.5).max(10.0 * scale);
     let tw = text_renderer.text_width(label, text_size);
     let tx = x + (w - tw) * 0.5;
-    let ty = y + (h + text_size) * 0.5 - 2.0;
+    let ty = y + (h + text_size) * 0.5 - 2.0 * scale;
     let fg = if active {
         active_border_color
     } else {

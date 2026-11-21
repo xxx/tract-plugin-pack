@@ -90,7 +90,7 @@ impl<A: Clone + PartialEq> TextEditState<A> {
         }
     }
 
-    /// Opt-in numeric input with Off, Hz/kHz, dB, ms or percent suffixes.
+    /// Opt-in numeric input with `Off`, `-inf`, and unit suffixes.
     pub fn insert_unit_char(&mut self, c: char) {
         if self.active.is_some()
             && (is_numeric_char(c)
@@ -100,6 +100,10 @@ impl<A: Clone + PartialEq> TextEditState<A> {
                         | 'O'
                         | 'f'
                         | 'F'
+                        | 'i'
+                        | 'I'
+                        | 'n'
+                        | 'N'
                         | 'h'
                         | 'H'
                         | 'z'

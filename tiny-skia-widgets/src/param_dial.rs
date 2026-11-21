@@ -211,6 +211,40 @@ pub fn draw_dial_ex(
     caret_on: bool,
     mod_color: tiny_skia::Color,
 ) {
+    draw_dial_scaled_ex(
+        pixmap,
+        text_renderer,
+        cx,
+        cy,
+        radius,
+        label,
+        value_text,
+        normalized,
+        modulated_normalized,
+        editing_text,
+        caret_on,
+        mod_color,
+        1.0,
+    );
+}
+
+/// Draw a dial whose minimum text sizes and padding follow the editor's scale.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_dial_scaled_ex(
+    pixmap: &mut Pixmap,
+    text_renderer: &mut TextRenderer,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    label: &str,
+    value_text: &str,
+    normalized: f32,
+    modulated_normalized: Option<f32>,
+    editing_text: Option<&str>,
+    caret_on: bool,
+    mod_color: tiny_skia::Color,
+    scale: f32,
+) {
     draw_dial_inner(
         pixmap,
         text_renderer,
@@ -225,6 +259,7 @@ pub fn draw_dial_ex(
         caret_on,
         color_accent(),
         mod_color,
+        scale,
     );
 }
 
@@ -260,6 +295,7 @@ pub fn draw_dial_dimmed_ex(
         caret_on,
         color_muted(),
         mod_color,
+        1.0,
     );
 }
 
@@ -280,9 +316,10 @@ fn draw_dial_inner(
     caret_on: bool,
     value_color: tiny_skia::Color,
     mod_color: tiny_skia::Color,
+    scale: f32,
 ) {
     let n = normalized.clamp(0.0, 1.0);
-    let stroke_width = (radius * 0.1).max(2.0);
+    let stroke_width = (radius * 0.1).max(2.0 * scale);
 
     // --- Background track (full arc) ---
     if let Some(track_path) = build_arc_path(cx, cy, radius, START_ANGLE, END_ANGLE) {
@@ -331,7 +368,7 @@ fn draw_dial_inner(
                 paint.set_color(modulation_arc_color(mod_color));
                 paint.anti_alias = true;
                 let stroke = Stroke {
-                    width: stroke_width + 1.0,
+                    width: stroke_width + scale,
                     line_cap: LineCap::Round,
                     ..Default::default()
                 };
@@ -350,20 +387,20 @@ fn draw_dial_inner(
     }
 
     // --- Label text centered above the arc ---
-    let text_size = (radius * 0.38).max(11.0);
+    let text_size = (radius * 0.38).max(11.0 * scale);
     let label_w = text_renderer.text_width(label, text_size);
     let label_x = cx - label_w * 0.5;
-    let label_y = cy - radius - stroke_width - 8.0;
+    let label_y = cy - radius - stroke_width - 8.0 * scale;
     text_renderer.draw_text(pixmap, label_x, label_y, label, text_size, color_muted());
 
     // --- Value readout: buffer + caret when editing, otherwise formatted value ---
-    let value_y = cy + radius * 0.71 + text_size + 4.0;
+    let value_y = cy + radius * 0.71 + text_size + 4.0 * scale;
     if let Some(buf) = editing_text {
         let ref_w = text_renderer.text_width("-999.99", text_size);
-        let box_w = ref_w + 12.0;
-        let box_h = text_size + 6.0;
+        let box_w = ref_w + 12.0 * scale;
+        let box_h = text_size + 6.0 * scale;
         let box_x = cx - box_w * 0.5;
-        let box_y = value_y - text_size - 2.0;
+        let box_y = value_y - text_size - 2.0 * scale;
         crate::primitives::draw_rect(pixmap, box_x, box_y, box_w, box_h, color_edit_bg());
         crate::primitives::draw_rect_outline(
             pixmap,
@@ -372,18 +409,17 @@ fn draw_dial_inner(
             box_w,
             box_h,
             color_accent(),
-            1.0,
+            scale,
         );
 
-        let buf_x = box_x + 6.0;
+        let buf_x = box_x + 6.0 * scale;
         text_renderer.draw_text(pixmap, buf_x, value_y, buf, text_size, color_text());
 
         if caret_on {
             let buf_w = text_renderer.text_width(buf, text_size);
-            let caret_x = buf_x + buf_w + 1.0;
-            let caret_y = box_y + 3.0;
-            let caret_h = box_h - 6.0;
-            crate::primitives::draw_rect(pixmap, caret_x, caret_y, 1.0, caret_h, color_text());
+            let caret_x = buf_x + buf_w + scale;
+            let caret_y = box_y + 3.0 * scale;
+            crate::primitives::draw_rect(pixmap, caret_x, caret_y, scale, text_size, color_text());
         }
     } else {
         let value_w = text_renderer.text_width(value_text, text_size);
