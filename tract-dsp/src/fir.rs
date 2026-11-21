@@ -63,27 +63,29 @@ impl FirRing {
         self.is_silent
     }
 
-    /// `f32x16` multiply-accumulate of the most-recent `rev_taps.len()` samples
-    /// against `rev_taps` — the kernel pre-reversed so the MAC reads it
-    /// contiguously. `rev_taps.len()` must be a non-zero multiple of 16 and
-    /// must not exceed the ring capacity.
-    ///
-    /// The window is oldest-first: `window[0]` is the oldest of the
-    /// `rev_taps.len()` most-recent samples, `window[len-1]` the newest.
+    /// Multiply-accumulate the most recent samples against oldest-first taps.
+    /// Full groups of 16 use SIMD and any remaining taps use scalar arithmetic.
+    /// The tap count must fit within the ring capacity.
     #[inline]
     pub fn mac(&self, rev_taps: &[f32]) -> f32 {
         let len = rev_taps.len();
         let cap = self.mask + 1;
         let start = (self.write_pos + cap - len) & self.mask;
         let window = &self.history[start..start + len];
+        let (sample_chunks, sample_tail) = window.as_chunks::<16>();
+        let (tap_chunks, tap_tail) = rev_taps.as_chunks::<16>();
         dispatch!(self.simd_level, simd => {
             let mut acc = f32x16::splat(simd, 0.0);
-            for c in 0..len / 16 {
-                let w = f32x16::from_slice(simd, &window[c * 16..c * 16 + 16]);
-                let k = f32x16::from_slice(simd, &rev_taps[c * 16..c * 16 + 16]);
+            for (samples, taps) in sample_chunks.iter().zip(tap_chunks) {
+                let w = f32x16::from_slice(simd, samples);
+                let k = f32x16::from_slice(simd, taps);
                 acc += w * k;
             }
-            acc.reduce_sum()
+            let mut sum = acc.reduce_sum();
+            for (&sample, &tap) in sample_tail.iter().zip(tap_tail) {
+                sum += sample * tap;
+            }
+            sum
         })
     }
 }
@@ -181,20 +183,29 @@ mod tests {
     }
 
     #[test]
-    fn multi_chunk_mac_matches_scalar_across_simd_levels_and_wraparound() {
-        let taps: Vec<f32> = (0..48).map(|i| (i as f32 * 0.17).sin() * 0.1).collect();
-        let reversed: Vec<f32> = taps.iter().rev().copied().collect();
+    fn mac_matches_scalar_across_tap_lengths_and_wraparound() {
+        let taps: Vec<f32> = (0..65).map(|i| (i as f32 * 0.17).cos() * 0.1).collect();
+        let kernels = [1, 15, 16, 17, 48, 65]
+            .map(|len| taps[..len].iter().rev().copied().collect::<Vec<_>>());
         for simd_level in [Level::baseline(), Level::new()] {
             let mut ring = FirRing::new(taps.len());
             ring.simd_level = simd_level;
-            let mut history = [0.0; 48];
-            for i in 0..200 {
+            let mut history = [0.0; 65];
+            for i in 0..300 {
                 let sample = (i as f32 * 0.13).cos();
                 history.rotate_right(1);
                 history[0] = sample;
                 ring.push(sample);
-                let expected: f32 = taps.iter().zip(history).map(|(tap, x)| tap * x).sum();
-                assert!((ring.mac(&reversed) - expected).abs() < 1e-6);
+                for reversed in &kernels {
+                    let len = reversed.len();
+                    let expected: f32 = taps[..len]
+                        .iter()
+                        .zip(&history)
+                        .map(|(tap, x)| tap * x)
+                        .sum();
+                    let actual = ring.mac(reversed);
+                    assert!((actual - expected).abs() < 1e-6, "sample {i}, {len} taps");
+                }
             }
         }
     }
