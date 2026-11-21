@@ -118,6 +118,26 @@ you sum Lincoln's output with an untreated copy of the same signal.
 - Drag a window edge to resize. The plug-in saves its editor size with the
   session.
 
+## Differences from Xfer OTT
+
+- **Crossovers.** Lincoln starts at OTT's fixed splits of 88.3 Hz and 2.5 kHz.
+  Both are adjustable and automatable, with phase compensation for close splits.
+- **Crossover calibration.** OTT offers a separate Clean XOV mode. Lincoln
+  uses one crossover that tracks the selected frequencies across sample rates.
+- **Timing and latency.** Lincoln uses the 48 kHz reference release timing at
+  every sample rate. In level-step tests, OTT's high band released faster at
+  96 kHz than at 48 kHz. Lincoln reports zero samples of latency. The measured
+  OTT 1.37 VST3 reported two samples.
+- **Downward above 100%.** At full Depth, Lincoln lowers the downward knee by
+  up to 12 dB as you raise Downward from 100% to 200%. The OTT 1.37 high-band
+  gain curve stayed the same across that range in the full-Depth tests.
+- **Threshold display.** OTT shows the gap between the upward and downward
+  knees. Lincoln uses a Threshold dial and a signed gain meter for each band.
+  Both have a wider gap for the mid band. Only makeup gain applies while the
+  detected level stays in that gap. Factory tests at 48 kHz measured a gap of
+  about 11.6 dB in OTT and 11.8 dB in Lincoln. The mid-band gain curves agreed
+  within 0.31 dB across 129 steady-state test levels.
+
 ## Formats and licence
 
 Lincoln supports mono and linked stereo and reports zero samples of latency.
