@@ -17,16 +17,12 @@
 //! callers want this — naïve `(input, hilbert(input))` is wrong because
 //! the FIR's group delay shifts `imag` relative to `real`.
 
+use crate::fir::FirRing;
+
 /// Type-IV anti-symmetric linear-phase Hilbert FIR.
 pub struct HilbertFir {
-    taps: Vec<f32>,
-    /// Double-buffered history: `2 * taps.len()` elements. Each sample is
-    /// written at both `write_idx` and `write_idx + length`, so a contiguous
-    /// `length`-element slice starting at any position is always available
-    /// for the dot product (no per-tap wraparound branch).
-    history: Vec<f32>,
-    /// Write position in `[0, length)`.
-    write_idx: usize,
+    rev_taps: Vec<f32>,
+    history: FirRing,
 }
 
 impl HilbertFir {
@@ -40,10 +36,10 @@ impl HilbertFir {
         );
         let mut taps = vec![0.0; length];
         Self::design_taps(&mut taps);
+        taps.reverse();
         Self {
-            taps,
-            history: vec![0.0; 2 * length],
-            write_idx: 0,
+            rev_taps: taps,
+            history: FirRing::new(length),
         }
     }
 
@@ -64,39 +60,20 @@ impl HilbertFir {
 
     #[inline]
     pub fn reset(&mut self) {
-        self.history.fill(0.0);
-        self.write_idx = 0;
+        self.history.reset();
     }
 
     /// Group delay in samples — equals `length / 2`.
     #[inline]
     pub fn latency_samples(&self) -> usize {
-        self.taps.len() / 2
+        self.rev_taps.len() / 2
     }
 
     /// Returns the 90°-rotated input sample, delayed by `latency_samples()`.
     #[inline]
     pub fn process(&mut self, x: f32) -> f32 {
-        let n = self.taps.len();
-        // Mirror-write into both halves so the dot-product can read a
-        // contiguous slice regardless of wraparound.
-        self.history[self.write_idx] = x;
-        self.history[self.write_idx + n] = x;
-        let next = if self.write_idx + 1 == n {
-            0
-        } else {
-            self.write_idx + 1
-        };
-        // Slice [next .. next + n] holds the last `n` samples in
-        // oldest→newest order; zipping taps with the reversed slice gives
-        // sum(taps[k] · x[n−k]).
-        let hist = &self.history[next..next + n];
-        let mut acc = 0.0;
-        for (&tap, &h) in self.taps.iter().zip(hist.iter().rev()) {
-            acc += tap * h;
-        }
-        self.write_idx = next;
-        acc
+        self.history.push(x);
+        self.history.mac(&self.rev_taps)
     }
 }
 
@@ -361,16 +338,16 @@ mod tests {
         let h = HilbertFir::new(65);
         let center = 65 / 2;
         // tap[center] (k=0) is zero.
-        assert!(h.taps[center].abs() < 1e-9);
+        assert!(h.rev_taps[center].abs() < 1e-9);
         // tap[center + 2k] for k != 0 is zero (because k%2 == 0 in design).
         for k in 1..=center / 2 {
-            assert!(h.taps[center - 2 * k].abs() < 1e-9, "k={k}");
-            assert!(h.taps[center + 2 * k].abs() < 1e-9, "k={k}");
+            assert!(h.rev_taps[center - 2 * k].abs() < 1e-9, "k={k}");
+            assert!(h.rev_taps[center + 2 * k].abs() < 1e-9, "k={k}");
         }
         // Anti-symmetry: tap[center - k] = -tap[center + k].
         for k in 1..center {
-            let lhs = h.taps[center - k];
-            let rhs = -h.taps[center + k];
+            let lhs = h.rev_taps[center - k];
+            let rhs = -h.rev_taps[center + k];
             assert!((lhs - rhs).abs() < 1e-6, "k={k}: {} vs {}", lhs, rhs);
         }
     }
