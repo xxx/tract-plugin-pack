@@ -141,7 +141,7 @@ Common shape per plugin: `lib.rs` (plugin struct, params, `process()`), `editor.
 - Freeze stops input-ring writes; STFT keeps re-analyzing; transport-aware (silences output when transport stopped). Feedback feeds clamped (±4.0) wet back into input. Spectral display = lock-free AtomicU32 (128 bins × 256 cols). Frequency range bins outside pass through with original phase.
 
 **pope-scope**
-- Cursor tooltip: vertical line + time/bar label + per-track dB rows. Readings via `peak_at_column` (integer `div_ceil` mirrors `decimate_to_columns`' floor mapping); sparse path interpolates. Vertical mode restricts tooltip/cursor to hovered lane. `DragState::mouse_in_window` (CursorEntered/Left) prevents phantom (0,0) hover.
+- Cursor tooltip: vertical line + time/bar label + per-track dB rows. `peak_at_column` uses the renderer's sample ranges for dense waveforms and interpolation for sparse waveforms. Vertical mode restricts tooltip/cursor to the hovered lane. `DragState::mouse_in_window` (CursorEntered/Left) prevents phantom (0,0) hover.
 - Freeze consistency: `sync_mode`/`timebase_ms`/`sync_unit_bars` cached in `CachedViewParams` each rebuild; while frozen, grid + tooltip read cached params so sync/timebase edits can't desync the frozen waveform.
 - Waveform = direct pixel-write pipeline (`fill_column_opaque`), no tiny-skia Paint/blitter. Half-split envelope smoothing: each column's top/bot is `min(own, (prev+own)/2, (own+next)/2)` — half-span polyline rasterization, smoother + symmetric. ~52% GUI CPU reduction vs the original path renderer.
 
