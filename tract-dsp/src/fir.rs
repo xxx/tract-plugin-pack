@@ -209,4 +209,41 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn aligned_mac_matches_legacy_accumulation_bits() {
+        for (capacity, tap_count) in [(4096, 128), (2048, 2048)] {
+            let taps: Vec<f32> = (0..tap_count).map(|i| (i as f32 * 0.17).cos()).collect();
+            let input: Vec<f32> = (0..capacity + 16)
+                .map(|i| (i as f32 * 0.13).sin())
+                .collect();
+            for simd_level in [Level::baseline(), Level::new()] {
+                let mut ring = FirRing::new(capacity);
+                ring.simd_level = simd_level;
+                for (i, &sample) in input.iter().enumerate() {
+                    ring.push(sample);
+                    let end = i + 1;
+                    if end < capacity {
+                        continue;
+                    }
+
+                    // Model the original SIMD lane order with scalar accumulators.
+                    let mut lanes = [0.0; 16];
+                    for (i, (&sample, &tap)) in
+                        input[end - tap_count..end].iter().zip(&taps).enumerate()
+                    {
+                        lanes[i % 16] += sample * tap;
+                    }
+                    let expected = dispatch!(simd_level, simd => {
+                        f32x16::from_slice(simd, &lanes).reduce_sum()
+                    });
+                    assert_eq!(
+                        ring.mac(&taps).to_bits(),
+                        expected.to_bits(),
+                        "{tap_count} taps, sample {i}, {simd_level:?}"
+                    );
+                }
+            }
+        }
+    }
 }
