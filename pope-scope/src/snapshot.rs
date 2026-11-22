@@ -366,16 +366,6 @@ impl WaveSnapshot {
     ///
     /// This is the function the cursor tooltip should use. For the raw
     /// "one element at this index" semantic, use `sample_at_normalized_x`.
-    ///
-    /// Precision note: column mapping uses integer arithmetic
-    /// (`(col * n).div_ceil(num_cols)`). The renderer's
-    /// `decimate_to_columns_into` uses f32 arithmetic, which begins to
-    /// lose integer precision around `i * num_cols > 2^24` (~16.7M).
-    /// The snapshot builder decimates raw data into L1/L2 mipmap levels
-    /// well before any realistic combination of `data_points * num_cols`
-    /// approaches that magnitude, so the two column mappings agree in
-    /// practice. Tests `test_peak_at_column_matches_decimate_on_*`
-    /// pin parity on representative small cases.
     pub fn peak_at_column(&self, col: usize, num_cols: usize, mix_to_mono: bool) -> f32 {
         if num_cols == 0 {
             return 0.0;
@@ -418,29 +408,14 @@ impl WaveSnapshot {
             return buf[i_lo] * (1.0 - frac) + buf[i_lo + 1] * frac;
         }
 
-        // Dense-samples path: exact inverse of
-        // `decimate_to_columns_into`'s `col = (i * num_cols / n) as usize`
-        // mapping, in integer arithmetic. Sample i belongs to column c
-        // iff `c * n <= i * num_cols < (c + 1) * n`, so:
-        //   i_lo = ceil(col * n / num_cols)
-        //   i_hi = ceil((col + 1) * n / num_cols)  (exclusive)
-        //
-        // At `col == num_cols - 1`, `((col + 1) * n).div_ceil(num_cols)`
-        // equals `n` exactly, so no special case is needed for the last
-        // column — `.min(n)` is belt-and-braces in case upstream math
-        // ever rounds differently.
-        let i_lo = (col * n).div_ceil(num_cols);
-        let i_hi = ((col + 1) * n).div_ceil(num_cols).min(n);
-
-        if i_lo >= i_hi {
-            // Should be unreachable given `n > num_cols` above, but
-            // degrade gracefully rather than panic.
-            return buf.get(i_lo.min(n - 1)).copied().unwrap_or(0.0);
+        let range = crate::renderer::ColumnMapping::new(n, num_cols).range(col);
+        if range.is_empty() {
+            return buf[range.start.min(n - 1)];
         }
 
         let mut best: f32 = 0.0;
         let mut best_abs: f32 = 0.0;
-        for &s in &buf[i_lo..i_hi] {
+        for &s in &buf[range] {
             let a = s.abs();
             if a > best_abs {
                 best_abs = a;
@@ -1121,7 +1096,7 @@ mod tests {
         snap.mipmap_level = 0;
 
         let num_cols = 5;
-        let (mins, maxs) = crate::renderer::decimate_to_columns(&samples, num_cols);
+        let (mins, maxs) = crate::renderer::decimate_to_columns(&samples, num_cols, true);
 
         for col in 0..num_cols {
             let tooltip = snap.peak_at_column(col, num_cols, false);
@@ -1133,6 +1108,19 @@ mod tests {
                 "col {col}: tooltip {tooltip} vs envelope {rendered_peak_abs}"
             );
         }
+    }
+
+    #[test]
+    fn tooltip_uses_the_rendered_column_at_a_quarter_bar_boundary() {
+        let mut snap = empty_snap();
+        let mut samples = vec![0.0; 24_000];
+        samples[7200] = -0.75;
+        let (mins, _) = crate::renderer::decimate_to_columns(&samples, 710, false);
+        snap.audio_data = vec![samples];
+
+        assert_eq!(mins[212..214], [-0.75, 0.0]);
+        assert_eq!(snap.peak_at_column(212, 710, false), mins[212]);
+        assert_eq!(snap.peak_at_column(213, 710, false), mins[213]);
     }
 
     #[test]
@@ -1155,7 +1143,7 @@ mod tests {
         snap.mipmap_level = 1;
 
         let num_cols = 10;
-        let (mins, maxs) = crate::renderer::decimate_to_columns(&samples, num_cols);
+        let (mins, maxs) = crate::renderer::decimate_to_columns(&samples, num_cols, true);
 
         for col in 0..num_cols {
             let tooltip = snap.peak_at_column(col, num_cols, false);
@@ -1244,7 +1232,7 @@ mod tests {
         snap.data_points = samples.len();
 
         let num_cols = 4;
-        let (mins, maxs) = crate::renderer::decimate_to_columns(&samples, num_cols);
+        let (mins, maxs) = crate::renderer::decimate_to_columns(&samples, num_cols, true);
         let last = num_cols - 1;
         let tooltip = snap.peak_at_column(last, num_cols, false);
         let envelope_peak_abs = mins[last].abs().max(maxs[last].abs());

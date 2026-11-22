@@ -335,28 +335,24 @@ impl PopeScopeWindow {
             };
         }
 
-        // "Effective" view params: when frozen, grid and tooltip both
-        // consult `cached_view_params` so the whole view stays stable
-        // even if the user then edits timebase/sync_mode/sync_unit. If
-        // the snapshot cache is uninitialized (first frame with freeze
-        // persisted from saved state) we fall through to live params.
-        let frozen_view = if freeze {
-            self.cached_view_params.sync_mode.map(|mode| {
-                (
-                    mode,
-                    self.cached_view_params.timebase_ms,
-                    self.cached_view_params.sync_unit_bars,
-                )
-            })
-        } else {
-            None
-        };
+        // Draw with the settings that produced this frame's snapshots, including frozen views.
+        let snapshot_view = self.cached_view_params.sync_mode.map(|mode| {
+            (
+                mode,
+                self.cached_view_params.timebase_ms,
+                self.cached_view_params.sync_unit_bars,
+            )
+        });
         let (eff_sync_mode, eff_timebase_ms, eff_sync_bars): (crate::SyncMode, f32, f32) =
-            frozen_view.unwrap_or((
-                sync_mode_val,
-                self.params.timebase.value(),
-                self.params.sync_unit.value().to_bars() as f32,
-            ));
+            snapshot_view.unwrap_or_else(|| {
+                (
+                    sync_mode_val,
+                    self.params.timebase.value(),
+                    self.params.sync_unit.value().to_bars() as f32,
+                )
+            });
+        let allow_grouped = eff_sync_mode != crate::SyncMode::BeatSync
+            || eff_sync_bars != crate::SyncUnit::Quarter.to_bars() as f32;
 
         // Solo/mute filtering. In vertical mode, all tracks get a lane
         // (for control strips), but muted/non-soloed tracks skip waveform drawing.
@@ -520,6 +516,7 @@ impl PopeScopeWindow {
                                 max_db_val,
                                 snap.display_color,
                                 draw_style_val,
+                                allow_grouped,
                             );
                         } else if track_visible && !snap.audio_data.is_empty() {
                             for (ch, ch_data) in snap.audio_data.iter().enumerate() {
@@ -539,6 +536,7 @@ impl PopeScopeWindow {
                                     max_db_val,
                                     color,
                                     draw_style_val,
+                                    allow_grouped,
                                 );
                             }
                         }
@@ -649,6 +647,7 @@ impl PopeScopeWindow {
                                 max_db_val,
                                 snap.display_color,
                                 draw_style_val,
+                                allow_grouped,
                             );
                         } else if !snap.audio_data.is_empty() {
                             for (ch, ch_data) in snap.audio_data.iter().enumerate() {
@@ -668,6 +667,7 @@ impl PopeScopeWindow {
                                     max_db_val,
                                     color,
                                     draw_style_val,
+                                    allow_grouped,
                                 );
                             }
                         }
@@ -769,6 +769,7 @@ impl PopeScopeWindow {
                             max_db_val,
                             theme::FG,
                             draw_style_val,
+                            allow_grouped,
                         );
                     }
                 }

@@ -1,7 +1,8 @@
 //! Waveform rendering: amplitude mapping, grid, waveform paths, display modes.
 
-use crate::theme;
+use crate::{ring_buffer::minmax_slice, theme};
 use std::borrow::Cow;
+use std::ops::Range;
 
 /// Map a sample value to a Y pixel coordinate using dB scaling.
 ///
@@ -129,9 +130,56 @@ pub fn draw_amplitude_grid(
     }
 }
 
-/// Decimate samples to pixel columns, computing min/max per column.
-/// Writes into caller-provided `mins` and `maxs` slices (must be same length = num_columns).
-pub fn decimate_to_columns_into(samples: &[f32], mins: &mut [f32], maxs: &mut [f32]) {
+pub(crate) struct ColumnMapping {
+    samples: usize,
+    columns: usize,
+    samples_per_column: f32,
+}
+
+impl ColumnMapping {
+    pub(crate) fn new(samples: usize, columns: usize) -> Self {
+        Self {
+            samples,
+            columns,
+            samples_per_column: samples as f32 / columns as f32,
+        }
+    }
+
+    #[inline]
+    fn column(&self, sample: usize) -> usize {
+        ((sample as f32 / self.samples_per_column) as usize).min(self.columns - 1)
+    }
+
+    fn start(&self, column: usize) -> usize {
+        if column >= self.columns {
+            return self.samples;
+        }
+        // Correct the estimated boundary using the renderer's f32 rounding.
+        let estimate = (column as f32 * self.samples_per_column).ceil() as usize;
+        let mut index = estimate.min(self.samples);
+        while index < self.samples && self.column(index) < column {
+            index += 1;
+        }
+        while index > 0 && self.column(index - 1) >= column {
+            index -= 1;
+        }
+        index
+    }
+
+    pub(crate) fn range(&self, column: usize) -> Range<usize> {
+        self.start(column)..self.start(column + 1)
+    }
+}
+
+const MIN_GROUPED_SAMPLES_PER_COLUMN: usize = 64;
+
+/// Decimate samples to pixel columns in the caller-provided slices.
+fn decimate_to_columns_into(
+    samples: &[f32],
+    mins: &mut [f32],
+    maxs: &mut [f32],
+    allow_grouped: bool,
+) {
     let num_columns = mins.len();
     debug_assert_eq!(mins.len(), maxs.len());
     if samples.is_empty() || num_columns == 0 {
@@ -139,12 +187,26 @@ pub fn decimate_to_columns_into(samples: &[f32], mins: &mut [f32], maxs: &mut [f
         maxs.fill(0.0);
         return;
     }
+    let mapping = ColumnMapping::new(samples.len(), num_columns);
+    if allow_grouped && samples.len() / num_columns >= MIN_GROUPED_SAMPLES_PER_COLUMN {
+        let mut start = 0;
+        for (col, (min, max)) in mins.iter_mut().zip(maxs.iter_mut()).enumerate() {
+            let end = mapping.start(col + 1);
+            let extrema = minmax_slice::<true>(&samples[start..end]);
+            (*min, *max) = if extrema.min == f32::MAX {
+                (0.0, 0.0)
+            } else {
+                (extrema.min, extrema.max)
+            };
+            start = end;
+        }
+        return;
+    }
+
     mins.fill(f32::MAX);
     maxs.fill(f32::MIN);
-    let samples_per_col = samples.len() as f32 / num_columns as f32;
-
     for (i, &s) in samples.iter().enumerate() {
-        let col = ((i as f32 / samples_per_col) as usize).min(num_columns - 1);
+        let col = mapping.column(i);
         mins[col] = mins[col].min(s);
         maxs[col] = maxs[col].max(s);
     }
@@ -160,11 +222,51 @@ pub fn decimate_to_columns_into(samples: &[f32], mins: &mut [f32], maxs: &mut [f
 
 /// Decimate samples to pixel columns, computing min/max per column.
 /// Returns (min_values, max_values) arrays of length `num_columns`.
-pub fn decimate_to_columns(samples: &[f32], num_columns: usize) -> (Vec<f32>, Vec<f32>) {
+pub(crate) fn decimate_to_columns(
+    samples: &[f32],
+    num_columns: usize,
+    allow_grouped: bool,
+) -> (Vec<f32>, Vec<f32>) {
     let mut mins = vec![0.0f32; num_columns];
     let mut maxs = vec![0.0f32; num_columns];
-    decimate_to_columns_into(samples, &mut mins, &mut maxs);
+    decimate_to_columns_into(samples, &mut mins, &mut maxs, allow_grouped);
     (mins, maxs)
+}
+
+fn envelope_columns<'a>(
+    mins: &'a [f32],
+    maxs: &'a [f32],
+    min_db: f32,
+    max_db: f32,
+    centre_y: f32,
+    half_height: f32,
+) -> impl Iterator<Item = (f32, f32)> + 'a {
+    let mut heights = mins
+        .iter()
+        .zip(maxs)
+        .map(move |(&min, &max)| {
+            (
+                sample_to_y(max, min_db, max_db, centre_y, half_height),
+                sample_to_y(min, min_db, max_db, centre_y, half_height),
+            )
+        })
+        .peekable();
+    let mut previous = None;
+    std::iter::from_fn(move || {
+        let (top, bottom) = heights.next()?;
+        let neighbors = previous.into_iter().chain(heights.peek().copied());
+        let smoothed = neighbors.fold(
+            (top, bottom),
+            |(lo, hi), (adjacent_top, adjacent_bottom)| {
+                (
+                    lo.min((adjacent_top + top) * 0.5),
+                    hi.max((adjacent_bottom + bottom) * 0.5),
+                )
+            },
+        );
+        previous = Some((top, bottom));
+        Some(smoothed)
+    })
 }
 
 /// Draw a waveform as a 1-pixel-per-column envelope.
@@ -181,8 +283,8 @@ pub fn decimate_to_columns(samples: &[f32], num_columns: usize) -> (Vec<f32>, Ve
 /// extreme zoom) the renderer still builds a tiny connected polyline
 /// using `stroke_path`, since there are only a handful of segments
 /// and the visible line quality matters there.
-#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
-pub fn draw_waveform_line(
+#[allow(clippy::too_many_arguments)]
+fn draw_waveform_line(
     pixmap: &mut tiny_skia::Pixmap,
     samples: &[f32],
     x: f32,
@@ -192,16 +294,11 @@ pub fn draw_waveform_line(
     min_db: f32,
     max_db: f32,
     color: tiny_skia::Color,
+    extrema: Option<(&[f32], &[f32])>,
 ) {
-    if samples.is_empty() || w < 2.0 {
-        return;
-    }
-
     let centre_y = y + h / 2.0;
     let half_height = h / 2.0;
-    let num_cols = w.floor() as usize;
-
-    if samples.len() <= num_cols {
+    let Some((mins, maxs)) = extrema else {
         // Sparse path: few samples, many pixels → keep the connected
         // line stroke so the visible segments look smooth. This branch
         // is not on the hot profile.
@@ -231,7 +328,7 @@ pub fn draw_waveform_line(
             );
         }
         return;
-    }
+    };
 
     // Dense path: one 1px-wide vertical rect per column, spanning the
     // (min, max) envelope. Each column's effective top/bot is
@@ -246,36 +343,16 @@ pub fn draw_waveform_line(
     //
     // All fills use `fill_column_opaque`, which writes directly into
     // `Pixmap::pixels_mut()` — no tiny-skia raster pipeline.
-    let (mins, maxs) = decimate_to_columns(samples, num_cols);
-    let col_top = |i: usize| sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
-    let col_bot = |i: usize| sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
-    for i in 0..num_cols {
-        let own_top = col_top(i);
-        let own_bot = col_bot(i);
-        let mid_prev_top = if i > 0 {
-            (col_top(i - 1) + own_top) * 0.5
-        } else {
-            own_top
-        };
-        let mid_prev_bot = if i > 0 {
-            (col_bot(i - 1) + own_bot) * 0.5
-        } else {
-            own_bot
-        };
-        let mid_next_top = if i + 1 < num_cols {
-            (own_top + col_top(i + 1)) * 0.5
-        } else {
-            own_top
-        };
-        let mid_next_bot = if i + 1 < num_cols {
-            (own_bot + col_bot(i + 1)) * 0.5
-        } else {
-            own_bot
-        };
-        let eff_top = own_top.min(mid_prev_top).min(mid_next_top);
-        let eff_bot = own_bot.max(mid_prev_bot).max(mid_next_bot);
-        let bot = eff_bot.max(eff_top + 1.0);
-        tiny_skia_widgets::fill_column_opaque(pixmap, x + i as f32, eff_top, bot, color);
+    for (i, (top, bottom)) in
+        envelope_columns(mins, maxs, min_db, max_db, centre_y, half_height).enumerate()
+    {
+        tiny_skia_widgets::fill_column_opaque(
+            pixmap,
+            x + i as f32,
+            top,
+            bottom.max(top + 1.0),
+            color,
+        );
     }
 }
 
@@ -293,7 +370,7 @@ pub fn draw_waveform_line(
 /// that density the polygon has few edges and the visible fill
 /// quality matters.
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
-pub fn draw_waveform_filled(
+fn draw_waveform_filled(
     pixmap: &mut tiny_skia::Pixmap,
     samples: &[f32],
     x: f32,
@@ -303,16 +380,11 @@ pub fn draw_waveform_filled(
     min_db: f32,
     max_db: f32,
     fill_color: tiny_skia::Color,
+    extrema: Option<(&[f32], &[f32])>,
 ) {
-    if samples.is_empty() || w < 2.0 {
-        return;
-    }
-
     let centre_y = y + h / 2.0;
     let half_height = h / 2.0;
-    let num_cols = w.floor() as usize;
-
-    if samples.len() <= num_cols {
+    let Some((mins, maxs)) = extrema else {
         // Sparse path: few samples, many pixels. Keep the closed
         // polygon fill so the visible shape is smooth. Not on the
         // hot profile.
@@ -339,7 +411,7 @@ pub fn draw_waveform_filled(
             );
         }
         return;
-    }
+    };
 
     // Dense path: per-column vertical rects from the center to the
     // positive and negative envelope peaks, with each column's
@@ -347,40 +419,15 @@ pub fn draw_waveform_filled(
     // `draw_waveform_line` for the rationale; this produces a
     // smoother outline than hard column steps while staying within
     // the direct-pixel-write fast path.
-    let (mins, maxs) = decimate_to_columns(samples, num_cols);
-    let col_top = |i: usize| sample_to_y(maxs[i], min_db, max_db, centre_y, half_height);
-    let col_bot = |i: usize| sample_to_y(mins[i], min_db, max_db, centre_y, half_height);
-    for i in 0..num_cols {
-        let own_top = col_top(i);
-        let own_bot = col_bot(i);
-        let mid_prev_top = if i > 0 {
-            (col_top(i - 1) + own_top) * 0.5
-        } else {
-            own_top
-        };
-        let mid_prev_bot = if i > 0 {
-            (col_bot(i - 1) + own_bot) * 0.5
-        } else {
-            own_bot
-        };
-        let mid_next_top = if i + 1 < num_cols {
-            (own_top + col_top(i + 1)) * 0.5
-        } else {
-            own_top
-        };
-        let mid_next_bot = if i + 1 < num_cols {
-            (own_bot + col_bot(i + 1)) * 0.5
-        } else {
-            own_bot
-        };
-        let top = own_top.min(mid_prev_top).min(mid_next_top);
-        let bot = own_bot.max(mid_prev_bot).max(mid_next_bot);
+    for (i, (top, bottom)) in
+        envelope_columns(mins, maxs, min_db, max_db, centre_y, half_height).enumerate()
+    {
         let px = x + i as f32;
         if top < centre_y {
             tiny_skia_widgets::fill_column_opaque(pixmap, px, top, centre_y, fill_color);
         }
-        if bot > centre_y {
-            tiny_skia_widgets::fill_column_opaque(pixmap, px, centre_y, bot, fill_color);
+        if bottom > centre_y {
+            tiny_skia_widgets::fill_column_opaque(pixmap, px, centre_y, bottom, fill_color);
         }
     }
 }
@@ -407,20 +454,30 @@ pub fn draw_waveform(
     max_db: f32,
     color: u32,
     draw_style: crate::DrawStyle,
+    allow_grouped: bool,
 ) {
+    if samples.is_empty() || w < 2.0 {
+        return;
+    }
+    let num_cols = w.floor() as usize;
+    let extrema =
+        (samples.len() > num_cols).then(|| decimate_to_columns(samples, num_cols, allow_grouped));
+    let extrema = extrema
+        .as_ref()
+        .map(|(mins, maxs)| (mins.as_slice(), maxs.as_slice()));
     let line_c = theme::to_color(color);
     match draw_style {
         crate::DrawStyle::Line => {
-            draw_waveform_line(pixmap, samples, x, y, w, h, min_db, max_db, line_c);
+            draw_waveform_line(pixmap, samples, x, y, w, h, min_db, max_db, line_c, extrema);
         }
         crate::DrawStyle::Filled => {
             let fill_c = theme::to_color(theme::blend_u32(theme::BG, color, 0.75));
-            draw_waveform_filled(pixmap, samples, x, y, w, h, min_db, max_db, fill_c);
+            draw_waveform_filled(pixmap, samples, x, y, w, h, min_db, max_db, fill_c, extrema);
         }
         crate::DrawStyle::Both => {
             let fill_c = theme::to_color(theme::blend_u32(theme::BG, color, 0.3));
-            draw_waveform_filled(pixmap, samples, x, y, w, h, min_db, max_db, fill_c);
-            draw_waveform_line(pixmap, samples, x, y, w, h, min_db, max_db, line_c);
+            draw_waveform_filled(pixmap, samples, x, y, w, h, min_db, max_db, fill_c, extrema);
+            draw_waveform_line(pixmap, samples, x, y, w, h, min_db, max_db, line_c, extrema);
         }
     }
 }
@@ -793,7 +850,7 @@ mod tests {
 
     #[test]
     fn test_decimate_empty() {
-        let (mins, maxs) = decimate_to_columns(&[], 4);
+        let (mins, maxs) = decimate_to_columns(&[], 4, true);
         assert_eq!(mins.len(), 4);
         assert_eq!(maxs.len(), 4);
         assert!(mins.iter().all(|&v| v == 0.0));
@@ -802,7 +859,7 @@ mod tests {
 
     #[test]
     fn test_decimate_zero_columns() {
-        let (mins, maxs) = decimate_to_columns(&[1.0, 2.0], 0);
+        let (mins, maxs) = decimate_to_columns(&[1.0, 2.0], 0, true);
         assert!(mins.is_empty());
         assert!(maxs.is_empty());
     }
@@ -811,7 +868,7 @@ mod tests {
     fn test_decimate_identity() {
         // 4 samples into 4 columns -> one sample per column
         let samples = [0.1, -0.3, 0.5, -0.2];
-        let (mins, maxs) = decimate_to_columns(&samples, 4);
+        let (mins, maxs) = decimate_to_columns(&samples, 4, true);
         assert_eq!(mins.len(), 4);
         assert_eq!(maxs.len(), 4);
         for i in 0..4 {
@@ -824,7 +881,7 @@ mod tests {
     fn test_decimate_reduction() {
         // 8 samples into 2 columns -> 4 samples per column
         let samples = [0.1, -0.3, 0.5, -0.2, 0.8, -0.1, 0.3, -0.7];
-        let (mins, maxs) = decimate_to_columns(&samples, 2);
+        let (mins, maxs) = decimate_to_columns(&samples, 2, true);
         assert_eq!(mins.len(), 2);
         // Column 0: [0.1, -0.3, 0.5, -0.2] -> min=-0.3, max=0.5
         assert!((mins[0] - (-0.3)).abs() < 0.001);
@@ -832,6 +889,22 @@ mod tests {
         // Column 1: [0.8, -0.1, 0.3, -0.7] -> min=-0.7, max=0.8
         assert!((mins[1] - (-0.7)).abs() < 0.001);
         assert!((maxs[1] - 0.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn grouped_reduction_matches_the_original_column_extrema() {
+        let mut samples: Vec<f32> = (0..96_001).map(|i| (i as f32 * 0.13).sin()).collect();
+        samples[0..68].fill(f32::NAN);
+        samples[96] = f32::NEG_INFINITY;
+        samples[142] = f32::INFINITY;
+        samples[212] = 2.0;
+        samples[228] = f32::from_bits(0x7f80_0001);
+        for width in [710, 1420] {
+            assert_eq!(
+                decimate_to_columns(&samples, width, true),
+                decimate_to_columns(&samples, width, false),
+            );
+        }
     }
 
     // ── Draw function smoke tests ────────────────────────────────────────────
@@ -852,39 +925,43 @@ mod tests {
     }
 
     #[test]
-    fn test_draw_waveform_line_smoke() {
-        let mut pm = make_test_pixmap(200, 100);
-        let samples = sine_samples(400);
-        let color = tiny_skia::Color::from_rgba8(255, 128, 0, 255);
-        draw_waveform_line(&mut pm, &samples, 0.0, 0.0, 200.0, 100.0, -48.0, 0.0, color);
-        assert!(pixmap_has_nonzero(&pm));
-    }
-
-    #[test]
     fn test_draw_waveform_line_fewer_samples_than_pixels() {
         let mut pm = make_test_pixmap(200, 100);
         let samples = sine_samples(50); // fewer than 200 pixels
-        let color = tiny_skia::Color::from_rgba8(255, 128, 0, 255);
-        draw_waveform_line(&mut pm, &samples, 0.0, 0.0, 200.0, 100.0, -48.0, 0.0, color);
+        draw_waveform(
+            &mut pm,
+            &samples,
+            0.0,
+            0.0,
+            200.0,
+            100.0,
+            -48.0,
+            0.0,
+            theme::CYAN,
+            crate::DrawStyle::Line,
+            true,
+        );
         assert!(pixmap_has_nonzero(&pm));
     }
 
     #[test]
     fn test_draw_waveform_line_empty() {
         let mut pm = make_test_pixmap(200, 100);
-        let color = tiny_skia::Color::from_rgba8(255, 128, 0, 255);
-        draw_waveform_line(&mut pm, &[], 0.0, 0.0, 200.0, 100.0, -48.0, 0.0, color);
+        draw_waveform(
+            &mut pm,
+            &[],
+            0.0,
+            0.0,
+            200.0,
+            100.0,
+            -48.0,
+            0.0,
+            theme::CYAN,
+            crate::DrawStyle::Line,
+            true,
+        );
         // Should not panic and should not draw anything
         assert!(!pixmap_has_nonzero(&pm));
-    }
-
-    #[test]
-    fn test_draw_waveform_filled_smoke() {
-        let mut pm = make_test_pixmap(200, 100);
-        let samples = sine_samples(400);
-        let color = tiny_skia::Color::from_rgba8(255, 128, 0, 255);
-        draw_waveform_filled(&mut pm, &samples, 0.0, 0.0, 200.0, 100.0, -48.0, 0.0, color);
-        assert!(pixmap_has_nonzero(&pm));
     }
 
     #[test]
@@ -902,6 +979,7 @@ mod tests {
             0.0,
             theme::CYAN,
             crate::DrawStyle::Line,
+            true,
         );
         assert!(pixmap_has_nonzero(&pm));
     }
@@ -921,6 +999,7 @@ mod tests {
             0.0,
             theme::CYAN,
             crate::DrawStyle::Filled,
+            true,
         );
         assert!(pixmap_has_nonzero(&pm));
     }
@@ -940,6 +1019,7 @@ mod tests {
             0.0,
             theme::CYAN,
             crate::DrawStyle::Both,
+            true,
         );
         assert!(pixmap_has_nonzero(&pm));
     }

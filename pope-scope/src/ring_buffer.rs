@@ -8,7 +8,7 @@
 //! - `read_most_recent_l1/l2()` takes `&self` (shared access, behind RwLock read guard)
 //! - The RwLock on the store provides memory synchronization between writer and readers.
 
-use fearless_simd::{Level, dispatch, f32x16, prelude::*};
+use fearless_simd::{Level, dispatch, f32x16, i32x16, prelude::*};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Level 1 mipmap: min/max per 64-sample block.
@@ -25,19 +25,30 @@ pub struct MinMax {
 }
 
 /// Compute min/max of a slice using SIMD (f32x16).
-fn minmax_slice(s: &[f32]) -> MinMax {
+pub(crate) fn minmax_slice<const MASK_NANS: bool>(s: &[f32]) -> MinMax {
     dispatch!(Level::new(), simd => {
         let mut vmin = f32x16::splat(simd, f32::MAX);
         let mut vmax = f32x16::splat(simd, f32::MIN);
         let (chunks, remainder) = s.as_chunks::<16>();
         for chunk in chunks {
             let v = f32x16::from_slice(simd, chunk);
-            vmin = vmin.min_precise(v);
-            vmax = vmax.max_precise(v);
+            let (min_input, max_input) = if MASK_NANS {
+                // Select by bits so signaling NaNs never reach the floating-point min/max.
+                let magnitude = v.bitcast::<i32x16<_>>() & i32x16::splat(simd, i32::MAX);
+                let valid = magnitude.simd_le(i32x16::splat(simd, f32::INFINITY.to_bits() as i32));
+                (valid.select(v, vmin), valid.select(v, vmax))
+            } else {
+                (v, v)
+            };
+            vmin = vmin.min_precise(min_input);
+            vmax = vmax.max_precise(max_input);
         }
         let mut min = vmin.reduce_min_precise();
         let mut max = vmax.reduce_max_precise();
         for &x in remainder {
+            if MASK_NANS && x.is_nan() {
+                continue;
+            }
             min = min.min(x);
             max = max.max(x);
         }
@@ -153,7 +164,7 @@ impl RingBuffer {
             let (chunk, rest) = remaining.split_at(count);
             remaining = rest;
 
-            let mm = minmax_slice(chunk);
+            let mm = minmax_slice::<false>(chunk);
             self.l1_accum.min = self.l1_accum.min.min(mm.min);
             self.l1_accum.max = self.l1_accum.max.max(mm.max);
             self.l1_accum_count += count;
@@ -244,8 +255,20 @@ mod tests {
         samples[16] = f32::NAN;
         samples[33] = f32::NAN;
         samples[48] = f32::NAN;
-        let result = minmax_slice(&samples);
+        let result = minmax_slice::<false>(&samples);
         assert_eq!((result.min, result.max), (-0.75, 0.875));
+    }
+
+    #[test]
+    fn masked_minmax_preserves_extrema_across_signaling_nans() {
+        let mut samples = [0.0; 49];
+        samples[0] = -0.875;
+        samples[1] = 0.75;
+        samples[16] = f32::from_bits(0x7f80_0001);
+        samples[17] = f32::from_bits(0xff80_0001);
+        samples[48] = f32::from_bits(0x7f80_0001);
+        let result = minmax_slice::<true>(std::hint::black_box(&samples));
+        assert_eq!((result.min, result.max), (-0.875, 0.75));
     }
 
     #[test]
