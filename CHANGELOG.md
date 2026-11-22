@@ -2,10 +2,19 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-11-21
+
 ### Added
 
 - Lincoln provides three bands of upward and downward compression with
-  automatable crossovers and zero reported latency.
+  automatable crossovers and zero reported latency. The CLAP and VST3 archives
+  include Lincoln and its illustrated manual.
+
+### Changed
+
+- Pope Scope reduces the work needed to draw waveforms and look up their
+  peaks in the cursor tooltip.
+- Imagine uses shared SIMD FIR processing for its linear-phase crossovers.
 
 ## 0.1.0 - 2026-11-19
 
