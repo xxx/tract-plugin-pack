@@ -198,7 +198,8 @@ impl Hd26Window {
         for &(id, label, lcx, lcy) in dials.iter() {
             let cx = lcx * s;
             let cy = lcy * s;
-            let normalized = dispatch!(self, id, p => p.modulated_normalized_value());
+            let normalized = dispatch!(self, id, p => p.unmodulated_normalized_value());
+            let modulated = dispatch!(self, id, p => p.modulated_normalized_value());
             let value_text = dispatch!(self, id, p => p.normalized_value_to_string(p.modulated_normalized_value(), true));
             let editing = self
                 .text_edit
@@ -219,7 +220,7 @@ impl Hd26Window {
                     label,
                     &value_text,
                     normalized,
-                    None,
+                    Some(modulated),
                     editing.as_deref(),
                     caret,
                     accent,
@@ -234,7 +235,7 @@ impl Hd26Window {
                     label,
                     &value_text,
                     normalized,
-                    None,
+                    Some(modulated),
                     editing.as_deref(),
                     caret,
                     accent,
@@ -366,11 +367,12 @@ impl Hd26Window {
         // ── Global row: Output dial + Bypass ──
         let out_cx = 200.0 * s;
         let out_cy = 284.0 * s;
-        let normalized = self.params.output.modulated_normalized_value();
+        let normalized = self.params.output.unmodulated_normalized_value();
+        let modulated = self.params.output.modulated_normalized_value();
         let value_text = self
             .params
             .output
-            .normalized_value_to_string(normalized, true);
+            .normalized_value_to_string(modulated, true);
         let editing = self
             .text_edit
             .active_for(&HitAction::Dial(ParamId::Output))
@@ -385,7 +387,7 @@ impl Hd26Window {
             "Output",
             &value_text,
             normalized,
-            None,
+            Some(modulated),
             editing.as_deref(),
             caret,
             accent,
