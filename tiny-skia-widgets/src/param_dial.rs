@@ -866,6 +866,68 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Host modulation arc: present when it differs, absent when equal
+    // -----------------------------------------------------------------------
+
+    fn render_with_modulation(normalized: f32, modulated: Option<f32>) -> Pixmap {
+        let mut pm = test_pixmap();
+        let mut tr = test_renderer();
+        draw_dial_ex(
+            &mut pm,
+            &mut tr,
+            100.0,
+            100.0,
+            40.0,
+            "Gain",
+            "0 dB",
+            normalized,
+            modulated,
+            None,
+            false,
+            tiny_skia::Color::from_rgba8(255, 160, 50, 255),
+        );
+        pm
+    }
+
+    #[test]
+    fn dial_modulated_equal_to_base_renders_exactly_as_unmodulated() {
+        // Plugins pass `Some(modulated)` on every host-bound dial. When the
+        // host is not modulating, the two values are equal and the dial must
+        // draw exactly what it drew with `None`.
+        for n in [0.0_f32, 0.3, 0.5, 1.0] {
+            let plain = render_with_modulation(n, None);
+            let equal = render_with_modulation(n, Some(n));
+            assert_eq!(plain.data(), equal.data(), "normalized {n}");
+        }
+    }
+
+    #[test]
+    fn dial_modulated_differing_from_base_draws_the_arc_and_dot() {
+        let plain = render_with_modulation(0.3, None);
+        let up = render_with_modulation(0.3, Some(0.7));
+        let down = render_with_modulation(0.7, Some(0.3));
+        assert_ne!(plain.data(), up.data());
+        let orange = |pm: &Pixmap| {
+            pm.pixels()
+                .iter()
+                .filter(|p| {
+                    p.red() > 100 && i32::from(p.red()) > i32::from(p.blue()) + 40 && p.green() > 50
+                })
+                .count()
+        };
+        assert!(
+            orange(&up) > orange(&plain),
+            "arc missing for positive modulation"
+        );
+        let plain_high = render_with_modulation(0.7, None);
+        assert_ne!(plain_high.data(), down.data());
+        assert!(
+            orange(&down) > orange(&plain_high),
+            "arc missing for negative modulation"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // arc_point geometry tests
     // -----------------------------------------------------------------------
 
