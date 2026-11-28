@@ -869,15 +869,20 @@ mod tests {
     // Host modulation arc: present when it differs, absent when equal
     // -----------------------------------------------------------------------
 
+    const MODULATION_TEST_CENTER: u32 = 300;
+    const MODULATION_TEST_RADIUS: u32 = 240;
+
     fn render_with_modulation(normalized: f32, modulated: Option<f32>) -> Pixmap {
-        let mut pm = test_pixmap();
+        let size = 2 * MODULATION_TEST_CENTER + 1;
+        let mut pm = Pixmap::new(size, size).unwrap();
         let mut tr = test_renderer();
+        let center = MODULATION_TEST_CENTER as f32 + 0.5;
         draw_dial_ex(
             &mut pm,
             &mut tr,
-            100.0,
-            100.0,
-            40.0,
+            center,
+            center,
+            MODULATION_TEST_RADIUS as f32,
             "Gain",
             "0 dB",
             normalized,
@@ -903,28 +908,30 @@ mod tests {
 
     #[test]
     fn dial_modulated_differing_from_base_draws_the_arc_and_dot() {
-        let plain = render_with_modulation(0.3, None);
-        let up = render_with_modulation(0.3, Some(0.7));
-        let down = render_with_modulation(0.7, Some(0.3));
-        assert_ne!(plain.data(), up.data());
-        let orange = |pm: &Pixmap| {
-            pm.pixels()
-                .iter()
-                .filter(|p| {
-                    p.red() > 100 && i32::from(p.red()) > i32::from(p.blue()) + 40 && p.green() > 50
-                })
-                .count()
-        };
-        assert!(
-            orange(&up) > orange(&plain),
-            "arc missing for positive modulation"
-        );
-        let plain_high = render_with_modulation(0.7, None);
-        assert_ne!(plain_high.data(), down.data());
-        assert!(
-            orange(&down) > orange(&plain_high),
-            "arc missing for negative modulation"
-        );
+        let center = MODULATION_TEST_CENTER;
+        let radius = MODULATION_TEST_RADIUS;
+        let left = 1.0 / 6.0;
+        let right = 5.0 / 6.0;
+        // At this size the dot extends 14.4 px past its center and the arc stroke extends 12.5 px.
+        let dot_offset = radius + 13;
+        for (base, modulated, dot_x) in [
+            (left, right, center + dot_offset),
+            (right, left, center - dot_offset),
+        ] {
+            let pm = render_with_modulation(base, Some(modulated));
+            let is_orange_at = |x, y| {
+                let p = pm.pixel(x, y).unwrap();
+                p.red() > 100 && i32::from(p.red()) > i32::from(p.blue()) + 40 && p.green() > 50
+            };
+            assert!(
+                is_orange_at(center, center - radius),
+                "arc missing between {base} and {modulated}"
+            );
+            assert!(
+                is_orange_at(dot_x, center),
+                "dot missing at the modulated endpoint {modulated}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

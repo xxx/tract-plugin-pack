@@ -1,9 +1,19 @@
 //! Bottom strip: Input dial, link button, Output dial, Mix dial,
 //! plus Quality / Drive stepped selectors and a De-Emphasis toggle.
 
+use crate::SixPackParams;
 use crate::editor::{GlobalDialId, HitAction, SixPackWindow};
 use nih_plug::prelude::Param;
 use tiny_skia_widgets as widgets;
+
+fn linked_output_dial_positions(params: &SixPackParams, modulated_input_gain: f32) -> (f32, f32) {
+    let output = &params.output_gain;
+    let base_input_gain = params.input_gain.unmodulated_plain_value();
+    (
+        output.preview_normalized(base_input_gain.recip()),
+        output.preview_normalized(modulated_input_gain.recip()),
+    )
+}
 
 pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
     let s = win.scale_factor;
@@ -53,26 +63,19 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
         (GlobalDialId::Output, "", 0.0, 0.0, String::new(), None),
         (GlobalDialId::Mix, "", 0.0, 0.0, String::new(), None),
     ];
-    // When I/O Link is on, the audio path uses `output_gain = 1 / input_gain`
-    // (i.e. `output_dB = -input_dB`) directly and ignores the Output param's
-    // stored value. Mirror the Output dial's display to match: same magnitude,
-    // opposite sign in dB, which by symmetry of the gain skew is exactly
-    // `1 − input_normalized` on the dial.
     let io_linked = win.params.io_link.value();
     let input_norm = win.params.input_gain.unmodulated_normalized_value();
     let input_mod_norm = win.params.input_gain.modulated_normalized_value();
-    let input_db = nih_plug::util::gain_to_db(win.params.input_gain.value());
+    let input_gain = win.params.input_gain.value();
+    let input_db = nih_plug::util::gain_to_db(input_gain);
 
     for (i, &(id, label)) in dials.iter().enumerate() {
         let (text, normalized, modulated) = match id {
             GlobalDialId::Input => (format!("{:+.1} dB", input_db), input_norm, input_mod_norm),
             GlobalDialId::Output => {
                 if io_linked {
-                    (
-                        format!("{:+.1} dB", -input_db),
-                        1.0 - input_norm,
-                        1.0 - input_mod_norm,
-                    )
+                    let (base, modulated) = linked_output_dial_positions(&win.params, input_gain);
+                    (format!("{:+.1} dB", -input_db), base, modulated)
                 } else {
                     (
                         format!(
@@ -230,5 +233,30 @@ fn draw_stepped_with_hit<F: Fn(usize) -> HitAction>(
     let seg_w = w / options.len() as f32;
     for i in 0..options.len() {
         drag.push_region(x + i as f32 * seg_w, y, seg_w, h, action_for(i));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nih_plug::prelude::FloatParam;
+    use nih_plug::util::{db_to_gain, gain_to_db};
+
+    #[test]
+    fn linked_output_dial_positions_match_reciprocal_input_gains() {
+        let params = SixPackParams::default();
+        let params = SixPackParams {
+            input_gain: FloatParam::new("Input", db_to_gain(-6.0), params.input_gain.range()),
+            ..params
+        };
+        let (base, modulated) = linked_output_dial_positions(&params, db_to_gain(16.2));
+
+        for (position, expected_db) in [(base, 6.0), (modulated, -16.2)] {
+            let actual_db = gain_to_db(params.output_gain.preview_plain(position));
+            assert!(
+                (actual_db - expected_db).abs() < 0.001,
+                "linked Output position was {actual_db} dB, expected {expected_db} dB"
+            );
+        }
     }
 }

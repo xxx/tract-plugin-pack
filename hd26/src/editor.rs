@@ -195,6 +195,7 @@ impl Hd26Window {
         ];
 
         let accent = widgets::color_accent();
+        let mod_color = tiny_skia::Color::from_rgba8(255, 160, 50, 255);
         for &(id, label, lcx, lcy) in dials.iter() {
             let cx = lcx * s;
             let cy = lcy * s;
@@ -223,7 +224,7 @@ impl Hd26Window {
                     Some(modulated),
                     editing.as_deref(),
                     caret,
-                    accent,
+                    mod_color,
                 );
             } else {
                 widgets::draw_dial_ex(
@@ -238,7 +239,7 @@ impl Hd26Window {
                     Some(modulated),
                     editing.as_deref(),
                     caret,
-                    accent,
+                    mod_color,
                 );
             }
             self.drag.push_region(
@@ -390,7 +391,7 @@ impl Hd26Window {
             Some(modulated),
             editing.as_deref(),
             caret,
-            accent,
+            mod_color,
         );
         self.drag.push_region(
             out_cx - r - 6.0 * s,
