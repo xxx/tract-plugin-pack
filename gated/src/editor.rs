@@ -528,8 +528,9 @@ impl Panel {
         ];
         for (dial, label, x, y, radius) in dials {
             let p = param(&self.params, dial);
-            let normalized = p.modulated_normalized_value();
-            let value = p.normalized_value_to_string(normalized, true);
+            let normalized = p.unmodulated_normalized_value();
+            let modulated = p.modulated_normalized_value();
+            let value = p.normalized_value_to_string(modulated, true);
             let editing = self
                 .text_edit
                 .active_for(&Action::Dial(dial))
@@ -545,7 +546,7 @@ impl Panel {
                 label,
                 &value,
                 normalized,
-                None,
+                Some(modulated),
                 editing.as_deref(),
                 self.text_edit.caret_visible(),
                 accent(),

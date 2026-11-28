@@ -303,12 +303,13 @@ impl TinylimitWindow {
             row2_params[2],
             row2_params[3],
         ];
-        let dial_data: Vec<(ParamId, &str, f32, String)> = all_params
+        let dial_data: Vec<(ParamId, &str, f32, f32, String)> = all_params
             .iter()
             .map(|&(pid, label)| {
                 let normalized = self.float_param(pid).unmodulated_normalized_value();
+                let modulated = self.float_param(pid).modulated_normalized_value();
                 let value_text = self.format_value(pid);
-                (pid, label, normalized, value_text)
+                (pid, label, normalized, modulated, value_text)
             })
             .collect();
 
@@ -523,7 +524,9 @@ impl TinylimitWindow {
         let dial_row_cy2 = meter_top + meter_h * 0.60;
 
         // Row 1: first 4 params
-        for (i, &(pid, label, normalized, ref value_text)) in dial_data[..4].iter().enumerate() {
+        for (i, &(pid, label, normalized, modulated, ref value_text)) in
+            dial_data[..4].iter().enumerate()
+        {
             let cx = center_x + dial_col_spacing * (i as f32 + 0.5);
             let editing_buf: Option<String> = self
                 .text_edit
@@ -539,7 +542,7 @@ impl TinylimitWindow {
                 label,
                 value_text,
                 normalized,
-                None,
+                Some(modulated),
                 editing_buf.as_deref(),
                 caret,
                 tiny_skia::Color::from_rgba8(255, 160, 50, 255),
@@ -559,7 +562,9 @@ impl TinylimitWindow {
         }
 
         // Row 2: last 4 params
-        for (i, &(pid, label, normalized, ref value_text)) in dial_data[4..].iter().enumerate() {
+        for (i, &(pid, label, normalized, modulated, ref value_text)) in
+            dial_data[4..].iter().enumerate()
+        {
             let cx = center_x + dial_col_spacing * (i as f32 + 0.5);
             let editing_buf: Option<String> = self
                 .text_edit
@@ -575,7 +580,7 @@ impl TinylimitWindow {
                 label,
                 value_text,
                 normalized,
-                None,
+                Some(modulated),
                 editing_buf.as_deref(),
                 caret,
                 tiny_skia::Color::from_rgba8(255, 160, 50, 255),

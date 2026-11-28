@@ -149,31 +149,35 @@ impl SatchWindow {
         // Row 1: Gain, Threshold
         // Row 2: Detail, Knee
         // Bottom-right: Mix
-        let row1: [(ParamId, &str, f32, String); 2] = [
+        let row1: [(ParamId, &str, f32, f32, String); 2] = [
             (
                 ParamId::Gain,
                 "Gain",
                 self.params.gain.unmodulated_normalized_value(),
+                self.params.gain.modulated_normalized_value(),
                 self.format_value(ParamId::Gain),
             ),
             (
                 ParamId::Threshold,
                 "Threshold",
                 self.params.threshold.unmodulated_normalized_value(),
+                self.params.threshold.modulated_normalized_value(),
                 self.format_value(ParamId::Threshold),
             ),
         ];
-        let row2: [(ParamId, &str, f32, String); 2] = [
+        let row2: [(ParamId, &str, f32, f32, String); 2] = [
             (
                 ParamId::Detail,
                 "Detail",
                 self.params.detail.unmodulated_normalized_value(),
+                self.params.detail.modulated_normalized_value(),
                 self.format_value(ParamId::Detail),
             ),
             (
                 ParamId::Knee,
                 "Knee",
                 self.params.knee.unmodulated_normalized_value(),
+                self.params.knee.modulated_normalized_value(),
                 self.format_value(ParamId::Knee),
             ),
         ];
@@ -181,6 +185,7 @@ impl SatchWindow {
             ParamId::Mix,
             "Mix",
             self.params.mix.unmodulated_normalized_value(),
+            self.params.mix.modulated_normalized_value(),
             self.format_value(ParamId::Mix),
         );
         let tr = &mut self.text_renderer;
@@ -206,7 +211,7 @@ impl SatchWindow {
         let row2_cy = y + row_h * 1.5;
 
         // Row 1: Gain, Threshold
-        for (i, (param_id, label, normalized, value_text)) in row1.iter().enumerate() {
+        for (i, (param_id, label, normalized, modulated, value_text)) in row1.iter().enumerate() {
             let cx = pad + col_spacing * (i as f32 + 0.5);
             let editing_buf: Option<String> = self
                 .text_edit
@@ -222,7 +227,7 @@ impl SatchWindow {
                 label,
                 value_text,
                 *normalized,
-                None,
+                Some(*modulated),
                 editing_buf.as_deref(),
                 caret,
                 tiny_skia::Color::from_rgba8(255, 160, 50, 255),
@@ -237,7 +242,7 @@ impl SatchWindow {
         }
 
         // Row 2: Detail, Knee
-        for (i, (param_id, label, normalized, value_text)) in row2.iter().enumerate() {
+        for (i, (param_id, label, normalized, modulated, value_text)) in row2.iter().enumerate() {
             let cx = pad + col_spacing * (i as f32 + 0.5);
             let editing_buf: Option<String> = self
                 .text_edit
@@ -253,7 +258,7 @@ impl SatchWindow {
                 label,
                 value_text,
                 *normalized,
-                None,
+                Some(*modulated),
                 editing_buf.as_deref(),
                 caret,
                 tiny_skia::Color::from_rgba8(255, 160, 50, 255),
@@ -269,7 +274,7 @@ impl SatchWindow {
 
         // Mix: bottom-right corner, smaller
         {
-            let (param_id, label, normalized, ref value_text) = mix_data;
+            let (param_id, label, normalized, modulated, ref value_text) = mix_data;
             let mix_radius = 22.0 * s;
             let mix_cx = w - pad - mix_radius - 10.0 * s;
             let mix_cy = y + row_h * 2.5;
@@ -287,7 +292,7 @@ impl SatchWindow {
                 label,
                 value_text,
                 normalized,
-                None,
+                Some(modulated),
                 editing_buf.as_deref(),
                 caret,
                 tiny_skia::Color::from_rgba8(255, 160, 50, 255),

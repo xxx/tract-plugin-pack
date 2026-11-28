@@ -255,7 +255,13 @@ impl Frame<'_> {
 
     fn dial(&mut self, [cx, cy]: [f32; 2], radius: f32, dial: Dial, label: &str) {
         let param = dial.param(self.params);
-        let value = dial.displayed_normalized(self.params, self.splits);
+        let displayed = dial.displayed_normalized(self.params, self.splits);
+        // The split dials show the applied (constrained) frequency, which the
+        // unmodulated parameter value does not describe; they keep no arc.
+        let (value, modulated) = match dial {
+            Dial::SplitLow | Dial::SplitHigh => (displayed, None),
+            _ => (dial.base_normalized(self.params), Some(displayed)),
+        };
         let [x, y, r, _] = self.layout.rect([cx, cy, radius, 0.0]);
         widgets::draw_dial_scaled_ex(
             self.pixmap,
@@ -264,9 +270,9 @@ impl Frame<'_> {
             y,
             r,
             label,
-            &param.normalized_value_to_string(value, true),
+            &param.normalized_value_to_string(displayed, true),
             value,
-            None,
+            modulated,
             self.panel.edit.active_for(&dial),
             self.panel.edit.caret_visible(),
             color(TEXT),

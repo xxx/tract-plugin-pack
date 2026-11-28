@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- Host modulation now shows on every dial bound to a host parameter in Gated,
+  HD26, Lincoln, Nap, Satch, Six Pack, and Tinylimit, as it already did in
+  Miff, Warp Zone, and Wavetable Filter.
+
 ## 0.2.0 - 2026-11-21
 
 ### Added

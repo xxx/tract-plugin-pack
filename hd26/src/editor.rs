@@ -195,10 +195,12 @@ impl Hd26Window {
         ];
 
         let accent = widgets::color_accent();
+        let mod_color = tiny_skia::Color::from_rgba8(255, 160, 50, 255);
         for &(id, label, lcx, lcy) in dials.iter() {
             let cx = lcx * s;
             let cy = lcy * s;
-            let normalized = dispatch!(self, id, p => p.modulated_normalized_value());
+            let normalized = dispatch!(self, id, p => p.unmodulated_normalized_value());
+            let modulated = dispatch!(self, id, p => p.modulated_normalized_value());
             let value_text = dispatch!(self, id, p => p.normalized_value_to_string(p.modulated_normalized_value(), true));
             let editing = self
                 .text_edit
@@ -219,10 +221,10 @@ impl Hd26Window {
                     label,
                     &value_text,
                     normalized,
-                    None,
+                    Some(modulated),
                     editing.as_deref(),
                     caret,
-                    accent,
+                    mod_color,
                 );
             } else {
                 widgets::draw_dial_ex(
@@ -234,10 +236,10 @@ impl Hd26Window {
                     label,
                     &value_text,
                     normalized,
-                    None,
+                    Some(modulated),
                     editing.as_deref(),
                     caret,
-                    accent,
+                    mod_color,
                 );
             }
             self.drag.push_region(
@@ -366,11 +368,12 @@ impl Hd26Window {
         // ── Global row: Output dial + Bypass ──
         let out_cx = 200.0 * s;
         let out_cy = 284.0 * s;
-        let normalized = self.params.output.modulated_normalized_value();
+        let normalized = self.params.output.unmodulated_normalized_value();
+        let modulated = self.params.output.modulated_normalized_value();
         let value_text = self
             .params
             .output
-            .normalized_value_to_string(normalized, true);
+            .normalized_value_to_string(modulated, true);
         let editing = self
             .text_edit
             .active_for(&HitAction::Dial(ParamId::Output))
@@ -385,10 +388,10 @@ impl Hd26Window {
             "Output",
             &value_text,
             normalized,
-            None,
+            Some(modulated),
             editing.as_deref(),
             caret,
-            accent,
+            mod_color,
         );
         self.drag.push_region(
             out_cx - r - 6.0 * s,
