@@ -46,10 +46,12 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
     ];
 
     // Pre-collect because draw_dial_ex needs &mut text_renderer.
-    let mut dial_data: [(GlobalDialId, &str, f32, String, Option<String>); 3] = [
-        (GlobalDialId::Input, "", 0.0, String::new(), None),
-        (GlobalDialId::Output, "", 0.0, String::new(), None),
-        (GlobalDialId::Mix, "", 0.0, String::new(), None),
+    // (id, label, unmodulated, modulated, text, editing buffer)
+    type DialRow<'a> = (GlobalDialId, &'a str, f32, f32, String, Option<String>);
+    let mut dial_data: [DialRow; 3] = [
+        (GlobalDialId::Input, "", 0.0, 0.0, String::new(), None),
+        (GlobalDialId::Output, "", 0.0, 0.0, String::new(), None),
+        (GlobalDialId::Mix, "", 0.0, 0.0, String::new(), None),
     ];
     // When I/O Link is on, the audio path uses `output_gain = 1 / input_gain`
     // (i.e. `output_dB = -input_dB`) directly and ignores the Output param's
@@ -58,14 +60,19 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
     // `1 − input_normalized` on the dial.
     let io_linked = win.params.io_link.value();
     let input_norm = win.params.input_gain.unmodulated_normalized_value();
+    let input_mod_norm = win.params.input_gain.modulated_normalized_value();
     let input_db = nih_plug::util::gain_to_db(win.params.input_gain.value());
 
     for (i, &(id, label)) in dials.iter().enumerate() {
-        let (text, normalized) = match id {
-            GlobalDialId::Input => (format!("{:+.1} dB", input_db), input_norm),
+        let (text, normalized, modulated) = match id {
+            GlobalDialId::Input => (format!("{:+.1} dB", input_db), input_norm, input_mod_norm),
             GlobalDialId::Output => {
                 if io_linked {
-                    (format!("{:+.1} dB", -input_db), 1.0 - input_norm)
+                    (
+                        format!("{:+.1} dB", -input_db),
+                        1.0 - input_norm,
+                        1.0 - input_mod_norm,
+                    )
                 } else {
                     (
                         format!(
@@ -73,19 +80,21 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
                             nih_plug::util::gain_to_db(win.params.output_gain.value())
                         ),
                         win.params.output_gain.unmodulated_normalized_value(),
+                        win.params.output_gain.modulated_normalized_value(),
                     )
                 }
             }
             GlobalDialId::Mix => (
                 format!("{:.0}%", win.params.mix.value() * 100.0),
                 win.params.mix.unmodulated_normalized_value(),
+                win.params.mix.modulated_normalized_value(),
             ),
         };
         let editing = win
             .text_edit
             .active_for(&HitAction::GlobalDial(id))
             .map(str::to_owned);
-        dial_data[i] = (id, label, normalized, text, editing);
+        dial_data[i] = (id, label, normalized, modulated, text, editing);
     }
 
     let caret = win.text_edit.caret_visible();
@@ -105,7 +114,9 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
 
     let tr = &mut win.text_renderer;
 
-    for (i, &(id, label, normalized, ref text, ref editing)) in dial_data.iter().enumerate() {
+    for (i, &(id, label, normalized, modulated, ref text, ref editing)) in
+        dial_data.iter().enumerate()
+    {
         let cx = x + col_spacing * (i as f32 + 0.5);
         widgets::draw_dial_ex(
             &mut win.surface.pixmap,
@@ -116,7 +127,7 @@ pub(crate) fn draw(win: &mut SixPackWindow, x: f32, y: f32, w: f32, h: f32) {
             label,
             text,
             normalized,
-            None,
+            Some(modulated),
             editing.as_deref(),
             caret,
             tiny_skia::Color::from_rgba8(255, 160, 50, 255),

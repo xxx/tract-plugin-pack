@@ -444,6 +444,15 @@ impl NapWindow {
         }
     }
 
+    /// Host-modulated normalized value for any dial (float or the int Seed).
+    fn dial_modulated_normalized(&self, id: DialId) -> f32 {
+        use nih_plug::prelude::Param;
+        match self.float_param(id) {
+            Some(p) => p.modulated_normalized_value(),
+            None => self.params.seed.modulated_normalized_value(),
+        }
+    }
+
     /// Formatted display value (with unit) for any dial.
     fn dial_value_text(&self, id: DialId) -> String {
         use nih_plug::prelude::Param;
@@ -785,6 +794,7 @@ impl NapWindow {
             let cx = rx + rw * 0.5;
             let cy = ry + rh * 0.5;
             let normalized = self.dial_normalized(id);
+            let modulated = self.dial_modulated_normalized(id);
             let value_text = self.dial_value_text(id);
             let editing_buf = self
                 .text_edit
@@ -801,7 +811,7 @@ impl NapWindow {
                 id.label(),
                 &value_text,
                 normalized,
-                None,
+                Some(modulated),
                 editing_buf.as_deref(),
                 caret,
                 crate::theme::color_strip_accent(),
